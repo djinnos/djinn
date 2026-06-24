@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, short_id, title, body, body_format,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id\n             FROM proposals p\n             WHERE p.status = 'building'\n               AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)\n               AND NOT EXISTS (\n                   SELECT 1 FROM proposal_epics pe\n                   JOIN epics e ON e.id = pe.epic_id\n                   WHERE pe.proposal_id = p.id AND e.status <> 'closed'\n               )\n             ORDER BY p.updated_at",
+  "query": "SELECT id, short_id, title, body, body_format,\n                    acceptance_criteria::text AS \"acceptance_criteria!\",\n                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim\n             FROM proposals WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -92,10 +92,22 @@
         "ordinal": 17,
         "name": "build_breakdown_task_id",
         "type_info": "Varchar"
+      },
+      {
+        "ordinal": 18,
+        "name": "linked_spike_task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 19,
+        "name": "needs_evidence_claim",
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -115,8 +127,10 @@
       false,
       true,
       false,
+      true,
+      true,
       true
     ]
   },
-  "hash": "564ceb570685e8e5d0c629ae1d42685304ee6094785ad046355ad100bfdc2862"
+  "hash": "5c57611e583c29cf5efe242df2d6826be52328bd69c7ff57d6c4f1887b441314"
 }

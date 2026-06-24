@@ -11844,8 +11844,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -12135,8 +12145,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -12899,8 +12919,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13275,8 +13305,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13411,8 +13451,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13568,6 +13618,16 @@ expression: signatures
               "description": "Head revision number (sign-offs anchored earlier are stale).",
               "format": "int32",
               "type": "integer"
+            },
+            "linked_spike_task_id": {
+              "description": "When parked for needs-evidence: the linked spike task id.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence_claim": {
+              "description": "When parked for needs-evidence: the named feasibility claim.",
+              "nullable": true,
+              "type": "string"
             },
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
@@ -13983,6 +14043,34 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
         "ProposalRefinementStatusModel": {
           "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
           "properties": {
@@ -14000,6 +14088,18 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
             "pending_checkpoint_count": {
               "default": 0,
@@ -14082,6 +14182,34 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
         "ProposalRefinementStatusModel": {
           "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
           "properties": {
@@ -14099,6 +14227,18 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
             "pending_checkpoint_count": {
               "default": 0,
@@ -14284,6 +14424,34 @@ expression: signatures
           },
           "required": [
             "criterion"
+          ],
+          "type": "object"
+        },
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
           ],
           "type": "object"
         },
@@ -14555,6 +14723,16 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "linked_spike_task_id": {
+              "description": "When parked for needs-evidence: the linked spike task id.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence_claim": {
+              "description": "When parked for needs-evidence: the named feasibility claim.",
+              "nullable": true,
+              "type": "string"
+            },
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
               "type": "boolean"
@@ -14615,6 +14793,18 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
             "pending_checkpoint_count": {
               "default": 0,
@@ -14956,8 +15146,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -15097,8 +15297,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -15381,8 +15591,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },

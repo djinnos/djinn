@@ -121,6 +121,12 @@ pub struct ProposalModel {
     /// proposals list. Only populated on `proposal_list`; `0` on show paths.
     #[serde(default)]
     pub unresolved_feedback_count: i64,
+    /// When parked for needs-evidence: the linked spike task id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_spike_task_id: Option<String>,
+    /// When parked for needs-evidence: the named feasibility claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence_claim: Option<String>,
 }
 
 /// An epic this proposal graduated into.
@@ -166,6 +172,8 @@ impl ProposalModel {
             pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,
+            linked_spike_task_id: p.linked_spike_task_id.clone(),
+            needs_evidence_claim: p.needs_evidence_claim.clone(),
         }
     }
 }
@@ -541,6 +549,23 @@ pub struct ProposalRefinementStatusModel {
     /// Always 0 in auto-accept mode.
     #[serde(default)]
     pub pending_checkpoint_count: i32,
+    /// When the proposal is parked for a needs-evidence spike, this contains
+    /// the claim and spike task reference. `None` when not parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence: Option<NeedsEvidenceStatus>,
+}
+
+/// Needs-evidence parking state for a proposal.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct NeedsEvidenceStatus {
+    /// The named feasibility claim that the Judge identified.
+    pub claim: String,
+    /// The spike task id (UUID).
+    pub spike_task_id: String,
+    /// The spike task short id (human-readable).
+    pub spike_short_id: String,
+    /// Current status of the spike task.
+    pub spike_status: String,
 }
 
 /// Response for `proposal_refinement_start`.
