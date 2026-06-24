@@ -503,7 +503,7 @@ fn chat_and_pr_poller_have_no_dispatch_pause_dependency() {
     // positive `use` could be wired in later. The presence/absence of
     // matching text in the source is the only stable contract we can lock.
     let coordinator_pr_poller_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/actors/coordinator/pr_poller");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pr_poller");
     let chat_entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/chat_tools.rs");
 
     let mut offenders: Vec<(std::path::PathBuf, String)> = Vec::new();
@@ -528,11 +528,14 @@ fn chat_and_pr_poller_have_no_dispatch_pause_dependency() {
         }
     }
 
-    // Also scan the chat dispatch entry point.
-    let chat_contents = std::fs::read_to_string(&chat_entry).unwrap();
-    for needle in &forbidden {
-        if chat_contents.contains(needle) {
-            offenders.push((chat_entry.clone(), (*needle).to_owned()));
+    // Also scan the chat dispatch entry point if it exists in this crate
+    // (djinn-coordinator may not have chat_tools.rs; the facade in djinn-agent does).
+    if chat_entry.exists() {
+        let chat_contents = std::fs::read_to_string(&chat_entry).unwrap();
+        for needle in &forbidden {
+            if chat_contents.contains(needle) {
+                offenders.push((chat_entry.clone(), (*needle).to_owned()));
+            }
         }
     }
 

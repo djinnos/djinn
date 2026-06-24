@@ -426,12 +426,10 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     let runtime = RecordingRuntimeOps::new(true);
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
-    let activity = app_state.register_activity(&task.id);
-    let old = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().saturating_sub(40 * 60))
-        .unwrap_or(0);
-    activity.store(old, std::sync::atomic::Ordering::Relaxed);
+    // Clone the activity tracker Arc before moving app_state into the pool,
+    // so we can overwrite the activity timestamp after dispatch (which
+    // re-registers the activity with the current time).
+    let active_tasks = app_state.active_tasks.clone();
     let cancel = CancellationToken::new();
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
@@ -461,6 +459,20 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
         .await
         .expect("dispatch should create a slot mapping");
+
+    // Overwrite the activity timestamp AFTER dispatch. The pool's dispatch
+    // re-registers activity with the current time; we need the stall timeout
+    // to see a 40-minute-old idle to trigger the kill path.
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(40 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;
