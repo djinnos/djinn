@@ -1670,7 +1670,9 @@ mod tests {
         let (events_tx, _events_rx) = broadcast::channel(16);
         let cancel = CancellationToken::new();
         let pool = SlotPoolHandle::spawn(
-            crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+            crate::test_helpers::slot_context_from_agent(
+                &crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+            ),
             cancel.clone(),
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {

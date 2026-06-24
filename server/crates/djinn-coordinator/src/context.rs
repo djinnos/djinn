@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use djinn_control_plane::bridge;
 use djinn_core::events::EventBus;
@@ -22,7 +23,7 @@ use tokio::sync::Mutex;
 use crate::handle::CoordinatorHandle;
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
-pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
+pub type ActivityTracker = Arc<std::sync::Mutex<HashMap<String, Arc<AtomicU64>>>>;
 
 /// Configuration for the periodic reconciliation sweep.
 #[derive(Debug, Clone)]
@@ -114,5 +115,53 @@ impl AgentContext {
     ) -> Result<GitActorHandle, djinn_git::GitError> {
         let mut actors = self.git_actors.lock().await;
         djinn_git::get_or_spawn(&mut actors, project_dir)
+    }
+
+    /// Register a task as active and return the shared timestamp atomic.
+    /// The atomic is initialized to the current unix timestamp.
+    pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ts = Arc::new(AtomicU64::new(now));
+        self.active_tasks
+            .lock()
+            .expect("poisoned")
+            .insert(task_id.to_string(), ts.clone());
+        ts
+    }
+
+    /// Update the activity timestamp for a task to now, creating the entry
+    /// if it does not exist yet (upsert).
+    pub fn touch_activity(&self, task_id: &str) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut guard = self.active_tasks.lock().expect("poisoned");
+        match guard.get(task_id) {
+            Some(ts) => ts.store(now, Ordering::Relaxed),
+            None => {
+                guard.insert(task_id.to_string(), Arc::new(AtomicU64::new(now)));
+            }
+        }
+    }
+
+    /// Return seconds since last activity touch, or `None` if not registered.
+    pub fn idle_seconds(&self, task_id: &str) -> Option<u64> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let guard = self.active_tasks.lock().expect("poisoned");
+        let ts = guard.get(task_id)?;
+        let last = ts.load(Ordering::Relaxed);
+        Some(now.saturating_sub(last))
+    }
+
+    /// Remove a task from the activity tracker.
+    pub fn deregister_activity(&self, task_id: &str) {
+        self.active_tasks.lock().expect("poisoned").remove(task_id);
     }
 }

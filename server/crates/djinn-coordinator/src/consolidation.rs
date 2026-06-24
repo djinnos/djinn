@@ -425,7 +425,10 @@ mod tests {
             db: db.clone(),
             events_tx: tx.clone(),
             pool: SlotPoolHandle::spawn(
-                test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+                test_helpers::slot_context_from_agent(&test_helpers::agent_context_from_db(
+                    db.clone(),
+                    CancellationToken::new(),
+                )),
                 CancellationToken::new(),
                 SlotPoolConfig {
                     models: vec![ModelSlotConfig {

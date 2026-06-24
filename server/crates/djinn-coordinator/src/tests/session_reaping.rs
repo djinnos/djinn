@@ -434,7 +434,7 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     activity.store(old, std::sync::atomic::Ordering::Relaxed);
     let cancel = CancellationToken::new();
     let pool = SlotPoolHandle::spawn_with_factory(
-        app_state,
+        test_helpers::slot_context_from_agent(&app_state),
         cancel.clone(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {
@@ -1387,7 +1387,7 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
         std::sync::atomic::Ordering::Relaxed,
     );
     let pool = SlotPoolHandle::spawn_with_factory(
-        app_state,
+        test_helpers::slot_context_from_agent(&app_state),
         cancel.clone(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {

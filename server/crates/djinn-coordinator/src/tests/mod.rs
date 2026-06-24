@@ -161,7 +161,7 @@ fn spawn_coordinator(
     ));
     let _ = sessions_dir;
     let pool = SlotPoolHandle::spawn(
-        ctx,
+        test_helpers::slot_context_from_agent(&ctx),
         cancel.clone(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {
@@ -406,7 +406,10 @@ fn coordinator_actor_for_tests(
         db: db.clone(),
         events_tx: tx.clone(),
         pool: SlotPoolHandle::spawn_with_factory(
-            test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+            test_helpers::slot_context_from_agent(&test_helpers::agent_context_from_db(
+                db.clone(),
+                CancellationToken::new(),
+            )),
             CancellationToken::new(),
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {
@@ -923,7 +926,10 @@ async fn live_mover_evidence_collects_active_session() {
         create_simple_task(&db, &tx, "task", "live mover active session").await;
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = SlotPoolHandle::spawn_with_factory(
-        test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
+        test_helpers::slot_context_from_agent(&test_helpers::agent_context_from_db(
+            db.clone(),
+            CancellationToken::new(),
+        )),
         CancellationToken::new(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {
@@ -1173,7 +1179,7 @@ fn spawn_coordinator_with_tracker(
     let cancel = CancellationToken::new();
     let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
     let pool = SlotPoolHandle::spawn(
-        ctx,
+        test_helpers::slot_context_from_agent(&ctx),
         cancel.clone(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {

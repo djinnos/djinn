@@ -1772,7 +1772,9 @@ mod inflight_ledger_tests {
             let started_tx = self.started_tx.clone();
             let releases = self.releases.clone();
             djinn_slot::SlotPoolHandle::spawn_with_factory(
-                crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                crate::test_helpers::slot_context_from_agent(
+                    &crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
+                ),
                 cancel,
                 djinn_slot::SlotPoolConfig {
                     models: vec![djinn_slot::ModelSlotConfig {

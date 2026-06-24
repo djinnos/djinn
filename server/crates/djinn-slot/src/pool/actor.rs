@@ -209,7 +209,7 @@ impl SlotPool {
                 };
                 let _ = respond_to.send(result);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             PoolMessage::TestSetTokenOverride { .. } => {}
         }
     }

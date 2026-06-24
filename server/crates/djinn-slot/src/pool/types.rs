@@ -141,8 +141,8 @@ pub enum PoolMessage {
     /// Test-only: inject a live `(token_count, turn_count)` override for a
     /// task so the coordinator's session ceiling logic can observe a runaway
     /// session without a real worker bridging `touch_activity`. No-op in
-    /// non-test builds (the variant is behind `#[cfg(test)]`).
-    #[cfg(test)]
+    /// non-test builds (the variant is behind `#[cfg(any(test, feature = "test-support"))]`).
+    #[cfg(any(test, feature = "test-support"))]
     TestSetTokenOverride {
         task_id: String,
         token_count: u64,

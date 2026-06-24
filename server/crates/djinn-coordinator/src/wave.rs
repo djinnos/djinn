@@ -215,7 +215,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
         let pool = SlotPoolHandle::spawn(
-            ctx,
+            test_helpers::slot_context_from_agent(&ctx),
             cancel.clone(),
             SlotPoolConfig {
                 models: vec![ModelSlotConfig {

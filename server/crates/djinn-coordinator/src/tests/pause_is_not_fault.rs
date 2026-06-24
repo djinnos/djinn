@@ -387,7 +387,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
     app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
     let cancel = CancellationToken::new();
     let pool = SlotPoolHandle::spawn_with_factory(
-        app_state,
+        test_helpers::slot_context_from_agent(&app_state),
         cancel.clone(),
         SlotPoolConfig {
             models: vec![ModelSlotConfig {
