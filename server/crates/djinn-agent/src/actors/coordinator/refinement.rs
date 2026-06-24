@@ -1,3 +1,4 @@
+// djinn:allow-oversize — human-auditable authority controls expand the state machine; split when touched substantively.
 // Bounded proposal-refinement workflow state machine.
 //
 // Orchestrates Advocate revision, Adversary attack, and Judge adjudication
