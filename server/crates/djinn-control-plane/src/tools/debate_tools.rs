@@ -290,9 +290,10 @@ mod tests {
             resp.get("error")
         );
         let entry_id = resp
-            .get("id")
+            .get("entry")
+            .and_then(|e| e.get("id"))
             .and_then(|v| v.as_str())
-            .expect("response should have id");
+            .expect("response should have entry.id");
 
         // List.
         let list_resp = server
@@ -350,7 +351,12 @@ mod tests {
             )
             .await
             .expect("tool should be registered");
-        let entry_id = resp.get("id").and_then(|v| v.as_str()).unwrap().to_string();
+        let entry_id = resp
+            .get("entry")
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
 
         // Resolve.
         let resolve_resp = server
@@ -361,8 +367,11 @@ mod tests {
             .await
             .expect("tool should be registered");
         assert!(resolve_resp.get("error").and_then(|v| v.as_str()).is_none());
+        let resolve_entry = resolve_resp
+            .get("entry")
+            .expect("resolve response should have entry");
         assert!(
-            resolve_resp
+            resolve_entry
                 .get("resolved_at")
                 .and_then(|v| v.as_str())
                 .is_some(),
@@ -378,8 +387,11 @@ mod tests {
             .await
             .expect("tool should be registered");
         assert!(reopen_resp.get("error").and_then(|v| v.as_str()).is_none());
+        let reopen_entry = reopen_resp
+            .get("entry")
+            .expect("reopen response should have entry");
         assert!(
-            reopen_resp
+            reopen_entry
                 .get("reopened_at")
                 .and_then(|v| v.as_str())
                 .is_some(),
@@ -387,7 +399,7 @@ mod tests {
         );
         // resolved_at should still be set.
         assert!(
-            reopen_resp
+            reopen_entry
                 .get("resolved_at")
                 .and_then(|v| v.as_str())
                 .is_some(),
