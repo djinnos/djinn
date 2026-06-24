@@ -7,6 +7,7 @@ use crate::models::Epic;
 use crate::models::GitSettings;
 use crate::models::Project;
 use crate::models::Proposal;
+use crate::models::ProposalDebateTrail;
 use crate::models::ProposalFeedback;
 use crate::models::Task;
 use serde::de::DeserializeOwned;
@@ -199,6 +200,37 @@ impl DjinnEventEnvelope {
             from_sync: false,
         }
     }
+
+    /// A debate-trail entry was appended to a proposal.
+    pub fn proposal_debate_trail_created(proposal_id: &str, entry: &ProposalDebateTrail) -> Self {
+        Self {
+            entity_type: "proposal_debate_trail",
+            action: "created",
+            payload: serde_json::to_value(
+                serde_json::json!({"proposal_id": proposal_id, "entry": entry}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
+    /// A debate-trail entry was updated (resolved or reopened).
+    pub fn proposal_debate_trail_updated(proposal_id: &str, entry: &ProposalDebateTrail) -> Self {
+        Self {
+            entity_type: "proposal_debate_trail",
+            action: "updated",
+            payload: serde_json::to_value(
+                serde_json::json!({"proposal_id": proposal_id, "entry": entry}),
+            )
+            .unwrap(),
+            id: None,
+            project_id: None,
+            from_sync: false,
+        }
+    }
+
     pub fn task_created(task: &Task, from_sync: bool) -> Self {
         Self {
             entity_type: "task",
