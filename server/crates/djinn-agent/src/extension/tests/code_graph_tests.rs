@@ -2741,3 +2741,580 @@ fn code_graph_params_current_head_blank_normalizes_to_none() {
     params_snake.normalize();
     assert_eq!(params_snake.current_head.as_deref(), Some("abc123"));
 }
+
+// -----------------------------------------------------------------------
+// h1hn corpus-driven dispatch coverage.
+//
+// The graph-ops-level `trait_dispatch_corpus_e2e.rs` exercises the
+// `RepoDependencyGraph` fixtures and the `code_graph` test-harness
+// equivalents (`collect_context_buckets`, `shared::impact_bfs`). The
+// tests below exercise the **agent dispatch boundary** itself:
+// `call_code_graph_inner` against a hand-shaped `RepoGraphOps` stub
+// whose `context` / `impact` returns are built from the corpus
+// entries documented in
+// `server/src/mcp_bridge/graph_ops/tests/trait_dispatch_corpus.rs`
+// (`RuntimeOps::list_taskrun_jobs`, `RepoGraphOps::context`,
+// `SlotPoolOps::get_status`, `RepoGraphOps::impact`).
+//
+// The fixtures mirror the corpus's hand-verified topology: a
+// `TraitDispatchCall` caller edge at the 0.70 floor lands the
+// production caller in the `Calls` bucket for both `context` and
+// `impact`, and the high-confidence `Implements` edge surfaces the
+// trait method in the impl's `outgoing.implements` bucket. This is
+// the "agent side" of the contract: the dispatch must serialize the
+// bridge response unchanged, so any regression that drops the
+// `symbol_context` / `impact` array (or reshapes the bucket keys)
+// would break these tests loudly.
+// -----------------------------------------------------------------------
+
+/// Build a `SymbolContext` payload for one corpus entry. The caller
+/// entry's `name`/`uid`/`confidence` model the corpus's hand-verified
+/// topology — `RuntimeOps::list_taskrun_jobs`'s caller
+/// (`reap_orphaned_taskrun_jobs`) carries the synthesized
+/// `TraitDispatchCall` confidence floor (0.70).
+fn corpus_symbol_context_for_runtime_ops_list_taskrun_jobs()
+-> djinn_control_plane::bridge::SymbolContext {
+    use djinn_control_plane::bridge::{EdgeCategory, RelatedSymbol, SymbolContext, SymbolNode};
+    use std::collections::BTreeMap;
+
+    let symbol = SymbolNode {
+        uid: "symbol:runtime_bridge.rs::list_taskrun_jobs".to_string(),
+        name: "list_taskrun_jobs".to_string(),
+        kind: "method".to_string(),
+        file_path: "server/crates/djinn-control-plane/src/bridge/runtime_bridge.rs".to_string(),
+        start_line: 137,
+        end_line: 137,
+        content: None,
+        method_metadata: None,
+        complexity: None,
+    };
+    let mut incoming: BTreeMap<EdgeCategory, Vec<RelatedSymbol>> = BTreeMap::new();
+    let mut outgoing: BTreeMap<EdgeCategory, Vec<RelatedSymbol>> = BTreeMap::new();
+    incoming.insert(
+        EdgeCategory::Calls,
+        vec![RelatedSymbol {
+            uid: "symbol:health.rs::reap_orphaned_taskrun_jobs".to_string(),
+            name: "reap_orphaned_taskrun_jobs".to_string(),
+            kind: "function".to_string(),
+            file_path: Some(
+                "server/crates/djinn-agent/src/actors/coordinator/health.rs".to_string(),
+            ),
+            confidence: 0.70,
+            confidence_tier: "inferred".to_string(),
+            confidence_reason: Some("trait-dispatch-call".to_string()),
+            excluded_reason: None,
+            route_language_chain: None,
+        }],
+    );
+    outgoing.insert(
+        EdgeCategory::Implements,
+        vec![RelatedSymbol {
+            uid: "symbol:app_state.rs::list_taskrun_jobs".to_string(),
+            name: "list_taskrun_jobs".to_string(),
+            kind: "method".to_string(),
+            file_path: Some("server/src/mcp_bridge/mod.rs".to_string()),
+            confidence: 0.90,
+            confidence_tier: "extracted".to_string(),
+            confidence_reason: None,
+            excluded_reason: None,
+            route_language_chain: None,
+        }],
+    );
+    SymbolContext {
+        symbol,
+        incoming,
+        outgoing,
+        processes: vec![],
+    }
+}
+
+/// Stub `RepoGraphOps` whose `context` returns the corpus-shaped
+/// payload above and whose `impact` returns the same caller in the
+/// blast radius at the 0.70 confidence floor. All other methods
+/// return "not used" — the agent dispatch routes them to other
+/// handlers (not used in this test) and we never call them.
+struct CorpusContextImpactStub {
+    symbol_context: djinn_control_plane::bridge::SymbolContext,
+    impact_entries: Vec<djinn_control_plane::bridge::ImpactEntry>,
+}
+
+fn runtime_ops_corpus_stub() -> (
+    CorpusContextImpactStub,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    let symbol_context = corpus_symbol_context_for_runtime_ops_list_taskrun_jobs();
+    let impact_entries = vec![djinn_control_plane::bridge::ImpactEntry {
+        uid: "symbol:health.rs::reap_orphaned_taskrun_jobs".to_string(),
+        key: "symbol:health.rs::reap_orphaned_taskrun_jobs".to_string(),
+        depth: 1,
+        file_path: Some("server/crates/djinn-agent/src/actors/coordinator/health.rs".to_string()),
+        confidence_tier: Some("symbol".to_string()),
+        exclusion_reason: None,
+    }];
+    (
+        CorpusContextImpactStub {
+            symbol_context,
+            impact_entries,
+        },
+        "symbol:health.rs::reap_orphaned_taskrun_jobs",
+        "reap_orphaned_taskrun_jobs",
+        "symbol:runtime_bridge.rs::list_taskrun_jobs",
+    )
+}
+
+#[async_trait::async_trait]
+impl djinn_control_plane::bridge::RepoGraphOps for CorpusContextImpactStub {
+    async fn context(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: bool,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
+        Ok(Some(self.symbol_context.clone()))
+    }
+
+    async fn impact(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: &str,
+        _: usize,
+        _: Option<&str>,
+        _: Option<f64>,
+    ) -> Result<djinn_control_plane::bridge::ImpactResult, String> {
+        Ok(djinn_control_plane::bridge::ImpactResult::Detailed(
+            self.impact_entries.clone(),
+        ))
+    }
+
+    async fn neighbors(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::NeighborsResult, String> {
+        Err("not used".into())
+    }
+
+    async fn ranked(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RankedNode>, String> {
+        Err("not used".into())
+    }
+    async fn implementations(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Vec<String>, String> {
+        Err("not used".into())
+    }
+    async fn search(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::SearchHit>, String> {
+        Err("not used".into())
+    }
+    async fn cycles(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CycleGroup>, String> {
+        Err("not used".into())
+    }
+    async fn orphans(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::OrphanEntry>, String> {
+        Err("not used".into())
+    }
+    async fn path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: &str,
+        _: &str,
+        _: Option<usize>,
+    ) -> Result<Option<djinn_control_plane::bridge::PathResult>, String> {
+        Err("not used".into())
+    }
+    async fn edges(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::EdgeEntry>, String> {
+        Err("not used".into())
+    }
+    async fn describe(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+    ) -> Result<Option<djinn_control_plane::bridge::SymbolDescription>, String> {
+        Err("not used".into())
+    }
+    async fn status(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::GraphStatus, String> {
+        Err("not used".into())
+    }
+    async fn snapshot(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: djinn_control_plane::bridge::SnapshotLevel,
+        _: usize,
+        _: &djinn_control_plane::tools::graph_exclusions::GraphExclusions,
+    ) -> Result<djinn_control_plane::bridge::SnapshotPayload, String> {
+        Err("not used".into())
+    }
+    async fn symbols_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: u32,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::SymbolAtHit>, String> {
+        Err("not used".into())
+    }
+    async fn diff_touches(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::ChangedRange],
+    ) -> Result<djinn_control_plane::bridge::DiffTouchesResult, String> {
+        Err("not used".into())
+    }
+    async fn detect_changes(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: &[String],
+    ) -> Result<djinn_control_plane::bridge::DetectedChangesResult, String> {
+        Err("not used".into())
+    }
+    async fn api_surface(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::ApiSurfaceEntry>, String> {
+        Err("not used".into())
+    }
+    async fn boundary_check(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &[djinn_control_plane::bridge::BoundaryRule],
+        _: &str,
+    ) -> Result<Vec<djinn_control_plane::bridge::BoundaryViolation>, String> {
+        Err("not used".into())
+    }
+    async fn hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: u32,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::HotspotEntry>, String> {
+        Err("not used".into())
+    }
+    async fn complexity(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
+        Err("not used".into())
+    }
+    async fn refactor_candidates(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<u32>,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
+        Err("not used".into())
+    }
+    async fn metrics_at(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+    ) -> Result<djinn_control_plane::bridge::MetricsAtResult, String> {
+        Err("not used".into())
+    }
+    async fn dead_symbols(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeadSymbolEntry>, String> {
+        Err("not used".into())
+    }
+    async fn deprecated_callers(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::DeprecatedHit>, String> {
+        Err("not used".into())
+    }
+    async fn touches_hot_path(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: Option<&str>,
+        _: &[String],
+        _: &[String],
+        _: &[String],
+    ) -> Result<Vec<djinn_control_plane::bridge::HotPathHit>, String> {
+        Err("not used".into())
+    }
+    async fn coupling(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
+        Err("not used".into())
+    }
+    async fn churn(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+    ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hotspots(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
+        Err("not used".into())
+    }
+    async fn coupling_hubs(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: usize,
+        _: Option<u32>,
+        _: usize,
+    ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
+        Err("not used".into())
+    }
+    async fn resolve(
+        &self,
+        _: &djinn_control_plane::bridge::ProjectCtx,
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<djinn_control_plane::bridge::ResolveOutcome, String> {
+        Err("not used".into())
+    }
+}
+
+async fn dispatch_corpus_context_impact(
+    mut params: CodeGraphParams,
+    stub: CorpusContextImpactStub,
+) -> serde_json::Value {
+    params.normalize();
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+    let ctx = djinn_control_plane::bridge::ProjectCtx {
+        id: "project-1".to_string(),
+        clone_path: "/repo".to_string(),
+        workspace: None,
+        sub_path: None,
+    };
+    call_code_graph_inner(&state, &mut params, &ctx, &stub)
+        .await
+        .expect("corpus-driven code_graph dispatch should serialize")
+}
+
+/// AC: `code_graph context` for `RuntimeOps::list_taskrun_jobs`
+/// surfaces the production caller `reap_orphaned_taskrun_jobs` in
+/// the incoming `Calls` bucket at the synthesized
+/// `TraitDispatchCall` confidence floor (0.70). The dispatch must
+/// preserve the `symbol_context` discriminator wrapper and the
+/// bucketed `incoming`/`outgoing` shape unchanged.
+#[tokio::test]
+async fn code_graph_dispatch_corpus_runtime_ops_list_taskrun_jobs_context() {
+    let (stub, caller_uid, caller_name, trait_uid) = runtime_ops_corpus_stub();
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "context",
+        "key": trait_uid,
+        "include_content": false
+    }))
+    .expect("context params parse");
+    let value = dispatch_corpus_context_impact(params, stub).await;
+
+    let payload = value
+        .get("symbol_context")
+        .and_then(|v| v.as_object())
+        .expect("code_graph context dispatch must wrap response in symbol_context");
+    assert_eq!(
+        payload["symbol"]["uid"], trait_uid,
+        "context dispatch must echo the queried symbol uid"
+    );
+    let incoming_calls = payload["incoming"]["calls"]
+        .as_array()
+        .expect("context incoming.calls must be an array");
+    assert!(
+        incoming_calls
+            .iter()
+            .any(|r| { r["uid"] == caller_uid && r["name"] == caller_name }),
+        "context incoming.calls must include corpus caller {caller_name} (uid={caller_uid}); got {incoming_calls:?}"
+    );
+    let caller_entry = incoming_calls
+        .iter()
+        .find(|r| r["uid"] == caller_uid)
+        .expect("caller present");
+    assert!(
+        (caller_entry["confidence"].as_f64().unwrap_or(0.0) - 0.70).abs() < f64::EPSILON,
+        "corpus caller confidence {} must equal TraitDispatchCall floor 0.70",
+        caller_entry["confidence"]
+    );
+    assert_eq!(
+        caller_entry["confidence_tier"], "inferred",
+        "TraitDispatchCall caller must classify as inferred confidence tier"
+    );
+}
+
+/// AC: `code_graph context` for the *concrete impl* method
+/// `AppState::list_taskrun_jobs` must surface the trait method in
+/// its outgoing `Implements` bucket via the high-confidence
+/// `Implements` relationship edge. The dispatch must preserve the
+/// bucket keys (`outgoing.implements`) unchanged so the
+/// `/code-graph` UI parser keeps working.
+#[tokio::test]
+async fn code_graph_dispatch_corpus_runtime_ops_list_taskrun_jobs_impl_method_implements_bucket() {
+    let (stub, _caller_uid, _caller_name, _trait_uid) = runtime_ops_corpus_stub();
+    // The stub's `context` returns the same SymbolContext regardless
+    // of `key`; here we exercise the dispatch boundary by querying
+    // with the impl method's uid and asserting the bucket shape.
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "context",
+        "key": "symbol:app_state.rs::list_taskrun_jobs",
+        "include_content": false
+    }))
+    .expect("context params parse");
+    let value = dispatch_corpus_context_impact(params, stub).await;
+
+    let payload = value
+        .get("symbol_context")
+        .and_then(|v| v.as_object())
+        .expect("symbol_context wrapper must be present");
+    let outgoing_implements = payload["outgoing"]["implements"]
+        .as_array()
+        .expect("context outgoing.implements must be an array");
+    assert!(
+        !outgoing_implements.is_empty(),
+        "outgoing.implements must carry the trait method for the impl_method context; got {outgoing_implements:?}"
+    );
+    let trait_hop = outgoing_implements
+        .iter()
+        .find(|r| r["uid"] == "symbol:app_state.rs::list_taskrun_jobs")
+        .expect("trait method hop must be present");
+    assert!(
+        (trait_hop["confidence"].as_f64().unwrap_or(0.0) - 0.90).abs() < f64::EPSILON,
+        "Implements hop confidence {} must equal Implements floor 0.90",
+        trait_hop["confidence"]
+    );
+    assert_eq!(
+        trait_hop["confidence_tier"], "extracted",
+        "Implements hop must classify as extracted confidence tier"
+    );
+}
+
+/// AC: `code_graph impact` for `RuntimeOps::list_taskrun_jobs` must
+/// include the production caller `reap_orphaned_taskrun_jobs` in the
+/// blast radius at the synthesized `TraitDispatchCall` confidence
+/// floor. The dispatch must preserve the `key` / `impact` array
+/// shape unchanged.
+#[tokio::test]
+async fn code_graph_dispatch_corpus_runtime_ops_list_taskrun_jobs_impact() {
+    let (stub, caller_uid, caller_name, trait_uid) = runtime_ops_corpus_stub();
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "key": trait_uid,
+        "limit": 3,
+        "min_confidence": 0.70
+    }))
+    .expect("impact params parse");
+    let value = dispatch_corpus_context_impact(params, stub).await;
+
+    assert_eq!(
+        value["key"], trait_uid,
+        "impact dispatch must echo the queried key"
+    );
+    let impact = value["impact"]
+        .as_array()
+        .expect("impact dispatch must include a non-empty impact array");
+    assert!(
+        impact
+            .iter()
+            .any(|e| e["key"] == caller_uid || e["uid"] == caller_uid),
+        "impact must include corpus caller {caller_name} (uid={caller_uid}); got {impact:?}"
+    );
+    let caller_entry = impact
+        .iter()
+        .find(|e| e["key"] == caller_uid || e["uid"] == caller_uid)
+        .expect("caller in blast radius");
+    assert_eq!(
+        caller_entry["depth"], 1,
+        "caller must be reached at depth 1 (direct trait-dispatch caller)"
+    );
+}
+
+/// AC: `code_graph impact` honors an explicit `min_confidence` lower
+/// than the default 0.85 to include the synthesized trait-dispatch
+/// caller. The dispatch must forward `min_confidence` to the bridge
+/// unchanged so callers can opt into the inferred edge tier.
+#[tokio::test]
+async fn code_graph_dispatch_corpus_runtime_ops_list_taskrun_jobs_impact_min_confidence_floor() {
+    let (stub, caller_uid, _caller_name, trait_uid) = runtime_ops_corpus_stub();
+    // Pass `min_confidence=0.0` to opt into the full edge set per
+    // the AC: "Include `min_confidence` coverage only as needed to
+    // validate end-to-end behavior not already covered by `ggrm`
+    // unit fixtures." The dispatch boundary is what we're testing
+    // here, not the BFS — that's covered by
+    // `trait_dispatch_impact.rs`.
+    let params: CodeGraphParams = serde_json::from_value(serde_json::json!({
+        "operation": "impact",
+        "key": trait_uid,
+        "limit": 3,
+        "min_confidence": 0.0
+    }))
+    .expect("impact params parse");
+    let value = dispatch_corpus_context_impact(params, stub).await;
+
+    let impact = value["impact"]
+        .as_array()
+        .expect("impact dispatch must include an impact array");
+    assert!(
+        impact
+            .iter()
+            .any(|e| e["key"] == caller_uid || e["uid"] == caller_uid),
+        "min_confidence=0.0 must include the trait-dispatch caller '{caller_uid}'; got {impact:?}"
+    );
+}

@@ -1223,3 +1223,120 @@ fn classifier_distinguishes_authoring_from_wave_planning_tasks() {
         "planning task must not classify as authoring"
     );
 }
+
+// ── Proposal-address prompt regressions (y4td) ───────────────────────────
+//
+// Verify that the proposal_address.md prompt text contains the expected
+// workflow guidance for progressive markdown-to-MDX enrichment via targeted
+// block patches, without inlining block vocabulary or forcing non-authoring
+// planner prompts to pay the catalog/skill body cost.
+
+#[test]
+fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Must reference the targeted block-patch primitive.
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "proposal_address.md must mention proposal_block_patch for targeted enrichment"
+    );
+
+    // Must reference visual-spec skill loading.
+    assert!(
+        prompt.contains("visual-spec"),
+        "proposal_address.md must mention visual-spec native skill for authoring sessions"
+    );
+    assert!(
+        prompt.contains("skill_read"),
+        "proposal_address.md must instruct skill_read to load visual-spec on demand"
+    );
+
+    // Must reference catalog pull on demand.
+    assert!(
+        prompt.contains("get_block_catalog"),
+        "proposal_address.md must instruct get_block_catalog pull on demand"
+    );
+
+    // Must reference memory retrieval for learned refinements.
+    assert!(
+        prompt.contains("memory_search") || prompt.contains("memory_build_context"),
+        "proposal_address.md must instruct memory retrieval for learned refinements"
+    );
+
+    // Must mention revision sequencing / latest_revision_seq inspection.
+    assert!(
+        prompt.contains("latest_revision_seq"),
+        "proposal_address.md must mention latest_revision_seq for patch sequencing"
+    );
+
+    // Must mention attribution fields.
+    assert!(
+        prompt.contains("native_skill_version"),
+        "proposal_address.md must mention native_skill_version for attribution"
+    );
+    assert!(
+        prompt.contains("native_skill_name"),
+        "proposal_address.md must mention native_skill_name for attribution"
+    );
+
+    // Lazy semantics: must NOT inline the full block vocabulary (no concrete
+    // block tag names from the catalog).
+    let forbidden_block_tags = [
+        "AnnotatedCode", "ApiEndpoint", "Callout", "Checklist", "Columns",
+        "Decisions", "Diagram", "Diff", "FileTree", "JsonExplorer",
+        "QuestionForm", "RichText", "Tabs", "Wireframe",
+    ];
+    for tag in &forbidden_block_tags {
+        assert!(
+            !prompt.contains(tag),
+            "proposal_address.md must not inline block vocabulary tag {tag}"
+        );
+    }
+
+    // Must not embed a giant catalog or list of block types.
+    assert!(
+        !prompt.contains("block_types"),
+        "proposal_address.md must not embed a block_types catalog list"
+    );
+}
+
+#[test]
+fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Both paths (simple update and block-patch) should be mentioned.
+    assert!(
+        prompt.contains("proposal_update"),
+        "proposal_address.md must still mention proposal_update for simple edits"
+    );
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "proposal_address.md must mention proposal_block_patch for MDX enrichment"
+    );
+
+    // The block-patch path should be framed as progressive enrichment.
+    let lower = prompt.to_lowercase();
+    assert!(
+        lower.contains("progressive") || lower.contains("one patch per revision"),
+        "proposal_address.md must frame block-patch as progressive enrichment"
+    );
+}
+
+#[test]
+fn proposal_address_prompt_preserves_existing_feedback_rules() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Existing rules must survive.
+    assert!(
+        prompt.contains("proposal_feedback_resolve"),
+        "proposal_address.md must still mention proposal_feedback_resolve"
+    );
+    assert!(
+        prompt.contains("building"),
+        "proposal_address.md must still mention the building guard"
+    );
+    assert!(
+        prompt.contains("{{PROPOSAL_CONTEXT}}"),
+        "proposal_address.md must keep the PROPOSAL_CONTEXT substitution marker"
+    );
+}

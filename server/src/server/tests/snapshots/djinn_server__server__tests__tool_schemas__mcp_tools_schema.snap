@@ -11655,6 +11655,233 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_block_patch",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "BlockPatchSelector": {
+          "description": "Selector for targeting a specific range in the proposal body",
+          "properties": {
+            "byte_range": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ByteRangeSelector"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Byte range selector: start is inclusive, end is exclusive. If\n`expected_text` is provided and does not match the body at that byte\nrange, the patch is rejected (stale-range guard)."
+            },
+            "exact_text": {
+              "description": "Match a contiguous substring of the body. Must occur exactly once;\nzero matches or ambiguous (multiple) matches are rejected.",
+              "nullable": true,
+              "type": "string"
+            },
+            "heading_text": {
+              "description": "Match a markdown heading by its text (without the `#` prefix). The\nmatched range includes the heading line itself and all content up to\n(but not including) the next heading at the same or higher level, or\nthe end of the body.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "ByteRangeSelector": {
+          "description": "A byte-range selector with an optional verification text.",
+          "properties": {
+            "end": {
+              "description": "Exclusive byte offset of the target range.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "expected_text": {
+              "description": "When set, the body text at `[start..end)` must equal this value or the\npatch is rejected. Guards against stale ranges after concurrent edits.",
+              "nullable": true,
+              "type": "string"
+            },
+            "start": {
+              "description": "Inclusive byte offset of the target range.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "block_mdx": {
+          "description": "The MDX content to insert (a single block or arbitrary MDX text).",
+          "type": "string"
+        },
+        "expected_latest_revision_seq": {
+          "description": "If set, reject the patch when the proposal's latest_revision_seq does\nnot equal this value. Guards against concurrent edits.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "native_skill_name": {
+          "description": "Name of the native skill producing this patch (e.g. \"visual-spec\").\nPersisted in the revision event_metadata for provenance.",
+          "nullable": true,
+          "type": "string"
+        },
+        "native_skill_version": {
+          "description": "Pinned version of the native skill.",
+          "nullable": true,
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional free-form note persisted alongside the revision metadata.",
+          "nullable": true,
+          "type": "string"
+        },
+        "operation": {
+          "description": "Operation: `replace` replaces the selected range, `wrap` wraps it.",
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/BlockPatchSelector",
+          "description": "Target selector: identifies the range in the body to patch."
+        }
+      },
+      "required": [
+        "id",
+        "selector",
+        "operation",
+        "block_mdx"
+      ],
+      "title": "ProposalBlockPatchParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_feedback_count": {
+          "default": 0,
+          "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list. Only populated on `proposal_list`; `0` on show paths.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_blocks",
     "read_only": true,
     "destructive": false,

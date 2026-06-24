@@ -95,8 +95,9 @@ pub use repositories::{
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
-        ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,
-        ProposalMemoryRef, ProposalRepository, ProposalUpdateInput,
+        ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput,
+        ProposalListQuery, ProposalListResult, ProposalMemoryRef, ProposalRepository,
+        ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     service::{ServicePreset, ServicePresetRepository},
