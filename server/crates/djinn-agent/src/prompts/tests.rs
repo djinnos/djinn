@@ -717,6 +717,105 @@ fn tools_section_injected_into_rendered_prompt() {
     );
 }
 
+// ── Advocate enrichment guidance regressions (k9zw) ─────────────────────
+//
+// Verify that the advocate prompt contains the expected enrichment guidance
+// for progressive MDX block-catalog consumption, and that the rendered prompt
+// includes the new block-catalog tools while adversary/judge do not.
+
+#[test]
+fn advocate_prompt_contains_enrichment_guidance() {
+    let prompt = include_str!("../prompts/advocate.md");
+
+    // Must reference proposal_block_patch for targeted enrichment.
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "advocate.md must mention proposal_block_patch for MDX enrichment"
+    );
+    // Must instruct get_block_catalog pull on demand.
+    assert!(
+        prompt.contains("get_block_catalog"),
+        "advocate.md must instruct get_block_catalog pull on demand"
+    );
+    // Must declare enrichment as default-but-optional, not DoR gate.
+    assert!(
+        prompt.contains("default behavior, not a deterministic DoR gate"),
+        "advocate.md must state enrichment is default-but-optional"
+    );
+    // Must bound enrichment to at most one block per revision.
+    assert!(
+        prompt.contains("at most one stable block"),
+        "advocate.md must bound enrichment to one block per revision"
+    );
+    // Must not require MDX for readiness.
+    assert!(
+        prompt.contains("prose grounding remains sufficient"),
+        "advocate.md must not require MDX for DoR readiness"
+    );
+}
+
+#[test]
+fn advocate_rendered_prompt_includes_block_catalog_tools() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    // Advocate prompt must include block-catalog enrichment tools.
+    assert!(
+        advocate_prompt.contains("`proposal_block_patch("),
+        "advocate rendered prompt should include proposal_block_patch tool"
+    );
+    assert!(
+        advocate_prompt.contains("`get_block_catalog("),
+        "advocate rendered prompt should include get_block_catalog tool"
+    );
+    assert!(
+        advocate_prompt.contains("`proposal_blocks("),
+        "advocate rendered prompt should include proposal_blocks tool"
+    );
+    assert!(
+        advocate_prompt.contains("`proposal_update("),
+        "advocate rendered prompt should include proposal_update tool"
+    );
+}
+
+#[test]
+fn adversary_judge_do_not_include_block_catalog_tools() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    // Adversary and Judge must NOT have block-catalog/advocacy tools.
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        !adversary_prompt.contains("`proposal_block_patch("),
+        "adversary rendered prompt must NOT include proposal_block_patch"
+    );
+    assert!(
+        !adversary_prompt.contains("`get_block_catalog("),
+        "adversary rendered prompt must NOT include get_block_catalog"
+    );
+    assert!(
+        !adversary_prompt.contains("`proposal_update("),
+        "adversary rendered prompt must NOT include proposal_update"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        !judge_prompt.contains("`proposal_block_patch("),
+        "judge rendered prompt must NOT include proposal_block_patch"
+    );
+    assert!(
+        !judge_prompt.contains("`get_block_catalog("),
+        "judge rendered prompt must NOT include get_block_catalog"
+    );
+    assert!(
+        !judge_prompt.contains("`proposal_update("),
+        "judge rendered prompt must NOT include proposal_update"
+    );
+}
+
 mod visual_spec;
 
 // ── Proposal-address prompt regressions (y4td) ───────────────────────────

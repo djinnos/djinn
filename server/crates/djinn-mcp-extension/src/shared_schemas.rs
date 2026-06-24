@@ -340,6 +340,89 @@ pub fn tool_proposal_ac_amend() -> RmcpTool {
     )
 }
 
+pub fn tool_proposal_update() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_update".to_string(),
+        "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short_id"},
+                "title": {"type": "string", "description": "New proposal title"},
+                "body": {"type": "string", "description": "New proposal body text"},
+                "acceptance_criteria": {
+                    "type": "array",
+                    "description": "Acceptance criteria: plain strings or {criterion, met} objects",
+                    "items": {"type": "object"}
+                },
+                "status": {"type": "string", "description": "draft | in_review | approved | building | done | rejected | archived | superseded"},
+                "superseded_by": {"type": "string", "description": "UUID or short_id of superseding proposal"},
+                "body_format": {"type": "string", "description": "Body encoding: markdown (default) or mdx (block-aware)"}
+            }
+        }),
+    )
+}
+
+pub fn tool_proposal_block_patch() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_block_patch".to_string(),
+        "Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id", "selector", "operation", "block_mdx"],
+            "properties": {
+                "id": {"type": "string", "description": "Proposal UUID or short_id"},
+                "selector": {
+                    "type": "object",
+                    "description": "Target selector: identifies the range in the body to patch",
+                    "properties": {
+                        "heading_text": {"type": "string", "description": "Match a markdown heading by text (without # prefix)"},
+                        "exact_text": {"type": "string", "description": "Match a contiguous substring of the body (must occur once)"},
+                        "byte_range": {
+                            "type": "object",
+                            "description": "Byte range selector: start inclusive, end exclusive",
+                            "properties": {
+                                "start": {"type": "integer"},
+                                "end": {"type": "integer"},
+                                "expected_text": {"type": "string", "description": "Verification text at the range (stale-range guard)"}
+                            }
+                        }
+                    }
+                },
+                "operation": {"type": "string", "enum": ["replace", "wrap"], "description": "replace replaces the selected range; wrap wraps it"},
+                "block_mdx": {"type": "string", "description": "The MDX content to insert"},
+                "expected_latest_revision_seq": {"type": "integer", "description": "Stale-revision guard: reject if proposal seq differs"},
+                "native_skill_name": {"type": "string", "description": "Name of the native skill producing this patch (e.g. visual-spec)"},
+                "native_skill_version": {"type": "string", "description": "Pinned version of the native skill"},
+                "note": {"type": "string", "description": "Optional free-form note persisted in revision metadata"}
+            }
+        }),
+    )
+}
+
+pub fn tool_get_block_catalog() -> RmcpTool {
+    RmcpTool::new(
+        "get_block_catalog".to_string(),
+        "Return the committed proposal MDX block vocabulary as a lean list of (type, tag) pairs sourced from proposal_block_catalog.json.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
+pub fn tool_proposal_blocks() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_blocks".to_string(),
+        "Return the v1 proposal MDX block registry, including stable block types, MDX tags, and field schemas.".to_string(),
+        object!({
+            "type": "object",
+            "properties": {}
+        }),
+    )
+}
+
 pub fn tool_proposal_reconcile_obsolete_epic() -> RmcpTool {
     RmcpTool::new(
         "proposal_reconcile_obsolete_epic".to_string(),
