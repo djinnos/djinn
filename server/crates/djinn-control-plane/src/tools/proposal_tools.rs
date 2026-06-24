@@ -23,7 +23,8 @@ use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
 use crate::tools::proposal_blocks::{
-    parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
+    extract_custom_block_tags, parse_mdx_blocks, validate_mdx_blocks,
+    validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse,
@@ -270,6 +271,242 @@ pub struct ProposalUpdateParams {
     pub superseded_by: Option<String>,
     /// Body encoding: `markdown` (default) or `mdx` (block-aware).
     pub body_format: Option<String>,
+}
+
+/// Selector for targeting a specific range in the proposal body.
+///
+/// Exactly one field must be provided. The selector identifies a deterministic
+/// byte range in the current body that will be replaced or wrapped.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Selector for targeting a specific range in the proposal body")]
+pub struct BlockPatchSelector {
+    /// Match a markdown heading by its text (without the `#` prefix). The
+    /// matched range includes the heading line itself and all content up to
+    /// (but not including) the next heading at the same or higher level, or
+    /// the end of the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_text: Option<String>,
+    /// Match a contiguous substring of the body. Must occur exactly once;
+    /// zero matches or ambiguous (multiple) matches are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_text: Option<String>,
+    /// Byte range selector: start is inclusive, end is exclusive. If
+    /// `expected_text` is provided and does not match the body at that byte
+    /// range, the patch is rejected (stale-range guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_range: Option<ByteRangeSelector>,
+}
+
+/// A byte-range selector with an optional verification text.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ByteRangeSelector {
+    /// Inclusive byte offset of the target range.
+    pub start: i64,
+    /// Exclusive byte offset of the target range.
+    pub end: i64,
+    /// When set, the body text at `[start..end)` must equal this value or the
+    /// patch is rejected. Guards against stale ranges after concurrent edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_text: Option<String>,
+}
+
+/// Resolved byte range in the proposal body.
+struct ResolvedRange {
+    start: usize,
+    end: usize,
+    /// Human-readable description for metadata.
+    selector_description: String,
+}
+
+/// Resolve a [`BlockPatchSelector`] to a byte range in `body`.
+fn resolve_selector(body: &str, selector: &BlockPatchSelector) -> Result<ResolvedRange, String> {
+    let mut provided = 0usize;
+    if selector.heading_text.is_some() {
+        provided += 1;
+    }
+    if selector.exact_text.is_some() {
+        provided += 1;
+    }
+    if selector.byte_range.is_some() {
+        provided += 1;
+    }
+    if provided != 1 {
+        return Err(
+            "selector must specify exactly one of heading_text, exact_text, or byte_range".into(),
+        );
+    }
+
+    if let Some(ref heading) = selector.heading_text {
+        return resolve_heading_selector(body, heading);
+    }
+    if let Some(ref text) = selector.exact_text {
+        return resolve_exact_text_selector(body, text);
+    }
+    if let Some(ref br) = selector.byte_range {
+        return resolve_byte_range_selector(body, br);
+    }
+    unreachable!()
+}
+
+/// Match a markdown heading and its section content.
+///
+/// Scans for `^(#{1,6}) <heading_text>` (exact heading text match after `#`
+/// prefix). The matched range is from the `#` character through the last byte
+/// before the next heading at the same or higher level, or end-of-body.
+fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRange, String> {
+    let needle = heading_text.trim();
+    if needle.is_empty() {
+        return Err("heading_text must not be empty".into());
+    }
+
+    // First pass: find all headings matching the needle using line-based scan.
+    let mut matches: Vec<(usize, usize)> = Vec::new(); // (line_byte_start, heading_level)
+    let mut offset = 0usize;
+    for line in body.lines() {
+        if let Some(stripped) = line.strip_prefix('#') {
+            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
+            let text = line[hashes..].trim();
+            if text == needle {
+                matches.push((offset, hashes));
+            }
+        }
+        offset += line.len() + 1; // +1 for '\n'
+    }
+
+    if matches.is_empty() {
+        return Err(format!("no heading matching {needle:?} found in body"));
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "heading_text {needle:?} is ambiguous: found {} matches",
+            matches.len()
+        ));
+    }
+
+    let (heading_start, heading_level) = matches[0];
+
+    // Find the end of this section: next heading at same or higher level, or
+    // end of body.
+    let mut section_end = body.len();
+    let mut pos = heading_start;
+    for line in body[heading_start..].lines().skip(1) {
+        pos += line.len() + 1;
+        if let Some(stripped) = line.strip_prefix('#') {
+            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
+            if hashes <= heading_level {
+                // Trim back to just before this heading line's start.
+                section_end = pos - line.len() - 1;
+                break;
+            }
+        }
+    }
+
+    Ok(ResolvedRange {
+        start: heading_start,
+        end: section_end,
+        selector_description: format!("heading: {needle}"),
+    })
+}
+
+/// Match an exact text substring. Must occur exactly once.
+fn resolve_exact_text_selector(body: &str, text: &str) -> Result<ResolvedRange, String> {
+    let needle = text;
+    if needle.is_empty() {
+        return Err("exact_text must not be empty".into());
+    }
+    let mut matches = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(pos) = body[search_from..].find(needle) {
+        matches.push(search_from + pos);
+        search_from += pos + needle.len();
+    }
+    if matches.is_empty() {
+        return Err("exact_text not found in body".into());
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "exact_text is ambiguous: found {} matches",
+            matches.len()
+        ));
+    }
+    let start = matches[0];
+    Ok(ResolvedRange {
+        start,
+        end: start + needle.len(),
+        selector_description: format!("exact_text ({} bytes)", needle.len()),
+    })
+}
+
+/// Match a byte range with optional verification.
+fn resolve_byte_range_selector(
+    body: &str,
+    br: &ByteRangeSelector,
+) -> Result<ResolvedRange, String> {
+    if br.start < 0 {
+        return Err("byte_range start must be non-negative".into());
+    }
+    if br.end < 0 {
+        return Err("byte_range end must be non-negative".into());
+    }
+    let start = br.start as usize;
+    let end = br.end as usize;
+    if start >= body.len() {
+        return Err(format!(
+            "byte_range start {} is beyond body length {}",
+            start,
+            body.len()
+        ));
+    }
+    if end > body.len() {
+        return Err(format!(
+            "byte_range end {} is beyond body length {}",
+            end,
+            body.len()
+        ));
+    }
+    if start >= end {
+        return Err("byte_range start must be less than end".into());
+    }
+    if let Some(ref expected) = br.expected_text {
+        let actual = &body[start..end];
+        if actual != expected {
+            return Err(format!(
+                "byte_range text mismatch: expected {:?} but found {:?}",
+                expected, actual
+            ));
+        }
+    }
+    Ok(ResolvedRange {
+        start,
+        end,
+        selector_description: format!("byte_range[{}..{}]", start, end),
+    })
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalBlockPatchParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+    /// Target selector: identifies the range in the body to patch.
+    pub selector: BlockPatchSelector,
+    /// Operation: `replace` replaces the selected range, `wrap` wraps it.
+    pub operation: String,
+    /// The MDX content to insert (a single block or arbitrary MDX text).
+    pub block_mdx: String,
+    /// If set, reject the patch when the proposal's latest_revision_seq does
+    /// not equal this value. Guards against concurrent edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_latest_revision_seq: Option<i32>,
+    /// Name of the native skill producing this patch (e.g. "visual-spec").
+    /// Persisted in the revision event_metadata for provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_skill_name: Option<String>,
+    /// Pinned version of the native skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_skill_version: Option<String>,
+    /// Optional free-form note persisted alongside the revision metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -837,6 +1074,152 @@ impl DjinnMcpServer {
                     // attribution metadata — block-patch / native-skill tagging
                     // is reserved for the targeted patch primitive.
                     event_metadata: None,
+                },
+            )
+            .await
+        {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+
+    /// Apply a single targeted MDX block patch to a proposal body.
+    ///
+    /// Locates a specific range in the proposal body using the provided
+    /// selector (heading, exact text, or byte range), then replaces or wraps
+    /// that range with the given MDX content. Unrelated body content is
+    /// preserved. Each successful patch increments `latest_revision_seq` exactly
+    /// once and records targeted-block-patch metadata.
+    #[tool(
+        description = "Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata."
+    )]
+    pub async fn proposal_block_patch(
+        &self,
+        Parameters(p): Parameters<ProposalBlockPatchParams>,
+    ) -> Json<ProposalSingleResponse> {
+        // 1. Validate operation.
+        if !matches!(p.operation.as_str(), "replace" | "wrap") {
+            return Json(err_single(format!(
+                "invalid operation: {:?} (expected replace or wrap)",
+                p.operation
+            )));
+        }
+
+        // 2. Validate block_mdx is non-empty.
+        if p.block_mdx.is_empty() {
+            return Json(err_single("block_mdx must not be empty".to_string()));
+        }
+
+        // 3. Resolve proposal.
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+
+        // 4. Edit gate.
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_single(e));
+        }
+
+        // 5. Stale revision guard.
+        if let Some(expected_seq) = p.expected_latest_revision_seq
+            && existing.latest_revision_seq != expected_seq
+        {
+            return Json(err_single(format!(
+                "stale revision: expected latest_revision_seq={}, but proposal has {}",
+                expected_seq, existing.latest_revision_seq
+            )));
+        }
+
+        // 6. Resolve selector to a byte range in the body.
+        let range = match resolve_selector(&existing.body, &p.selector) {
+            Ok(r) => r,
+            Err(e) => return Json(err_single(format!("selector error: {e}"))),
+        };
+
+        // 7. Build the new body.
+        let new_body = match p.operation.as_str() {
+            "replace" => {
+                let mut body = String::with_capacity(
+                    existing.body.len() - (range.end - range.start) + p.block_mdx.len(),
+                );
+                body.push_str(&existing.body[..range.start]);
+                body.push_str(&p.block_mdx);
+                body.push_str(&existing.body[range.end..]);
+                body
+            }
+            "wrap" => {
+                let selected = &existing.body[range.start..range.end];
+                let mut body = String::with_capacity(
+                    existing.body.len() - (range.end - range.start)
+                        + p.block_mdx.len()
+                        + selected.len(),
+                );
+                body.push_str(&existing.body[..range.start]);
+                // Insert the block_mdx before the selected content.
+                body.push_str(&p.block_mdx);
+                body.push_str(selected);
+                body.push_str(&existing.body[range.end..]);
+                body
+            }
+            _ => unreachable!(),
+        };
+
+        // 8. Validate the resulting MDX body.
+        // Determine body_format: if the proposal is markdown and the patch
+        // introduces MDX block tags, upgrade to mdx.
+        let has_mdx_blocks = !extract_custom_block_tags(&new_body).is_empty();
+        let new_body_format = if existing.body_format == "mdx" || has_mdx_blocks {
+            "mdx"
+        } else {
+            "markdown"
+        };
+
+        if new_body_format == "mdx" {
+            if let Err(e) = validate_mdx_blocks(&new_body) {
+                return Json(err_single(format!("resulting MDX is invalid: {e}")));
+            }
+            if let Err(e) = parse_mdx_blocks(&new_body) {
+                return Json(err_single(format!("resulting MDX parse error: {e}")));
+            }
+        }
+        if let Err(e) = validate_design(&new_body) {
+            return Json(err_single(e));
+        }
+
+        // 9. Build event_metadata for the targeted block-patch revision.
+        let mut metadata = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "selector": range.selector_description,
+            "range_start_byte": range.start,
+            "range_end_byte": range.end,
+            "native_skill_name": p.native_skill_name.as_deref().unwrap_or(""),
+            "native_skill_version": p.native_skill_version.as_deref().unwrap_or(""),
+        });
+        if let Some(ref note) = p.note {
+            metadata["note"] = serde_json::Value::String(note.clone());
+        }
+
+        // 10. Persist through the revisioning path.
+        let ac_json = existing.acceptance_criteria.clone();
+        match repo
+            .update(
+                &existing.id,
+                djinn_db::ProposalUpdateInput {
+                    title: &existing.title,
+                    body: &new_body,
+                    acceptance_criteria: &ac_json,
+                    status: &existing.status,
+                    superseded_by: existing.superseded_by.as_deref(),
+                    body_format: Some(new_body_format),
+                    event_metadata: Some(&metadata),
                 },
             )
             .await
@@ -2746,5 +3129,440 @@ mod schema_lean_tests {
         );
 
         assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
+    }
+}
+
+#[cfg(test)]
+mod block_patch_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_replace_by_exact_text_preserves_unrelated_content() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Patch Test",
+                body: "# Intro\n\nOld paragraph here.\n\n## Details\n\nMore content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Old paragraph here." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"new\">\nNew rich text content.\n</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("# Intro\n\n"),
+            "unrelated intro must survive"
+        );
+        assert!(
+            stored.body.contains("## Details\n\nMore content."),
+            "unrelated details must survive"
+        );
+        assert!(
+            stored.body.contains("<RichText id=\"new\">"),
+            "new block must be inserted"
+        );
+        assert!(
+            !stored.body.contains("Old paragraph here."),
+            "old content must be replaced"
+        );
+        assert_eq!(
+            stored.body_format, "mdx",
+            "format must upgrade to mdx when block inserted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_increments_revision_seq_once() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Test",
+                body: "First paragraph.\n\nSecond paragraph.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(proposal.latest_revision_seq, 1);
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Second paragraph." },
+                    "operation": "replace",
+                    "block_mdx": "<Callout id=\"c1\">\nImportant note.\n</Callout>",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(response.get("error").is_none());
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.latest_revision_seq, 2,
+            "revision must increment exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_stale_expected_revision() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Stale Test",
+                body: "Content here.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Content here." },
+                    "operation": "replace",
+                    "block_mdx": "<Diagram id=\"d1\" />\n",
+                    "expected_latest_revision_seq": 99,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("stale revision"), "error was: {error}");
+        // Verify nothing was modified.
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_missing_selector() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Missing Selector",
+                body: "Some body.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {},
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">hi</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("exactly one"), "error was: {error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_ambiguous_exact_text() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Ambiguous",
+                body: "Repeated text.\n\nMore.\n\nRepeated text.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Repeated text." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">hi</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("ambiguous"), "error was: {error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_heading_selector_replaces_section() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Heading Patch",
+                body: "# First\n\nFirst content.\n\n# Second\n\nSecond content.\n\n# Third\n\nThird content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "heading_text": "Second" },
+                    "operation": "replace",
+                    "block_mdx": "# Second\n\n<Callout id=\"c1\">\nReplaced second section.\n</Callout>\n",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("# First\n\nFirst content."),
+            "first section preserved"
+        );
+        assert!(
+            stored.body.contains("<Callout id=\"c1\">"),
+            "callout inserted"
+        );
+        assert!(
+            !stored.body.contains("Second content."),
+            "old second content replaced"
+        );
+        assert!(
+            stored.body.contains("# Third\n\nThird content."),
+            "third section preserved"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_wrap_preserves_selected_content_and_inserts_before() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Wrap Test",
+                body: "Before.\n\nTarget text.\n\nAfter.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Wrap inserts block_mdx before the selected text. Use a plain markdown
+        // prefix (no MDX block tags) to keep validation simple.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Target text." },
+                    "operation": "wrap",
+                    "block_mdx": "> **Note:** ",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "wrap failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("> **Note:** Target text."),
+            "wrapped content present"
+        );
+        assert!(stored.body.contains("Before.\n"), "before preserved");
+        assert!(stored.body.contains("\nAfter."), "after preserved");
+        assert_eq!(
+            stored.body_format, "markdown",
+            "no MDX tags so stays markdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_records_event_metadata() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Metadata Test",
+                body: "Some content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Some content." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">New content.</RichText>",
+                    "native_skill_name": "visual-spec",
+                    "native_skill_version": "1.0.0",
+                    "note": "test patch",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        // Revision 1 is the create seed; revision 2 is the block patch.
+        assert_eq!(revisions.len(), 2);
+        let patch_rev = &revisions[1];
+        let metadata: serde_json::Value =
+            serde_json::from_str(patch_rev.event_metadata.as_deref().unwrap_or("null")).unwrap();
+        assert_eq!(metadata["change_kind"], "targeted_block_patch");
+        assert_eq!(metadata["native_skill_name"], "visual-spec");
+        assert_eq!(metadata["native_skill_version"], "1.0.0");
+        assert_eq!(metadata["note"], "test patch");
+        assert!(metadata["range_start_byte"].is_number());
+        assert!(metadata["range_end_byte"].is_number());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_byte_range_selector() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "aaa bbb ccc";
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Byte Range Test",
+                body,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // "bbb" starts at byte 4, ends at byte 7.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {
+                        "byte_range": {
+                            "start": 4,
+                            "end": 7,
+                            "expected_text": "bbb"
+                        }
+                    },
+                    "operation": "replace",
+                    "block_mdx": "DDD",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.body, "aaa DDD ccc");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_byte_range_rejects_stale_text() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Stale Range",
+                body: "aaa bbb ccc",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {
+                        "byte_range": {
+                            "start": 4,
+                            "end": 7,
+                            "expected_text": "XXX"
+                        }
+                    },
+                    "operation": "replace",
+                    "block_mdx": "DDD",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("text mismatch"), "error was: {error}");
     }
 }
