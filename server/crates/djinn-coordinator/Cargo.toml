@@ -1,0 +1,60 @@
+[package]
+publish = false
+name = "djinn-coordinator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[features]
+default = []
+
+[dependencies]
+djinn-core = { path = "../djinn-core" }
+djinn-db = { path = "../djinn-db" }
+djinn-memory = { path = "../djinn-memory" }
+djinn-git = { path = "../djinn-git" }
+djinn-provider = { path = "../djinn-provider" }
+djinn-control-plane = { path = "../djinn-control-plane" }
+djinn-telemetry = { path = "../djinn-telemetry" }
+djinn-runtime = { path = "../djinn-runtime" }
+djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-workspace = { path = "../djinn-workspace" }
+djinn-roles = { path = "../djinn-roles" }
+djinn-lsp = { path = "../djinn-lsp" }
+djinn-orchestration-types = { path = "../djinn-orchestration-types" }
+djinn-slot = { path = "../djinn-slot" }
+djinn-stack = { path = "../djinn-stack" }
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+async-stream = "0.3"
+regex = "1.12.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+uuid = { version = "1", features = ["v7"] }
+async-trait = "0.1"
+sha2 = "0.10"
+hex = "0.4"
+git2 = "0.20"
+libc = "0.2"
+# NOTE(djinn-coordinator): direct sqlx usage is a temporary exception.
+# The dispatch_pause module uses djinn_db::DispatchPauseRepository which
+# transitively pulls in sqlx; we also re-export the repository call from
+# the coordinator's task dispatch path.  This will be removed when the
+# dispatch-pause query surface is lifted into djinn-db proper.
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "macros"] }
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = "3"
+insta = { version = "1", features = ["json"] }
