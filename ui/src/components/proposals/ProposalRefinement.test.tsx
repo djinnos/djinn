@@ -51,6 +51,7 @@ describe("ProposalRefinement", () => {
       total_entries: 7,
       update_authority: "checkpoint",
       stop_reason: null,
+      pending_checkpoint_count: 0,
     };
     render(
       <ProposalRefinement
@@ -130,6 +131,71 @@ describe("ProposalRefinement", () => {
     );
     expect(
       screen.getByText(/advocate revisions are proposed for approval/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders pending checkpoint count in checkpoint mode", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      pending_checkpoint_count: 2,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/2 advocate revision\(s\) awaiting approval/)).toBeInTheDocument();
+  });
+
+  it("does not show pending revisions in auto-accept mode", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      update_authority: "auto_accept",
+      stop_reason: null,
+      pending_checkpoint_count: 0,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/pending revision/)).not.toBeInTheDocument();
+  });
+
+  it("shows checkpoint approval message when no pending revisions", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 1,
+      dry_rounds: 0,
+      total_entries: 0,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      pending_checkpoint_count: 0,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText(/Advocate revisions require explicit approval/),
     ).toBeInTheDocument();
   });
 });

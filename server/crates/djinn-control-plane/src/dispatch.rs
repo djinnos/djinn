@@ -59,6 +59,7 @@ use crate::tools::provider_tools::{
     ProviderRemoveInput, ProviderValidateInput,
 };
 use crate::tools::refinement_tools::{
+    CheckpointApproveParams, CheckpointListParams, CheckpointRejectParams,
     ProposalRefinementStartParams, ProposalRefinementStatusParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
@@ -554,6 +555,31 @@ impl DjinnMcpServer {
                     ProposalRefinementStatusParams,
                 >(name, args)?))
                     .await,
+            ),
+            "proposal_refinement_checkpoint_list" => map_json(
+                name,
+                self.proposal_refinement_checkpoint_list(Parameters(decode_args::<
+                    CheckpointListParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_checkpoint_approve" => map_json(
+                name,
+                self.proposal_refinement_checkpoint_approve(Parameters(decode_args::<
+                    CheckpointApproveParams,
+                >(
+                    name, args
+                )?))
+                .await,
+            ),
+            "proposal_refinement_checkpoint_reject" => map_json(
+                name,
+                self.proposal_refinement_checkpoint_reject(Parameters(decode_args::<
+                    CheckpointRejectParams,
+                >(
+                    name, args
+                )?))
+                .await,
             ),
             "model_health" => map_json(
                 name,

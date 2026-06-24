@@ -17,7 +17,8 @@ use serde_json::json;
 use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
+    CheckpointApproveResponse, CheckpointListResponse, CheckpointRejectResponse,
+    CheckpointRevisionModel, ProposalRefinementStartResponse, ProposalRefinementStatusModel,
     ProposalRefinementStatusResponse,
 };
 use djinn_db::ProposalRepository;
@@ -59,6 +60,28 @@ fn default_update_authority() -> String {
 pub struct ProposalRefinementStatusParams {
     /// Proposal UUID or short_id.
     pub proposal_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CheckpointListParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CheckpointApproveParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// Revision sequence number to approve.
+    pub revision_seq: i32,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CheckpointRejectParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// Revision sequence number to reject.
+    pub revision_seq: i32,
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -192,6 +215,7 @@ impl DjinnMcpServer {
             total_entries: 0,
             update_authority: authority.to_string(),
             stop_reason: None,
+            pending_checkpoint_count: 0,
         };
 
         Json(ProposalRefinementStartResponse {
@@ -232,6 +256,125 @@ impl DjinnMcpServer {
             Err(e) => Json(err_refinement_status(e)),
         }
     }
+
+    /// List pending checkpoint revisions for a proposal. Returns the
+    /// pending advocate revisions that await human approval in checkpoint
+    /// mode. In auto-accept mode the list is always empty.
+    #[tool(
+        description = "List pending checkpoint revisions for a proposal. Returns advocate revisions that await approval in checkpoint mode. Each entry includes the revision seq, round, author model, title, and a body preview. Empty list in auto-accept mode."
+    )]
+    pub async fn proposal_refinement_checkpoint_list(
+        &self,
+        Parameters(p): Parameters<CheckpointListParams>,
+    ) -> Json<CheckpointListResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(CheckpointListResponse {
+                proposal_id: None,
+                pending: vec![],
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        match repo.pending_checkpoint_revisions(&proposal.id).await {
+            Ok(revisions) => {
+                let pending = revisions
+                    .iter()
+                    .map(CheckpointRevisionModel::from_revision)
+                    .collect();
+                Json(CheckpointListResponse {
+                    proposal_id: Some(proposal.id),
+                    pending,
+                    error: None,
+                })
+            }
+            Err(e) => Json(CheckpointListResponse {
+                proposal_id: Some(proposal.id),
+                pending: vec![],
+                error: Some(format!("failed to list pending revisions: {e}")),
+            }),
+        }
+    }
+
+    /// Approve a pending checkpoint revision: apply its title, body, and
+    /// acceptance criteria to the live proposal. The revision row is marked
+    /// as `checkpoint_approved` for audit. Idempotent — no-op if already
+    /// approved or rejected.
+    #[tool(
+        description = "Approve a pending checkpoint revision. Applies the revision's body, title, and acceptance criteria to the live proposal. Marks the revision as checkpoint_approved. Idempotent — returns success even if the revision was already approved or rejected."
+    )]
+    pub async fn proposal_refinement_checkpoint_approve(
+        &self,
+        Parameters(p): Parameters<CheckpointApproveParams>,
+    ) -> Json<CheckpointApproveResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(CheckpointApproveResponse {
+                proposal_id: None,
+                approved: false,
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        let user_id = djinn_core::auth_context::current_user_id();
+
+        match repo
+            .approve_checkpoint_revision(&proposal.id, p.revision_seq, user_id.as_deref())
+            .await
+        {
+            Ok(_) => Json(CheckpointApproveResponse {
+                proposal_id: Some(proposal.id),
+                approved: true,
+                error: None,
+            }),
+            Err(e) => Json(CheckpointApproveResponse {
+                proposal_id: Some(proposal.id),
+                approved: false,
+                error: Some(format!("failed to approve checkpoint revision: {e}")),
+            }),
+        }
+    }
+
+    /// Reject a pending checkpoint revision: mark it as `checkpoint_rejected`
+    /// without modifying the live proposal body. Idempotent — no-op if
+    /// already approved or rejected.
+    #[tool(
+        description = "Reject a pending checkpoint revision. Marks the revision as checkpoint_rejected without modifying the live proposal body. Idempotent — returns success even if the revision was already approved or rejected."
+    )]
+    pub async fn proposal_refinement_checkpoint_reject(
+        &self,
+        Parameters(p): Parameters<CheckpointRejectParams>,
+    ) -> Json<CheckpointRejectResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(CheckpointRejectResponse {
+                proposal_id: None,
+                rejected: false,
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        let user_id = djinn_core::auth_context::current_user_id();
+
+        match repo
+            .reject_checkpoint_revision(&proposal.id, p.revision_seq, user_id.as_deref())
+            .await
+        {
+            Ok(_) => Json(CheckpointRejectResponse {
+                proposal_id: Some(proposal.id),
+                rejected: true,
+                error: None,
+            }),
+            Err(e) => Json(CheckpointRejectResponse {
+                proposal_id: Some(proposal.id),
+                rejected: false,
+                error: Some(format!("failed to reject checkpoint revision: {e}")),
+            }),
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -261,6 +404,7 @@ pub async fn build_refinement_status(
             total_entries: 0,
             update_authority: "checkpoint".to_string(),
             stop_reason: None,
+            pending_checkpoint_count: 0,
         });
     };
 
@@ -284,13 +428,30 @@ pub async fn build_refinement_status(
         .unwrap_or_else(|| "checkpoint".to_string());
 
     // Read stop reason from stop metadata (if stopped).
+    // The coordinator's persist_refinement_stop writes `reason_tag`, while
+    // the refinement_start error handler may write `reason`. Try both.
     let stop_reason = if !is_active {
         stop_after
             .and_then(|s| s.event_metadata.as_ref())
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-            .and_then(|v| v.get("stop_reason")?.as_str().map(String::from))
+            .and_then(|v| {
+                v.get("reason_tag")
+                    .or_else(|| v.get("stop_reason"))
+                    .or_else(|| v.get("reason"))
+                    .and_then(|r| r.as_str().map(String::from))
+            })
     } else {
         None
+    };
+
+    // Count pending checkpoint revisions.
+    let pending_checkpoint_count = if update_authority == "checkpoint" {
+        repo.pending_checkpoint_revisions(proposal_id)
+            .await
+            .map(|v| v.len() as i32)
+            .unwrap_or(0)
+    } else {
+        0
     };
 
     // Derive round and dry-round counts from debate trail.
@@ -334,6 +495,7 @@ pub async fn build_refinement_status(
         total_entries,
         update_authority,
         stop_reason,
+        pending_checkpoint_count,
     })
 }
 
@@ -799,5 +961,370 @@ mod tests {
             .filter(|r| r.event_kind == "refinement_stop")
             .collect();
         assert_eq!(stops.len(), 1, "expected one refinement_stop");
+    }
+
+    // ── Checkpoint list/approve/reject tests ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_list_returns_empty_for_no_pending() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Empty Checkpoint List",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_list",
+                serde_json::json!({ "proposal_id": proposal.id }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        let pending = resp.get("pending").and_then(|v| v.as_array()).unwrap();
+        assert!(pending.is_empty(), "expected no pending revisions");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_list_returns_pending_revisions() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Pending Checkpoint",
+                body: "original body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate a pending checkpoint revision by updating the proposal
+        // (which creates a spec_revision) and then marking it as pending.
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Advocate Revised Title",
+                body: "advocate revised body content",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Mark the latest revision as checkpoint_pending.
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        let meta = serde_json::json!({
+            "source": "refinement_loop",
+            "role": "advocate",
+            "round": 1,
+            "authority": "checkpoint",
+            "checkpoint_status": "pending",
+        });
+        repo.set_latest_revision_event_metadata(&proposal.id, updated.latest_revision_seq, &meta)
+            .await
+            .unwrap();
+
+        // Revert the live body to simulate the coordinator's checkpoint revert.
+        // (In production the coordinator does this; here we do it manually.)
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_list",
+                serde_json::json!({ "proposal_id": proposal.id }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        let pending = resp.get("pending").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(pending.len(), 1, "expected one pending revision");
+        let first = &pending[0];
+        assert_eq!(
+            first.get("title").and_then(|v| v.as_str()),
+            Some("Advocate Revised Title")
+        );
+        assert_eq!(first.get("role").and_then(|v| v.as_str()), Some("advocate"));
+        assert_eq!(first.get("round").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_approve_applies_pending_revision() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Original Title",
+                body: "original body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate advocate revision + pending marking.
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Advocate Title",
+                body: "advocate body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        let pending_seq = updated.latest_revision_seq;
+        let meta = serde_json::json!({
+            "source": "refinement_loop",
+            "role": "advocate",
+            "round": 1,
+            "authority": "checkpoint",
+            "checkpoint_status": "pending",
+        });
+        repo.set_latest_revision_event_metadata(&proposal.id, pending_seq, &meta)
+            .await
+            .unwrap();
+
+        // Approve the pending revision.
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_approve",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "revision_seq": pending_seq,
+                }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        assert_eq!(resp.get("approved").and_then(|v| v.as_bool()), Some(true));
+
+        // The live proposal should now have the advocate's body.
+        let final_proposal = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(final_proposal.title, "Advocate Title");
+        assert_eq!(final_proposal.body, "advocate body");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_reject_leaves_live_body_unchanged() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Original Title",
+                body: "original body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate advocate revision + pending marking + revert.
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Advocate Title",
+                body: "advocate body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        let pending_seq = updated.latest_revision_seq;
+        let meta = serde_json::json!({
+            "source": "refinement_loop",
+            "role": "advocate",
+            "round": 1,
+            "authority": "checkpoint",
+            "checkpoint_status": "pending",
+        });
+        repo.set_latest_revision_event_metadata(&proposal.id, pending_seq, &meta)
+            .await
+            .unwrap();
+
+        // Reject the pending revision.
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_reject",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "revision_seq": pending_seq,
+                }),
+            )
+            .await
+            .expect("tool should be registered");
+
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        assert_eq!(resp.get("rejected").and_then(|v| v.as_bool()), Some(true));
+
+        // The live proposal body is unchanged (reject doesn't modify it).
+        let final_proposal = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(final_proposal.body, "advocate body");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_approve_is_idempotent() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Idempotent Approve",
+                body: "original body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Create a pending revision.
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Pending Title",
+                body: "pending body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        let seq = updated.latest_revision_seq;
+        let meta = serde_json::json!({
+            "checkpoint_status": "pending",
+            "role": "advocate",
+            "round": 1,
+            "authority": "checkpoint",
+        });
+        repo.set_latest_revision_event_metadata(&proposal.id, seq, &meta)
+            .await
+            .unwrap();
+
+        // First approve.
+        let resp1 = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_approve",
+                serde_json::json!({ "proposal_id": proposal.id, "revision_seq": seq }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.get("approved").and_then(|v| v.as_bool()), Some(true));
+
+        // Second approve (idempotent — the revision is no longer pending).
+        let resp2 = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_approve",
+                serde_json::json!({ "proposal_id": proposal.id, "revision_seq": seq }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.get("approved").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_reject_is_idempotent() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Idempotent Reject",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Advocate Title",
+                body: "advocate body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        let seq = updated.latest_revision_seq;
+        let meta = serde_json::json!({
+            "checkpoint_status": "pending",
+            "role": "advocate",
+            "round": 1,
+            "authority": "checkpoint",
+        });
+        repo.set_latest_revision_event_metadata(&proposal.id, seq, &meta)
+            .await
+            .unwrap();
+
+        // First reject.
+        let resp1 = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_reject",
+                serde_json::json!({ "proposal_id": proposal.id, "revision_seq": seq }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.get("rejected").and_then(|v| v.as_bool()), Some(true));
+
+        // Second reject (idempotent — no longer pending).
+        let resp2 = server
+            .dispatch_tool(
+                "proposal_refinement_checkpoint_reject",
+                serde_json::json!({ "proposal_id": proposal.id, "revision_seq": seq }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.get("rejected").and_then(|v| v.as_bool()), Some(true));
     }
 }

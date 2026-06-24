@@ -537,6 +537,10 @@ pub struct ProposalRefinementStatusModel {
     /// `agent_failure`, or `null` (still running / not started).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
+    /// Count of pending checkpoint revisions awaiting approval.
+    /// Always 0 in auto-accept mode.
+    #[serde(default)]
+    pub pending_checkpoint_count: i32,
 }
 
 /// Response for `proposal_refinement_start`.
@@ -558,6 +562,96 @@ pub struct ProposalRefinementStatusResponse {
     pub proposal_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Checkpoint approval/rejection models ─────────────────────────────────
+
+/// A pending checkpoint revision visible in the UI for approval or rejection.
+/// Derived from a `proposal_revisions` row whose `event_metadata` marks it as
+/// `checkpoint_status: "pending"`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct CheckpointRevisionModel {
+    /// The `proposal_revisions.seq` this pending revision targets.
+    pub seq: i32,
+    /// Advocate role attribution from event_metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Refinement round that produced this revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i32>,
+    /// Model that authored this revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_model: Option<String>,
+    /// Short preview of the proposed body (first 300 chars).
+    pub body_preview: String,
+    /// Title of the pending revision.
+    pub title: String,
+    /// When the revision was created.
+    pub created_at: String,
+}
+
+impl CheckpointRevisionModel {
+    pub fn from_revision(rev: &djinn_core::models::ProposalRevision) -> Self {
+        let meta: Option<serde_json::Value> = rev
+            .event_metadata
+            .as_ref()
+            .and_then(|m| serde_json::from_str(m).ok());
+        let role = meta
+            .as_ref()
+            .and_then(|v| v.get("role")?.as_str())
+            .map(String::from);
+        let round = meta
+            .as_ref()
+            .and_then(|v| v.get("round")?.as_i64())
+            .map(|r| r as i32);
+        let author_model = meta
+            .as_ref()
+            .and_then(|v| v.get("author_model")?.as_str())
+            .map(String::from);
+        let preview_len = rev.body.len().min(300);
+        Self {
+            seq: rev.seq,
+            role,
+            round,
+            author_model,
+            body_preview: rev.body[..preview_len].to_string(),
+            title: rev.title.clone(),
+            created_at: rev.created_at.clone(),
+        }
+    }
+}
+
+/// Response for `proposal_refinement_checkpoint_list`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct CheckpointListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(default)]
+    pub pending: Vec<CheckpointRevisionModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_refinement_checkpoint_approve`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct CheckpointApproveResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the pending revision was found and applied.
+    pub approved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_refinement_checkpoint_reject`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct CheckpointRejectResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the pending revision was found and rejected.
+    pub rejected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
