@@ -10,6 +10,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
 import type {
   Proposal,
+  ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
   ProposalRevision,
@@ -62,6 +63,8 @@ export interface ProposalDetail {
   revisions: ProposalHistoryEntry[];
   signoffs: ProposalSignoff[];
   epics: ProposalEpic[];
+  /** Structured debate-trail rows (objections, rebuttals, verdicts). */
+  debate_trail: ProposalDebateTrailRow[];
 }
 
 export function proposalDetailQueryOptions(id: string | null) {
@@ -77,6 +80,7 @@ export function proposalDetailQueryOptions(id: string | null) {
         revisions: (res.revisions ?? []) as ProposalHistoryEntry[],
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
         epics: (res.epics ?? []) as ProposalEpic[],
+        debate_trail: (res.debate_trail ?? []) as ProposalDebateTrailRow[],
       };
     },
     staleTime: 15_000,
