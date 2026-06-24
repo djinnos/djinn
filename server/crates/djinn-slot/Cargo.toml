@@ -1,6 +1,6 @@
 [package]
 publish = false
-name = "djinn-agent"
+name = "djinn-slot"
 version = "0.1.0"
 edition = "2024"
 
@@ -11,33 +11,23 @@ doctest = false
 # Exposes cluster-free slot-pool factory hooks for downstream integration tests.
 test-support = []
 
-[[bin]]
-name = "djinn-skills-manifest"
-path = "src/bin/skills_manifest.rs"
-required-features = []
-
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
 djinn-memory = { path = "../djinn-memory" }
-djinn-git = { path = "../djinn-git" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-control-plane = { path = "../djinn-control-plane" }
-djinn-telemetry = { path = "../djinn-telemetry" }
-djinn-runtime = { path = "../djinn-runtime", features = ["test-runtime"] }
-djinn-stack = { path = "../djinn-stack" }
+djinn-runtime = { path = "../djinn-runtime" }
 djinn-supervisor = { path = "../djinn-supervisor" }
-djinn-k8s = { path = "../djinn-k8s" }
-djinn-workspace = { path = "../djinn-workspace" }
 djinn-roles = { path = "../djinn-roles" }
-djinn-sandbox = { path = "../djinn-sandbox" }
-djinn-lsp = { path = "../djinn-lsp" }
 djinn-compaction = { path = "../djinn-compaction" }
 djinn-mcp-extension = { path = "../djinn-mcp-extension" }
 djinn-orchestration-types = { path = "../djinn-orchestration-types" }
-djinn-slot = { path = "../djinn-slot" }
-kube = { version = "0.95", features = ["runtime", "derive"] }
+djinn-stack = { path = "../djinn-stack" }
+djinn-lsp = { path = "../djinn-lsp" }
+djinn-telemetry = { path = "../djinn-telemetry" }
 anyhow = "1"
+regex = "1.12.3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -47,22 +37,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
 async-stream = "0.3"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
-rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
-schemars = "1"
-regex = "1.12.3"
-git2 = "0.20"
-libc = "0.2"
-wait-timeout = "0.2"
-base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
-globset = "0.4"
-ring = "0.17"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v7"] }
-sqlx = { version = "0.8", features = ["mysql", "runtime-tokio-rustls", "macros"] }
 async-trait = "0.1"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "macros"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]
