@@ -58,3 +58,4 @@ workspace-hack.workspace = true
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
+djinn-slot = { path = "../djinn-slot", features = ["test-support"] }

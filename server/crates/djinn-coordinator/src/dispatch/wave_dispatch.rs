@@ -387,7 +387,7 @@ mod e6_tests {
     use super::*;
     use djinn_core::models::Task;
     use djinn_core::models::task::compute_transition;
-    use djinn_roles::{DispatchContext, RoleRegistry};
+    use crate::roles::{DispatchContext, RoleRegistry};
 
     /// A `Task` shaped like a worker task reopened by a merge-queue rejection:
     /// `issue_type=task`, `status=open`, with the given `reopen_count`.
