@@ -29,25 +29,39 @@ impl RoleRegistry {
     pub fn new() -> Self {
         Self {
             entries: vec![
+                // ADR-051 §1 + §8: review tasks (escalation + intervention) are
+                // Planner-owned.  This rule must come before the architect
+                // rule so spike tasks still fall through to Architect.
+                RoleEntry {
+                    agent_type: AgentType::Planner,
+                    claims: planner_review_claims,
+                },
+                // Architect claims spike tasks (open status) — the
+                // on-demand consultant loop per ADR-051 §2.
                 RoleEntry {
                     agent_type: AgentType::Architect,
                     claims: architect_claims,
                 },
+                // Planning / decomposition tasks go to Planner.
                 RoleEntry {
                     agent_type: AgentType::Planner,
-                    claims: planner_claims,
+                    claims: planning_claims,
                 },
                 RoleEntry {
-                    agent_type: AgentType::Lead,
-                    claims: lead_claims,
+                    agent_type: AgentType::Worker,
+                    claims: worker_claims,
                 },
                 RoleEntry {
                     agent_type: AgentType::Reviewer,
                     claims: reviewer_claims,
                 },
                 RoleEntry {
-                    agent_type: AgentType::Worker,
-                    claims: worker_claims,
+                    agent_type: AgentType::Lead,
+                    claims: lead_claims,
+                },
+                RoleEntry {
+                    agent_type: AgentType::Planner,
+                    claims: planner_fallback_claims,
                 },
             ],
         }
@@ -74,16 +88,21 @@ impl RoleRegistry {
 }
 
 fn architect_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    task.issue_type == "task" && task.status == "open" && task.design.is_empty()
+    matches!(task.status.as_str(), "open" | "in_progress")
+        && matches!(task.issue_type.as_str(), "spike")
 }
 
-fn planner_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    task.status == "needs_planner"
-        || task.status == "in_planner"
-        || (task.issue_type == "task"
-            && task.status == "open"
-            && !task.design.is_empty()
-            && task.description.is_empty())
+/// Review tasks dispatch as Planner (ADR-051 §1 + §8).
+fn planner_review_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    matches!(task.status.as_str(), "open" | "in_progress") && task.issue_type.as_str() == "review"
+}
+
+/// Planning / decomposition / epic_breakdown tasks dispatch as Planner.
+fn planning_claims(task: &Task, _ctx: &DispatchContext) -> bool {
+    matches!(
+        task.issue_type.as_str(),
+        "planning" | "decomposition" | "epic_breakdown"
+    )
 }
 
 fn lead_claims(task: &Task, _ctx: &DispatchContext) -> bool {
@@ -94,6 +113,22 @@ fn reviewer_claims(task: &Task, _ctx: &DispatchContext) -> bool {
     task.status == "needs_task_review" || task.status == "in_task_review"
 }
 
+/// Worker claims non-specialist open/in-progress tasks: not spike, not
+/// review, not planning/decomposition/epic_breakdown, and not in a
+/// review/lead-intervention status.
 fn worker_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    task.status == "open" || task.status == "in_progress"
+    !matches!(
+        task.status.as_str(),
+        "needs_task_review" | "in_task_review" | "needs_lead_intervention" | "in_lead_intervention"
+    ) && !matches!(
+        task.issue_type.as_str(),
+        "spike" | "review" | "planning" | "decomposition" | "epic_breakdown"
+    )
+}
+
+/// Planner fallback — never claims anything (the planner-specific rules
+/// above handle review and planning tasks; this is the catch-all entry
+/// that matches the original `planner_claims` that always returns false).
+fn planner_fallback_claims(_task: &Task, _ctx: &DispatchContext) -> bool {
+    false
 }

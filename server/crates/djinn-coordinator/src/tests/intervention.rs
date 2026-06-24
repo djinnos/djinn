@@ -1144,10 +1144,10 @@ async fn completed_budget_park_sessions_clear_recovery_backoff_without_fault_rou
 fn budget_park_source_paths_do_not_enter_dispatch_fault_routing() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let guarded_paths = [
-        "src/actors/coordinator/dispatch/task_dispatch.rs",
-        "src/actors/coordinator/dispatch/wave_dispatch.rs",
-        "src/actors/coordinator/dispatch/session_recovery.rs",
-        "src/actors/coordinator/dispatch/retry.rs",
+        "src/dispatch/task_dispatch.rs",
+        "src/dispatch/wave_dispatch.rs",
+        "src/dispatch/session_recovery.rs",
+        "src/dispatch/retry.rs",
     ];
 
     let mut offenders = Vec::new();

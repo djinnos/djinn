@@ -30,6 +30,10 @@ pub(super) struct SlotPool {
     ctx: SlotContext,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
+    /// Test-only override map for injecting token/turn counts into
+    /// `session_for_task` without a real running worker.
+    #[cfg(any(test, feature = "test-support"))]
+    token_overrides: HashMap<String, (u64, u64)>,
 }
 
 impl SlotPool {
@@ -69,6 +73,8 @@ impl SlotPool {
             ctx,
             cancel,
             slot_factory,
+            #[cfg(any(test, feature = "test-support"))]
+            token_overrides: HashMap::new(),
         };
         pool.spawn_slots_for_config(&config);
         pool
@@ -164,8 +170,32 @@ impl SlotPool {
                             idle_seconds: self.ctx.idle_seconds(&task_id).unwrap_or(0),
                             activity_tracked: true,
                             project_id: self.task_projects.get(&task_id).cloned(),
-                            token_count: 0,
-                            turn_count: 0,
+                            token_count: {
+                                #[cfg(any(test, feature = "test-support"))]
+                                {
+                                    self.token_overrides
+                                        .get(&task_id)
+                                        .map(|(tc, _)| *tc)
+                                        .unwrap_or(0)
+                                }
+                                #[cfg(not(any(test, feature = "test-support")))]
+                                {
+                                    0
+                                }
+                            },
+                            turn_count: {
+                                #[cfg(any(test, feature = "test-support"))]
+                                {
+                                    self.token_overrides
+                                        .get(&task_id)
+                                        .map(|(_, tr)| *tr)
+                                        .unwrap_or(0)
+                                }
+                                #[cfg(not(any(test, feature = "test-support")))]
+                                {
+                                    0
+                                }
+                            },
                         })
                 });
                 let _ = respond_to.send(Ok(info));
@@ -210,7 +240,14 @@ impl SlotPool {
                 let _ = respond_to.send(result);
             }
             #[cfg(any(test, feature = "test-support"))]
-            PoolMessage::TestSetTokenOverride { .. } => {}
+            PoolMessage::TestSetTokenOverride {
+                task_id,
+                token_count,
+                turn_count,
+            } => {
+                self.token_overrides
+                    .insert(task_id, (token_count, turn_count));
+            }
         }
     }
 

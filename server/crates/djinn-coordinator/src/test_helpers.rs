@@ -200,7 +200,7 @@ pub fn slot_context_from_agent(
         catalog: ctx.catalog.clone(),
         health_tracker: ctx.health_tracker.clone(),
         background_work_tasks: ctx.background_work_tasks.clone(),
-        active_tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        active_tasks: ctx.active_tasks.clone(),
         default_project_id: ctx.default_project_id.clone(),
         working_root: ctx.working_root.clone(),
         coordinator_trigger: None,
