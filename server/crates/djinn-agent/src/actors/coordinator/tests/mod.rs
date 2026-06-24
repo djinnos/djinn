@@ -478,6 +478,7 @@ fn coordinator_actor_for_tests(
         idle_consolidation_handle: None,
         pr_cleanup_config: PrCleanupConfig::default(),
         active_refinements: HashMap::new(),
+        refinement_sessions: HashMap::new(),
         dispatched: 0,
         recovered: 0,
     }

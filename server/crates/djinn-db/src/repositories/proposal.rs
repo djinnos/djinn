@@ -882,6 +882,36 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Patch the `event_metadata` column on the latest `spec_revision` row for
+    /// `proposal_id`.  Used by the refinement coordinator to retroactively
+    /// attribute an advocate-authored revision after the agent session completes
+    /// (the agent's `proposal_update` tool call doesn't carry refinement
+    /// context, so the metadata is set post-hoc).
+    ///
+    /// When no `spec_revision` row exists for the given `seq`, this is a
+    /// no-op — the revision was created by a non-spec source (lifecycle event,
+    /// status change, etc.) and doesn't need attribution.
+    pub async fn set_latest_revision_event_metadata(
+        &self,
+        proposal_id: &str,
+        seq: i32,
+        event_metadata: &serde_json::Value,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let metadata: Option<serde_json::Value> = Some(event_metadata.clone());
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(metadata)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn signoffs(&self, proposal_id: &str) -> Result<Vec<ProposalSignoff>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(

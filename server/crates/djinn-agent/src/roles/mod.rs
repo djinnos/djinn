@@ -215,6 +215,10 @@ pub(crate) fn flow_for_task_dispatch(
         "planning" | "decomposition" | "review" | "epic_breakdown" => {
             return SupervisorFlow::Planning;
         }
+        // Proposal-refinement tribunal: single-stage flow that runs one
+        // refinement role (advocate, adversary, or judge). The concrete
+        // agent type is resolved from task.agent_type in role_overrides.
+        "refinement" => return SupervisorFlow::Refinement,
         _ => {}
     }
 
@@ -784,5 +788,27 @@ mod tests {
             );
             assert_eq!(SupervisorFlow::Lead.role_sequence(), &[RoleKind::Lead]);
         }
+    }
+
+    #[test]
+    fn flow_for_refinement_is_refinement() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task_with_type("open", "refinement");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::Refinement
+        );
+    }
+
+    #[test]
+    fn refinement_issue_type_takes_precedence_over_status() {
+        use crate::supervisor::SupervisorFlow;
+        // Even if the task status is needs_task_review, a refinement issue_type
+        // short-circuits to the Refinement flow.
+        let task = make_task_with_type("needs_task_review", "refinement");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, true),
+            SupervisorFlow::Refinement
+        );
     }
 }

@@ -29,6 +29,11 @@ pub enum IssueType {
     /// target repos and creates the epics (with cross-repo dependencies). Has
     /// no `epic_id` (it operates one level above epics).
     EpicBreakdown,
+    /// Proposal-refinement tribunal session — simple lifecycle
+    /// (open → in_progress → closed). Routed to the refinement tribunal
+    /// (advocate, adversary, or judge) via `SupervisorFlow::Refinement`.
+    /// The `agent_type` field on the task determines the concrete tribunal role.
+    Refinement,
 }
 
 impl IssueType {
@@ -42,6 +47,7 @@ impl IssueType {
             Self::Planning => "planning",
             Self::Review => "review",
             Self::EpicBreakdown => "epic_breakdown",
+            Self::Refinement => "refinement",
         }
     }
 
@@ -57,6 +63,7 @@ impl IssueType {
             "decomposition" => Ok(Self::Planning),
             "review" => Ok(Self::Review),
             "epic_breakdown" => Ok(Self::EpicBreakdown),
+            "refinement" => Ok(Self::Refinement),
             other => Err(Error::Internal(format!("unknown issue_type: {other}"))),
         }
     }
@@ -66,7 +73,12 @@ impl IssueType {
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
-            Self::Spike | Self::Research | Self::Planning | Self::Review | Self::EpicBreakdown
+            Self::Spike
+                | Self::Research
+                | Self::Planning
+                | Self::Review
+                | Self::EpicBreakdown
+                | Self::Refinement
         )
     }
 }

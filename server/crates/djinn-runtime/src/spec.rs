@@ -31,6 +31,9 @@ pub enum RoleKind {
     Verifier,
     Architect,
     Lead,
+    /// Refinement tribunal role (advocate, adversary, or judge). The concrete
+    /// agent type is resolved from `task.agent_type` at the role-overrides layer.
+    Refinement,
 }
 
 /// Reply-loop guard family that terminated a degenerate session.
@@ -81,6 +84,7 @@ impl RoleKind {
             RoleKind::Verifier => "verifier",
             RoleKind::Architect => "architect",
             RoleKind::Lead => "lead",
+            RoleKind::Refinement => "refinement",
         }
     }
 }
@@ -121,6 +125,11 @@ pub enum SupervisorFlow {
     /// `NewTask` and looped worker→reviewer forever (the dead-end that wedged
     /// 82g0/78y9).
     Lead,
+    /// Proposal-refinement tribunal: a single-stage flow that runs one
+    /// refinement role (advocate, adversary, or judge) on a proposal. The
+    /// concrete agent type is resolved from `task.agent_type` at the
+    /// role-overrides layer.
+    Refinement,
 }
 
 impl SupervisorFlow {
@@ -137,6 +146,7 @@ impl SupervisorFlow {
             SupervisorFlow::Planning => "planning",
             SupervisorFlow::ReviewResume => "review_resume",
             SupervisorFlow::Lead => "lead",
+            SupervisorFlow::Refinement => "refinement",
         }
     }
 }
@@ -174,6 +184,10 @@ pub fn role_sequence(flow: SupervisorFlow) -> &'static [RoleKind] {
         // `reopen` returns the task to `open` and the coordinator starts a
         // clean subsequent run.
         SupervisorFlow::Lead => &[Lead],
+        // Single-stage refinement: the tribunal role (advocate, adversary, or
+        // judge) runs once. The concrete agent type is resolved from
+        // `task.agent_type` in the role-overrides layer.
+        SupervisorFlow::Refinement => &[Refinement],
     }
 }
 

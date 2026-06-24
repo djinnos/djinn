@@ -946,4 +946,59 @@ mod tests {
             Some(StopReason::AgentFailure { .. })
         ));
     }
+
+    // ── Revision attribution per round ──────────────────────────────────
+
+    #[test]
+    fn revision_metadata_includes_round_and_role_attribution() {
+        // Each round's advocate revision should carry round number, role,
+        // authority mode, and model for attribution in proposal history.
+        for round in 1..=5 {
+            let meta = build_revision_event_metadata(
+                round,
+                UpdateAuthority::AutoAccept,
+                Some("anthropic/claude-sonnet-4-20250514"),
+            );
+            assert_eq!(meta["round"], round, "round must match for round {round}");
+            assert_eq!(meta["role"], "advocate");
+            assert_eq!(meta["source"], "refinement_loop");
+            assert_eq!(meta["authority"], "auto_accept");
+            assert_eq!(
+                meta["author_model"], "anthropic/claude-sonnet-4-20250514",
+                "model must be attributed"
+            );
+        }
+    }
+
+    #[test]
+    fn debate_trail_attribution_fields_are_consistent_with_state() {
+        // Verify that the objection record shape aligns with the debate-trail
+        // schema fields (round, against_revision_seq, agent_role, blocking).
+        let mut state =
+            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+
+        // Round 1: advocate advances to revision 1.
+        state.record_advocate_revision(1);
+        assert_eq!(state.current_revision_seq, 1);
+        assert_eq!(state.current_round, 1);
+
+        // The debate-trail entry for the adversary's objection in this round
+        // should carry: round=1, against_revision_seq=1, agent_role="adversary".
+        // This test verifies the state machine tracks these correctly so the
+        // dispatch layer can persist them with the right values.
+        let objection = ObjectionRecord {
+            body: "Missing scope section".into(),
+            blocking: true,
+            author_model: Some("openai/gpt-4o".into()),
+            entry_id: None,
+        };
+        let outcome = state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![objection],
+            explicit_dry: false,
+        });
+        assert_eq!(outcome, AdversaryPassOutcome::Continue);
+        // After processing, round advances to 2, revision_seq stays 1.
+        assert_eq!(state.current_round, 2);
+        assert_eq!(state.current_revision_seq, 1);
+    }
 }

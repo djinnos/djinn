@@ -221,6 +221,10 @@ pub(super) struct CoordinatorActor {
     /// already has an entry here cannot be started again until the loop
     /// completes or is terminated.
     pub(super) active_refinements: HashMap<String, super::refinement::RefinementLoopState>,
+    /// In-flight refinement sessions by proposal_id.  Tracks which task is
+    /// currently running for each active refinement loop so the coordinator
+    /// can detect session completion and advance the phase.
+    pub(super) refinement_sessions: HashMap<String, super::refinement_dispatch::RefinementSession>,
     // Metrics
     pub(super) dispatched: u64,
     pub(super) recovered: u64,
@@ -416,6 +420,7 @@ impl CoordinatorActor {
             idle_consolidation_handle: None,
             pr_cleanup_config,
             active_refinements: HashMap::new(),
+            refinement_sessions: HashMap::new(),
             dispatched: 0,
             recovered: 0,
         }
@@ -702,6 +707,7 @@ impl CoordinatorActor {
 
         if !memory_throttled {
             self.dispatch_ready_tasks(None).await;
+            self.drive_active_refinements().await;
         }
         self.process_approved_tasks().await;
         self.poll_pr_statuses().await;

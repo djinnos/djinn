@@ -47,6 +47,9 @@ mod reentrance;
 // yet.  Allow dead_code until the full loop is wired into the coordinator.
 #[allow(dead_code)]
 pub(crate) mod refinement;
+// Refinement tribunal dispatch orchestration — drives the advocate/adversary/
+// judge phase loop.
+mod refinement_dispatch;
 pub(crate) mod rules;
 mod types;
 mod wave;
