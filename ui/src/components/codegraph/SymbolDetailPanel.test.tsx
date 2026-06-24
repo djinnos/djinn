@@ -207,6 +207,144 @@ describe("SymbolDetailPanel", () => {
     expect(screen.queryByText("container")).not.toBeInTheDocument();
   });
 
+  it("renders trait-dispatch Dependents/Impact and Dependencies for a trait method with in-repo callers", () => {
+    useCodeGraphStore.getState().setSelection(
+      "symbol:runtime_bridge.rs::list_taskrun_jobs",
+    );
+    render(
+      <SymbolDetailPanel
+        projectId="proj"
+        injectedContext={ctx({
+          symbol: {
+            uid: "symbol:runtime_bridge.rs::list_taskrun_jobs",
+            name: "list_taskrun_jobs",
+            kind: "method",
+            file_path:
+              "server/crates/djinn-control-plane/src/bridge/runtime_bridge.rs",
+            start_line: 137,
+            end_line: 137,
+            content: null,
+            method_metadata: null,
+          },
+          incoming: {
+            calls: [
+              {
+                uid: "symbol:health.rs::reap_orphaned_taskrun_jobs",
+                name: "reap_orphaned_taskrun_jobs",
+                kind: "function",
+                file_path:
+                  "server/crates/djinn-agent/src/actors/coordinator/health.rs",
+                confidence: 0.7,
+                confidence_tier: "inferred",
+                confidence_reason: "trait-dispatch-call",
+              },
+            ],
+          },
+          outgoing: {
+            implements: [
+              {
+                uid: "symbol:app_state.rs::list_taskrun_jobs",
+                name: "list_taskrun_jobs",
+                kind: "method",
+                file_path: "server/src/mcp_bridge/mod.rs",
+                confidence: 0.9,
+                confidence_tier: "extracted",
+              },
+            ],
+          },
+        })}
+      />,
+    );
+
+    // Dependents/Impact section shows the trait-dispatch caller
+    const dependentsHeaders = screen.getAllByText("Dependents/Impact");
+    expect(dependentsHeaders.length).toBeGreaterThanOrEqual(1);
+    expect(dependentsHeaders[0]).toBeInTheDocument();
+    expect(screen.getByText("Calls")).toBeInTheDocument();
+    expect(
+      screen.getByText("reap_orphaned_taskrun_jobs"),
+    ).toBeInTheDocument();
+
+    // Dependencies section shows the concrete impl via Implements
+    const dependenciesHeaders = screen.getAllByText("Dependencies");
+    expect(dependenciesHeaders.length).toBeGreaterThanOrEqual(1);
+    expect(dependenciesHeaders[0]).toBeInTheDocument();
+    expect(screen.getByText("Implements")).toBeInTheDocument();
+    const listTaskrunJobs = screen.getAllByText("list_taskrun_jobs");
+    expect(listTaskrunJobs.length).toBeGreaterThanOrEqual(1);
+    expect(listTaskrunJobs[0]).toBeInTheDocument();
+
+    // The caller file path truncates correctly
+    expect(
+      screen.getByTitle("symbol:health.rs::reap_orphaned_taskrun_jobs"),
+    ).toBeInTheDocument();
+  });
+
+  it("parses backend-shaped trait-dispatch context with all optional confidence fields", () => {
+    useCodeGraphStore.getState().setSelection(
+      "symbol:runtime_bridge.rs::list_taskrun_jobs",
+    );
+    render(
+      <SymbolDetailPanel
+        projectId="proj"
+        injectedContext={ctx({
+          symbol: {
+            uid: "symbol:runtime_bridge.rs::list_taskrun_jobs",
+            name: "list_taskrun_jobs",
+            kind: "method",
+            file_path:
+              "server/crates/djinn-control-plane/src/bridge/runtime_bridge.rs",
+            start_line: 137,
+            end_line: 137,
+            content: null,
+            method_metadata: null,
+          },
+          incoming: {
+            calls: [
+              {
+                uid: "symbol:health.rs::reap_orphaned_taskrun_jobs",
+                name: "reap_orphaned_taskrun_jobs",
+                kind: "function",
+                file_path:
+                  "server/crates/djinn-agent/src/actors/coordinator/health.rs",
+                confidence: 0.7,
+                confidence_tier: "inferred",
+                confidence_reason: "trait-dispatch-call",
+              },
+            ],
+          },
+          outgoing: {
+            implements: [
+              {
+                uid: "symbol:app_state.rs::list_taskrun_jobs",
+                name: "list_taskrun_jobs",
+                kind: "method",
+                file_path: "server/src/mcp_bridge/mod.rs",
+                confidence: 0.9,
+                confidence_tier: "extracted",
+              },
+            ],
+          },
+        })}
+      />,
+    );
+
+    // Non-empty Dependents/Impact renders
+    const dependentsHeaders2 = screen.getAllByText("Dependents/Impact");
+    expect(dependentsHeaders2.length).toBeGreaterThanOrEqual(1);
+    expect(dependentsHeaders2[0]).toBeInTheDocument();
+    expect(screen.getByText("Calls")).toBeInTheDocument();
+    expect(
+      screen.getByText("reap_orphaned_taskrun_jobs"),
+    ).toBeInTheDocument();
+
+    // Non-empty Dependencies renders
+    const dependenciesHeaders2 = screen.getAllByText("Dependencies");
+    expect(dependenciesHeaders2.length).toBeGreaterThanOrEqual(1);
+    expect(dependenciesHeaders2[0]).toBeInTheDocument();
+    expect(screen.getByText("Implements")).toBeInTheDocument();
+  });
+
   it("renders a placeholder when no edges are present", () => {
     useCodeGraphStore.getState().setSelection("foo");
     render(<SymbolDetailPanel projectId="proj" injectedContext={ctx()} />);
