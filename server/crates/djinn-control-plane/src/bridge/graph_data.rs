@@ -869,6 +869,11 @@ pub struct ChurnEntry {
 #[serde(rename_all = "snake_case")]
 pub enum EdgeCategory {
     /// SymbolReference where the target symbol is a function/method/constructor.
+    /// Also includes synthesized `TraitDispatchCall` edges (epic ggrm/5wyo),
+    /// which represent trait-dispatch callers resolved through canonical
+    /// fan-out. Use the per-neighbor `confidence` / `confidence_tier` to
+    /// distinguish lower-confidence trait-dispatch edges from directly
+    /// extracted calls.
     Calls,
     /// SymbolReference catch-all (imports, type-only references, etc.).
     References,
