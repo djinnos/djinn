@@ -30,6 +30,7 @@ import {
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
+import { DebateTrail } from "@/components/proposals/DebateTrail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -600,6 +601,8 @@ function ProposalDetailView({
         <ProposalKickoff detail={detail} onChanged={onChanged} />
 
         <Separator />
+
+        <DebateTrail debateTrail={detail.debate_trail} />
 
         <FeedbackThread
           proposal={proposal}
