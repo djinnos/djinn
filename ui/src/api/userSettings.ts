@@ -63,6 +63,13 @@ export interface UserSettings {
    * single-model selection falls back to same-model review.
    */
   diverseReview: boolean;
+  /**
+   * Cross-model ("Diverse") refinement. When true (the default), the
+   * proposal-refinement roles (advocate, adversary, judge) prefer a model id
+   * different from the primary task model. Falls back to same-model when
+   * alternatives are unavailable.
+   */
+  diverseRefinement: boolean;
 }
 
 interface RawGet {
@@ -72,6 +79,7 @@ interface RawGet {
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
   diverse_review?: boolean | null;
+  diverse_refinement?: boolean | null;
   error?: string | null;
 }
 
@@ -82,6 +90,7 @@ interface RawSet {
   lanes?: Partial<ModelLanes> | null;
   max_sessions?: Record<string, number> | null;
   diverse_review?: boolean | null;
+  diverse_refinement?: boolean | null;
   error?: string | null;
 }
 
@@ -100,6 +109,8 @@ export async function fetchUserSettings(): Promise<UserSettings> {
     maxSessions: parseMaxSessions(resp?.max_sessions),
     // Cross-model review defaults ON; only an explicit `false` disables it.
     diverseReview: resp?.diverse_review !== false,
+    // Cross-model refinement defaults ON; only an explicit `false` disables it.
+    diverseRefinement: resp?.diverse_refinement !== false,
   };
 }
 
@@ -111,6 +122,8 @@ export async function patchUserSettings(patch: {
   maxSessions?: Record<string, number>;
   /** Cross-model ("Thorough") review toggle. Omit to keep current. */
   diverseReview?: boolean;
+  /** Cross-model ("Diverse") refinement toggle. Omit to keep current. */
+  diverseRefinement?: boolean;
 }): Promise<UserSettings> {
   const args: Record<string, unknown> = {};
   if (patch.autoApprovePrs !== undefined) {
@@ -125,6 +138,9 @@ export async function patchUserSettings(patch: {
   if (patch.diverseReview !== undefined) {
     args.diverse_review = patch.diverseReview;
   }
+  if (patch.diverseRefinement !== undefined) {
+    args.diverse_refinement = patch.diverseRefinement;
+  }
   const resp = (await callMcpTool("user_settings_set", args)) as RawSet;
   if (resp?.ok === false) {
     throw new Error(resp.error ?? "failed to save user settings");
@@ -134,5 +150,6 @@ export async function patchUserSettings(patch: {
     lanes: parseLanes(resp?.lanes),
     maxSessions: parseMaxSessions(resp?.max_sessions),
     diverseReview: resp?.diverse_review !== false,
+    diverseRefinement: resp?.diverse_refinement !== false,
   };
 }

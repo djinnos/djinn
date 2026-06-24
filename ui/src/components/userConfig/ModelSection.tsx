@@ -89,6 +89,11 @@ export function ModelSection({ targetId }: { targetId: string }) {
   // gate below disables interaction when fewer than 2 distinct model ids are
   // reachable by the Implement + Review lanes.
   const [diverseReview, setDiverseReview] = useState(true);
+  // Cross-model ("Diverse") refinement toggle. Defaults ON (server default);
+  // the gate below disables interaction when fewer than 2 distinct model ids
+  // are reachable across the Plan + Implement lanes (the refinement roles
+  // draw from these).
+  const [diverseRefinement, setDiverseRefinement] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [lastServer, setLastServer] = useState<typeof selection.data>(undefined);
 
@@ -98,6 +103,7 @@ export function ModelSection({ targetId }: { targetId: string }) {
       setLanes(selection.data.lanes);
       setCaps(selection.data.maxSessions);
       setDiverseReview(selection.data.diverseReview);
+      setDiverseRefinement(selection.data.diverseRefinement);
     }
   }
 
@@ -136,17 +142,34 @@ export function ModelSection({ targetId }: { targetId: string }) {
   // if the persisted value is true (dispatch already falls back to same-model).
   const effectiveDiverseReview = diverseReview && diverseReviewEnabled;
 
+  // Cross-model refinement gate: needs ≥2 distinct model ids reachable by the
+  // Plan + Implement lanes (the refinement roles draw from these). Same
+  // gate-and-hint pattern as the review toggle above.
+  const refinementDistinctIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const id of lanes.plan) ids.add(id);
+    for (const id of lanes.implement) ids.add(id);
+    return ids;
+  }, [lanes]);
+  const diverseRefinementEnabled = refinementDistinctIds.size >= 2;
+  const soleRefinementModel = useMemo(() => {
+    const [only] = refinementDistinctIds;
+    return only ? stripProviderPrefix(only) : undefined;
+  }, [refinementDistinctIds]);
+  const effectiveDiverseRefinement = diverseRefinement && diverseRefinementEnabled;
+
   const saveMutation = useMutation({
     mutationFn: () => {
       // Only persist caps for models still selected in some lane, default 1.
       const maxSessions: Record<string, number> = {};
       for (const id of allSelected) maxSessions[id] = caps[id] ?? 1;
-      return saveUserModelSelection(targetId, lanes, maxSessions, diverseReview);
+      return saveUserModelSelection(targetId, lanes, maxSessions, diverseReview, diverseRefinement);
     },
     onSuccess: (saved) => {
       setLanes(saved.lanes);
       setCaps(saved.maxSessions);
       setDiverseReview(saved.diverseReview);
+      setDiverseRefinement(saved.diverseRefinement);
       setDirty(false);
       queryClient.setQueryData(userConfigKeys.modelSelection(targetId), saved);
       showToast.success("Model roles saved");
@@ -182,6 +205,12 @@ export function ModelSection({ targetId }: { targetId: string }) {
   const toggleDiverseReview = () => {
     if (!diverseReviewEnabled) return; // gated — see hint
     setDiverseReview((prev) => !prev);
+    setDirty(true);
+  };
+
+  const toggleDiverseRefinement = () => {
+    if (!diverseRefinementEnabled) return; // gated — see hint
+    setDiverseRefinement((prev) => !prev);
     setDirty(true);
   };
 
@@ -233,6 +262,14 @@ export function ModelSection({ targetId }: { targetId: string }) {
             soleModel={soleReviewModel}
             saving={saveMutation.isPending}
             onToggle={toggleDiverseReview}
+          />
+
+          <DiverseRefinementToggle
+            checked={effectiveDiverseRefinement}
+            enabled={diverseRefinementEnabled}
+            soleModel={soleRefinementModel}
+            saving={saveMutation.isPending}
+            onToggle={toggleDiverseRefinement}
           />
 
           {MODEL_LANE_KEYS.map((lane) => (
@@ -314,6 +351,74 @@ function ThoroughReviewToggle({
           in the{" "}
           <span className="font-medium">Connections</span> tab, then put it in the
           Implement or Review lane.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Cross-model ("Diverse") refinement toggle for proposal-refinement roles
+ * (Advocate, Adversary, Judge). Disabled — with a hint — until ≥2 distinct
+ * model ids are reachable by the Plan + Implement lanes. Explains that the
+ * refinement roles use best-effort cross-model diversity and collapse to
+ * same-model rather than blocking when alternatives are unavailable.
+ */
+function DiverseRefinementToggle({
+  checked,
+  enabled,
+  soleModel,
+  saving,
+  onToggle,
+}: {
+  checked: boolean;
+  enabled: boolean;
+  soleModel: string | undefined;
+  saving: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border bg-card/40 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-foreground">Diverse refinement</h4>
+          <p className="text-xs text-muted-foreground/70">
+            Have Advocate, Adversary, and Judge use a different model than the
+            primary task model — uses best-effort cross-model diversity. Falls
+            back to same-model when alternatives are unavailable, rather than
+            blocking.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={checked}
+          aria-label="Diverse refinement"
+          disabled={!enabled || saving}
+          onClick={onToggle}
+          className={cn(
+            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors",
+            checked ? "border-primary bg-primary" : "border-border bg-muted",
+            enabled ? "cursor-pointer" : "cursor-not-allowed opacity-50",
+            saving && "opacity-60",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform",
+              checked ? "translate-x-6" : "translate-x-1",
+            )}
+          />
+        </button>
+      </div>
+      {!enabled && (
+        <p className="text-xs text-amber-600 dark:text-amber-500">
+          Connect a second model to enable cross-model refinement
+          {soleModel ? ` — only ${soleModel} is available` : ""}. Add another model
+          in the{" "}
+          <span className="font-medium">Connections</span> tab, then put it in the
+          Plan or Implement lane. Refinement roles will collapse to same-model
+          when alternatives are unavailable.
         </p>
       )}
     </div>
