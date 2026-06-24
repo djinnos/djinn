@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy test module over size-guard threshold; split when touched substantively.
+
 use super::*;
 
 fn rendered_counter_value(metric: &str, kind: &str) -> f64 {

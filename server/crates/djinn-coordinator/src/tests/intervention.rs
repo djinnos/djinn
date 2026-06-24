@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy test module over size-guard threshold; split when touched substantively.
+
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::run_progress::RunProgress;

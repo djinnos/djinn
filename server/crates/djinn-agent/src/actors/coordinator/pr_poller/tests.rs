@@ -1,3 +1,5 @@
+// djinn:allow-oversize — legacy test module over size-guard threshold; split when touched substantively.
+
 use super::{
     AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
     blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,
