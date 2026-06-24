@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
+    Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision, ProposalSignoff,
+    ProposalTarget,
 };
 
 use crate::database::Database;
@@ -120,6 +121,26 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_kind: &'a str,
     pub author_model: Option<&'a str>,
     pub body: &'a str,
+}
+
+pub struct ProposalDebateTrailCreateInput<'a> {
+    pub proposal_id: &'a str,
+    /// `objection` | `rebuttal` | `verdict`.
+    pub kind: &'a str,
+    pub body: &'a str,
+    /// When true, this entry blocks proposal readiness.
+    pub blocking: bool,
+    /// Agent role (e.g. "advocate", "adversary", "judge").
+    pub agent_role: &'a str,
+    /// `agent` (default) or `user`.
+    pub author_kind: &'a str,
+    pub author_model: Option<&'a str>,
+    /// Optional source task attribution.
+    pub source_task_id: Option<&'a str>,
+    /// The proposal revision this entry is written against.
+    pub against_revision_seq: i32,
+    /// Debate round (1-based).
+    pub round: i32,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -536,6 +557,170 @@ impl ProposalRepository {
                 &feedback,
             ));
         Ok(feedback)
+    }
+
+    // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────
+
+    /// List debate-trail entries for a proposal, ordered by round then creation.
+    pub async fn debate_trail(&self, proposal_id: &str) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+             ORDER BY round, created_at"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Get a single debate-trail entry by id.
+    pub async fn get_debate_trail_entry(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE id = $1"#,
+            entry_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Append a debate-trail entry. Validates that the proposal exists and that
+    /// `kind` is one of the allowed values. Emits a `proposal_debate_trail_created` event.
+    pub async fn add_debate_trail_entry(
+        &self,
+        input: ProposalDebateTrailCreateInput<'_>,
+    ) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        // Validate kind.
+        match input.kind {
+            "objection" | "rebuttal" | "verdict" => {}
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, or verdict"
+                )));
+            }
+        }
+        // Validate author_kind.
+        match input.author_kind {
+            "agent" | "user" => {}
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid author_kind: {other:?}; expected agent or user"
+                )));
+            }
+        }
+        // Validate proposal exists.
+        if self.get(input.proposal_id).await?.is_none() {
+            return Err(Error::InvalidData(format!(
+                "proposal not found: {}",
+                input.proposal_id
+            )));
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let author_user_id: Option<String> = if input.author_kind == "user" {
+            djinn_core::auth_context::current_user_id()
+        } else {
+            None
+        };
+        sqlx::query!(
+            "INSERT INTO proposal_debate_trail
+                (id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                 author_user_id, author_model, source_task_id,
+                 against_revision_seq, round)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            id,
+            input.proposal_id,
+            input.kind,
+            input.body,
+            input.blocking,
+            input.agent_role,
+            input.author_kind,
+            author_user_id,
+            input.author_model,
+            input.source_task_id,
+            input.against_revision_seq,
+            input.round,
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(&id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_created(
+                input.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
+    /// Resolve a debate-trail entry. Stamps the resolving user via
+    /// `current_user_id()`. Clears any prior reopen state. Idempotent.
+    pub async fn resolve_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        let resolved_by = djinn_core::auth_context::current_user_id();
+        sqlx::query!(
+            r#"UPDATE proposal_debate_trail SET
+                    resolved_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    resolved_by_user_id = $1,
+                    reopened_at = NULL,
+                    reopened_by_user_id = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            resolved_by,
+            entry_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(entry_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_updated(
+                &entry.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
+    /// Reopen a previously resolved debate-trail entry. Stamps the reopening
+    /// user via `current_user_id()`. No-op (idempotent) if already open.
+    pub async fn reopen_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        let reopened_by = djinn_core::auth_context::current_user_id();
+        sqlx::query!(
+            r#"UPDATE proposal_debate_trail SET
+                    reopened_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    reopened_by_user_id = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2 AND resolved_at IS NOT NULL"#,
+            reopened_by,
+            entry_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(entry_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_updated(
+                &entry.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
     }
 
     // ── Listing ──────────────────────────────────────────────────────────────
@@ -1455,6 +1640,12 @@ impl ProposalRepository {
         self.get_feedback(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("feedback not found after write: {id}")))
+    }
+
+    async fn get_debate_trail_entry_required(&self, id: &str) -> Result<ProposalDebateTrail> {
+        self.get_debate_trail_entry(id).await?.ok_or_else(|| {
+            Error::InvalidData(format!("debate trail entry not found after write: {id}"))
+        })
     }
 
     /// Generate a globally-unique 4-char base36 short id for proposals.
@@ -3233,5 +3424,326 @@ mod tests {
             revisions[1].event_metadata.is_none(),
             "status_change rows must leave event_metadata NULL"
         );
+    }
+
+    // ── Debate trail tests ──────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_append_and_list_ordered() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("Trail")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        // Append three entries in mixed order; list should return round then created_at.
+        let obj = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "objection",
+                body: "too broad",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(obj.kind, "objection");
+        assert!(obj.blocking);
+        assert_eq!(obj.round, 1);
+        assert!(obj.resolved_at.is_none());
+        assert!(obj.reopened_at.is_none());
+
+        let reb = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "rebuttal",
+                body: "scope is fine because...",
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reb.kind, "rebuttal");
+
+        let verdict = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "verdict",
+                body: "narrow scope to X",
+                blocking: false,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 3);
+        // Ordered by round then created_at; ids are UUIDv7 so created_at ordering
+        // is deterministic within the same millisecond.
+        assert_eq!(trail[0].id, obj.id);
+        assert_eq!(trail[1].id, reb.id);
+        assert_eq!(trail[2].id, verdict.id);
+
+        // get by id works
+        let fetched = repo.get_debate_trail_entry(&obj.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, obj.id);
+
+        // events fired for each append
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.entity_type == "proposal_debate_trail")
+        );
+        assert!(events.iter().all(|e| e.action == "created"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_isolation_by_proposal() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p1 = repo.create(create_input("One")).await.unwrap();
+        let p2 = repo.create(create_input("Two")).await.unwrap();
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p1.id,
+            kind: "objection",
+            body: "obj-1",
+            blocking: false,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p2.id,
+            kind: "rebuttal",
+            body: "reb-2",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        let trail1 = repo.debate_trail(&p1.id).await.unwrap();
+        let trail2 = repo.debate_trail(&p2.id).await.unwrap();
+        assert_eq!(trail1.len(), 1);
+        assert_eq!(trail1[0].body, "obj-1");
+        assert_eq!(trail2.len(), 1);
+        assert_eq!(trail2[0].body, "reb-2");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_resolve_and_reopen() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("Resolve")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "objection",
+                body: "blocking issue",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Resolve it.
+        let resolved = repo.resolve_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(resolved.resolved_at.is_some());
+        assert!(resolved.reopened_at.is_none());
+
+        // Reopen it.
+        let reopened = repo.reopen_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(reopened.resolved_at.is_some());
+        assert!(reopened.reopened_at.is_some());
+
+        // Re-resolve clears reopen state.
+        let re_resolved = repo.resolve_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(re_resolved.resolved_at.is_some());
+        assert!(re_resolved.reopened_at.is_none());
+        assert!(re_resolved.reopened_by_user_id.is_none());
+
+        let events = captured.lock().unwrap();
+        // 1 created + 3 updates = 4 events
+        assert_eq!(events.len(), 4);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.entity_type == "proposal_debate_trail")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_invalid_kind_rejected() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Invalid")).await.unwrap();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "comment",
+                body: "nope",
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("invalid debate trail kind"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_proposal_must_exist() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: "nonexistent-id",
+                kind: "objection",
+                body: "nope",
+                blocking: false,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("proposal not found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_multiround_ordering() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Rounds")).await.unwrap();
+
+        // Round 1
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "objection",
+            body: "r1-obj",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Round 2
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "rebuttal",
+            body: "r2-reb",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 2,
+            round: 2,
+        })
+        .await
+        .unwrap();
+
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 2);
+        assert_eq!(trail[0].round, 1);
+        assert_eq!(trail[0].body, "r1-obj");
+        assert_eq!(trail[1].round, 2);
+        assert_eq!(trail[1].body, "r2-reb");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_feedback_crud_unaffected_by_debate_trail() {
+        // Verify that adding debate-trail entries does not interfere with
+        // existing proposal_feedback operations.
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Both")).await.unwrap();
+
+        // Add a feedback entry.
+        let fb = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "human comment",
+            })
+            .await
+            .unwrap();
+        assert!(fb.resolved_at.is_none());
+
+        // Add a debate trail entry.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "objection",
+            body: "ai objection",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Feedback still works independently.
+        let feedbacks = repo.feedback(&p.id).await.unwrap();
+        assert_eq!(feedbacks.len(), 1);
+        assert_eq!(feedbacks[0].body, "human comment");
+
+        let resolved = repo.set_feedback_resolved(&fb.id, Some(2)).await.unwrap();
+        assert!(resolved.resolved_at.is_some());
+        assert_eq!(resolved.resolved_revision_seq, Some(2));
+
+        // Debate trail is still separate.
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].body, "ai objection");
     }
 }
