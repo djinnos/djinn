@@ -6118,8 +6118,8 @@ export namespace ProposalFeedbackResolveOutputSchema {
 
 }
 export type ProposalFeedbackResolveOutput = ProposalFeedbackResolveOutputSchema.ProposalFeedbackResolveOutput;
-export namespace ProposalDebateTrailResolveInputSchema {
-  export interface ProposalDebateTrailResolveInput {
+export namespace ProposalDebateResolveInputSchema {
+  export interface ProposalDebateResolveInput {
   /**
    * Debate-trail entry UUID.
    */
@@ -6128,9 +6128,9 @@ export namespace ProposalDebateTrailResolveInputSchema {
   }
 
 }
-export type ProposalDebateTrailResolveInput = ProposalDebateTrailResolveInputSchema.ProposalDebateTrailResolveInput;
-export namespace ProposalDebateTrailResolveOutputSchema {
-  export interface ProposalDebateTrailResolveOutput {
+export type ProposalDebateResolveInput = ProposalDebateResolveInputSchema.ProposalDebateResolveInput;
+export namespace ProposalDebateResolveOutputSchema {
+  export interface ProposalDebateResolveOutput {
   entry?: (ProposalDebateTrailModel | null)
   error?: string
   [k: string]: any
@@ -6158,9 +6158,9 @@ export namespace ProposalDebateTrailResolveOutputSchema {
   }
 
 }
-export type ProposalDebateTrailResolveOutput = ProposalDebateTrailResolveOutputSchema.ProposalDebateTrailResolveOutput;
-export namespace ProposalDebateTrailReopenInputSchema {
-  export interface ProposalDebateTrailReopenInput {
+export type ProposalDebateResolveOutput = ProposalDebateResolveOutputSchema.ProposalDebateResolveOutput;
+export namespace ProposalDebateReopenInputSchema {
+  export interface ProposalDebateReopenInput {
   /**
    * Debate-trail entry UUID.
    */
@@ -6169,9 +6169,9 @@ export namespace ProposalDebateTrailReopenInputSchema {
   }
 
 }
-export type ProposalDebateTrailReopenInput = ProposalDebateTrailReopenInputSchema.ProposalDebateTrailReopenInput;
-export namespace ProposalDebateTrailReopenOutputSchema {
-  export interface ProposalDebateTrailReopenOutput {
+export type ProposalDebateReopenInput = ProposalDebateReopenInputSchema.ProposalDebateReopenInput;
+export namespace ProposalDebateReopenOutputSchema {
+  export interface ProposalDebateReopenOutput {
   entry?: (ProposalDebateTrailModel | null)
   error?: string
   [k: string]: any
@@ -6199,7 +6199,7 @@ export namespace ProposalDebateTrailReopenOutputSchema {
   }
 
 }
-export type ProposalDebateTrailReopenOutput = ProposalDebateTrailReopenOutputSchema.ProposalDebateTrailReopenOutput;
+export type ProposalDebateReopenOutput = ProposalDebateReopenOutputSchema.ProposalDebateReopenOutput;
 export namespace ProposalGraduateInputSchema {
   export interface ProposalGraduateInput {
   /**
@@ -8738,7 +8738,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_debate_trail_resolve" | "proposal_debate_trail_reopen" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_debate_resolve" | "proposal_debate_reopen" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -8830,8 +8830,8 @@ export interface McpToolMap {
   "proposal_export": { input: ProposalExportInput; output: ProposalExportOutput };
   "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
-  "proposal_debate_trail_resolve": { input: ProposalDebateTrailResolveInput; output: ProposalDebateTrailResolveOutput };
-  "proposal_debate_trail_reopen": { input: ProposalDebateTrailReopenInput; output: ProposalDebateTrailReopenOutput };
+  "proposal_debate_resolve": { input: ProposalDebateResolveInput; output: ProposalDebateResolveOutput };
+  "proposal_debate_reopen": { input: ProposalDebateReopenInput; output: ProposalDebateReopenOutput };
   "proposal_graduate": { input: ProposalGraduateInput; output: ProposalGraduateOutput };
   "proposal_import": { input: ProposalImportInput; output: ProposalImportOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };

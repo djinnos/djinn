@@ -235,7 +235,7 @@ function DebateEntry({
     if (pending) return;
     setPending(true);
     try {
-      const res = await callMcpTool("proposal_debate_trail_resolve", { id: row.id });
+      const res = await callMcpTool("proposal_debate_resolve", { id: row.id });
       if (res.error) throw new Error(res.error);
       showToast.success("Debate entry resolved");
       onChanged?.();
@@ -250,7 +250,7 @@ function DebateEntry({
     if (pending) return;
     setPending(true);
     try {
-      const res = await callMcpTool("proposal_debate_trail_reopen", { id: row.id });
+      const res = await callMcpTool("proposal_debate_reopen", { id: row.id });
       if (res.error) throw new Error(res.error);
       showToast.success("Debate entry reopened");
       onChanged?.();

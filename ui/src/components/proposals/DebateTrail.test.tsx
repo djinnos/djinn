@@ -334,7 +334,7 @@ describe("DebateTrail", () => {
 
   // ── Successful resolve action ─────────────────────────────────────────
 
-  it("calls proposal_debate_trail_resolve on Resolve click and triggers refresh", async () => {
+  it("calls proposal_debate_resolve on Resolve click and triggers refresh", async () => {
     const onChanged = vi.fn();
     vi.mocked(callMcpTool).mockResolvedValueOnce({
       entry: { id: "dt-1" },
@@ -351,7 +351,7 @@ describe("DebateTrail", () => {
 
     await user.click(screen.getByRole("button", { name: /resolve/i }));
 
-    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_trail_resolve", {
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_resolve", {
       id: "dt-1",
     });
     expect(showToast.success).toHaveBeenCalledWith("Debate entry resolved");
@@ -360,7 +360,7 @@ describe("DebateTrail", () => {
 
   // ── Successful reopen action ──────────────────────────────────────────
 
-  it("calls proposal_debate_trail_reopen on Reopen click and triggers refresh", async () => {
+  it("calls proposal_debate_reopen on Reopen click and triggers refresh", async () => {
     const onChanged = vi.fn();
     vi.mocked(callMcpTool).mockResolvedValueOnce({
       entry: { id: "dt-1" },
@@ -383,7 +383,7 @@ describe("DebateTrail", () => {
 
     await user.click(screen.getByRole("button", { name: /reopen/i }));
 
-    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_trail_reopen", {
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_reopen", {
       id: "dt-1",
     });
     expect(showToast.success).toHaveBeenCalledWith("Debate entry reopened");
