@@ -626,7 +626,7 @@ mod tests {
                 Some("spec_revision")
             );
             assert!(
-                rev.get("event_metadata").map_or(true, |v| v.is_null()),
+                rev.get("event_metadata").is_none_or(|v| v.is_null()),
                 "ordinary proposal_update/create revisions must surface null event_metadata, got {:?}",
                 rev.get("event_metadata")
             );
