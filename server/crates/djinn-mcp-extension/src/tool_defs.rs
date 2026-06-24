@@ -724,11 +724,12 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Advocate: base + write/edit + memory + proposal tools +
-/// submit_work finalize tool.
+/// proposal block enrichment tools + submit_work finalize tool.
 ///
 /// The Advocate authors/revises proposal specifications in the tribunal
-/// refinement workflow (k9zw). It has write access for proposal enrichment
-/// and memory tools for design rationale.
+/// refinement workflow (k9zw). It has write access for proposal enrichment,
+/// block-catalog enrichment tools for progressive MDX refinement, and memory
+/// tools for design rationale.
 pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(tool_write(), destructive()));
@@ -750,12 +751,31 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         read_only(),
     ));
     tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_update(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_ac_set(),
         idempotent_mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_ac_amend(),
         mutation(),
+    ));
+    // Block-catalog enrichment tools for progressive MDX refinement (k9zw).
+    // These are default-but-optional enrichment; failure to enrich must not
+    // fail the deterministic DoR evaluator.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_block_patch(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_get_block_catalog(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_blocks(),
+        read_only(),
     ));
     tool_values.push(serialize_tool(
         crate::finalize_tools::tool_submit_work(),

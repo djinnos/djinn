@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
+assertion_line: 563
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -23,6 +24,10 @@ expression: section
 - `memory_write(content, title, type, status?, tags?)` — Create a new memory note. Memory notes live in Dolt — this is the canonical way to author them; do not attempt filesystem writes. `type` is required and routes the note (adr, pattern, case, pitfall, research, requirement, reference, design, tech_spike, session, brief [singleton], roadmap [singleton]). Use [[wikilinks]] in content to connect notes.
 - `memory_edit(content, identifier, operation, find_text?, section?, type?)` — Edit an existing memory note in-place. Memory notes live in Dolt — this is the canonical way to amend them; do not attempt filesystem writes. Operations: "append" (add to end), "prepend" (add after frontmatter), "find_replace" (exact text replacement, requires find_text), "replace_section" (replace content under a markdown heading, requires section).
 - `proposal_show(id)` — Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.
+- `proposal_update(id, acceptance_criteria?, body?, body_format?, status?, superseded_by?, title?)` — Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change.
 - `proposal_ac_set(acceptance_criteria, id)` — Reconcile a proposal's acceptance-criteria `met` flags (Planner Workflow E) as graduated epics land. Send the FULL list in order — one entry per criterion, each `{"met": true|false}` (criterion text is preserved automatically). A status annotation only: it does not edit the spec, bump a revision, or clear sign-offs. Returns {met, total}.
 - `proposal_ac_amend(amendments, id, reason)` — Amend a proposal's acceptance-criteria spec with audited revision semantics. Each amendment targets a zero-based criterion index and uses operation `rewrite`, `drop`, or `waive`: rewrite replaces criterion text and requires `criterion`; drop removes the criterion; waive keeps the criterion visible with `waived: true`. Requires a non-empty top-level reason. This is a real spec edit: it bumps the proposal revision, retains sign-offs, and records feedback/audit. Use proposal_ac_set instead when only reconciling met flags.
+- `proposal_block_patch(block_mdx, id, operation, selector, expected_latest_revision_seq?, native_skill_name?, native_skill_version?, note?)` — Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata.
+- `get_block_catalog()` — Return the committed proposal MDX block vocabulary as a lean list of (type, tag) pairs sourced from proposal_block_catalog.json.
+- `proposal_blocks()` — Return the v1 proposal MDX block registry, including stable block types, MDX tags, and field schemas.
 - `submit_work(commit_title, summary, task_id, files_changed?, remaining_concerns?)` — Signal that the worker has finished implementing the task. Provide a summary of changes made and list of files modified. Your session ends after this call.

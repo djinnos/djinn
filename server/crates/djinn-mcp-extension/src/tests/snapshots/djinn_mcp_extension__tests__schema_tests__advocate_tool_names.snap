@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
+assertion_line: 763
 expression: names
 ---
 [
@@ -24,7 +25,11 @@ expression: names
   "memory_write",
   "memory_edit",
   "proposal_show",
+  "proposal_update",
   "proposal_ac_set",
   "proposal_ac_amend",
+  "proposal_block_patch",
+  "get_block_catalog",
+  "proposal_blocks",
   "submit_work"
 ]

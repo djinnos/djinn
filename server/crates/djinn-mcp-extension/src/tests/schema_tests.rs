@@ -63,6 +63,8 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "epic_blockers_list"
         | "epic_blocked_list"
         | "proposal_show"
+        | "get_block_catalog"
+        | "proposal_blocks"
         | "memory_read"
         | "memory_search"
         | "memory_list"
@@ -83,9 +85,21 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         "task_update" | "epic_update" | "epic_close" | "proposal_ac_set" => {
             Some(idempotent_mutation)
         }
-        "task_create" | "epic_create" | "task_transition" | "task_comment_add" | "memory_write"
-        | "memory_edit" | "memory_move" | "request_lead" | "request_planner"
-        | "proposal_ac_amend" | "submit_work" | "submit_review" | "submit_decision"
+        "task_create"
+        | "epic_create"
+        | "task_transition"
+        | "task_comment_add"
+        | "memory_write"
+        | "memory_edit"
+        | "memory_move"
+        | "request_lead"
+        | "request_planner"
+        | "proposal_ac_amend"
+        | "proposal_update"
+        | "proposal_block_patch"
+        | "submit_work"
+        | "submit_review"
+        | "submit_decision"
         | "submit_grooming" => Some(mutation),
         "shell"
         | "write"
@@ -226,6 +240,22 @@ fn tool_schemas_include_role_specific_tools() {
         "advocate should have proposal_ac_amend"
     );
     assert!(
+        advocate.iter().any(|n| n == "proposal_update"),
+        "advocate should have proposal_update"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_block_patch"),
+        "advocate should have proposal_block_patch for MDX enrichment"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "get_block_catalog"),
+        "advocate should have get_block_catalog for vocabulary pull"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_blocks"),
+        "advocate should have proposal_blocks for block registry"
+    );
+    assert!(
         advocate.iter().any(|n| n == "memory_write"),
         "advocate should have memory_write"
     );
@@ -252,6 +282,23 @@ fn tool_schemas_include_role_specific_tools() {
         !adversary.iter().any(|n| n == "edit"),
         "adversary must not have edit"
     );
+    // Adversary must NOT have Advocate-specific authoring/advocacy tools.
+    assert!(
+        !adversary.iter().any(|n| n == "proposal_update"),
+        "adversary must not have proposal_update"
+    );
+    assert!(
+        !adversary.iter().any(|n| n == "proposal_block_patch"),
+        "adversary must not have proposal_block_patch"
+    );
+    assert!(
+        !adversary.iter().any(|n| n == "get_block_catalog"),
+        "adversary must not have get_block_catalog"
+    );
+    assert!(
+        !adversary.iter().any(|n| n == "proposal_blocks"),
+        "adversary must not have proposal_blocks"
+    );
 
     let judge = schema_names(tool_schemas_judge());
     assert!(
@@ -274,6 +321,23 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(
         !judge.iter().any(|n| n == "edit"),
         "judge must not have edit"
+    );
+    // Judge must NOT have Advocate-specific authoring/advocacy tools.
+    assert!(
+        !judge.iter().any(|n| n == "proposal_update"),
+        "judge must not have proposal_update"
+    );
+    assert!(
+        !judge.iter().any(|n| n == "proposal_block_patch"),
+        "judge must not have proposal_block_patch"
+    );
+    assert!(
+        !judge.iter().any(|n| n == "get_block_catalog"),
+        "judge must not have get_block_catalog"
+    );
+    assert!(
+        !judge.iter().any(|n| n == "proposal_blocks"),
+        "judge must not have proposal_blocks"
     );
 }
 
