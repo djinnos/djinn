@@ -1194,6 +1194,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-coordinator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "djinn-control-plane",
+ "djinn-core",
+ "djinn-db",
+ "djinn-git",
+ "djinn-lsp",
+ "djinn-memory",
+ "djinn-orchestration-types",
+ "djinn-provider",
+ "djinn-roles",
+ "djinn-runtime",
+ "djinn-slot",
+ "djinn-stack",
+ "djinn-supervisor",
+ "djinn-telemetry",
+ "djinn-workspace",
+ "futures",
+ "git2",
+ "hex",
+ "insta",
+ "libc",
+ "regex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-core"
 version = "0.1.0"
 dependencies = [
