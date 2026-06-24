@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 510
 expression: signatures
 ---
 [
@@ -12173,6 +12174,597 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_debate_append",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "against_revision_seq": {
+          "description": "The proposal revision this entry is written against.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "agent_role": {
+          "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+          "type": "string"
+        },
+        "author_kind": {
+          "default": "agent",
+          "description": "`agent` (default) or `user`.",
+          "type": "string"
+        },
+        "author_model": {
+          "description": "Model id when `author_kind == \"agent\"`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "blocking": {
+          "default": false,
+          "description": "When true, this entry blocks proposal readiness.\nMeaningful for objection and verdict kinds.",
+          "type": "boolean"
+        },
+        "body": {
+          "description": "Body text of the debate entry.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`objection` | `rebuttal` | `verdict`.",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "round": {
+          "description": "Debate round (1-based).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "source_task_id": {
+          "description": "Optional source task attribution.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "kind",
+        "body",
+        "agent_role",
+        "against_revision_seq",
+        "round"
+      ],
+      "title": "ProposalDebateAppendParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalDebateListParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ProposalDebateTrailModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_reopen",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Debate-trail entry UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalDebateReopenParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_resolve",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Debate-trail entry UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalDebateResolveParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_delete",
     "read_only": false,
     "destructive": true,
@@ -13300,6 +13892,96 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
         "ProposalEpicModel": {
           "description": "An epic this proposal graduated into.",
           "properties": {
@@ -13646,6 +14328,14 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "debate_trail": {
+          "description": "Structured debate-trail rows (objections, rebuttals, verdicts).\nKept separate from `feedback` (plain human discussion).",
+          "items": {
+            "$ref": "#/$defs/ProposalDebateTrailModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "epics": {
           "items": {
             "$ref": "#/$defs/ProposalEpicModel"

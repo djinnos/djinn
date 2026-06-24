@@ -9,6 +9,10 @@ use crate::tools::agent_tools::{
 use crate::tools::credential_tools::{
     CredentialDeleteInput, CredentialListInput, CredentialSetInput,
 };
+use crate::tools::debate_tools::{
+    ProposalDebateAppendParams, ProposalDebateListParams, ProposalDebateReopenParams,
+    ProposalDebateResolveParams,
+};
 use crate::tools::dispatch_pause_tools::{
     DispatchPauseParams, DispatchPauseStatusParams, DispatchResumeParams,
 };
@@ -502,6 +506,34 @@ impl DjinnMcpServer {
             "proposal_signoff_clear" => map_json(
                 name,
                 self.proposal_signoff_clear(Parameters(decode_args::<ProposalSignoffParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_debate_append" => map_json(
+                name,
+                self.proposal_debate_append(Parameters(decode_args::<ProposalDebateAppendParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_debate_list" => map_json(
+                name,
+                self.proposal_debate_list(Parameters(decode_args::<ProposalDebateListParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_debate_resolve" => map_json(
+                name,
+                self.proposal_debate_resolve(Parameters(
+                    decode_args::<ProposalDebateResolveParams>(name, args)?,
+                ))
+                .await,
+            ),
+            "proposal_debate_reopen" => map_json(
+                name,
+                self.proposal_debate_reopen(Parameters(decode_args::<ProposalDebateReopenParams>(
                     name, args,
                 )?))
                 .await,

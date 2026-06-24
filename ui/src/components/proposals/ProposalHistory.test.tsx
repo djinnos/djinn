@@ -78,6 +78,7 @@ function detail(revisions: ProposalRevision[]): ProposalDetail {
     revisions,
     signoffs: [],
     epics: [],
+    debate_trail: [],
   };
 }
 

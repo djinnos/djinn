@@ -1,3 +1,4 @@
+// djinn:allow-oversize — test module grows with DoR/lifecycle regression coverage; split when touched substantively.
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
@@ -515,13 +516,20 @@ mod tests {
     async fn proposal_show_includes_manual_done_status_history_event() {
         let db = Database::open_in_memory().unwrap();
         let state = test_mcp_state(db.clone());
-        create_project(&db, std::path::Path::new("")).await;
+        let project = create_project(&db, std::path::Path::new("")).await;
         let server = DjinnMcpServer::new(state);
 
+        // Create a proposal with a ready body so the readiness gate allows
+        // the `in_review` transition.
         let created = server
             .dispatch_tool(
                 "proposal_create",
-                json!({ "title": "External implementation" }),
+                json!({
+                    "title": "External implementation",
+                    "body": "# Problem\nUsers cannot do X.\n\n# Scope\nIn scope: Y.\n\n# Objectives\nDeliver A.\n\n# Dependencies\nNone.\n\n# Open Questions\nWhat if D fails?\n\n## File map\n```file-map\nsrc/main.rs\n```\n",
+                    "acceptance_criteria": ["API returns 200"],
+                    "target_projects": [project.slug()],
+                }),
             )
             .await
             .expect("dispatch proposal_create");
@@ -1060,6 +1068,230 @@ mod tests {
             dispatch_pause_events.is_empty(),
             "dispatch_pause_status must not emit dispatch_pause.changed events; \
              recorded: {dispatch_pause_events:#?}"
+        );
+    }
+
+    // ── Deterministic DoR gate regression tests ──────────────────────────
+
+    /// A draft proposal with a complete body, target, and concrete AC
+    /// successfully transitions to `in_review`.
+    #[tokio::test]
+    async fn proposal_update_draft_to_in_review_with_ready_body_succeeds() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        let created = server
+            .dispatch_tool(
+                "proposal_create",
+                json!({
+                    "title": "Ready proposal",
+                    "body": "# Problem\nUsers cannot do X.\n\n# Scope\nIn scope: Y.\n\n# Objectives\nDeliver A.\n\n# Dependencies\nNone.\n\n# Open Questions\nWhat if D fails?\n\nEntry points: src/main.rs.\n",
+                    "acceptance_criteria": ["API returns 200"],
+                    "target_projects": [project.slug()],
+                }),
+            )
+            .await
+            .expect("dispatch proposal_create");
+        assert_eq!(created.get("error"), None, "create should succeed");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id");
+
+        let updated = server
+            .dispatch_tool(
+                "proposal_update",
+                json!({ "id": id, "status": "in_review" }),
+            )
+            .await
+            .expect("dispatch proposal_update");
+        assert_eq!(
+            updated.get("error"),
+            None,
+            "in_review transition should succeed for a ready proposal"
+        );
+        assert_eq!(
+            updated.get("status").and_then(|v| v.as_str()),
+            Some("in_review")
+        );
+    }
+
+    /// Updating a draft with missing targets/sections to `in_review` fails
+    /// and does not bump `latest_revision_seq`.
+    #[tokio::test]
+    async fn proposal_update_draft_to_in_review_fails_with_missing_readiness() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        // Minimal proposal: title only, no body sections or targets.
+        let created = server
+            .dispatch_tool("proposal_create", json!({ "title": "Minimal proposal" }))
+            .await
+            .expect("dispatch proposal_create");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id");
+
+        let result = server
+            .dispatch_tool(
+                "proposal_update",
+                json!({ "id": id, "status": "in_review" }),
+            )
+            .await
+            .expect("dispatch proposal_update");
+        let error = result.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "should fail readiness check");
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+        // Should mention specific missing sections.
+        assert!(
+            error.contains("problem"),
+            "error should mention missing problem: {error}"
+        );
+        assert!(
+            error.contains("target"),
+            "error should mention missing targets: {error}"
+        );
+
+        // The proposal status should NOT have changed.
+        let shown = server
+            .dispatch_tool("proposal_show", json!({ "id": id }))
+            .await
+            .expect("dispatch proposal_show");
+        assert_eq!(
+            shown
+                .get("proposal")
+                .and_then(|p| p.get("status"))
+                .and_then(|v| v.as_str()),
+            Some("draft"),
+            "status should remain draft after failed readiness gate"
+        );
+    }
+
+    /// A vague AC like "Make it better" fails with the offending index/text.
+    #[tokio::test]
+    async fn proposal_update_in_review_with_vague_ac_fails() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        let created = server
+            .dispatch_tool(
+                "proposal_create",
+                json!({
+                    "title": "Proposal with vague AC",
+                    "body": "# Problem\nUsers cannot do X.\n\n# Scope\nIn scope: Y.\n\n# Objectives\nDeliver A.\n\n# Dependencies\nNone.\n\n# Open Questions\nWhat if D fails?\n\nEntry points: src/main.rs.\n",
+                    "acceptance_criteria": ["API returns 200"],
+                    "target_projects": [project.slug()],
+                }),
+            )
+            .await
+            .expect("dispatch proposal_create");
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id")
+            .to_string();
+
+        // First transition to in_review (should succeed).
+        server
+            .dispatch_tool(
+                "proposal_update",
+                json!({ "id": id, "status": "in_review" }),
+            )
+            .await
+            .expect("dispatch proposal_update in_review");
+
+        // Now update the AC to include a vague criterion while staying in_review.
+        let result = server
+            .dispatch_tool(
+                "proposal_update",
+                json!({
+                    "id": id,
+                    "acceptance_criteria": ["API returns 200", "Make it better"],
+                }),
+            )
+            .await
+            .expect("dispatch proposal_update");
+        let error = result.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "should fail vague AC check");
+        let error = error.unwrap();
+        assert!(
+            error.contains("Vague/unverifiable acceptance criterion"),
+            "error should mention vague AC: {error}"
+        );
+        assert!(
+            error.contains("Make it better"),
+            "error should contain the offending AC text: {error}"
+        );
+        assert!(
+            error.contains("#1"),
+            "error should contain the offending AC index: {error}"
+        );
+    }
+
+    /// Existing MDX validation errors still win over readiness errors for
+    /// malformed MDX.
+    #[tokio::test]
+    async fn proposal_update_mdx_validation_wins_over_readiness() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db.clone());
+        let project = create_project(&db, std::path::Path::new("")).await;
+        let server = DjinnMcpServer::new(state);
+
+        // Create a valid draft proposal with markdown body_format.
+        let created = server
+            .dispatch_tool(
+                "proposal_create",
+                json!({
+                    "title": "MDX proposal",
+                    "body": "# Problem\nNeeds MDX.\n\n# Scope\nX.\n\n# Objectives\nY.\n\n# Dependencies\nNone.\n\n# Open Questions\nN/A.\n\nEntry points: src/lib.rs.\n",
+                    "target_projects": [project.slug()],
+                    "acceptance_criteria": ["API returns 200"],
+                }),
+            )
+            .await
+            .expect("dispatch proposal_create");
+        assert!(
+            created.get("error").is_none(),
+            "proposal_create should succeed: {created:#?}"
+        );
+        let id = created
+            .get("id")
+            .and_then(|v| v.as_str())
+            .expect("proposal id");
+
+        // Update with malformed MDX body that would also fail readiness.
+        // The MDX validation error should take precedence.
+        let result = server
+            .dispatch_tool(
+                "proposal_update",
+                json!({
+                    "id": id,
+                    "body": "<UnknownBlock>bad</UnknownBlock>",
+                    "body_format": "mdx",
+                    "status": "in_review",
+                }),
+            )
+            .await
+            .expect("dispatch proposal_update");
+        let error = result.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "should fail validation");
+        let error = error.unwrap();
+        // MDX validation runs before readiness, so the error should be about
+        // MDX, not readiness.
+        assert!(
+            !error.contains("proposal not ready for review"),
+            "MDX validation error should win over readiness: {error}"
         );
     }
 }
