@@ -594,10 +594,10 @@ pub struct CheckpointRevisionModel {
 
 impl CheckpointRevisionModel {
     pub fn from_revision(rev: &djinn_core::models::ProposalRevision) -> Self {
-        let meta: Option<serde_json::Value> = rev
+        let meta = rev
             .event_metadata
             .as_ref()
-            .and_then(|m| serde_json::from_str(m).ok());
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
         let role = meta
             .as_ref()
             .and_then(|v| v.get("role")?.as_str())
