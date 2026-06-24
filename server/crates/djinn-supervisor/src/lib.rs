@@ -889,6 +889,10 @@ impl TaskRunSupervisor {
                     // force_close) are valid — they all require the task to be
                     // in_lead_intervention.
                     RoleKind::Lead => Some("lead_intervention_start"),
+                    // Refinement tribunal sessions are simple-lifecycle.
+                    // Move open → in_progress so the board reflects the
+                    // running role and the coordinator stops re-dispatching.
+                    RoleKind::Refinement => Some("start"),
                     _ => None,
                 };
                 if let Some(action) = pre_stage_action
@@ -1671,6 +1675,32 @@ impl TaskRunSupervisor {
                                 last_stage_role
                             ),
                         },
+                        // Refinement tribunal sessions are simple-lifecycle:
+                        // close the task on success (same pattern as Spike).
+                        SupervisorFlow::Refinement => {
+                            let reason = format!(
+                                "{} flow completed (last stage: {:?})",
+                                spec.flow.as_str(),
+                                last_stage_role
+                            );
+                            if let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "close".into(),
+                                    Some(reason.clone()),
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: refinement-completion close transition skipped"
+                                );
+                            }
+                            TaskRunOutcome::Closed { reason }
+                        }
                         // Worker-only flows (NewTask / ReviewResponse /
                         // ConflictRetry) end at the worker stage. The worker
                         // already fired `submit_task_review` (in_progress →

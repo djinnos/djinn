@@ -873,6 +873,23 @@ pub(crate) async fn execute_stage(
                             provider_failure: None,
                         },
                     },
+                    // Refinement tribunal roles (advocate, adversary, judge)
+                    // use `submit_work` to signal completion. The coordinator
+                    // reads the DB (proposal revisions, debate trail) after
+                    // the session ends to advance the refinement state machine.
+                    RoleKind::Refinement => match finalize_name {
+                        "submit_work" => StageOutcome::WorkerDone,
+                        "" => StageOutcome::Failed {
+                            reason: "refinement session ended without calling submit_work".into(),
+                            provider_failure: None,
+                        },
+                        other => StageOutcome::Failed {
+                            reason: format!(
+                                "refinement session finalized via unexpected tool '{other}'"
+                            ),
+                            provider_failure: None,
+                        },
+                    },
                 }
             }
         }
@@ -953,6 +970,9 @@ fn role_arc_for(kind: RoleKind) -> Arc<dyn AgentRole> {
         RoleKind::Verifier => role_impl_for(AgentType::Worker),
         RoleKind::Architect => role_impl_for(AgentType::Architect),
         RoleKind::Lead => role_impl_for(AgentType::Lead),
+        // Default for refinement — the concrete tribunal role (advocate,
+        // adversary, judge) is resolved from task.agent_type by role_overrides.
+        RoleKind::Refinement => role_impl_for(AgentType::Advocate),
     }
 }
 
