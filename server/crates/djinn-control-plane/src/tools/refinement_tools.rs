@@ -18,10 +18,11 @@ use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
     CheckpointApproveResponse, CheckpointListResponse, CheckpointRejectResponse,
-    CheckpointRevisionModel, ProposalRefinementStartResponse, ProposalRefinementStatusModel,
-    ProposalRefinementStatusResponse,
+    CheckpointRevisionModel, NeedsEvidenceStatus, ProposalRefinementStartResponse,
+    ProposalRefinementStatusModel, ProposalRefinementStatusResponse,
 };
 use djinn_db::ProposalRepository;
+use djinn_db::TaskRepository;
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
     ProposalRefinementStartResponse {
@@ -216,6 +217,7 @@ impl DjinnMcpServer {
             update_authority: authority.to_string(),
             stop_reason: None,
             pending_checkpoint_count: 0,
+            needs_evidence: None,
         };
 
         Json(ProposalRefinementStartResponse {
@@ -405,6 +407,7 @@ pub async fn build_refinement_status(
             update_authority: "checkpoint".to_string(),
             stop_reason: None,
             pending_checkpoint_count: 0,
+            needs_evidence: None,
         });
     };
 
@@ -488,6 +491,38 @@ pub async fn build_refinement_status(
         consecutive_dry
     };
 
+    // Derive needs-evidence state from the proposal's linked spike.
+    let proposal = repo
+        .get(proposal_id)
+        .await
+        .map_err(|e| format!("failed to load proposal: {e}"))?;
+
+    let needs_evidence = if let Some(ref spike_id) = proposal
+        .as_ref()
+        .and_then(|p| p.linked_spike_task_id.as_ref())
+    {
+        let task_repo = TaskRepository::new(repo.db().clone(), repo.events().clone());
+        let spike = task_repo.get(spike_id).await.ok().flatten();
+        let claim = proposal
+            .as_ref()
+            .and_then(|p| p.needs_evidence_claim.clone())
+            .unwrap_or_default();
+        Some(NeedsEvidenceStatus {
+            claim,
+            spike_task_id: spike_id.to_string(),
+            spike_short_id: spike
+                .as_ref()
+                .map(|t| t.short_id.clone())
+                .unwrap_or_default(),
+            spike_status: spike
+                .as_ref()
+                .map(|t| t.status.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+    } else {
+        None
+    };
+
     Ok(ProposalRefinementStatusModel {
         active: is_active,
         current_round: Some(current_round),
@@ -496,6 +531,7 @@ pub async fn build_refinement_status(
         update_authority,
         stop_reason,
         pending_checkpoint_count,
+        needs_evidence,
     })
 }
 

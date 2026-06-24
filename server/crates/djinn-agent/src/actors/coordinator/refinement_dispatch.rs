@@ -31,7 +31,7 @@ use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
     RefinementLoopState, RefinementPhase, StopReason, UpdateAuthority,
-    build_revision_event_metadata, select_refinement_model,
+    build_revision_event_metadata, parse_needs_evidence_claims, select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -76,6 +76,11 @@ impl CoordinatorActor {
             return;
         };
         if state.is_complete() {
+            return;
+        }
+
+        // When parked for needs-evidence, skip dispatch until the spike closes.
+        if state.phase == RefinementPhase::NeedsEvidenceParked {
             return;
         }
 
@@ -265,7 +270,7 @@ impl CoordinatorActor {
             RefinementPhase::JudgeAdjudication => {
                 self.process_judge_outcome(proposal_id, &state).await;
             }
-            RefinementPhase::Complete => {}
+            RefinementPhase::Complete | RefinementPhase::NeedsEvidenceParked => {}
         }
     }
 
@@ -476,7 +481,8 @@ impl CoordinatorActor {
     }
 
     /// Process a judge session outcome by reading the verdict from
-    /// the debate trail and terminating the refinement loop.
+    /// the debate trail. When the verdict contains `NEEDS-EVIDENCE:` claims,
+    /// creates spike tasks and parks the proposal instead of terminating.
     async fn process_judge_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
@@ -506,30 +512,122 @@ impl CoordinatorActor {
             .iter()
             .find(|e| e.agent_role == "judge" && e.kind == "verdict" && e.round == round);
 
-        let verdict = if let Some(entry) = verdict_entry {
-            JudgeVerdictResult {
-                body: entry.body.clone(),
-                blocking: entry.blocking,
-            }
+        let (body, blocking) = if let Some(entry) = verdict_entry {
+            (entry.body.clone(), entry.blocking)
         } else {
-            JudgeVerdictResult {
-                body: "Judge session completed without explicit verdict".into(),
-                blocking: false,
-            }
+            (
+                "Judge session completed without explicit verdict".into(),
+                false,
+            )
+        };
+
+        // Parse needs-evidence claims from the verdict body.
+        let needs_evidence = parse_needs_evidence_claims(&body);
+
+        let verdict = JudgeVerdictResult {
+            body: body.clone(),
+            blocking,
+            needs_evidence: needs_evidence.clone(),
         };
 
         if let Some(state) = self.active_refinements.get_mut(proposal_id) {
             state.record_judge_verdict(&verdict);
         }
 
-        self.persist_refinement_stop(proposal_id, &StopReason::AdversaryDry)
-            .await;
+        if needs_evidence.is_empty() {
+            // Normal verdict — terminate refinement.
+            self.persist_refinement_stop(proposal_id, &StopReason::AdversaryDry)
+                .await;
 
-        tracing::info!(
-            proposal_id = %proposal_id,
-            blocking = verdict.blocking,
-            "Judge verdict recorded — refinement complete"
-        );
+            tracing::info!(
+                proposal_id = %proposal_id,
+                blocking = verdict.blocking,
+                "Judge verdict recorded — refinement complete"
+            );
+        } else {
+            // Needs-evidence verdict — create spike and park proposal.
+            let first_claim = &needs_evidence[0].claim;
+            match self
+                .create_needs_evidence_spike(proposal_id, first_claim, round)
+                .await
+            {
+                Some(spike_task_id) => {
+                    // Park the proposal.
+                    let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+                    let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+                    if let Err(e) = proposal_repo2
+                        .set_needs_evidence_spike(proposal_id, &spike_task_id, first_claim)
+                        .await
+                    {
+                        tracing::warn!(
+                            proposal_id = %proposal_id,
+                            error = %e,
+                            "Failed to park proposal for needs-evidence spike"
+                        );
+                        self.terminate_refinement(
+                            proposal_id,
+                            StopReason::AgentFailure {
+                                role: "judge".into(),
+                                error: format!("failed to park proposal: {e}"),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+
+                    // Record the parked state in the refinement loop.
+                    if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                        state.record_needs_evidence_parked(spike_task_id.clone());
+                    }
+
+                    // Record a lifecycle event for the parking.
+                    let event_bus3 = crate::events::event_bus_for(&self.events_tx);
+                    let proposal_repo3 = ProposalRepository::new(self.db.clone(), event_bus3);
+                    let park_meta = serde_json::json!({
+                        "source": "refinement_loop",
+                        "event": "needs_evidence_parked",
+                        "spike_task_id": spike_task_id,
+                        "claim": first_claim,
+                        "round": round,
+                    });
+                    if let Err(e) = proposal_repo3
+                        .record_refinement_lifecycle(
+                            proposal_id,
+                            "needs_evidence_parked",
+                            Some(&park_meta),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            proposal_id = %proposal_id,
+                            error = %e,
+                            "Failed to record needs_evidence_parked lifecycle"
+                        );
+                    }
+
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        spike_task_id = %spike_task_id,
+                        claim = %first_claim,
+                        "Judge needs-evidence verdict — proposal parked, spike created"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        "Failed to create needs-evidence spike — terminating refinement"
+                    );
+                    self.terminate_refinement(
+                        proposal_id,
+                        StopReason::AgentFailure {
+                            role: "judge".into(),
+                            error: "spike task creation failed".into(),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
     }
 
     /// Terminate a refinement loop and persist stop metadata.
@@ -671,7 +769,9 @@ impl CoordinatorActor {
             RefinementPhase::AdvocateRevision => "advocate",
             RefinementPhase::AdversaryAttack => "adversary",
             RefinementPhase::JudgeAdjudication => "judge",
-            RefinementPhase::Complete => return ("advocate".into(), String::new()),
+            RefinementPhase::Complete | RefinementPhase::NeedsEvidenceParked => {
+                return ("advocate".into(), String::new());
+            }
         };
 
         let primary_model = self.resolve_refinement_primary_model();
@@ -818,5 +918,194 @@ impl CoordinatorActor {
             &ac_items,
             target_count,
         ))
+    }
+
+    // ── Needs-evidence spike helpers ────────────────────────────────────
+
+    /// Create a spike task for a needs-evidence claim. The spike is an
+    /// ordinary Djinn task with `issue_type = "spike"` and concrete
+    /// acceptance criteria derived from the Judge's named feasibility claim.
+    async fn create_needs_evidence_spike(
+        &self,
+        proposal_id: &str,
+        claim: &str,
+        round: i32,
+    ) -> Option<String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let task_repo = TaskRepository::new(self.db.clone(), event_bus.clone());
+
+        let title = format!("Spike: investigate feasibility claim for proposal {proposal_id}");
+        let description = format!(
+            "Research spike created by the Judge during proposal refinement (round {round}).\n\n\
+             Feasibility claim: {claim}\n\n\
+             Deliverable: Provide evidence (benchmarks, prototypes, documentation, or analysis) \
+             that resolves this feasibility question so proposal refinement can resume."
+        );
+        let acceptance_criteria = serde_json::json!([
+            format!("Feasibility claim addressed: {claim}"),
+            "Evidence documented and linked to this task"
+        ])
+        .to_string();
+
+        // Find a project_id from the proposal's targets.
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let project_id = match proposal_repo.targets(proposal_id).await {
+            Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
+            _ => return None,
+        };
+
+        match task_repo
+            .create_in_project(
+                &project_id,
+                None, // epic_id — spike tasks aren't epic-scoped
+                &title,
+                &description,
+                "", // design
+                "spike",
+                0,        // priority
+                "system", // owner
+                None,     // status — defaults to "open"
+                Some(&acceptance_criteria),
+            )
+            .await
+        {
+            Ok(task) => Some(task.id),
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    claim = %claim,
+                    error = %e,
+                    "Failed to create needs-evidence spike task"
+                );
+                None
+            }
+        }
+    }
+
+    /// Resume refinement after a needs-evidence spike has closed. Reads the
+    /// spike's finding, feeds it back into the debate trail as a rebuttal,
+    /// clears the parking state, and advances the refinement loop.
+    ///
+    /// Called from the coordinator's event handler when a spike task closes.
+    pub(super) async fn resume_needs_evidence_refinement(
+        &mut self,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) {
+        // Read the spike task to get its resolution.
+        let task_repo = self.task_repo();
+        let spike_task = match task_repo.get(spike_task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::warn!(
+                    spike_task_id = %spike_task_id,
+                    "Spike task not found for needs-evidence resume"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    spike_task_id = %spike_task_id,
+                    error = %e,
+                    "DB error reading spike task for needs-evidence resume"
+                );
+                return;
+            }
+        };
+
+        // Get the current state.
+        let state = match self.active_refinements.get(proposal_id).cloned() {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    "No active refinement found for needs-evidence resume"
+                );
+                return;
+            }
+        };
+
+        let round = state.current_round;
+        let revision_seq = state.current_revision_seq;
+
+        // Build a debate-trail entry with the spike finding.
+        let finding_body = format!(
+            "Spike finding (task {}): {}\n\n\
+             Close reason: {}",
+            spike_task.short_id,
+            spike_task.description,
+            spike_task.close_reason.as_deref().unwrap_or("completed"),
+        );
+
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let model_id = self
+            .refinement_sessions
+            .get(proposal_id)
+            .map(|s| s.model_id.clone());
+
+        if let Err(e) = proposal_repo
+            .add_debate_trail_entry(djinn_db::ProposalDebateTrailCreateInput {
+                proposal_id,
+                kind: "rebuttal",
+                body: &finding_body,
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: model_id.as_deref(),
+                source_task_id: Some(spike_task_id),
+                against_revision_seq: revision_seq,
+                round,
+            })
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to record spike finding in debate trail"
+            );
+        }
+
+        // Clear the parking state on the proposal.
+        let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+        if let Err(e) = proposal_repo2.clear_needs_evidence_spike(proposal_id).await {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to clear needs-evidence spike linkage"
+            );
+        }
+
+        // Record a lifecycle event for the resume.
+        let event_bus3 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo3 = ProposalRepository::new(self.db.clone(), event_bus3);
+        let resume_meta = serde_json::json!({
+            "source": "refinement_loop",
+            "event": "needs_evidence_resumed",
+            "spike_task_id": spike_task_id,
+            "round": round,
+        });
+        if let Err(e) = proposal_repo3
+            .record_refinement_lifecycle(proposal_id, "needs_evidence_resumed", Some(&resume_meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to record needs_evidence_resumed lifecycle"
+            );
+        }
+
+        // Resume the refinement loop.
+        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            state.resume_from_needs_evidence();
+        }
+
+        tracing::info!(
+            proposal_id = %proposal_id,
+            spike_task_id = %spike_task_id,
+            "Needs-evidence spike closed — refinement resumed"
+        );
     }
 }

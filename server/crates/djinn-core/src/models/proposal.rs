@@ -46,6 +46,15 @@ pub struct Proposal {
     /// generation). Set on graduate, cleared on stop. Lets a stop find and
     /// force-close the breakdown task even before it has produced epics.
     pub build_breakdown_task_id: Option<String>,
+    /// When the Judge issues a `needs-evidence` verdict, this is the FK to the
+    /// spike task that must close before refinement can resume. `None` when not
+    /// parked. ON DELETE SET NULL keeps the proposal safe if the task is
+    /// hard-deleted.
+    pub linked_spike_task_id: Option<String>,
+    /// The named load-bearing feasibility claim that the Judge identified as
+    /// needing research. Set alongside `linked_spike_task_id`; cleared when
+    /// the spike closes and refinement resumes.
+    pub needs_evidence_claim: Option<String>,
 }
 
 /// An immutable proposal-history row. Spec revisions are appended on every

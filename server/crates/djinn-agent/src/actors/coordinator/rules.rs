@@ -33,6 +33,20 @@ impl CoordinatorActor {
     ///
     /// Deduplicates by checking whether an open planning task already exists.
     pub(super) async fn on_task_closed(&mut self, task: &djinn_core::models::Task) {
+        // Rule 0: Needs-evidence spike closure.
+        // When a spike task closes and a proposal is parked on it, resume
+        // the refinement loop. This check runs before the epic-scoped rules
+        // because needs-evidence spikes have no epic_id.
+        if task.issue_type == "spike" {
+            let event_bus = crate::events::event_bus_for(&self.events_tx);
+            let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+            if let Ok(Some(proposal)) = proposal_repo.find_by_linked_spike(&task.id).await {
+                self.resume_needs_evidence_refinement(&proposal.id, &task.id)
+                    .await;
+                return;
+            }
+        }
+
         let Some(epic_id) = task.epic_id.as_deref() else {
             return;
         };
