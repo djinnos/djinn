@@ -100,6 +100,11 @@ pub struct UserSettingsGetResponse {
     /// that implemented it. A degenerate single-model selection falls back to
     /// same-model review.
     pub diverse_review: bool,
+    /// Cross-model ("Diverse") refinement. When true (the default), the
+    /// proposal-refinement roles (advocate, adversary, judge) prefer a model id
+    /// different from the primary task model. Falls back to same-model when
+    /// alternatives are unavailable.
+    pub diverse_refinement: bool,
     pub error: Option<String>,
 }
 
@@ -123,6 +128,11 @@ pub struct UserSettingsSetParams {
     /// (the default), the reviewer prefers a model id different from the
     /// implementer's. Omit to keep the current value.
     pub diverse_review: Option<bool>,
+    /// Enable or disable cross-model ("Diverse") refinement for THIS user. When
+    /// on (the default), proposal-refinement roles prefer a different model from
+    /// the primary task model. Falls back to same-model when alternatives are
+    /// unavailable. Omit to keep the current value.
+    pub diverse_refinement: Option<bool>,
     /// Admin-only: act on behalf of this user id (e.g. another user to
     /// configure). Non-admins must omit it.
     #[serde(default)]
@@ -141,6 +151,8 @@ pub struct UserSettingsSetResponse {
     pub max_sessions: Option<HashMap<String, u32>>,
     /// The resulting cross-model review toggle after the patch.
     pub diverse_review: Option<bool>,
+    /// The resulting cross-model refinement toggle after the patch.
+    pub diverse_refinement: Option<bool>,
     pub error: Option<String>,
 }
 
@@ -173,6 +185,7 @@ impl DjinnMcpServer {
                         lane_locked: false,
                         max_sessions: HashMap::new(),
                         diverse_review: true,
+                        diverse_refinement: true,
                         error: Some(missing_session()),
                     });
                 }
@@ -185,6 +198,7 @@ impl DjinnMcpServer {
                         lane_locked: false,
                         max_sessions: HashMap::new(),
                         diverse_review: true,
+                        diverse_refinement: true,
                         error: Some(e),
                     });
                 }
@@ -211,6 +225,7 @@ impl DjinnMcpServer {
                     lane_locked,
                     max_sessions: s.max_sessions.unwrap_or_default(),
                     diverse_review: s.diverse_review,
+                    diverse_refinement: s.diverse_refinement,
                     error: None,
                 })
             }
@@ -222,6 +237,7 @@ impl DjinnMcpServer {
                 lane_locked: false,
                 max_sessions: HashMap::new(),
                 diverse_review: true,
+                diverse_refinement: true,
                 error: Some(e.to_string()),
             }),
         }
@@ -249,6 +265,7 @@ impl DjinnMcpServer {
                         lanes: None,
                         max_sessions: None,
                         diverse_review: None,
+                        diverse_refinement: None,
                         error: Some(missing_session()),
                     });
                 }
@@ -260,6 +277,7 @@ impl DjinnMcpServer {
                         lanes: None,
                         max_sessions: None,
                         diverse_review: None,
+                        diverse_refinement: None,
                         error: Some(e),
                     });
                 }
@@ -274,6 +292,7 @@ impl DjinnMcpServer {
                 lanes: None,
                 max_sessions: None,
                 diverse_review: None,
+                diverse_refinement: None,
                 error: Some(msg),
             })
         };
@@ -335,6 +354,17 @@ impl DjinnMcpServer {
             applied = true;
         }
 
+        // Cross-model ("Diverse") refinement toggle for proposal-refinement
+        // roles (advocate, adversary, judge). No validation needed — same
+        // best-effort model-divergence strategy; a degenerate single-model
+        // selection falls back to same-model refinement.
+        if let Some(target) = p.diverse_refinement {
+            if let Err(e) = repo.upsert_diverse_refinement(&user_id, target).await {
+                return err(e.to_string());
+            }
+            applied = true;
+        }
+
         // A changed model selection or cap can make more work dispatchable now,
         // so kick a dispatch pass. No-op for auto-approve-only patches.
         if p.lanes.is_some() || p.max_sessions.is_some() {
@@ -349,6 +379,7 @@ impl DjinnMcpServer {
                 lanes: Some(s.lanes.unwrap_or_default().into()),
                 max_sessions: Some(s.max_sessions.unwrap_or_default()),
                 diverse_review: Some(s.diverse_review),
+                diverse_refinement: Some(s.diverse_refinement),
                 error: None,
             }),
             Err(e) => err(e.to_string()),
