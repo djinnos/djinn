@@ -1,7 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@/test/test-utils";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { render, screen, userEvent } from "@/test/test-utils";
+import { callMcpTool } from "@/api/mcpClient";
+import { showToast } from "@/lib/toast";
 import type { ProposalDebateTrailRow } from "@/api/types";
 import { DebateTrail } from "./DebateTrail";
+
+vi.mock("@/api/mcpClient", () => ({
+  callMcpTool: vi.fn(),
+}));
+
+vi.mock("@/lib/toast", () => ({
+  showToast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock("@/components/memory/memoryUtils", () => ({
   relativeTime: vi.fn((iso: string) => {
@@ -38,6 +51,14 @@ function row(overrides: Partial<ProposalDebateTrailRow> = {}): ProposalDebateTra
 }
 
 describe("DebateTrail", () => {
+  beforeEach(() => {
+    vi.mocked(callMcpTool).mockReset();
+    vi.mocked(showToast.success).mockClear();
+    vi.mocked(showToast.error).mockClear();
+  });
+
+  // ── Read-only display tests ────────────────────────────────────────────
+
   it("renders nothing when debate trail is empty", () => {
     const { container } = render(<DebateTrail debateTrail={[]} />);
     expect(container.firstChild).toBeNull();
@@ -217,5 +238,312 @@ describe("DebateTrail", () => {
       <DebateTrail debateTrail={[row({ id: "solo", round: 1 })]} />,
     );
     expect(screen.getByText("1 entry")).toBeInTheDocument();
+  });
+
+  // ── Action visibility: read-only when canEdit is false ────────────────
+
+  it("hides resolve/reopen buttons when canEdit is false", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({ id: "open-row", resolved_at: null }),
+          row({
+            id: "resolved-row",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={false}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /resolve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  it("hides resolve/reopen buttons when canEdit is omitted", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({ id: "open-row", resolved_at: null }),
+          row({
+            id: "resolved-row",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /resolve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  // ── Action visibility: editable when canEdit is true ──────────────────
+
+  it("shows Resolve button for open rows when canEdit is true", () => {
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "open-row", resolved_at: null })]}
+        canEdit={true}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /resolve/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  it("shows Reopen button for resolved rows when canEdit is true", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "resolved-row",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /resolve/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reopen/i })).toBeInTheDocument();
+  });
+
+  it("shows Resolve button for reopened rows when canEdit is true", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "reopened-row",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+            reopened_at: "2026-06-22T09:00:00Z",
+            reopened_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+      />,
+    );
+
+    // Reopened entries can be re-resolved
+    expect(screen.getByRole("button", { name: /resolve/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  // ── Successful resolve action ─────────────────────────────────────────
+
+  it("calls proposal_debate_trail_resolve on Resolve click and triggers refresh", async () => {
+    const onChanged = vi.fn();
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      entry: { id: "dt-1" },
+    } as never);
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "dt-1", resolved_at: null })]}
+        canEdit={true}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /resolve/i }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_trail_resolve", {
+      id: "dt-1",
+    });
+    expect(showToast.success).toHaveBeenCalledWith("Debate entry resolved");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Successful reopen action ──────────────────────────────────────────
+
+  it("calls proposal_debate_trail_reopen on Reopen click and triggers refresh", async () => {
+    const onChanged = vi.fn();
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      entry: { id: "dt-1" },
+    } as never);
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "dt-1",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /reopen/i }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_debate_trail_reopen", {
+      id: "dt-1",
+    });
+    expect(showToast.success).toHaveBeenCalledWith("Debate entry reopened");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Error handling ────────────────────────────────────────────────────
+
+  it("shows error toast when resolve MCP call returns an error response", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      error: "permission denied",
+    } as never);
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "dt-1", resolved_at: null })]}
+        canEdit={true}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /resolve/i }));
+
+    expect(showToast.error).toHaveBeenCalledWith(
+      "Failed to resolve",
+      { description: "permission denied" },
+    );
+  });
+
+  it("shows error toast when resolve MCP call throws", async () => {
+    vi.mocked(callMcpTool).mockRejectedValueOnce(new Error("Network error"));
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "dt-1", resolved_at: null })]}
+        canEdit={true}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /resolve/i }));
+
+    expect(showToast.error).toHaveBeenCalledWith(
+      "Failed to resolve",
+      { description: "Network error" },
+    );
+  });
+
+  it("shows error toast when reopen MCP call returns an error response", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      error: "not found",
+    } as never);
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "dt-1",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /reopen/i }));
+
+    expect(showToast.error).toHaveBeenCalledWith(
+      "Failed to reopen",
+      { description: "not found" },
+    );
+  });
+
+  it("shows error toast when reopen MCP call throws", async () => {
+    vi.mocked(callMcpTool).mockRejectedValueOnce(new Error("Timeout"));
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "dt-1",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /reopen/i }));
+
+    expect(showToast.error).toHaveBeenCalledWith(
+      "Failed to reopen",
+      { description: "Timeout" },
+    );
+  });
+
+  // ── Button disabling while pending ────────────────────────────────────
+
+  it("disables resolve button while action is pending", async () => {
+    // Never-resolving promise to keep it pending
+    vi.mocked(callMcpTool).mockReturnValueOnce(new Promise(() => {}));
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "dt-1", resolved_at: null })]}
+        canEdit={true}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /resolve/i });
+    await user.click(button);
+
+    expect(button).toBeDisabled();
+  });
+
+  it("disables reopen button while action is pending", async () => {
+    vi.mocked(callMcpTool).mockReturnValueOnce(new Promise(() => {}));
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "dt-1",
+            resolved_at: "2026-06-21T08:00:00Z",
+            resolved_by_user_id: "user-1",
+          }),
+        ]}
+        canEdit={true}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: /reopen/i });
+    await user.click(button);
+
+    expect(button).toBeDisabled();
+  });
+
+  // ── Error does not trigger onChanged ──────────────────────────────────
+
+  it("does not call onChanged when resolve fails", async () => {
+    const onChanged = vi.fn();
+    vi.mocked(callMcpTool).mockRejectedValueOnce(new Error("fail"));
+
+    const user = userEvent.setup();
+    render(
+      <DebateTrail
+        debateTrail={[row({ id: "dt-1", resolved_at: null })]}
+        canEdit={true}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /resolve/i }));
+
+    expect(onChanged).not.toHaveBeenCalled();
   });
 });

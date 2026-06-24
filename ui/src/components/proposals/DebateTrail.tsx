@@ -1,16 +1,20 @@
-import { useMemo } from "react";
+import { useCallback, useState, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
   CheckmarkCircle02Icon,
+  RefreshIcon,
   Shield01Icon,
 } from "@hugeicons/core-free-icons";
+import { callMcpTool } from "@/api/mcpClient";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { relativeTime } from "@/components/memory/memoryUtils";
+import { showToast } from "@/lib/toast";
 import type { ProposalDebateTrailRow } from "@/api/types";
 
 /** Derived display state for a single debate-trail row. */
@@ -117,20 +121,25 @@ interface RoundGroup {
 }
 
 /**
- * Read-only debate-trail viewer for proposals.
+ * Debate-trail viewer for proposals with resolve/reopen actions.
  *
  * Groups rows by `round`, displays kind (objection/rebuttal/verdict),
  * blocking/non-blocking badges, open/resolved/reopened state, role/speaker
  * labels, revision anchor, timestamps, and markdown body content.
  *
- * This component is intentionally read-only. Resolve/reopen actions are
- * handled by the follow-up task (6dav).
+ * When `canEdit` is true, open rows show a "Resolve" action and
+ * resolved rows show a "Reopen" action. When `canEdit` is false the
+ * trail remains read-only.
  */
 export function DebateTrail({
   debateTrail,
+  canEdit,
+  onChanged,
   className,
 }: {
   debateTrail: ProposalDebateTrailRow[];
+  canEdit?: boolean;
+  onChanged?: () => void;
   className?: string;
 }) {
   const groups = useMemo<RoundGroup[]>(() => {
@@ -165,14 +174,27 @@ export function DebateTrail({
       </Label>
       <div className="space-y-4">
         {groups.map((group) => (
-          <RoundSection key={group.round} group={group} />
+          <RoundSection
+            key={group.round}
+            group={group}
+            canEdit={canEdit}
+            onChanged={onChanged}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function RoundSection({ group }: { group: RoundGroup }) {
+function RoundSection({
+  group,
+  canEdit,
+  onChanged,
+}: {
+  group: RoundGroup;
+  canEdit?: boolean;
+  onChanged?: () => void;
+}) {
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
@@ -185,15 +207,62 @@ function RoundSection({ group }: { group: RoundGroup }) {
       </div>
       <ul className="divide-y rounded-md border">
         {group.rows.map((row) => (
-          <DebateEntry key={row.id} row={row} />
+          <DebateEntry
+            key={row.id}
+            row={row}
+            canEdit={canEdit}
+            onChanged={onChanged}
+          />
         ))}
       </ul>
     </div>
   );
 }
 
-function DebateEntry({ row }: { row: ProposalDebateTrailRow }) {
+function DebateEntry({
+  row,
+  canEdit,
+  onChanged,
+}: {
+  row: ProposalDebateTrailRow;
+  canEdit?: boolean;
+  onChanged?: () => void;
+}) {
   const state = entryState(row);
+  const [pending, setPending] = useState(false);
+
+  const handleResolve = useCallback(async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const res = await callMcpTool("proposal_debate_trail_resolve", { id: row.id });
+      if (res.error) throw new Error(res.error);
+      showToast.success("Debate entry resolved");
+      onChanged?.();
+    } catch (e) {
+      showToast.error("Failed to resolve", { description: (e as Error).message });
+    } finally {
+      setPending(false);
+    }
+  }, [row.id, pending, onChanged]);
+
+  const handleReopen = useCallback(async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const res = await callMcpTool("proposal_debate_trail_reopen", { id: row.id });
+      if (res.error) throw new Error(res.error);
+      showToast.success("Debate entry reopened");
+      onChanged?.();
+    } catch (e) {
+      showToast.error("Failed to reopen", { description: (e as Error).message });
+    } finally {
+      setPending(false);
+    }
+  }, [row.id, pending, onChanged]);
+
+  const showResolve = canEdit && (state === "open" || state === "reopened");
+  const showReopen = canEdit && state === "resolved";
 
   return (
     <li className="space-y-2 px-3 py-3">
@@ -229,6 +298,36 @@ function DebateEntry({ row }: { row: ProposalDebateTrailRow }) {
           {row.body || "_Empty entry._"}
         </ReactMarkdown>
       </div>
+
+      {/* Resolve / Reopen action controls */}
+      {(showResolve || showReopen) && (
+        <div className="flex gap-2 pt-1">
+          {showResolve && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              disabled={pending}
+              onClick={handleResolve}
+            >
+              <HugeiconsIcon icon={CheckmarkCircle02Icon} size={14} />
+              Resolve
+            </Button>
+          )}
+          {showReopen && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="gap-1.5"
+              disabled={pending}
+              onClick={handleReopen}
+            >
+              <HugeiconsIcon icon={RefreshIcon} size={14} />
+              Reopen
+            </Button>
+          )}
+        </div>
+      )}
     </li>
   );
 }

@@ -602,7 +602,11 @@ function ProposalDetailView({
 
         <Separator />
 
-        <DebateTrail debateTrail={detail.debate_trail} />
+        <DebateTrail
+          debateTrail={detail.debate_trail}
+          canEdit={canDirectEdit}
+          onChanged={onChanged}
+        />
 
         <FeedbackThread
           proposal={proposal}
