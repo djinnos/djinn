@@ -65,6 +65,16 @@ pub use actors::coordinator::{
 /// path behind an env flag — see `run_extraction_backfill` for the policy.
 pub use actors::slot::session_extraction::run_extraction_backfill;
 
+// ─── djinn-slot re-exports ─────────────────────────────────────────────────
+//
+// Phase 5: the canonical slot code now lives in `djinn-slot`.  The
+// `djinn_agent::actors::slot::*` facade paths are preserved above; these
+// additional re-exports expose the new host-context types so downstream
+// crates can construct a `SlotContext` and wire `SlotHostCallbacks`.
+
+pub use djinn_slot::SlotEvent;
+pub use djinn_slot::host::{KnowledgeBranchTarget, SlotContext, SlotHostCallbacks};
+
 // ─── AgentType (re-exported from djinn-roles) ──────────────────────────────
 
 pub use djinn_roles::AgentType;
