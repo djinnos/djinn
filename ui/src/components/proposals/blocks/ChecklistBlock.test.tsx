@@ -24,7 +24,9 @@ describe("ChecklistBlock — marker glyphs", () => {
     expect(items).toHaveLength(2);
 
     const dOf = (li: Element) =>
-      [...li.querySelectorAll("svg path")].map((p) => p.getAttribute("d") ?? "");
+      [...li.querySelectorAll("svg path")].map(
+        (p) => p.getAttribute("d") ?? "",
+      );
 
     // The rounded-square outline path shared by SquareIcon / CheckmarkSquare02.
     const SQUARE_OUTLINE = "M2.5 12C2.5 7.52166";
@@ -56,9 +58,93 @@ describe("ChecklistBlock — marker glyphs", () => {
     expect(getByText("1/2 done")).toBeInTheDocument();
 
     const checkedLabel = getByText("Ship it");
-    expect(checkedLabel.className).toContain("line-through");
+    // The label is now rendered through InlineMarkdown, so the styled
+    // wrapper is the *parent* of the element getByText returns.
+    expect(checkedLabel.parentElement?.className).toContain("line-through");
 
     // Read-only: no interactive checkboxes/inputs are rendered.
     expect(container.querySelectorAll("input")).toHaveLength(0);
+  });
+});
+
+describe("ChecklistBlock — inline markdown", () => {
+  it("renders bold text as <strong> in checklist labels", () => {
+    const body = "- [x] **Shared `PageHeader`**\n- [ ] Regular item";
+    const { container } = render(
+      <ChecklistBlock id="cm1" attributes={{}}>
+        {body}
+      </ChecklistBlock>,
+    );
+
+    const strong = container.querySelector("strong");
+    expect(strong).not.toBeNull();
+    expect(strong!.textContent).toBe("Shared PageHeader");
+  });
+
+  it("renders inline code as <code> in checklist labels", () => {
+    const body = "- [ ] Use `getServerSideProps` for SSR";
+    const { container } = render(
+      <ChecklistBlock id="cm2" attributes={{}}>
+        {body}
+      </ChecklistBlock>,
+    );
+
+    const code = container.querySelector("code");
+    expect(code).not.toBeNull();
+    expect(code!.textContent).toBe("getServerSideProps");
+  });
+
+  it("renders links as <a> in checklist labels", () => {
+    const body = "- [ ] See [docs](https://example.com)";
+    const { container } = render(
+      <ChecklistBlock id="cm3" attributes={{}}>
+        {body}
+      </ChecklistBlock>,
+    );
+
+    const link = container.querySelector("a");
+    expect(link).not.toBeNull();
+    expect(link!.getAttribute("href")).toBe("https://example.com");
+    expect(link!.textContent).toBe("docs");
+  });
+
+  it("renders inline markdown in item notes after a dash separator", () => {
+    const body = "- [x] Foo — `bar` and **baz**";
+    const { container } = render(
+      <ChecklistBlock id="cm4" attributes={{}}>
+        {body}
+      </ChecklistBlock>,
+    );
+
+    const items = container.querySelectorAll("li");
+    expect(items).toHaveLength(1);
+
+    // The note section should have rendered <code> and <strong>
+    const code = items[0].querySelector("code");
+    const strong = items[0].querySelector("strong");
+    expect(code).not.toBeNull();
+    expect(code!.textContent).toBe("bar");
+    expect(strong).not.toBeNull();
+    expect(strong!.textContent).toBe("baz");
+  });
+
+  it("falls back to BlockMarkdown when nothing parses as a list", () => {
+    const body = "This is just **prose** with `code`.";
+    const { container } = render(
+      <ChecklistBlock id="cm5" attributes={{}}>
+        {body}
+      </ChecklistBlock>,
+    );
+
+    // Should still render markdown correctly via BlockMarkdown fallback
+    const strong = container.querySelector("strong");
+    expect(strong).not.toBeNull();
+    expect(strong!.textContent).toBe("prose");
+    const code = container.querySelector("code");
+    expect(code).not.toBeNull();
+    expect(code!.textContent).toBe("code");
+
+    // No list items rendered
+    expect(container.querySelectorAll("li")).toHaveLength(0);
   });
 });
