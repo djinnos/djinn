@@ -1,3 +1,4 @@
+// djinn:allow-oversize — test module grows with DoR/lifecycle regression coverage; split when touched substantively.
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
