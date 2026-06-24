@@ -151,9 +151,14 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
 pub async fn create_test_project(db: &Database) -> djinn_core::models::Project {
     let event_bus = test_events();
     let repo = djinn_db::ProjectRepository::new(db.clone(), event_bus);
-    repo.create("test-project", "Test Project", "main")
-        .await
-        .expect("create project")
+    let uuid = uuid::Uuid::now_v7().simple();
+    repo.create(
+        &format!("test-project-{uuid}"),
+        &format!("owner-{uuid}"),
+        &format!("repo-{uuid}"),
+    )
+    .await
+    .expect("create project")
 }
 
 pub async fn create_test_epic(db: &Database, project_id: &str) -> djinn_core::models::Epic {
