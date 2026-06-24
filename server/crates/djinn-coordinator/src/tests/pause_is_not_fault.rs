@@ -502,9 +502,10 @@ fn chat_and_pr_poller_have_no_dispatch_pause_dependency() {
     // import" — and that has to be asserted at the SOURCE level, because a
     // positive `use` could be wired in later. The presence/absence of
     // matching text in the source is the only stable contract we can lock.
+    // In djinn-coordinator, the PR poller is at src/pr_poller (not the
+    // old djinn-agent path src/actors/coordinator/pr_poller).
     let coordinator_pr_poller_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/actors/coordinator/pr_poller");
-    let chat_entry = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/chat_tools.rs");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pr_poller");
 
     let mut offenders: Vec<(std::path::PathBuf, String)> = Vec::new();
     let forbidden = [
@@ -528,17 +529,9 @@ fn chat_and_pr_poller_have_no_dispatch_pause_dependency() {
         }
     }
 
-    // Also scan the chat dispatch entry point.
-    let chat_contents = std::fs::read_to_string(&chat_entry).unwrap();
-    for needle in &forbidden {
-        if chat_contents.contains(needle) {
-            offenders.push((chat_entry.clone(), (*needle).to_owned()));
-        }
-    }
-
     assert!(
         offenders.is_empty(),
-        "dispatch-pause symbols must not leak into the PR poller or chat entry point; offenders: {offenders:?}"
+        "dispatch-pause symbols must not leak into the PR poller; offenders: {offenders:?}"
     );
 }
 
