@@ -140,22 +140,24 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
     let (task, _note) = create_task_with_note(&db, &tx, "zombie-reap").await;
 
     // Put the task in an execution state, as if dispatched.
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
     let run_id = "run-zombie-reap";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -174,11 +176,8 @@ async fn zombie_zero_token_session_is_reaped_on_db_truth() {
     // Backdate well past the 10-minute hard cap, leaving tokens at 0/0.
     // Match the column's stored format (VARCHAR `YYYY-MM-DDThh:mm:ss.msZ`)
     // so `parse_iso_elapsed` reads it.
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-        .bind(&session.id)
-        .execute(db.pool())
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
         .await
         .unwrap();
 
@@ -242,9 +241,8 @@ async fn young_zero_token_session_is_not_reaped() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "young-session").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
@@ -289,21 +287,23 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "connected-no-reap").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
     let run_id = "run-connected-1";
     // `sessions.task_run_id` has an FK to `task_runs`, so seed the run row.
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-        .bind(run_id)
-        .bind(&task.project_id)
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
         .await
         .unwrap();
 
@@ -322,11 +322,8 @@ async fn connected_worker_past_hard_cap_is_not_reaped() {
         .await
         .unwrap();
     // Backdate past the 10-minute hard cap, tokens still 0/0.
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-        .bind(&session.id)
-        .execute(db.pool())
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
         .await
         .unwrap();
 
@@ -395,15 +392,18 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "stall-teardown").await;
     let run_id = "run-stall-timeout";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -419,13 +419,10 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         })
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '40 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(true);
     let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
@@ -529,22 +526,24 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "zombie-no-slot").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
     let run_id = "run-zombie-no-slot";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -560,13 +559,10 @@ async fn reap_zombie_session_with_no_slot_mapping_still_tears_down_taskrun_job()
         })
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -606,22 +602,24 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "zombie-teardown-fail").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
     let run_id = "run-zombie-teardown-fail";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -637,13 +635,10 @@ async fn reap_zombie_session_continues_recovery_when_teardown_fails() {
         })
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(true);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -683,9 +678,8 @@ async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "zombie-no-run-id").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
@@ -703,13 +697,10 @@ async fn reap_zombie_session_without_task_run_id_is_reaped_without_teardown() {
         })
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -767,29 +758,31 @@ fn temp_cargo_target_runs_root() -> tempfile::TempDir {
 
 async fn seed_task_run(db: &Database, task: &djinn_core::models::Task, id: &str, status: &str) {
     if status == "running" {
-        sqlx::query(
-            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
-             VALUES ($1, $2, $3, 'manual', 'running')",
-        )
-        .bind(id)
-        .bind(&task.project_id)
-        .bind(&task.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id,
+                project_id: &task.project_id,
+                task_id: &task.id,
+                trigger_type: "manual",
+                status: Some("running"),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
     } else {
-        sqlx::query(
-            "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
-             VALUES ($1, $2, $3, 'manual', $4,
-                     to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
-        )
-        .bind(id)
-        .bind(&task.project_id)
-        .bind(&task.id)
-        .bind(status)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        TaskRunRepository::new(db.clone())
+            .create(CreateTaskRunParams {
+                id,
+                project_id: &task.project_id,
+                task_id: &task.id,
+                trigger_type: "manual",
+                status: Some(status),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
     }
 }
 
@@ -862,28 +855,32 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
     let (task, _note) = create_task_with_note(&db, &tx, "taskrun-job-backstop").await;
 
     let finalized_run_id = "run-finalized-backstop";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
-         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
-    )
-    .bind(finalized_run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: finalized_run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("completed"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let live_run_id = "run-live-backstop";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
-         VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(live_run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: live_run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let live_session = session_repo
@@ -927,16 +924,18 @@ async fn taskrun_job_backstop_deletes_absent_and_finalized_rows_only() {
         .unwrap();
 
     let interrupted_run_id = "run-interrupted-backstop";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status)
-         VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(interrupted_run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: interrupted_run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
     let interrupted_session = session_repo
         .create(CreateSessionParams {
             project_id: &task.project_id,
@@ -1001,16 +1000,18 @@ async fn stale_resource_sweep_runs_taskrun_job_backstop() {
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "periodic-backstop-wiring").await;
     let periodic_run_id = "periodic-finalized";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
-         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
-    )
-    .bind(periodic_run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: periodic_run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("completed"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
     let runtime =
         RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(periodic_run_id)]);
     let mut app_state =
@@ -1034,16 +1035,18 @@ async fn startup_reconcile_runs_taskrun_job_backstop() {
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "startup-backstop-wiring").await;
     let startup_run_id = "startup-finalized";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status, ended_at)
-         VALUES ($1, $2, $3, 'manual', 'completed', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))",
-    )
-    .bind(startup_run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: startup_run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("completed"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
     let runtime =
         RecordingRuntimeOps::new(false).with_taskrun_jobs(vec![taskrun_job_ref(startup_run_id)]);
     let mut app_state =
@@ -1117,13 +1120,10 @@ async fn ready_state_stale_orphan_session_is_finalized() {
     // Backdate the session so it predates the task's `updated_at`. The task
     // was just created so its `updated_at` is ~now; the session is 20 minutes
     // older, making `session_predates_task_status` return true.
-    sqlx::query(
-        "UPDATE sessions SET started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
 
     assert!(
         session_repo
@@ -1190,13 +1190,7 @@ async fn ready_state_newer_session_is_not_finalized() {
     // Backdate the TASK's `updated_at` so the session's `started_at` is
     // NEWER. This models a just-redispatched task whose fresh session started
     // after the task's last status transition.
-    sqlx::query(
-        "UPDATE tasks SET updated_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    djinn_db::test_support::backdate_task_updated_at(&db, &task.id, "20 minutes").await;
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.detect_and_recover_stuck_filtered(None).await;
@@ -1225,22 +1219,24 @@ async fn token_bearing_terminal_orphan_is_reaped() {
     let (task, _note) = create_task_with_note(&db, &tx, "terminal-token-orphan").await;
 
     // Put the task in a terminal status.
-    sqlx::query("UPDATE tasks SET status = 'force_closed' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "force_closed")
         .await
         .unwrap();
 
     let run_id = "run-terminal-token";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -1258,15 +1254,10 @@ async fn token_bearing_terminal_orphan_is_reaped() {
         .unwrap();
     // Set nonzero tokens to exercise the kill-on-status bypass, and backdate
     // past the zombie hard cap so the age gate passes.
-    sqlx::query(
-        "UPDATE sessions SET tokens_in = 100, tokens_out = 50, \
-         started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
-         WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .set_tokens_and_backdate(&session.id, "20 minutes", 100, 50)
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -1302,15 +1293,18 @@ async fn token_bearing_open_reset_orphan_is_reaped() {
     let (task, _note) = create_task_with_note(&db, &tx, "open-reset-token-orphan").await;
 
     let run_id = "run-open-reset-token";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
 
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
@@ -1328,28 +1322,19 @@ async fn token_bearing_open_reset_orphan_is_reaped() {
         .unwrap();
     // Set nonzero tokens and backdate the session to 20 minutes ago (predating
     // the task reset below).
-    sqlx::query(
-        "UPDATE sessions SET tokens_in = 100, tokens_out = 50, \
-         started_at = to_char(now() AT TIME ZONE 'utc' - interval '20 minutes', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') \
-         WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .set_tokens_and_backdate(&session.id, "20 minutes", 100, 50)
+        .await
+        .unwrap();
 
     // Now "reset" the task to `open` with a fresh `updated_at` (now), so the
     // session's started_at predates the reset. The task is already `open`
     // from `create_task_with_note`, but we explicitly touch `updated_at` to
     // ensure it is newer than the backdated session.
-    sqlx::query(
-        "UPDATE tasks SET status = 'open', \
-         updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') WHERE id = $1",
-    )
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "open")
+        .await
+        .unwrap();
 
     let runtime = RecordingRuntimeOps::new(false);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -1383,9 +1368,8 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "ceiling-kill").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
@@ -1493,9 +1477,8 @@ async fn healthy_under_ceiling_session_is_not_killed() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let (task, _note) = create_task_with_note(&db, &tx, "healthy-under-ceiling").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
@@ -1515,9 +1498,8 @@ async fn healthy_under_ceiling_session_is_not_killed() {
         .unwrap();
     // Set nonzero tokens on the DB row (this is how they look mid-flight) and
     // keep started_at recent so the zombie hard cap doesn't fire.
-    sqlx::query("UPDATE sessions SET tokens_in = 1000, tokens_out = 500 WHERE id = $1")
-        .bind(&session.id)
-        .execute(db.pool())
+    session_repo
+        .set_token_counts(&session.id, 1000, 500)
         .await
         .unwrap();
 

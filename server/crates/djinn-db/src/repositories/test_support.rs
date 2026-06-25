@@ -7,6 +7,40 @@ use tokio::sync::broadcast;
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 
+/// Drop a database table if it exists.  Test-fixture helper for
+/// failure-injection tests that need to simulate a missing-table error
+/// (e.g. the coordinator reentrance `blocker_lookup_error` test).
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn drop_table_for_test(db: &Database, table_name: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(&format!("DROP TABLE IF EXISTS {table_name}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+}
+
+/// Backdate a task's `updated_at` by a PostgreSQL `interval` string
+/// (e.g. `'20 minutes'`).
+///
+/// Test-fixture helper: production `updated_at` is stamped automatically
+/// by status transitions.  Used by coordinator orphan / zombie tests to
+/// fabricate task timestamps that predate a session's `started_at`.
+pub async fn backdate_task_updated_at(db: &Database, task_id: &str, interval: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "UPDATE tasks SET updated_at = to_char(
+             now() AT TIME ZONE 'utc' - $1::interval,
+             'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+         WHERE id = $2",
+    )
+    .bind(interval)
+    .bind(task_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
 pub fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
     let tx = tx.clone();
     EventBus::new(move |event| {
