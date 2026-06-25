@@ -46,6 +46,7 @@ pub fn debug_view(state: &DispatchPauseState) -> DispatchPauseView {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn matching_task_dispatch_pause<'a>(
     pause_state: &'a DispatchPauseState,
     task: &Task,

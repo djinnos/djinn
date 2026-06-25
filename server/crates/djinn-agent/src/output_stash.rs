@@ -56,6 +56,7 @@ struct StashedOutput {
 /// Durable output-stash root used by coordinator maintenance. Exposed as a
 /// narrow integration point so GC wiring uses the same cache location as normal
 /// durable writes/reads.
+#[allow(dead_code)]
 pub(crate) fn durable_root_for_gc() -> Option<PathBuf> {
     durable_root()
 }

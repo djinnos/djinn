@@ -22,6 +22,7 @@ pub(crate) fn build_app_push_url(owner: &str, repo: &str, installation_token: &s
 
 /// Bot identity used when committing/pushing through the GitHub App. The
 /// canonical no-reply email form is `<app-id>+djinn-bot[bot]@users.noreply.github.com`.
+#[allow(dead_code)]
 fn bot_identity() -> (String, String) {
     let app_id = djinn_provider::github_app::app_id()
         .map(|id| id.to_string())
@@ -247,6 +248,7 @@ pub(crate) async fn resolve_project_path_for_id(
 /// with GitHub — typically a stale `origin/{target_branch}` ref) or `Err` if
 /// the trial merge couldn't run at all.  The ephemeral workspace is dropped
 /// at the end of the call.
+#[allow(dead_code)]
 pub(crate) async fn detect_pr_conflict_files(
     mirror: &MirrorManager,
     project_id: &str,
@@ -309,6 +311,7 @@ pub(crate) async fn detect_pr_conflict_files(
 
 /// Outcome of [`try_auto_merge_target_into_task_branch`].
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum AutoMergeOutcome {
     /// The merge target folded cleanly into the task branch (or the task
     /// branch was merely behind / already current). The merge commit was
@@ -359,6 +362,7 @@ pub(crate) enum AutoMergeOutcome {
 /// current and pushes the same SHA — a no-op force-push. The GitHub push reuses
 /// the `is_concurrent_push_race` recovery in `push_task_branch_to_github`'s
 /// sibling logic via a plain `--force` push that's idempotent on identical SHAs.
+#[allow(dead_code)]
 pub(crate) async fn try_auto_merge_target_into_task_branch(
     mirror: &MirrorManager,
     db: &djinn_db::Database,
