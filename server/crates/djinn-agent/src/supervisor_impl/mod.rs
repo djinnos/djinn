@@ -30,8 +30,6 @@ pub(crate) mod disposition {
 pub(crate) mod pr;
 #[cfg(test)]
 mod pr_close;
-#[cfg(test)]
-mod pr_tests;
 pub(crate) mod stage;
 
 /// Non-PR reusable live-mover API surface for post-run and orphan-task checks
