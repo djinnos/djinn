@@ -23,6 +23,7 @@ mcp.json
 
 # Package manager stores
 .pnpm-store/
+.npm-cache/
 node_modules/
 # pnpm/npm/corepack write here when HOME points inside the worktree (e.g. a
 # worker sets HOME=<worktree> to make pnpm runnable). The pnpm content store

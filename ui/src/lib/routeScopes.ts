@@ -15,7 +15,7 @@
  *    No global project selector is shown because the URL *is* the source of
  *    truth for multi-select or cross-project filters.
  *    Routes: `/tasks`, `/dependencies` (board multi-select via URL params),
- *    `/admin/usage` (usage filters via URL params).
+ *    `/admin/usage` (usage filters via URL params — see below).
  *
  *  **path-scoped**
  *    The page's project identity comes from a URL path segment rather than
@@ -101,7 +101,14 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
   {
     pattern: "/admin/usage",
     scope: "url-filtered",
-    note: "UsageDashboard filters live in URL search-params",
+    note:
+      "UsageDashboard filters live in URL search-params. " +
+      "Supported URL keys: preset, start, end, granularity, project_id, " +
+      "model, agent_type, user_id. " +
+      "Note: project_id is a dashboard reporting filter scoped to the " +
+      "usage analytics query — it is NOT the global project context " +
+      "from useProjectStore. The global ProjectSelector is hidden on " +
+      "this route.",
   },
 
   // ── path-scoped ─────────────────────────────────────────────────────────
