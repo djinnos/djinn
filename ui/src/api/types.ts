@@ -88,7 +88,7 @@ export interface ProposalRefinementStatus {
    * Update authority mode: `checkpoint` (advocate revisions require approval)
    * or `auto_accept` (revisions applied automatically).
    */
-  update_authority: "checkpoint" | "auto_accept" | string;
+  update_authority?: "checkpoint" | "auto_accept" | string;
   /**
    * When set, refinement has stopped.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,

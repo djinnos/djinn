@@ -11,8 +11,6 @@ pub struct ProposalRefinementStartRequest {
     /// refinement was requested. The coordinator uses this to initialise
     /// `RefinementLoopState::current_revision_seq`.
     pub current_revision_seq: i32,
-    /// Update authority mode: `"checkpoint"` or `"auto_accept"`.
-    pub update_authority: String,
     /// User the refinement run is attributed to: owner of the spawned
     /// refinement tasks and the scope for per-user role-model resolution.
     /// `None` falls back to the proposal author at dispatch time.

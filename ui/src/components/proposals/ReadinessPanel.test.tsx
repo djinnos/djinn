@@ -342,19 +342,20 @@ describe("ReadinessPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders auto-accept mode explanation when refinement is active and auto_accept", () => {
+  it("always renders checkpoint explanation when refinement is active", () => {
     render(
       <ReadinessPanel
         gateStatus={gateStatus()}
-        refinement={refinement({ update_authority: "auto_accept" })}
+        refinement={refinement({ update_authority: "checkpoint" })}
         proposalId="p-1"
         pendingRevisions={[]}
         onChanged={vi.fn()}
       />,
     );
     expect(
-      screen.getByText(/Auto-accept mode: advocate revisions are applied automatically/),
+      screen.getByText(/Checkpoint mode: advocate revisions require explicit approval/),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Auto-accept/)).not.toBeInTheDocument();
   });
 
   // ── Checkpoint revisions with diff ──────────────────────────────────────
@@ -501,14 +502,14 @@ describe("ReadinessPanel", () => {
     render(
       <ReadinessPanel
         gateStatus={null}
-        refinement={refinement({ update_authority: "auto_accept" })}
+        refinement={refinement()}
         proposalId="p-1"
         pendingRevisions={[]}
         onChanged={vi.fn()}
       />,
     );
     expect(
-      screen.getByText(/Auto-accept mode/),
+      screen.getByText(/Checkpoint mode/),
     ).toBeInTheDocument();
   });
 

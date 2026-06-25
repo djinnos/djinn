@@ -14039,12 +14039,6 @@ expression: signatures
           "description": "Why another round is being demanded. Recorded in proposal history.",
           "nullable": true,
           "type": "string"
-        },
-        "update_authority": {
-          "default": "checkpoint",
-          "description": "Update authority mode: `checkpoint` (default) or `auto_accept`.",
-          "nullable": true,
-          "type": "string"
         }
       },
       "required": [
@@ -14196,11 +14190,6 @@ expression: signatures
         },
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
-          "type": "string"
-        },
-        "update_authority": {
-          "default": "checkpoint",
-          "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates). Defaults to `checkpoint`.",
           "type": "string"
         }
       },

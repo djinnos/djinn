@@ -84,18 +84,6 @@ pub enum RefinementPhase {
     Complete,
 }
 
-/// Update authority mode for the refinement loop. Read at each round boundary
-/// so a mid-run setting change is respected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateAuthority {
-    /// Record proposed revisions as a checkpoint without applying them to the
-    /// live proposal. The revision is stored via proposal history but the
-    /// live spec body is not mutated.
-    Checkpoint,
-    /// Apply advocate revisions through existing proposal update / revision
-    /// history semantics (auto-accept).
-    AutoAccept,
-}
 
 /// An adversary objection as seen by the state machine. The coordinator
 /// extracts these from agent session output and feeds them in.
@@ -188,8 +176,6 @@ pub struct RefinementLoopState {
     /// The proposal revision seq the adversary should attack.
     /// Updated after each advocate revision.
     pub current_revision_seq: i32,
-    /// How advocate revisions are applied.
-    pub update_authority: UpdateAuthority,
     /// The user this refinement run is attributed to: owner of the spawned
     /// refinement tasks (`created_by_user_id`) AND the scope used to resolve
     /// per-user role models for the tribunal agents. `None` means "fall back
@@ -205,15 +191,10 @@ pub struct RefinementLoopState {
 
 impl RefinementLoopState {
     /// Create a new refinement loop for the given proposal.
-    pub fn new(
-        proposal_id: impl Into<String>,
-        current_revision_seq: i32,
-        update_authority: UpdateAuthority,
-    ) -> Self {
+    pub fn new(proposal_id: impl Into<String>, current_revision_seq: i32) -> Self {
         Self::with_config(
             proposal_id,
             current_revision_seq,
-            update_authority,
             RefinementConfig::default(),
         )
     }
@@ -222,7 +203,6 @@ impl RefinementLoopState {
     pub fn with_config(
         proposal_id: impl Into<String>,
         current_revision_seq: i32,
-        update_authority: UpdateAuthority,
         config: RefinementConfig,
     ) -> Self {
         Self {
@@ -233,7 +213,6 @@ impl RefinementLoopState {
             consecutive_dry_rounds: 0,
             total_spawns: 0,
             current_revision_seq,
-            update_authority,
             attributed_user_id: None,
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
@@ -260,17 +239,6 @@ impl RefinementLoopState {
         self.consecutive_dry_rounds >= self.config.dry_rounds_required
     }
 
-    /// Read the current update authority. In production, the coordinator calls
-    /// this at each round boundary to respect mid-run setting changes.
-    pub fn update_authority(&self) -> UpdateAuthority {
-        self.update_authority
-    }
-
-    /// Set the update authority (called when the coordinator reads user settings
-    /// at a round boundary).
-    pub fn set_update_authority(&mut self, authority: UpdateAuthority) {
-        self.update_authority = authority;
-    }
 
     /// Record that an agent session was spawned. Returns `Err` if the spawn
     /// cap would be exceeded.
@@ -443,19 +411,12 @@ pub fn select_refinement_model(
 /// Build the `event_metadata` JSON for an advocate revision attributed to the
 /// refinement loop. This is persisted in `proposal_revisions.event_metadata`
 /// so revisions are attributable by role, round, and authority mode.
-pub fn build_revision_event_metadata(
-    round: i32,
-    authority: UpdateAuthority,
-    author_model: Option<&str>,
-) -> serde_json::Value {
+pub fn build_revision_event_metadata(round: i32, author_model: Option<&str>) -> serde_json::Value {
     let mut meta = serde_json::json!({
         "source": "refinement_loop",
         "role": "advocate",
         "round": round,
-        "authority": match authority {
-            UpdateAuthority::Checkpoint => "checkpoint",
-            UpdateAuthority::AutoAccept => "auto_accept",
-        },
+        "authority": "checkpoint",
     });
     if let Some(model) = author_model {
         meta["author_model"] = serde_json::Value::String(model.to_string());
@@ -528,7 +489,7 @@ mod tests {
     #[test]
     fn stops_after_two_dry_adversary_rounds_and_invokes_judge() {
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+            RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: advocate revises.
         state.record_advocate_revision(1);
@@ -583,7 +544,7 @@ mod tests {
     #[test]
     fn dry_rounds_reset_on_blocking_objection() {
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+            RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: dry.
         state.record_advocate_revision(1);
@@ -616,7 +577,7 @@ mod tests {
             ..test_config()
         };
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, config);
+            RefinementLoopState::with_config("p1", 0, config);
 
         // Rounds 1-3: adversary keeps finding blocking objections.
         for round in 1..=3 {
@@ -653,7 +614,7 @@ mod tests {
             ..test_config()
         };
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, config);
+            RefinementLoopState::with_config("p1", 0, config);
 
         // Spawn 3 agents successfully.
         assert!(state.record_spawn().is_ok());
@@ -676,7 +637,7 @@ mod tests {
             ..test_config()
         };
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, config);
+            RefinementLoopState::with_config("p1", 0, config);
 
         // Round 1: adversary raises a blocking objection.
         state.record_advocate_revision(1);
@@ -729,7 +690,7 @@ mod tests {
             ..test_config()
         };
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, config);
+            RefinementLoopState::with_config("p1", 0, config);
 
         // Round 1: non-blocking objection.
         state.record_advocate_revision(1);
@@ -759,35 +720,6 @@ mod tests {
         assert_eq!(outcome, AdversaryPassOutcome::Continue);
         assert!(!state.is_complete());
         assert_eq!(state.consecutive_dry_rounds, 2);
-    }
-
-    // ── Checkpoint vs auto-accept ────────────────────────────────────────
-
-    #[test]
-    fn checkpoint_mode_records_without_applying() {
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::Checkpoint, test_config());
-
-        assert_eq!(state.update_authority(), UpdateAuthority::Checkpoint);
-
-        // Simulate mid-run switch to auto-accept.
-        state.set_update_authority(UpdateAuthority::AutoAccept);
-        assert_eq!(state.update_authority(), UpdateAuthority::AutoAccept);
-
-        // The authority is what the coordinator reads at round boundaries.
-        // In checkpoint mode, the caller should store the revision but not
-        // mutate the live proposal body; in auto-accept, it should apply.
-        // This is verified at the integration level; here we verify the
-        // state machine tracks the mode correctly.
-    }
-
-    #[test]
-    fn update_authority_defaults_are_respected() {
-        let checkpoint = RefinementLoopState::new("p1", 0, UpdateAuthority::Checkpoint);
-        assert_eq!(checkpoint.update_authority(), UpdateAuthority::Checkpoint);
-
-        let auto_accept = RefinementLoopState::new("p1", 0, UpdateAuthority::AutoAccept);
-        assert_eq!(auto_accept.update_authority(), UpdateAuthority::AutoAccept);
     }
 
     // ── Diverse-refinement model selection ────────────────────────────────
@@ -858,7 +790,7 @@ mod tests {
 
     #[test]
     fn phase_transitions_follow_expected_sequence() {
-        let mut state = RefinementLoopState::new("p1", 0, UpdateAuthority::AutoAccept);
+        let mut state = RefinementLoopState::new("p1", 0);
         assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
 
         state.record_advocate_revision(1);
@@ -907,17 +839,16 @@ mod tests {
 
     #[test]
     fn revision_metadata_contains_expected_fields() {
-        let meta = build_revision_event_metadata(2, UpdateAuthority::AutoAccept, Some("gpt-4o"));
+        let meta = build_revision_event_metadata(2, Some("gpt-4o"));
         assert_eq!(meta["source"], "refinement_loop");
         assert_eq!(meta["role"], "advocate");
         assert_eq!(meta["round"], 2);
-        assert_eq!(meta["authority"], "auto_accept");
         assert_eq!(meta["author_model"], "gpt-4o");
     }
 
     #[test]
     fn revision_metadata_checkpoint_mode() {
-        let meta = build_revision_event_metadata(1, UpdateAuthority::Checkpoint, None);
+        let meta = build_revision_event_metadata(1, None);
         assert_eq!(meta["authority"], "checkpoint");
         assert!(meta.get("author_model").is_none() || meta["author_model"].is_null());
     }
@@ -927,7 +858,7 @@ mod tests {
     #[test]
     fn explicit_dry_signal_overrides_blocking_objections() {
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+            RefinementLoopState::with_config("p1", 0, test_config());
 
         state.record_advocate_revision(1);
         // Adversary found blocking objections but explicitly signals dry
@@ -949,7 +880,7 @@ mod tests {
 
     #[test]
     fn agent_failure_terminates_loop() {
-        let mut state = RefinementLoopState::new("p1", 0, UpdateAuthority::AutoAccept);
+        let mut state = RefinementLoopState::new("p1", 0);
         state.terminate(StopReason::AgentFailure {
             role: "adversary".into(),
             error: "session crashed".into(),
@@ -970,13 +901,11 @@ mod tests {
         for round in 1..=5 {
             let meta = build_revision_event_metadata(
                 round,
-                UpdateAuthority::AutoAccept,
                 Some("anthropic/claude-sonnet-4-20250514"),
             );
             assert_eq!(meta["round"], round, "round must match for round {round}");
             assert_eq!(meta["role"], "advocate");
             assert_eq!(meta["source"], "refinement_loop");
-            assert_eq!(meta["authority"], "auto_accept");
             assert_eq!(
                 meta["author_model"], "anthropic/claude-sonnet-4-20250514",
                 "model must be attributed"
@@ -989,7 +918,7 @@ mod tests {
         // Verify that the objection record shape aligns with the debate-trail
         // schema fields (round, against_revision_seq, agent_role, blocking).
         let mut state =
-            RefinementLoopState::with_config("p1", 0, UpdateAuthority::AutoAccept, test_config());
+            RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: advocate advances to revision 1.
         state.record_advocate_revision(1);
@@ -1020,7 +949,7 @@ mod tests {
 
     #[test]
     fn build_revision_event_metadata_checkpoint_includes_pending() {
-        let meta = build_revision_event_metadata(2, UpdateAuthority::Checkpoint, Some("model-x"));
+        let meta = build_revision_event_metadata(2, Some("model-x"));
         assert_eq!(meta["authority"], "checkpoint");
         assert_eq!(meta["role"], "advocate");
         assert_eq!(meta["round"], 2);
@@ -1031,16 +960,8 @@ mod tests {
     }
 
     #[test]
-    fn build_revision_event_metadata_auto_accept_no_checkpoint() {
-        let meta = build_revision_event_metadata(1, UpdateAuthority::AutoAccept, None);
-        assert_eq!(meta["authority"], "auto_accept");
-        assert!(meta.get("checkpoint_status").is_none());
-        assert!(meta.get("author_model").is_none());
-    }
-
-    #[test]
     fn checkpoint_pending_status_field_can_be_added() {
-        let mut meta = build_revision_event_metadata(3, UpdateAuthority::Checkpoint, None);
+        let mut meta = build_revision_event_metadata(3, None);
         meta["checkpoint_status"] = serde_json::json!("pending");
         meta["previous_revision_seq"] = serde_json::json!(2);
         assert_eq!(meta["checkpoint_status"], "pending");

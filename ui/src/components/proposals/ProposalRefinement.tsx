@@ -40,15 +40,6 @@ function stopReasonLabel(reason: string): string {
 }
 
 /**
- * Badge variant for the update authority mode.
- */
-function authorityBadgeVariant(
-  authority: string,
-): "default" | "secondary" | "outline" {
-  return authority === "auto_accept" ? "default" : "secondary";
-}
-
-/**
  * Status badge for a checkpoint revision.
  */
 function checkpointStatusBadge(
@@ -63,8 +54,8 @@ function checkpointStatusBadge(
  * Shows a "Start refinement" button when refinement hasn't been started,
  * and a status panel when refinement is active or has stopped.
  *
- * In checkpoint mode, shows pending advocate revisions with approve/reject
- * actions. In auto-accept mode, revisions are applied automatically.
+ * Refinement always runs in checkpoint mode: pending advocate revisions are
+ * shown with approve/reject actions and applied only after explicit approval.
  */
 export function ProposalRefinement({
   proposalId,
@@ -78,7 +69,6 @@ export function ProposalRefinement({
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [authority, setAuthority] = useState<string>("checkpoint");
   const me = useAuthUser();
   const usersQuery = useQuery(usersQueryOptions());
   const users: OrgUser[] = usersQuery.data ?? [];
@@ -102,7 +92,7 @@ export function ProposalRefinement({
   const [actionBusy, setActionBusy] = useState<number | null>(null);
   const [diffOpen, setDiffOpen] = useState<number | null>(null);
 
-  // Fetch pending checkpoint revisions when in checkpoint mode.
+  // Fetch pending checkpoint revisions whenever refinement is active.
   const fetchPending = useCallback(async () => {
     if (!proposalId) return;
     try {
@@ -119,10 +109,10 @@ export function ProposalRefinement({
   }, [proposalId]);
 
   useEffect(() => {
-    if (status?.update_authority === "checkpoint" && status?.active) {
+    if (status?.active) {
       fetchPending();
     }
-  }, [status?.update_authority, status?.active, status?.pending_checkpoint_count, fetchPending]);
+  }, [status?.active, status?.pending_checkpoint_count, fetchPending]);
 
   const handleApprove = useCallback(
     async (seq: number) => {
@@ -175,7 +165,6 @@ export function ProposalRefinement({
     try {
       const res = await callMcpTool("proposal_refinement_start", {
         proposal_id: proposalId,
-        update_authority: authority,
         owner_user_id: owner || undefined,
       });
       if (res.error) throw new Error(res.error);
@@ -188,7 +177,7 @@ export function ProposalRefinement({
     } finally {
       setBusy(false);
     }
-  }, [proposalId, authority, owner, onChanged]);
+  }, [proposalId, owner, onChanged]);
 
   // Active or stopped refinement status panel.
   if (status && (status.active || status.stop_reason)) {
@@ -208,13 +197,8 @@ export function ProposalRefinement({
                 Stopped
               </Badge>
             )}
-            <Badge
-              variant={authorityBadgeVariant(status.update_authority)}
-              className="text-xs"
-            >
-              {status.update_authority === "auto_accept"
-                ? "Auto-accept"
-                : "Checkpoint"}
+            <Badge variant="secondary" className="text-xs">
+              Checkpoint
             </Badge>
           </div>
         </div>
@@ -251,8 +235,7 @@ export function ProposalRefinement({
         )}
 
         {/* Pending checkpoint revisions */}
-        {status.update_authority === "checkpoint" &&
-          (status.pending_checkpoint_count ?? 0) > 0 && (
+        {(status.pending_checkpoint_count ?? 0) > 0 && (
             <div className="space-y-2 border-t pt-2">
               <Label className="text-xs uppercase text-muted-foreground">
                 Pending revisions ({status.pending_checkpoint_count})
@@ -262,7 +245,7 @@ export function ProposalRefinement({
                 return (
                   <div
                     key={rev.seq}
-                    className="space-y-1 rounded-md border border-amber-200 bg-amber-50 p-2"
+                    className="space-y-1 rounded-md border border-amber-500/30 bg-amber-500/10 p-2"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -345,13 +328,11 @@ export function ProposalRefinement({
             </div>
           )}
 
-        {status.update_authority === "checkpoint" && status.active && (
+        {status.active && (
           <p className="text-xs text-muted-foreground">
             {(status.pending_checkpoint_count ?? 0) > 0
               ? `${status.pending_checkpoint_count} advocate revision(s) awaiting approval.`
               : "Advocate revisions require explicit approval before they are applied."}
-            {" "}
-            In auto-accept mode, revisions are applied automatically.
           </p>
         )}
 
@@ -378,16 +359,6 @@ export function ProposalRefinement({
         rounds.
       </p>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm">Mode</span>
-        <Select value={authority} onValueChange={(value) => setAuthority(value ?? "checkpoint")}>
-          <SelectTrigger className="h-8 w-[200px] text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="checkpoint">Checkpoint</SelectItem>
-            <SelectItem value="auto_accept">Auto-accept</SelectItem>
-          </SelectContent>
-        </Select>
         <span className="text-sm">Attribute to</span>
         <Select
           value={owner}
@@ -422,9 +393,7 @@ export function ProposalRefinement({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        {authority === "checkpoint"
-          ? "Checkpoint mode: advocate revisions are proposed for approval before they are applied."
-          : "Auto-accept mode: advocate revisions are applied automatically as proposal updates."}
+        Advocate revisions are proposed for your approval before they're applied.
         {" "}
         Same-model fallback is used when diverse models are unavailable.
       </p>

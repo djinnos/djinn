@@ -47,20 +47,11 @@ fn err_refinement_status(error: impl Into<String>) -> ProposalRefinementStatusRe
 pub struct ProposalRefinementStartParams {
     /// Proposal UUID or short_id.
     pub proposal_id: String,
-    /// Update authority mode: `checkpoint` (advocate revisions are proposed
-    /// but not auto-applied) or `auto_accept` (revisions are applied as
-    /// proposal updates). Defaults to `checkpoint`.
-    #[serde(default = "default_update_authority")]
-    pub update_authority: String,
     /// User the refinement run is attributed to: owner of the spawned
     /// refinement (tribunal) tasks and the scope for per-user role-model
     /// resolution. Omit to attribute the run to the proposal author.
     #[serde(default)]
     pub owner_user_id: Option<String>,
-}
-
-fn default_update_authority() -> String {
-    "checkpoint".to_string()
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -97,13 +88,6 @@ pub struct ProposalRefinementDemandRoundParams {
     pub proposal_id: String,
     /// Why another round is being demanded. Recorded in proposal history.
     pub reason: Option<String>,
-    /// Update authority mode: `checkpoint` (default) or `auto_accept`.
-    #[serde(default = "default_demand_authority")]
-    pub update_authority: Option<String>,
-}
-
-fn default_demand_authority() -> Option<String> {
-    Some("checkpoint".to_string())
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -131,12 +115,12 @@ impl DjinnMcpServer {
     /// coordinator rejects the start (e.g. duplicate active run), a
     /// `refinement_stop` lifecycle entry is recorded with the error reason.
     ///
-    /// `update_authority` controls whether advocate revisions are applied
-    /// automatically (`auto_accept`) or proposed for approval (`checkpoint`,
-    /// the default). Same-model fallback is allowed when diverse models are
-    /// unavailable — this is not presented as an error.
+    /// Refinement is always checkpoint-gated: the advocate's revisions are
+    /// proposed for explicit approval/rejection and never auto-applied.
+    /// Same-model fallback is allowed when diverse models are unavailable —
+    /// this is not presented as an error.
     #[tool(
-        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. `update_authority` is `checkpoint` (default — advocate revisions require approval) or `auto_accept` (revisions are applied automatically). Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
+        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. Refinement is always checkpoint-gated: the advocate's revisions are proposed for explicit approval/rejection and never auto-applied. Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
     )]
     pub async fn proposal_refinement_start(
         &self,
@@ -159,14 +143,6 @@ impl DjinnMcpServer {
             )));
         }
 
-        // Validate update_authority.
-        let authority = p.update_authority.as_str();
-        if !matches!(authority, "checkpoint" | "auto_accept") {
-            return Json(err_refinement_start(format!(
-                "invalid update_authority: {authority:?} (expected checkpoint or auto_accept)"
-            )));
-        }
-
         // Lifecycle-level duplicate check — fast-path early return before
         // hitting the coordinator channel.
         if refinement_is_active(&repo, &proposal.id).await {
@@ -175,9 +151,10 @@ impl DjinnMcpServer {
             ));
         }
 
-        // Record refinement_start lifecycle entry.
+        // Record refinement_start lifecycle entry. Refinement is always
+        // checkpoint-gated; the field is retained for status-display compat.
         let metadata = json!({
-            "update_authority": authority,
+            "update_authority": "checkpoint",
         });
         match repo
             .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&metadata))
@@ -202,7 +179,6 @@ impl DjinnMcpServer {
                 let request = ProposalRefinementStartRequest {
                     proposal_id: proposal.id.clone(),
                     current_revision_seq: proposal.latest_revision_seq,
-                    update_authority: authority.to_string(),
                     // Attribute to the explicitly-chosen user, else the proposal
                     // author. This owns the tribunal tasks and scopes per-user
                     // model resolution (so refinement uses the attributed user's
@@ -255,7 +231,7 @@ impl DjinnMcpServer {
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
-            update_authority: authority.to_string(),
+            update_authority: "checkpoint".to_string(),
             stop_reason: None,
             pending_checkpoint_count: 0,
             needs_evidence: None,
@@ -275,7 +251,7 @@ impl DjinnMcpServer {
     /// Status is derived from the refinement lifecycle events and debate trail.
     /// Returns an empty (inactive) status when refinement has not been started.
     #[tool(
-        description = "Read proposal refinement status. Returns active flag, current round, dry-round count, total entries, update_authority (checkpoint or auto_accept), and stop_reason if refinement has ended. Derived from refinement lifecycle events and debate-trail entries."
+        description = "Read proposal refinement status. Returns active flag, current round, dry-round count, total entries, update_authority (always `checkpoint`), and stop_reason if refinement has ended. Derived from refinement lifecycle events and debate-trail entries."
     )]
     pub async fn proposal_refinement_status(
         &self,
@@ -455,23 +431,12 @@ impl DjinnMcpServer {
             });
         }
 
-        let authority = p.update_authority.as_deref().unwrap_or("checkpoint");
-        if !matches!(authority, "checkpoint" | "auto_accept") {
-            return Json(DemandRoundResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                refinement: None,
-                error: Some(format!(
-                    "invalid update_authority: {authority:?} (expected checkpoint or auto_accept)"
-                )),
-            });
-        }
-
-        // Record the demand-round action as a lifecycle event.
+        // Record the demand-round action as a lifecycle event. Refinement is
+        // always checkpoint-gated; the field is retained for status-display compat.
         let demand_metadata = serde_json::json!({
             "source": "human_demand_round",
             "reason": p.reason,
-            "update_authority": authority,
+            "update_authority": "checkpoint",
         });
         if let Err(e) = repo
             .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
@@ -492,7 +457,6 @@ impl DjinnMcpServer {
                 let request = ProposalRefinementStartRequest {
                     proposal_id: proposal.id.clone(),
                     current_revision_seq: proposal.latest_revision_seq,
-                    update_authority: authority.to_string(),
                     // Demand-round reuses the proposal author for attribution.
                     owner_user_id: proposal.author_user_id.clone(),
                 };
@@ -543,7 +507,7 @@ impl DjinnMcpServer {
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
-            update_authority: authority.to_string(),
+            update_authority: "checkpoint".to_string(),
             stop_reason: None,
             pending_checkpoint_count: 0,
             needs_evidence: None,
@@ -686,15 +650,12 @@ pub async fn build_refinement_status(
         None
     };
 
-    // Count pending checkpoint revisions.
-    let pending_checkpoint_count = if update_authority == "checkpoint" {
-        repo.pending_checkpoint_revisions(proposal_id)
-            .await
-            .map(|v| v.len() as i32)
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // Count pending checkpoint revisions (refinement is always checkpoint-gated).
+    let pending_checkpoint_count = repo
+        .pending_checkpoint_revisions(proposal_id)
+        .await
+        .map(|v| v.len() as i32)
+        .unwrap_or(0);
 
     // Derive round and dry-round counts from debate trail.
     let trail = repo

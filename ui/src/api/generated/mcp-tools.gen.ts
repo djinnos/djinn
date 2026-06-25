@@ -7116,10 +7116,6 @@ export namespace ProposalRefinementDemandRoundInputSchema {
    * Why another round is being demanded. Recorded in proposal history.
    */
   reason?: string
-  /**
-   * Update authority mode: `checkpoint` (default) or `auto_accept`.
-   */
-  update_authority?: string
   [k: string]: any
   }
 
@@ -7225,12 +7221,6 @@ export namespace ProposalRefinementStartInputSchema {
    * Proposal UUID or short_id.
    */
   proposal_id: string
-  /**
-   * Update authority mode: `checkpoint` (advocate revisions are proposed
-   * but not auto-applied) or `auto_accept` (revisions are applied as
-   * proposal updates). Defaults to `checkpoint`.
-   */
-  update_authority?: string
   [k: string]: any
   }
 
