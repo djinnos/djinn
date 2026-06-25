@@ -137,6 +137,38 @@ impl CoordinatorActor {
         let round = state.current_round;
         let revision_seq = state.current_revision_seq;
 
+        // Checkpoint pause gate: when an advocate revision is awaiting human
+        // approval/rejection, do NOT dispatch the next phase. The loop resumes
+        // on a later tick once the pending checkpoint is resolved (approve
+        // applies it to the live spec; reject discards it). Without this gate,
+        // checkpoint mode runs every round autonomously and the per-round body
+        // reverts compound — silently applying the advocate's edits to the live
+        // spec across rounds without the human ever approving them.
+        if state.update_authority() == UpdateAuthority::Checkpoint {
+            let event_bus = crate::events::event_bus_for(&self.events_tx);
+            let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+            match proposal_repo
+                .has_pending_checkpoint_revisions(proposal_id)
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        "Refinement paused: advocate revision awaiting checkpoint approval"
+                    );
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        error = %e,
+                        "Failed to check pending checkpoints; proceeding with dispatch"
+                    );
+                }
+            }
+        }
+
         // The user this run is attributed to (task owner + model scope).
         // Falls back to the proposal author when not explicitly set.
         let attributed_user_id = self
