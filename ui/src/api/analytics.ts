@@ -53,6 +53,22 @@ export interface UsageKpi {
   caption?: string | null;
   /** Optional composition of the value (e.g. Tokens → input / cached / output). */
   breakdown?: UsageKpiPart[] | null;
+  /**
+   * Real API-key spend in USD. Only present for cost-basis split responses
+   * (backend task 87v3+). Subscription/coding-plan sessions contribute $0.
+   */
+  actual_spend_usd?: number | null;
+  /**
+   * Projected subscription-equivalent cost in USD (list-rate estimate).
+   * Only present for cost-basis split responses. API-key sessions carry $0
+   * here; the real spend is in `actual_spend_usd`.
+   */
+  projected_usd?: number | null;
+  /**
+   * Count of sessions excluded from both actual and projected figures because
+   * they were uncatalogued or had no pricing data.
+   */
+  unpriced_count?: number;
 }
 
 export interface UsageTimeSeriesPoint {
@@ -75,6 +91,20 @@ export interface UsageTimeSeriesPoint {
   /** Optional agent role / type dimension supplied by grouped overview responses. */
   agent_type?: string;
   agent_role?: string;
+  /**
+   * Real API-key spend in this bucket (split cost-basis). Null when the
+   * bucket contains unpriced sessions; absent on pre-split responses.
+   */
+  actual_spend_usd?: number | null;
+  /**
+   * Projected subscription-equivalent cost in this bucket (split cost-basis).
+   * Absent on pre-split responses.
+   */
+  projected_usd?: number | null;
+  /**
+   * Count of unpriced sessions in this bucket. Absent on pre-split responses.
+   */
+  unpriced_count?: number;
 }
 
 export interface UsageModelSplit {
@@ -87,6 +117,12 @@ export interface UsageModelSplit {
   success_rate?: number | null;
   avg_reopens?: number | null;
   cost_per_task?: number | null;
+  /** Real API-key spend for this model split (split cost-basis). */
+  actual_spend_usd?: number | null;
+  /** Projected subscription-equivalent cost for this model split. */
+  projected_usd?: number | null;
+  /** Count of unpriced sessions in this model split. */
+  unpriced_count?: number;
 }
 
 export interface UsageBreakdownRow {
@@ -108,6 +144,12 @@ export interface UsageBreakdownRow {
   task_url?: string | null;
   proposal_id?: string | null;
   proposal_url?: string | null;
+  /** Real API-key spend for this breakdown row (split cost-basis). */
+  actual_spend_usd?: number | null;
+  /** Projected subscription-equivalent cost for this breakdown row. */
+  projected_usd?: number | null;
+  /** Count of unpriced sessions in this breakdown row. */
+  unpriced_count?: number;
 }
 
 export interface UsageModelEffectiveness {
@@ -125,6 +167,12 @@ export interface UsageModelEffectiveness {
   session_count?: number;
   completed_task_count?: number;
   reopen_count?: number;
+  /** Real API-key spend for this model (split cost-basis). */
+  actual_spend_usd?: number | null;
+  /** Projected subscription-equivalent cost for this model. */
+  projected_usd?: number | null;
+  /** Count of unpriced sessions for this model. */
+  unpriced_count?: number;
 }
 
 export interface UsageProjectModelCell {
@@ -138,6 +186,12 @@ export interface UsageProjectModelCell {
   total_tokens: number;
   /** Cache-read (cached input) tokens — priced separately from fresh input. */
   tokens_cached?: number;
+  /** Real API-key spend for this project×model cell (split cost-basis). */
+  actual_spend_usd?: number | null;
+  /** Projected subscription-equivalent cost for this project×model cell. */
+  projected_usd?: number | null;
+  /** Count of unpriced sessions in this project×model cell. */
+  unpriced_count?: number;
 }
 
 /**
@@ -156,6 +210,11 @@ export interface UsageAnalyticsResponse {
   model_effectiveness: UsageModelEffectiveness[];
   project_model_matrix: UsageProjectModelCell[];
   generated_at: string;
+  /**
+   * Total count of unpriced sessions across the entire filtered window.
+   * Present on split cost-basis responses; absent on pre-split responses.
+   */
+  unpriced_session_count?: number;
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────
