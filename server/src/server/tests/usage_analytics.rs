@@ -693,7 +693,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     // total_cost is omitted from JSON when None (skip_serializing_if);
     // absent or null both indicate no cost data.
     assert!(
-        row.get("total_cost").map_or(true, |v| v.is_null()),
+        row.get("total_cost").is_none_or(|v| v.is_null()),
         "expected total_cost absent or null for unpriced model, got: {:?}",
         row.get("total_cost")
     );
