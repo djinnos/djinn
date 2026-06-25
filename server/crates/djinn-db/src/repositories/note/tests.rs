@@ -103,7 +103,8 @@ async fn make_session(
             started_at,
             status,
             tokens_in,
-            tokens_out
+            tokens_out,
+            cost_basis
         )
         VALUES (
             $1,
@@ -114,7 +115,8 @@ async fn make_session(
             to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             'completed',
             0,
-            0
+            0,
+            'unpriced'
         )"#,
         id,
         project_id,

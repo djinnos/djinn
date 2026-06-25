@@ -258,7 +258,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
-                cost_basis: "unpriced",
+                cost_basis: Some("unpriced"),
             })
             .await
             .unwrap();

@@ -630,7 +630,11 @@ async fn model_effectiveness_uses_frontend_field_names() {
     assert!(row.get("session_count").unwrap().is_number());
     assert_eq!(row.get("total_tokens").unwrap().as_i64().unwrap(), 150);
     assert!((row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 1.0).abs() < 1e-9);
-    assert_eq!(row.get("projected_usd").unwrap().as_f64().unwrap(), 0.0);
+    assert!(
+        row.get("projected_usd").unwrap().is_null(),
+        "expected projected_usd null when no projected sessions, got: {}",
+        row.get("projected_usd").unwrap()
+    );
     assert_eq!(
         row.get("unpriced_session_count").unwrap().as_i64().unwrap(),
         0
@@ -686,10 +690,12 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
 
     let me = array_field(&body, "model_effectiveness");
     let row = model_effectiveness_row(me, "unpriced-model");
+    // total_cost is omitted from JSON when None (skip_serializing_if);
+    // absent or null both indicate no cost data.
     assert!(
-        row.get("total_cost").unwrap().is_null(),
-        "expected total_cost null for unpriced model, got: {}",
-        row.get("total_cost").unwrap()
+        row.get("total_cost").map_or(true, |v| v.is_null()),
+        "expected total_cost absent or null for unpriced model, got: {:?}",
+        row.get("total_cost")
     );
     assert!(
         row.get("actual_spend_usd").unwrap().is_null(),
@@ -759,9 +765,10 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
         "breakdown-project"
     );
     assert!((proj_row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
-    assert_eq!(
-        proj_row.get("projected_usd").unwrap().as_f64().unwrap(),
-        0.0
+    assert!(
+        proj_row.get("projected_usd").unwrap().is_null(),
+        "expected projected_usd null when no projected sessions, got: {}",
+        proj_row.get("projected_usd").unwrap()
     );
     assert_eq!(
         proj_row
@@ -796,7 +803,11 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
         })
         .expect("matrix cell for proj-bd/model-bd");
     assert!((cell.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
-    assert_eq!(cell.get("projected_usd").unwrap().as_f64().unwrap(), 0.0);
+    assert!(
+        cell.get("projected_usd").unwrap().is_null(),
+        "expected projected_usd null when no projected sessions, got: {}",
+        cell.get("projected_usd").unwrap()
+    );
     assert_eq!(
         cell.get("unpriced_session_count")
             .unwrap()

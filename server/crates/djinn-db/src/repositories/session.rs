@@ -38,7 +38,10 @@ pub struct CreateSessionParams<'a> {
     /// `'projected'` for subscription/coding-plan sessions, `'unpriced'` when
     /// no usable price exists. Derived by the caller from catalog + credential
     /// class. Added as part of the cost-basis split (migration 83).
-    pub cost_basis: &'a str,
+    ///
+    /// Defaults to `"unpriced"` when `None` — callers that do not care about
+    /// cost-basis classification (most test code) can leave this as `None`.
+    pub cost_basis: Option<&'a str>,
 }
 
 impl SessionRepository {
@@ -78,7 +81,7 @@ impl SessionRepository {
             params.pricing.map(|p| p.output_per_million),
             params.pricing.map(|p| p.cache_read_per_million),
             params.pricing.map(|p| p.cache_write_per_million),
-            params.cost_basis,
+            params.cost_basis.unwrap_or("unpriced"),
         )
         .execute(self.db.pool())
         .await?;
@@ -830,8 +833,8 @@ impl SessionRepository {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id, title)
-             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4)
+                 created_by_user_id, task_run_id, title, cost_basis)
+             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4, 'unpriced')
              ON CONFLICT (id) DO UPDATE
                 SET status = 'running', ended_at = NULL
               WHERE sessions.status <> 'running'",
@@ -1410,6 +1413,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1423,6 +1427,7 @@ mod tests {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: None,
         })
         .await
         .unwrap();
@@ -1493,6 +1498,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1506,6 +1512,7 @@ mod tests {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: None,
         })
         .await
         .unwrap();
@@ -1517,8 +1524,8 @@ mod tests {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id, title)
-             VALUES ($1, NULL, NULL, 'openai/gpt', 'chat', 'running', $2, NULL, 'New Chat')",
+                 created_by_user_id, task_run_id, title, cost_basis)
+             VALUES ($1, NULL, NULL, 'openai/gpt', 'chat', 'running', $2, NULL, 'New Chat', 'unpriced')",
             chat_id,
             user_a
         )
@@ -1561,6 +1568,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1615,6 +1623,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1645,6 +1654,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1721,6 +1731,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1760,6 +1771,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1787,6 +1799,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1836,6 +1849,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1869,6 +1883,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1927,6 +1942,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1940,6 +1956,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1954,6 +1971,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -1967,6 +1985,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2049,6 +2068,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2063,6 +2083,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2077,6 +2098,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2091,6 +2113,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2145,6 +2168,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2281,6 +2305,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2333,6 +2358,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2380,6 +2406,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2429,6 +2456,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2467,6 +2495,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2519,6 +2548,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2561,6 +2591,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2626,6 +2657,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&original_pricing),
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2668,6 +2700,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2720,6 +2753,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
@@ -2763,6 +2797,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .unwrap();
