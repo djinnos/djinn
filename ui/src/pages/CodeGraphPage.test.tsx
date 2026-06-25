@@ -8,7 +8,7 @@ import type { Project } from "@/api/types";
 import type { CodeGraphWorkspace } from "@/api/codeGraph";
 
 // Sigma + WebGL aren't worth wiring up in jsdom; we stub the constructor so
-// the smoke test only validates the React surface (project picker shell,
+// the smoke test only validates the React surface (workspace selector,
 // canvas container, fetch / loading / empty copy).
 vi.mock("sigma", () => ({
   default: class MockSigma {
@@ -126,25 +126,14 @@ describe("CodeGraphPage", () => {
     render(<CodeGraphPage />);
 
     expect(screen.getByTestId("code-graph-canvas")).toBeInTheDocument();
-    expect(screen.getByLabelText(/select project/i)).toBeInTheDocument();
+    // No local project picker — the shared chrome selector drives project context.
     await waitFor(() => {
       expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
     });
   });
 
-  it("falls back to the no-projects copy when the project list is empty", () => {
-    projectStore.setState({
-      projects: [],
-      selectedProjectId: null,
-      lastViewPerProject: {},
-    });
-
-    render(<CodeGraphPage />);
-
-    expect(
-      screen.getByText(/no projects yet\. add one from the repositories page\./i),
-    ).toBeInTheDocument();
-  });
+  // Note: "No projects yet" empty state is now handled by the shared chrome
+  // ProjectSelector, not by CodeGraphPage itself.
 
   it("surfaces a friendly empty hint when the snapshot has no nodes", async () => {
     projectStore.setState({
@@ -252,7 +241,7 @@ describe("CodeGraphPage", () => {
     expect(fetchWorkspacesMock).toHaveBeenCalledTimes(1);
   });
 
-  it("resets workspace selection when the project changes or the slug is no longer valid", async () => {
+  it("resets workspace selection when the project changes (via shared chrome selector)", async () => {
     fetchWorkspacesMock.mockImplementation(async (project) =>
       project === "project-a"
         ? [
@@ -277,9 +266,8 @@ describe("CodeGraphPage", () => {
     });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("api");
 
-    fireEvent.change(screen.getByLabelText(/select project/i), {
-      target: { value: "project-b" },
-    });
+    // Simulate the shared chrome selector changing the project.
+    projectStore.setState({ selectedProjectId: "project-b" });
 
     await waitFor(() => {
       expect(fetchWorkspacesMock).toHaveBeenCalledWith("project-b");
@@ -291,13 +279,12 @@ describe("CodeGraphPage", () => {
     });
     expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBe("worker");
 
+    // Simulate switching back to project-a via shared chrome selector.
     fetchWorkspacesMock.mockResolvedValueOnce([
       { slug: "api", display: "API" },
       { slug: "web", display: "Web" },
     ]);
-    fireEvent.change(screen.getByLabelText(/select project/i), {
-      target: { value: "project-a" },
-    });
+    projectStore.setState({ selectedProjectId: "project-a" });
 
     await waitFor(() => {
       expect(useCodeGraphStore.getState().selectedWorkspaceSlug).toBeNull();
@@ -465,5 +452,39 @@ describe("CodeGraphPage", () => {
       expect(fetchSnapshotMock).toHaveBeenCalledWith("project-a", 10_000);
     });
     expect(screen.getAllByTestId("graph-toolbar")).toHaveLength(1);
+  });
+
+  // ── Duplicate project picker regression ──────────────────────────────────
+
+  it("does NOT render a local project picker in the page body (shared chrome handles it)", () => {
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    // The shared chrome ProjectSelector is rendered outside this component;
+    // the page itself should have no "Select project" control.
+    expect(screen.queryByLabelText(/select project/i)).not.toBeInTheDocument();
+  });
+
+  it("renders the workspace selector only when multiple workspaces exist", async () => {
+    fetchWorkspacesMock.mockResolvedValue([
+      { slug: "api", display: "API" },
+      { slug: "web", display: "Web" },
+    ]);
+    projectStore.setState({
+      projects: projectsFixture,
+      selectedProjectId: "project-a",
+      lastViewPerProject: {},
+    });
+
+    render(<CodeGraphPage />);
+
+    const selector = await screen.findByLabelText(/select workspace/i);
+    expect(selector).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "All" })).toBeInTheDocument();
   });
 });

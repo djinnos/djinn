@@ -20,6 +20,10 @@ describe("routeScopes", () => {
       expect(isGlobalProjectContextRoute("/memory")).toBe(true);
     });
 
+    it("returns true for /code-graph (local picker removed)", () => {
+      expect(isGlobalProjectContextRoute("/code-graph")).toBe(true);
+    });
+
     it("returns false for /tasks (board — url-filtered)", () => {
       expect(isGlobalProjectContextRoute("/tasks")).toBe(false);
     });
@@ -100,6 +104,12 @@ describe("routeScopes", () => {
       expect(entry!.scope).toBe("global-project-context");
     });
 
+    it("returns global-project-context scope for /code-graph", () => {
+      const entry = getRouteScopeEntry("/code-graph");
+      expect(entry).toBeDefined();
+      expect(entry!.scope).toBe("global-project-context");
+    });
+
     it("returns undefined for unregistered paths", () => {
       expect(getRouteScopeEntry("/unknown")).toBeUndefined();
     });
@@ -147,6 +157,12 @@ describe("routeScopes", () => {
       const memoryEntries = ROUTE_SCOPES.filter((e) => e.pattern === "/memory");
       expect(memoryEntries).toHaveLength(1);
       expect(memoryEntries[0].scope).toBe("global-project-context");
+    });
+
+    it("/code-graph appears exactly once with global-project-context scope", () => {
+      const entries = ROUTE_SCOPES.filter((e) => e.pattern === "/code-graph");
+      expect(entries).toHaveLength(1);
+      expect(entries[0].scope).toBe("global-project-context");
     });
   });
 });
