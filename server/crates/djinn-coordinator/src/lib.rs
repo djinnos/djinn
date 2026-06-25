@@ -55,7 +55,7 @@ mod evidence;
 pub mod handle;
 mod health;
 pub mod messages;
-pub(crate) mod pr_poller;
+pub mod pr_poller;
 mod prompt_eval;
 mod reentrance;
 #[allow(dead_code)]

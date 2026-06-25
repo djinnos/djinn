@@ -16,6 +16,25 @@ pub struct SlotPoolHandle {
 }
 
 impl SlotPoolHandle {
+    /// Wrap a pre-existing `mpsc::Sender<PoolMessage>` as a `SlotPoolHandle`.
+    ///
+    /// This is the interop seam used by `djinn-agent`'s coordinator facade
+    /// to bridge between the agent-side slot pool (which spawns with
+    /// `AgentContext`) and the coordinator (which expects a
+    /// `djinn_slot::SlotPoolHandle`).  Both handle types are thin wrappers
+    /// around the same `mpsc::Sender<PoolMessage>` channel; the receiving
+    /// actor is the same regardless of which crate spawned it.
+    ///
+    /// # Safety note
+    ///
+    /// The caller must ensure the sender was created from a slot-pool actor
+    /// whose message type is layout-compatible with this crate's
+    /// `PoolMessage`.  In practice this holds because both definitions are
+    /// kept in sync (same variants, same order, same field types).
+    pub fn from_raw_sender(sender: mpsc::Sender<PoolMessage>) -> Self {
+        Self { sender }
+    }
+
     pub fn spawn(
         app_state: SlotContext,
         cancel: CancellationToken,

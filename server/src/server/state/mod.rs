@@ -994,8 +994,8 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator =
-            CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps::new(
+        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(
+            djinn_agent::actors::coordinator::CoordinatorDeps::new(
                 self.events().clone(),
                 self.cancel().clone(),
                 self.db().clone(),
@@ -1005,7 +1005,8 @@ impl AppState {
                 self.inner.role_registry.clone(),
                 self.inner.background_work_tasks.clone(),
                 self.inner.lsp.clone(),
-            ));
+            ),
+        );
 
         self.set_agent_handles_for_tests(pool, coordinator).await;
     }
@@ -1055,7 +1056,7 @@ impl AppState {
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator = CoordinatorHandle::spawn(
+        let coordinator = djinn_agent::actors::coordinator::spawn_coordinator(
             djinn_agent::actors::coordinator::CoordinatorDeps::new(
                 self.events().clone(),
                 self.cancel().clone(),
