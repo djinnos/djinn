@@ -1,5 +1,6 @@
 // Phase 5: legacy wave module retained while migration completes.
-#![allow(dead_code)]
+// Dead-code warnings are suppressed by the parent module's
+// `#[allow(dead_code)]` on the `mod wave;` declaration.
 
 // Wave-based Planner planning (task `watx`).
 //
