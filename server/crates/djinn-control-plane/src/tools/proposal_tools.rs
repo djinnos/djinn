@@ -680,46 +680,54 @@ async fn evaluate_composed_gate(
     // 2. Tribunal conditions.
     let proposal_id = &proposal.id;
 
-    // 2a. Unresolved blocking debate-trail entries.
+    // 2a. Check for a current human override first — it gates whether
+    // judge-verdict blocking entries and needs-work verdicts are enforced.
+    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
+        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
+        _ => false,
+    };
+
+    // 2b. Unresolved blocking debate-trail entries.
+    // When a current override exists, judge verdict entries are excluded —
+    // the override explicitly supersedes the judge's needs-work verdict.
     match repo
         .list_unresolved_blocking_debate_entries(proposal_id)
         .await
     {
-        Ok(entries) if !entries.is_empty() => {
-            let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
-            failures.push(format!(
-                "unresolved blocking debate entries: {}",
-                ids.join(", ")
-            ));
+        Ok(entries) => {
+            let remaining: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
+                })
+                .collect();
+            if !remaining.is_empty() {
+                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+                failures.push(format!(
+                    "unresolved blocking debate entries: {}",
+                    ids.join(", ")
+                ));
+            }
         }
         Err(e) => {
             failures.push(format!("failed to check debate trail: {e}"));
         }
-        _ => {}
     }
 
-    // 2b. Latest judge verdict.
+    // 2c. Latest judge verdict.
     match repo.latest_judge_verdict(proposal_id).await {
         Ok(Some(verdict)) => {
             let verdict_lower = verdict.body.to_lowercase();
             // A "needs-work" verdict blocks unless overridden.
-            if verdict_lower.contains("needs-work")
+            if (verdict_lower.contains("needs-work")
                 || verdict_lower.contains("needs_work")
-                || verdict_lower.contains("needs work")
+                || verdict_lower.contains("needs work"))
+                && !override_is_current
             {
-                // Check for a current human override.
-                let override_is_current = match repo.latest_verdict_override(proposal_id).await {
-                    Ok(Some((override_on_seq, _))) => {
-                        override_on_seq == proposal.latest_revision_seq
-                    }
-                    _ => false,
-                };
-                if !override_is_current {
-                    failures.push(format!(
-                        "judge returned needs-work (verdict {}); no current human override",
-                        verdict.id
-                    ));
-                }
+                failures.push(format!(
+                    "judge returned needs-work (verdict {}); no current human override",
+                    verdict.id
+                ));
             }
         }
         Err(e) => {
@@ -728,7 +736,7 @@ async fn evaluate_composed_gate(
         _ => {}
     }
 
-    // 2c. Needs-evidence spike parking.
+    // 2d. Needs-evidence spike parking.
     match repo.has_open_needs_evidence_spike(proposal_id).await {
         Ok(true) => {
             let claim = proposal
