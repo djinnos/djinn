@@ -159,6 +159,7 @@ impl Workspace {
         if staged.trim().is_empty() {
             return Ok(false);
         }
+        self.reject_oversized_staged_files(&staged).await?;
         self.run_git(
             &["commit", "-m", message],
             &[
@@ -170,6 +171,68 @@ impl Workspace {
         )
         .await?;
         Ok(true)
+    }
+
+    /// Refuse to commit any staged file larger than GitHub's 100 MiB hard limit.
+    ///
+    /// GitHub's pre-receive hook rejects a push containing a blob > 100 MiB
+    /// (`GH001`), and once such a blob is in branch history the only fix is a
+    /// history rewrite — there is no in-band recovery from the push itself. The
+    /// blob is almost always a cache/store directory swept in by `git add -A`
+    /// after a tool wrote it inside the worktree (observed: a `pnpm` store under
+    /// `.local/share/pnpm` when `HOME` drifted into the worktree; also cargo
+    /// target dirs and `node_modules`). Catching it here, at commit time, turns a
+    /// dead-end push rejection into an actionable error the worker can fix within
+    /// its own run (gitignore or delete the file) before it ever enters history.
+    ///
+    /// Staged content equals on-disk content (we just ran `add -A`), so the
+    /// on-disk size of each staged regular file is its blob size. Deleted paths
+    /// don't stat (skipped — a deletion can't be oversized); symlinks report
+    /// their own small size via `symlink_metadata` and never false-trigger.
+    async fn reject_oversized_staged_files(
+        &self,
+        staged: &str,
+    ) -> Result<(), EphemeralWorkspaceError> {
+        const MAX_COMMIT_FILE_BYTES: u64 = 100 * 1024 * 1024;
+        let root = self.path().to_path_buf();
+        let names: Vec<String> = staged
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        let offenders = tokio::task::spawn_blocking(move || {
+            let mut offenders: Vec<(String, u64)> = Vec::new();
+            for name in names {
+                if let Ok(meta) = std::fs::symlink_metadata(root.join(&name))
+                    && meta.is_file()
+                    && meta.len() > MAX_COMMIT_FILE_BYTES
+                {
+                    offenders.push((name, meta.len()));
+                }
+            }
+            offenders
+        })
+        .await
+        .map_err(|e| {
+            EphemeralWorkspaceError::Git(format!("oversized-file scan join error: {e}"))
+        })?;
+        if offenders.is_empty() {
+            return Ok(());
+        }
+        let detail = offenders
+            .iter()
+            .map(|(p, n)| format!("  {p} ({:.2} MB)", *n as f64 / (1024.0 * 1024.0)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(EphemeralWorkspaceError::Git(format!(
+            "refusing to commit: {} staged file(s) exceed GitHub's 100 MB limit and would make the \
+             task_branch push fail (GH001 — pre-receive hook declined). These are almost always \
+             cache/store artifacts written inside the worktree (e.g. a pnpm store under \
+             `.local/share/pnpm`, a cargo target dir, or `node_modules`) — add them to `.gitignore` \
+             or remove them; do not commit them:\n{detail}",
+            offenders.len()
+        )))
     }
 
     /// Explicit teardown. Equivalent to `drop(self)` — the `TempDir` cleans
@@ -1287,5 +1350,65 @@ mod tests {
         let ws = Workspace::attach_existing(dir, "main").expect("attach");
         // Must not panic / error even with zero commits + zero tracked files.
         ws.normalize_mtimes().await;
+    }
+
+    /// Create a sparse file of `len` bytes at `path` (reports `len` via
+    /// `metadata().len()` without writing real data — keeps the >100 MB test
+    /// cheap on disk).
+    fn sparse_file(path: &Path, len: u64) {
+        let f = std::fs::File::create(path).expect("create sparse file");
+        f.set_len(len).expect("set_len");
+    }
+
+    /// `commit` must refuse to stage a file over GitHub's 100 MB hard limit —
+    /// the exact footgun behind the `task/aqmk` GH001 push rejection (a pnpm
+    /// store swept in by `add -A` when HOME drifted into the worktree). The
+    /// error must name the offending path, and NO commit may be created.
+    #[tokio::test]
+    async fn commit_rejects_oversized_staged_file() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        let head_before = git(cp, &["rev-parse", "HEAD"]).trim().to_string();
+
+        // 101 MB > the 100 MiB limit; a normal small file is also staged to
+        // prove the guard fires on the big one specifically, not "any change".
+        sparse_file(&cp.join("cache.bin"), 101 * 1024 * 1024);
+        write(cp, "real.txt", "legit change\n");
+
+        let err = ws
+            .commit("work", TEST_IDENT)
+            .await
+            .expect_err("commit must be refused when an oversized file is staged");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cache.bin") && msg.contains("100 MB"),
+            "error must name the oversized path and the limit, got: {msg}"
+        );
+        assert_eq!(
+            git(cp, &["rev-parse", "HEAD"]).trim(),
+            head_before,
+            "no commit may be created when the guard trips"
+        );
+    }
+
+    /// Control: an ordinary (sub-limit) change still commits cleanly — the
+    /// guard must not block normal work.
+    #[tokio::test]
+    async fn commit_allows_normal_sized_files() {
+        let (_origin, clone, ws) = fixture();
+        let cp = clone.path();
+        write(cp, "real.txt", "legit change\n");
+        // A few MB is well under the limit and must pass.
+        sparse_file(&cp.join("medium.bin"), 5 * 1024 * 1024);
+
+        assert!(
+            ws.commit("work", TEST_IDENT).await.expect("commit"),
+            "a sub-limit change must commit"
+        );
+        assert_eq!(
+            git(cp, &["log", "--oneline"]).lines().count(),
+            2,
+            "exactly the base commit plus the worker commit"
+        );
     }
 }
