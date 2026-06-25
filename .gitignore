@@ -24,6 +24,10 @@ mcp.json
 # Package manager stores
 .pnpm-store/
 node_modules/
+# pnpm/npm/corepack write here when HOME points inside the worktree (e.g. a
+# worker sets HOME=<worktree> to make pnpm runnable). The pnpm content store
+# lands at .local/share/pnpm and is huge — never commit it.
+.local/
 
 # Tilt local state — dev vault key + optional GitHub App creds consumed by the Tiltfile.
 /.tilt/
