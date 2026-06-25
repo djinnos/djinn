@@ -215,7 +215,7 @@ impl SupervisorServices for DirectServices {
             metadata_json: params.metadata_json.as_deref(),
             task_run_id: params.task_run_id.as_deref(),
             pricing: pricing.as_ref(),
-            cost_basis: Some(cost_basis),
+            cost_basis,
         })
         .await
         .map_err(|e| e.to_string())
