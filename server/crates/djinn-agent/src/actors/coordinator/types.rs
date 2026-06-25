@@ -1,3 +1,8 @@
+// Phase 5: this module is retained as a legacy facade while types are migrated
+// to `djinn-coordinator`.  Dead-code warnings fire because the djinn-coordinator
+// re-exports shadow these items in the parent module scope.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};

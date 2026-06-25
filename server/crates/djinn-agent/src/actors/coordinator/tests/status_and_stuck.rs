@@ -1,5 +1,24 @@
 use super::*;
 
+/// Poll `handle.get_status()` until `predicate` returns true or timeout.
+async fn wait_for_status<F>(handle: &CoordinatorHandle, predicate: F)
+where
+    F: Fn(&CoordinatorStatus) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        if let Ok(status) = handle.get_status() {
+            if predicate(&status) {
+                return;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out waiting for coordinator status condition");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 // ── Status ───────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -106,7 +125,7 @@ async fn stuck_detection_skips_task_with_background_post_session_work() {
 
     // Trigger stuck scan again — this time the task should be recovered.
     handle.trigger_stuck_scan().await.unwrap();
-    handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
+    wait_for_status(&handle, |s| s.sessions_recovered >= 1).await;
 
     let final_task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
@@ -132,7 +151,7 @@ async fn stuck_detection_releases_orphaned_in_progress_task() {
     let handle = spawn_coordinator(&db, &tx);
     handle.trigger_dispatch().await.unwrap();
     // Trigger dispatch to also run stuck detection; wait for recovery.
-    handle.wait_for_status(|s| s.sessions_recovered >= 1).await;
+    wait_for_status(&handle, |s| s.sessions_recovered >= 1).await;
 
     let status = handle.get_status().unwrap();
     assert!(

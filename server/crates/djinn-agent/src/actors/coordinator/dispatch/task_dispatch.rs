@@ -1612,6 +1612,9 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod inflight_ledger_tests {
     use super::*;
+    use crate::actors::coordinator::types::{
+        AutoMergeTracker as LocalAutoMergeTracker, PrCleanupConfig as LocalPrCleanupConfig,
+    };
     use djinn_core::models::{DispatchPause, DispatchPauseState, Task};
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
     use std::time::Duration;
@@ -1937,7 +1940,7 @@ mod inflight_ledger_tests {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
-            auto_merge_tracker: AutoMergeTracker::default(),
+            auto_merge_tracker: LocalAutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::actors::coordinator::consolidation::DbConsolidationRunner::new(db.clone()),
             ),
@@ -1964,7 +1967,7 @@ mod inflight_ledger_tests {
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
-            pr_cleanup_config: PrCleanupConfig::default(),
+            pr_cleanup_config: LocalPrCleanupConfig::default(),
             active_refinements: HashMap::new(),
             refinement_sessions: HashMap::new(),
             dispatched: 0,

@@ -816,16 +816,131 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    fn test_slot_context(db: Database) -> djinn_slot::host::SlotContext {
+        struct NoopCallbacks;
+        impl djinn_slot::host::SlotHostCallbacks for NoopCallbacks {
+            fn interrupt_paused_worker_session<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a djinn_slot::host::SlotContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+                Box::pin(async {})
+            }
+            fn resolve_mcp_tools<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a djinn_slot::host::SlotContext,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<djinn_slot::host::ResolvedMcpTools, String>,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async { Err("noop".into()) })
+            }
+            fn render_prompt(
+                &self,
+                _: &str,
+                _: &djinn_core::models::Task,
+                _: &serde_json::Value,
+            ) -> String {
+                String::new()
+            }
+            fn initial_user_message<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a djinn_slot::host::SlotContext,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>>
+            {
+                Box::pin(async { String::new() })
+            }
+            fn build_mcp_state(
+                &self,
+                _: &djinn_slot::host::SlotContext,
+            ) -> djinn_control_plane::McpState {
+                panic!("noop")
+            }
+            fn require_project_id_for_task_ops<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a djinn_slot::host::SlotContext,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                String,
+                                djinn_control_plane::tools::task_tools::ErrorResponse,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async {
+                    Err(djinn_control_plane::tools::task_tools::ErrorResponse {
+                        error: "noop".into(),
+                    })
+                })
+            }
+            fn resolve_provider_credential<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a djinn_slot::host::SlotContext,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<djinn_slot::helpers::ProviderCredential, String>,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async { Err("noop".into()) })
+            }
+            fn run_task_dispatch<'a>(
+                &'a self,
+                _: String,
+                _: String,
+                _: String,
+                _: djinn_slot::host::SlotContext,
+                _: tokio_util::sync::CancellationToken,
+                _: tokio_util::sync::CancellationToken,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>
+            {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        djinn_slot::host::SlotContext {
+            db,
+            event_bus: djinn_core::events::EventBus::noop(),
+            catalog: djinn_provider::catalog::CatalogService::new(),
+            health_tracker: djinn_provider::catalog::HealthTracker::default(),
+            background_work_tasks: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            active_tasks: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            default_project_id: None,
+            working_root: None,
+            coordinator_trigger: None,
+            runtime_ops: None,
+            repo_graph_ops: None,
+            callbacks: std::sync::Arc::new(NoopCallbacks),
+        }
+    }
+
     fn spawn_coordinator(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> CoordinatorHandle {
-        use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
-        use crate::roles::RoleRegistry;
+        use djinn_coordinator::roles::RoleRegistry;
         use djinn_provider::catalog::health::HealthTracker;
+        use djinn_slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
 
         let cancel = CancellationToken::new();
-        let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let ctx = test_slot_context(db.clone());
         let pool = SlotPoolHandle::spawn(
             ctx,
             cancel.clone(),
@@ -860,6 +975,7 @@ mod tests {
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
     ) -> CoordinatorActor {
+        use super::types::{CoordinatorDeps as LocalCoordinatorDeps, SharedCoordinatorState};
         use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
         use crate::roles::RoleRegistry;
         use djinn_provider::catalog::health::HealthTracker;
@@ -887,7 +1003,7 @@ mod tests {
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         CoordinatorActor::new(
-            CoordinatorDeps::new(
+            LocalCoordinatorDeps::new(
                 tx.clone(),
                 cancel,
                 db.clone(),
@@ -1272,6 +1388,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (events_tx, _rx) = broadcast::channel::<DjinnEventEnvelope>(16);
 
+        use super::types::{CoordinatorDeps as LocalCoordinatorDeps, SharedCoordinatorState};
         use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
         use crate::roles::RoleRegistry;
         use djinn_provider::catalog::health::HealthTracker;
@@ -1299,7 +1416,7 @@ mod tests {
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(
-            CoordinatorDeps::new(
+            LocalCoordinatorDeps::new(
                 events_tx.clone(),
                 cancel,
                 db,
@@ -1334,6 +1451,7 @@ mod tests {
         let db = test_helpers::create_test_db();
         let (events_tx, _rx) = broadcast::channel::<DjinnEventEnvelope>(16);
 
+        use super::types::{CoordinatorDeps as LocalCoordinatorDeps, SharedCoordinatorState};
         use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
         use crate::roles::RoleRegistry;
         use djinn_provider::catalog::health::HealthTracker;
@@ -1361,7 +1479,7 @@ mod tests {
         });
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let mut actor = CoordinatorActor::new(
-            CoordinatorDeps::new(
+            LocalCoordinatorDeps::new(
                 events_tx.clone(),
                 cancel,
                 db,

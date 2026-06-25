@@ -357,9 +357,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::actors::coordinator::types::{AutoMergeTracker, PrCleanupConfig};
     use crate::actors::coordinator::{
-        AutoMergeTracker, BackgroundWorkTracker, DEFAULT_MODEL_ID, PrCleanupConfig, STUCK_INTERVAL,
-        SharedCoordinatorState,
+        BackgroundWorkTracker, DEFAULT_MODEL_ID, STUCK_INTERVAL, SharedCoordinatorState,
     };
     use crate::actors::slot::{ModelSlotConfig, SlotPoolConfig, SlotPoolHandle};
     use crate::roles::RoleRegistry;
