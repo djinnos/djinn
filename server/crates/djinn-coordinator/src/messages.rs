@@ -67,7 +67,6 @@ pub(super) enum CoordinatorMessage {
     StartProposalRefinement {
         proposal_id: String,
         current_revision_seq: i32,
-        update_authority: String,
         /// User the refinement run is attributed to (task owner + model scope).
         /// `None` falls back to the proposal author at dispatch time.
         owner_user_id: Option<String>,
@@ -80,7 +79,6 @@ pub(super) enum CoordinatorMessage {
     DemandProposalRefinementRound {
         proposal_id: String,
         current_revision_seq: i32,
-        update_authority: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }

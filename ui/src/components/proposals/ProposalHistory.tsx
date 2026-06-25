@@ -117,6 +117,47 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           const bodyFormat = revisionBodyFormat(r);
           const titleChanged = !!prev && prev.title !== r.title;
           if (!isSpecRevision) {
+            const hasTransition = !!(r.status_from || r.status_to);
+            const lifecycleLabel =
+              r.event_kind === "refinement_start"
+                ? "Refinement started"
+                : r.event_kind === "refinement_stop"
+                  ? "Refinement stopped"
+                  : null;
+            // Drop no-info noise rows: refinement lifecycle events and
+            // checkpoint reverts carry no status_from/status_to, so without a
+            // recognised lifecycle label they would render as a meaningless
+            // "Status changed (— → —)" row.
+            if (!hasTransition && !lifecycleLabel) return null;
+            if (!hasTransition && lifecycleLabel) {
+              return (
+                <li key={r.id}>
+                  <div className="flex w-full items-center gap-2 px-3 py-2 text-sm">
+                    <Badge variant="secondary" className="font-mono">
+                      {r.event_kind}
+                    </Badge>
+                    <span className="font-medium">{lifecycleLabel}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <UserAvatar user={editor} className="size-4" />
+                      <span className="truncate">
+                        {editor
+                          ? userDisplayName(editor)
+                          : r.edited_by_user_id
+                            ? "unknown"
+                            : "—"}
+                      </span>
+                    </span>
+                    <time
+                      dateTime={r.created_at}
+                      title={r.created_at}
+                      className="ml-auto shrink-0 text-xs text-muted-foreground"
+                    >
+                      {relativeTime(r.created_at)}
+                    </time>
+                  </div>
+                </li>
+              );
+            }
             const statusLabel =
               r.status_to === "done"
                 ? "Marked done (implemented externally)"

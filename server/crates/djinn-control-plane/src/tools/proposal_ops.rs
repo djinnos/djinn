@@ -540,9 +540,8 @@ pub struct ProposalRefinementStatusModel {
     pub dry_rounds: i32,
     /// Total debate-trail entries produced so far.
     pub total_entries: i32,
-    /// Update authority mode: `checkpoint` (advocate revisions are proposed
-    /// but not auto-applied) or `auto_accept` (revisions are applied as
-    /// proposal updates).
+    /// Update authority mode. Always `checkpoint` (advocate revisions are
+    /// proposed for approval, never auto-applied); retained for display compat.
     pub update_authority: String,
     /// When set, refinement has stopped for this reason.
     /// Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,

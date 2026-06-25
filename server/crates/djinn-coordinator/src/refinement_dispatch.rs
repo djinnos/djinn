@@ -31,8 +31,8 @@ use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
-    RefinementLoopState, RefinementPhase, StopReason, UpdateAuthority,
-    build_revision_event_metadata, select_refinement_model,
+    RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
+    select_refinement_model,
 };
 
 use super::actor::CoordinatorActor;
@@ -144,7 +144,7 @@ impl CoordinatorActor {
         // checkpoint mode runs every round autonomously and the per-round body
         // reverts compound — silently applying the advocate's edits to the live
         // spec across rounds without the human ever approving them.
-        if state.update_authority() == UpdateAuthority::Checkpoint {
+        {
             let event_bus = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
             match proposal_repo
@@ -365,28 +365,21 @@ impl CoordinatorActor {
 
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
-        let is_checkpoint = state.update_authority() == UpdateAuthority::Checkpoint;
 
         // Persist revision attribution when the advocate advanced the spec.
         // The agent's `proposal_update` tool call doesn't carry refinement
-        // context, so we patch the event_metadata post-hoc.
+        // context, so we patch the event_metadata post-hoc. Refinement is
+        // always checkpoint-gated: mark the revision pending and revert the live
+        // body so the proposal stays the author's until they approve.
         if advanced {
             let model_id = self
                 .refinement_sessions
                 .get(proposal_id)
                 .map(|s| s.model_id.clone());
-            let mut event_meta = build_revision_event_metadata(
-                state.current_round,
-                state.update_authority(),
-                model_id.as_deref(),
-            );
-
-            // In checkpoint mode, mark the revision as pending and revert
-            // the live body so the proposal is unchanged until approval.
-            if is_checkpoint {
-                event_meta["checkpoint_status"] = serde_json::json!("pending");
-                event_meta["previous_revision_seq"] = serde_json::json!(state.current_revision_seq);
-            }
+            let mut event_meta =
+                build_revision_event_metadata(state.current_round, model_id.as_deref());
+            event_meta["checkpoint_status"] = serde_json::json!("pending");
+            event_meta["previous_revision_seq"] = serde_json::json!(state.current_revision_seq);
 
             let event_bus2 = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
@@ -402,27 +395,24 @@ impl CoordinatorActor {
                 );
             }
 
-            // In checkpoint mode, revert the live proposal body to the
-            // pre-revision state. The revision row retains the advocate's
-            // full output for later approval.
-            if is_checkpoint {
-                if let Err(e) = self
-                    .revert_checkpoint_body(proposal_id, state.current_revision_seq)
-                    .await
-                {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        error = %e,
-                        "Failed to revert proposal body for checkpoint pending"
-                    );
-                } else {
-                    tracing::info!(
-                        proposal_id = %proposal_id,
-                        pending_seq = new_revision_seq,
-                        reverted_to_seq = state.current_revision_seq,
-                        "Checkpoint: advocate revision marked pending, live body reverted"
-                    );
-                }
+            // Revert the live proposal body to the pre-revision state. The
+            // revision row retains the advocate's full output for later approval.
+            if let Err(e) = self
+                .revert_checkpoint_body(proposal_id, state.current_revision_seq)
+                .await
+            {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to revert proposal body for checkpoint pending"
+                );
+            } else {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    pending_seq = new_revision_seq,
+                    reverted_to_seq = state.current_revision_seq,
+                    "Checkpoint: advocate revision marked pending, live body reverted"
+                );
             }
         }
 
@@ -433,7 +423,6 @@ impl CoordinatorActor {
                     proposal_id = %proposal_id,
                     new_seq = new_revision_seq,
                     round = state.current_round,
-                    is_checkpoint,
                     "Advocate produced revision"
                 );
             } else {

@@ -285,7 +285,6 @@ impl CoordinatorHandle {
         &self,
         proposal_id: String,
         current_revision_seq: i32,
-        update_authority: String,
         owner_user_id: Option<String>,
     ) -> Result<(), CoordinatorError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -293,7 +292,6 @@ impl CoordinatorHandle {
             .send(CoordinatorMessage::StartProposalRefinement {
                 proposal_id,
                 current_revision_seq,
-                update_authority,
                 owner_user_id,
                 reply: tx,
             })
@@ -311,14 +309,12 @@ impl CoordinatorHandle {
         &self,
         proposal_id: String,
         current_revision_seq: i32,
-        update_authority: String,
     ) -> Result<(), CoordinatorError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.sender
             .send(CoordinatorMessage::DemandProposalRefinementRound {
                 proposal_id,
                 current_revision_seq,
-                update_authority,
                 reply: tx,
             })
             .await
