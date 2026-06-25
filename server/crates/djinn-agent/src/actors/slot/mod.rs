@@ -43,10 +43,11 @@ pub(crate) mod host_callbacks;
 // supervisor's `execute_stage`.  The legacy `run_task_lifecycle` entry point
 // and worktree orchestration have been deleted.
 //
-// hfhw cutover: the lifecycle helper `build_prompt_context` is now a thin
-// adapter that delegates to `assemble_prompt_context`.  The actual prompt
-// assembly logic remains in `djinn-agent` because `stage::execute_stage`
-// calls it with `AgentContext` through the host callback dispatch path.
+// hfhw cutover: the lifecycle module owns per-stage helpers including
+// `assemble_prompt_context` (the prompt assembly logic).  The old
+// `build_prompt_context` stub has been removed — `stage::execute_stage`
+// calls `assemble_prompt_context` directly with `AgentContext` through the
+// host callback dispatch path.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
 mod pool;
@@ -59,9 +60,9 @@ mod reply_loop_tests;
 pub(crate) mod session_extraction;
 // hfhw cutover: `supervisor_runner` contains the host-side dispatch logic
 // (`dispatch_task_runtime`) called through `host_callbacks::AgentDispatchCallbacks`.
-// The old `run_supervisor_dispatch` is an `unreachable!()` stub — the slot
-// actor now dispatches through `djinn_slot::run_supervisor_dispatch` →
-// `SlotHostCallbacks::run_task_dispatch`.
+// The old `run_supervisor_dispatch` stub has been removed — the slot actor
+// dispatches through `djinn_slot::run_supervisor_dispatch` →
+// `SlotHostCallbacks::run_task_dispatch` → `dispatch_task_runtime`.
 mod supervisor_runner;
 
 pub use actor::*;

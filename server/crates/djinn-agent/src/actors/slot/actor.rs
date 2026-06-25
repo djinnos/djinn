@@ -236,7 +236,7 @@ impl SlotHandle {
                 Box::pin(async move {
                     let slot_ctx =
                         super::host_callbacks::agent_to_dispatch_slot_context(&app_state);
-                    djinn_slot::supervisor_runner::run_supervisor_dispatch(
+                    djinn_slot::run_supervisor_dispatch(
                         task_id,
                         project_path,
                         model_id,

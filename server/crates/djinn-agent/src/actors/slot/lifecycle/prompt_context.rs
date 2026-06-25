@@ -151,18 +151,6 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
 }
 
-// ─── hfhw cutover: old build_prompt_context is no longer called ─────────────
-//
-// `stage.rs` now calls `assemble_prompt_context` directly. This function is
-// retained as an `unreachable!()` stub for backward-compatibility paths that
-// have not yet been updated.
-pub(crate) async fn build_prompt_context(_inputs: PromptContextInputs<'_>) -> PromptContext {
-    unreachable!(
-        "superseded by assemble_prompt_context; stage.rs calls it directly \
-         through the host callback dispatch path"
-    )
-}
-
 /// Build the full prompt context (all `TaskContext` fields, base +
 /// extensions + skills prompts) for one role session.
 ///

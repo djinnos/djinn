@@ -103,26 +103,6 @@ async fn surface_credential_revocation(
     }
 }
 
-// ─── hfhw cutover: old run_supervisor_dispatch is no longer called ─────────
-//
-// The slot actor now dispatches through `djinn_slot::run_supervisor_dispatch`
-// → `host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
-// `dispatch_task_runtime` (below). This function is retained only as a
-// no-longer-called compatibility stub.
-pub(crate) async fn run_supervisor_dispatch(
-    _task_id: String,
-    _project_path: String,
-    _model_id: String,
-    _app_state: AgentContext,
-    _kill: CancellationToken,
-    _pause: CancellationToken,
-) -> anyhow::Result<()> {
-    unreachable!(
-        "superseded by djinn_slot::run_supervisor_dispatch via host_callbacks; \
-         actor.rs dispatches through the SlotHostCallbacks pathway"
-    )
-}
-
 /// Host-side dispatch logic — called from
 /// [`host_callbacks::AgentDispatchCallbacks::run_task_dispatch`].
 ///

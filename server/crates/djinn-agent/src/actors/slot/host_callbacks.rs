@@ -1,13 +1,12 @@
 // ─── hfhw cutover: host callbacks for the djinn-slot dispatch pathway ─────
 //
-// After the hwhw cutover, the slot actor dispatches through
+// After the htfw cutover, the slot actor dispatches through
 // `djinn_slot::run_supervisor_dispatch` → `SlotHostCallbacks::run_task_dispatch`.
 // This module provides the concrete `AgentDispatchCallbacks` implementation
 // that wraps `AgentContext` and contains the host-side dispatch entry point.
 //
 // The actual dispatch logic lives in `super::supervisor_runner::dispatch_task_runtime`
-// (called from the `run_task_dispatch` callback). The old standalone
-// `run_supervisor_dispatch` function is a no-longer-called `unreachable!()` stub.
+// (called from the `run_task_dispatch` callback).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -71,14 +70,8 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
         _worktree_path: &'a str,
         _role_name: &'a str,
         _ctx: &'a djinn_slot::host::SlotContext,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = Result<djinn_slot::host::ResolvedMcpTools, String>,
-                > + Send
-                + 'a,
-        >,
-    > {
+    ) -> Pin<Box<dyn Future<Output = Result<djinn_slot::host::ResolvedMcpTools, String>> + Send + 'a>>
+    {
         // Not invoked in the dispatch pathway — MCP resolution happens inside
         // the supervisor/stage execution which uses AgentContext directly.
         Box::pin(async { Err("not available in dispatch callback".into()) })
@@ -119,10 +112,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = Result<
-                        String,
-                        djinn_control_plane::tools::task_tools::ErrorResponse,
-                    >,
+                    Output = Result<String, djinn_control_plane::tools::task_tools::ErrorResponse>,
                 > + Send
                 + 'a,
         >,
@@ -140,9 +130,8 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
         _ctx: &'a djinn_slot::host::SlotContext,
     ) -> Pin<
         Box<
-            dyn Future<
-                    Output = Result<djinn_slot::helpers::ProviderCredential, String>,
-                > + Send
+            dyn Future<Output = Result<djinn_slot::helpers::ProviderCredential, String>>
+                + Send
                 + 'a,
         >,
     > {
