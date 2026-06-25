@@ -10,6 +10,7 @@ export function ProjectSelector() {
       <label htmlFor="project-selector" className="text-sm text-muted-foreground">Project</label>
       <select
         id="project-selector"
+        aria-label="Select project"
         className="rounded border bg-background px-2 py-1 text-sm"
         value={selectedProjectId ?? ""}
         onChange={(e) => setSelectedProjectId(e.target.value || null)}

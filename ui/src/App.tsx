@@ -1,6 +1,8 @@
 import { useServerHealth } from "@/hooks/useServerHealth";
 import { useEventSource } from "@/hooks/useEventSource";
 import { Sidebar } from "@/components/Sidebar";
+import { ProjectSelector } from "@/components/ProjectSelector";
+import { isGlobalProjectContextRoute } from "@/lib/routeScopes";
 import { KanbanPage } from "@/pages/KanbanPage";
 import { DependenciesPage } from "@/pages/DependenciesPage";
 import { BoardLayout } from "@/components/board/BoardLayout";
@@ -22,7 +24,7 @@ import { DispatchPauseBanner } from "@/components/DispatchPauseBanner";
 import { AuthGate, useAuthUser } from "@/components/AuthGate";
 import { useEffect, useRef } from "react";
 import { useProjectsBootstrap } from "@/hooks/useProjectsBootstrap";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useProviderGateStore } from "@/stores/providerGateStore";
 import { useModelGateStore } from "@/stores/modelGateStore";
 import { FirstRunOnboarding } from "@/components/onboarding/FirstRunOnboarding";
@@ -31,8 +33,11 @@ import { useProjectGateStore } from "@/stores/projectGateStore";
 import { RepositoryOnboarding } from "@/components/RepositoryOnboarding";
 import { useDispatchPauseHydration } from "@/hooks/useDispatchPauseHydration";
 
-function MainLayout() {
+export function MainLayout() {
   const isAdmin = useAuthUser()?.isAdmin ?? false;
+  const location = useLocation();
+  const showProjectSelector = isGlobalProjectContextRoute(location.pathname);
+
   return (
     <main className="flex h-screen overflow-hidden bg-background">
       <Sidebar />
@@ -40,6 +45,14 @@ function MainLayout() {
         <div className="flex min-h-0 flex-1 flex-col">
           <ConnectionBanner />
           <DispatchPauseBanner />
+          {/* Shared project-context chrome — rendered only for routes whose
+              data reads the global project store (global-project-context scope).
+              See src/lib/routeScopes.ts for the full scope registry. */}
+          {showProjectSelector && (
+            <div className="flex items-center border-b px-4 py-1.5">
+              <ProjectSelector />
+            </div>
+          )}
           <Routes>
             {/* Views — project selection lives in the projectStore, not the URL.
                 Tasks + Dependencies share the BoardLayout (filter header + view
