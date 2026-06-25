@@ -103,7 +103,8 @@ async fn surface_credential_revocation(
     }
 }
 
-/// Default slot-dispatch runner.
+/// Host-side dispatch logic — called from
+/// [`host_callbacks::AgentDispatchCallbacks::run_task_dispatch`].
 ///
 /// Resolves `(task, flow, base_branch, task_branch, trigger)` from the task
 /// row + ambient dispatch context, builds a [`TaskRunSpec`], then:
@@ -126,7 +127,7 @@ async fn surface_credential_revocation(
 ///   express through a `TaskRunReport` (task lookup failed, mirror not
 ///   configured, runtime construction error).  The slot actor logs the
 ///   error and still emits `SlotEvent::Free`.
-pub(crate) async fn run_supervisor_dispatch(
+pub(super) async fn dispatch_task_runtime(
     task_id: String,
     _project_path: String,
     model_id: String,

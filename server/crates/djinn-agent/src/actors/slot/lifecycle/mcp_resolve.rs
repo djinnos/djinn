@@ -72,6 +72,7 @@ pub(crate) struct McpAndSkills {
 ///   - The `mcp_registry_override` test seam bypasses `connect_and_discover`.
 ///   - The two `tracing::info!` "resolved role MCP servers" / "resolved role
 ///     skills" log lines are preserved.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_mcp_and_skills(
     worktree_path: &Path,
     runtime_role: &dyn AgentRole,

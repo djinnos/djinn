@@ -80,7 +80,7 @@ use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
-    PromptContext, PromptContextInputs, ReadSourceInfo, build_prompt_context,
+    PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -560,7 +560,7 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
-    let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
+    let PromptContext { system_prompt, .. } = assemble_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),
         role_for_epic_check: role.as_ref(),

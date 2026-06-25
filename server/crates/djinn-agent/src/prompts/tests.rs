@@ -139,7 +139,7 @@ fn facade_parity_agent_type_and_role_config() {
     assert_eq!(super::format_acceptance_criteria("not json"), "not json");
 
     // MAX_SYSTEM_PROMPT_CHARS re-exported
-    assert!(super::MAX_SYSTEM_PROMPT_CHARS > 0);
+    const { assert!(super::MAX_SYSTEM_PROMPT_CHARS > 0) }
 }
 
 // ── Tests that require extension tool-schema registry ────────────────────
