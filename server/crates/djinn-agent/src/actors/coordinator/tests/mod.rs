@@ -1,3 +1,20 @@
+// ── Agent-side coordinator tests ─────────────────────────────────────────────
+//
+// These tests exercise the `djinn-agent` coordinator module through the
+// agent's own `AgentContext` / slot facade paths.  The canonical coordinator
+// logic and its primary test coverage now live in `djinn-coordinator` (see
+// `djinn-coordinator/src/tests/`).  These agent-side tests are intentionally
+// retained as facade-compatibility tests: they verify that the agent's
+// coordinator module — which still re-implements the coordinator rather than
+// re-exporting from `djinn-coordinator` — compiles and behaves correctly
+// through the agent's internal import paths (`crate::actors::slot::*`,
+// `crate::events::*`, `crate::test_helpers`, etc.).
+//
+// If the agent's coordinator is thinned to a pure re-export facade in a
+// future phase, these tests should be replaced by a single compile-time
+// smoke test that verifies the re-exports resolve.  Until then, they serve
+// as regression coverage for the agent-specific wiring.
+
 use std::path::Path;
 use std::sync::Mutex;
 
