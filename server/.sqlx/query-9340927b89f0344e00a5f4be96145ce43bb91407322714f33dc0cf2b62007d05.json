@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1\n             ORDER BY s.started_at DESC",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot,\n                cost_basis\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat'\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
   "describe": {
     "columns": [
       {
@@ -102,12 +102,15 @@
         "ordinal": 19,
         "name": "cache_write_price_per_million_snapshot",
         "type_info": "Float8"
+      },
+      {
+        "ordinal": 20,
+        "name": "cost_basis",
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -129,8 +132,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "d2f66648833cf5af6713f2676678998f47396a68ef30690660c991ae5bcaaa02"
+  "hash": "9340927b89f0344e00a5f4be96145ce43bb91407322714f33dc0cf2b62007d05"
 }
