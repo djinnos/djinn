@@ -6513,6 +6513,12 @@ export type ProposalReconcileObsoleteEpicOutput = ProposalReconcileObsoleteEpicO
 export namespace ProposalRefinementStartInputSchema {
   export interface ProposalRefinementStartInput {
   /**
+   * User the refinement run is attributed to: owner of the spawned
+   * refinement (tribunal) tasks and the scope for per-user role-model
+   * resolution. Omit to attribute the run to the proposal author.
+   */
+  owner_user_id?: string
+  /**
    * Proposal UUID or short_id.
    */
   proposal_id: string

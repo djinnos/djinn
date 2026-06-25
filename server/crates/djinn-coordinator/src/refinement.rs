@@ -190,6 +190,11 @@ pub struct RefinementLoopState {
     pub current_revision_seq: i32,
     /// How advocate revisions are applied.
     pub update_authority: UpdateAuthority,
+    /// The user this refinement run is attributed to: owner of the spawned
+    /// refinement tasks (`created_by_user_id`) AND the scope used to resolve
+    /// per-user role models for the tribunal agents. `None` means "fall back
+    /// to the proposal author at dispatch time".
+    pub attributed_user_id: Option<String>,
     /// Normalized objection-signature → occurrence count.
     pub objection_signatures: HashMap<String, usize>,
     /// Per-round blocking objection counts: `(round, count)`.
@@ -229,10 +234,19 @@ impl RefinementLoopState {
             total_spawns: 0,
             current_revision_seq,
             update_authority,
+            attributed_user_id: None,
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
             stop_reason: None,
         }
+    }
+
+    /// Attribute this refinement run to a specific user (owner of the spawned
+    /// refinement tasks + scope for per-user model resolution). Builder-style so
+    /// the existing `new`/`with_config` constructors stay source-compatible.
+    pub fn with_attributed_user(mut self, attributed_user_id: Option<String>) -> Self {
+        self.attributed_user_id = attributed_user_id;
+        self
     }
 
     /// Whether the loop has terminated.
