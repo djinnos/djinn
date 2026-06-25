@@ -46,8 +46,14 @@ use super::types::*;
 mod ci;
 mod code_intel;
 mod jit_pitfalls;
+// Retained for test coverage; production dispatch goes through djinn-mcp-extension.
+#[allow(dead_code)]
 mod memory_agent;
+// Retained for test coverage; production dispatch goes through djinn-mcp-extension.
+#[allow(dead_code)]
 mod task_admin;
+// Retained for test coverage; production dispatch goes through djinn-mcp-extension.
+#[allow(dead_code)]
 mod task_epic;
 mod workspace;
 
@@ -57,11 +63,9 @@ mod workspace;
 // because they need concrete `AgentContext` / workspace / MCP-registry
 // internals that `djinn-mcp-extension` does not own.
 pub(crate) use ci::call_ci_job_log;
-pub(crate) use code_intel::{
-    call_code_graph, call_github_fetch_file, call_github_search, call_lsp,
-};
+pub(crate) use code_intel::{call_code_graph, call_github_fetch_file, call_github_search};
 #[cfg(test)]
-pub(super) use code_intel::{call_code_graph_inner, should_pre_resolve_chat_key};
+pub(super) use code_intel::{call_code_graph_inner, call_lsp, should_pre_resolve_chat_key};
 #[cfg(test)]
 pub(super) use memory_agent::call_agent_amend_prompt;
 pub(crate) use task_admin::call_task_kill_session;
@@ -108,7 +112,7 @@ pub(super) use task_epic::{
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_tool_call<T>(
     state: &AgentContext,
-    services: &dyn djinn_supervisor::SupervisorServices,
+    _services: &dyn djinn_supervisor::SupervisorServices,
     tool_call: &T,
     worktree_path: &Path,
     allowed_schemas: Option<&[serde_json::Value]>,
@@ -150,7 +154,7 @@ where
         resolved
     };
     let project_id = project.as_ref().map(|project| project.id.clone());
-    let project_ref = project
+    let _project_ref = project
         .as_ref()
         .map(|project| project.slug())
         .unwrap_or_else(|| worktree_path.display().to_string());

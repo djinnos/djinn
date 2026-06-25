@@ -13,8 +13,9 @@
 // structural extraction, LLM extraction callout, and helper functions) has
 // been removed from `djinn-agent`.  It is no longer production-reachable.
 //
-// Public types (`SessionSignals`, `SessionTaxonomy`, etc.) are re-exported
-// from `djinn-slot` via `super::mod.rs` if callers need them.
+// Public types (`ExtractionQuality`, `SessionTaxonomy`, etc.) are re-exported
+// from `djinn-slot`.  Test-only types (`SessionSignals`, `extract_session_signals`)
+// are gated behind `#[cfg(test)]`.
 
 use crate::context::AgentContext;
 
@@ -23,9 +24,11 @@ use crate::context::AgentContext;
 // now live in `djinn-slot`; these re-exports keep `crate::actors::slot::session_extraction::*`
 // paths resolving for agent-internal callers.
 
-pub use djinn_slot::{
-    ExtractionQuality, SessionSignals, SessionTaxonomy, derive_scope_paths, extract_session_signals,
-};
+pub use djinn_slot::{ExtractionQuality, SessionTaxonomy, derive_scope_paths};
+// Only needed by llm_extraction_tests; suppressed in non-test builds to avoid
+// unused-import warnings from clippy -D warnings.
+#[cfg(test)]
+pub use djinn_slot::{SessionSignals, extract_session_signals};
 
 // `run_structural_extraction` is re-exported from djinn-slot but takes
 // `SlotContext`.  We provide a thin adapter that accepts `AgentContext`

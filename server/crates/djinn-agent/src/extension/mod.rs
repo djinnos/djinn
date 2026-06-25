@@ -1,7 +1,13 @@
 mod fuzzy;
 pub(crate) mod github_search;
 pub(crate) mod handlers;
+// Retained for test coverage of handlers that were migrated to djinn-mcp-extension.
+// The dead_code lint is suppressed because these helpers are only called from
+// handler functions that are themselves test-only (dispatched through the
+// djinn-mcp-extension facade in production).
+#[allow(dead_code)]
 mod helpers;
+#[allow(dead_code)]
 mod types;
 
 // Façade: re-export schema surfaces from `djinn-mcp-extension` so that
