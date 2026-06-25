@@ -88,6 +88,12 @@ describe("MainLayout — project selector chrome", () => {
     expect(selector).toBeInTheDocument();
   });
 
+  it("renders the shared project selector on /memory (global-project-context)", () => {
+    render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/memory"] } } });
+    const selector = screen.getByLabelText("Select project");
+    expect(selector).toBeInTheDocument();
+  });
+
   it("does NOT render the project selector on /tasks (url-filtered board route)", () => {
     render(<MainLayout />, { wrapperOptions: { routerProps: { initialEntries: ["/tasks"] } } });
     const selector = screen.queryByLabelText("Select project");
