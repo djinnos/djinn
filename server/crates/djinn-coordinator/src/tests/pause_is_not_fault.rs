@@ -337,21 +337,23 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
     // Put the task in the dispatchable execution state and create a real
     // `running` session row for it — i.e. an in-flight worker that has not
     // yet reported a token/turn.
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
     let run_id = "pause-active-run";
-    sqlx::query(
-        "INSERT INTO task_runs (id, project_id, task_id, trigger_type, status) VALUES ($1, $2, $3, 'manual', 'running')",
-    )
-    .bind(run_id)
-    .bind(&task.project_id)
-    .bind(&task.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
     let session = session_repo
         .create(CreateSessionParams {
@@ -564,10 +566,8 @@ async fn pr_poller_lists_pr_draft_candidates_independent_of_dispatch_pause() {
         .unwrap();
     // Stamp a dummy PR URL so the poller keeps the row (it filters to
     // `pr_url.is_some()`).
-    sqlx::query("UPDATE tasks SET pr_url = $1 WHERE id = $2")
-        .bind("https://github.com/owner/repo/pull/1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_pr_url(&task.id, "https://github.com/owner/repo/pull/1")
         .await
         .unwrap();
 

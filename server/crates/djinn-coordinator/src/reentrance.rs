@@ -452,10 +452,7 @@ mod tests {
 
         // Drop the epic_blockers table to cause a lookup error on the
         // next has_unresolved_blockers call.
-        sqlx::query("DROP TABLE IF EXISTS epic_blockers")
-            .execute(db.pool())
-            .await
-            .unwrap();
+        djinn_db::test_support::drop_table_for_test(&db, "epic_blockers").await;
 
         // With the table gone, the blocker lookup will error.
         // The gate must fail CLOSED: defer dispatch rather than allow it.
