@@ -167,6 +167,20 @@ pub(super) struct ToolDispatchContext<'a> {
     pub otel_session: Option<&'a telemetry::SessionSpan>,
 }
 
+/// Per-call fields passed into [`dispatch_single_tool`].
+///
+/// Grouped separately from the borrowed [`ToolDispatchContext`] so the dispatch
+/// entry-point does not need `#[allow(clippy::too_many_arguments)]`.
+pub(super) struct ToolDispatchRequest {
+    pub idx: usize,
+    pub id: String,
+    pub name: String,
+    pub args: Option<serde_json::Map<String, serde_json::Value>>,
+    pub tool_span: Option<djinn_provider::provider::telemetry::ToolSpan>,
+    pub stash: Arc<Mutex<OutputStash>>,
+    pub retry_safe: bool,
+}
+
 pub(super) enum ToolBatch {
     Parallel(Vec<usize>),
     Serial(usize),
@@ -208,23 +222,19 @@ pub(super) fn build_tool_batches<'a>(
     (indexed_tool_calls, batches)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn dispatch_single_tool<'a>(
-    idx: usize,
-    id: String,
-    name: String,
-    _input_json: serde_json::Value,
-    args: Option<serde_json::Map<String, serde_json::Value>>,
-    tool_span: Option<djinn_provider::provider::telemetry::ToolSpan>,
-    stash: Arc<Mutex<OutputStash>>,
-    app_state: &'a crate::context::AgentContext,
-    services: &'a dyn djinn_supervisor::SupervisorServices,
-    task_id: &'a str,
-    worktree_path: &'a std::path::Path,
-    role_name: &'a str,
-    mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
-    retry_safe: bool,
+    req: ToolDispatchRequest,
+    ctx: &'a ToolDispatchContext<'a>,
 ) -> (usize, ContentBlock) {
+    let ToolDispatchRequest {
+        idx,
+        id,
+        name,
+        args,
+        tool_span,
+        stash,
+        retry_safe,
+    } = req;
     if is_stash_tool(&name) {
         let result = handle_stash_tool(&stash, &name, args.as_ref());
         let (content, is_error) = match result {
@@ -263,13 +273,13 @@ pub(super) async fn dispatch_single_tool<'a>(
         );
     }
 
-    if let Some(registry) = mcp_registry
+    if let Some(registry) = ctx.mcp_registry
         && registry.has_tool(&name)
     {
-        tracing::debug!(task_id = %task_id, tool = %name, "ReplyLoop: dispatching to MCP server");
+        tracing::debug!(task_id = %ctx.task_id, tool = %name, "ReplyLoop: dispatching to MCP server");
         let mcp_result = run_with_heartbeat(
             tool_heartbeat_interval(),
-            || beat_activity(services, task_id),
+            || beat_activity(ctx.services, ctx.task_id),
             registry.call_tool(&name, args.clone()),
         )
         .await;
@@ -316,16 +326,16 @@ pub(super) async fn dispatch_single_tool<'a>(
 
     let mut result = run_with_heartbeat(
         tool_heartbeat_interval(),
-        || beat_activity(services, task_id),
+        || beat_activity(ctx.services, ctx.task_id),
         extension::call_tool(
-            app_state,
-            services,
+            ctx.app_state,
+            ctx.services,
             &name,
             args.clone(),
-            worktree_path,
-            Some(task_id),
-            Some(role_name),
-            mcp_registry,
+            ctx.worktree_path,
+            Some(ctx.task_id),
+            Some(ctx.role_name),
+            ctx.mcp_registry,
         ),
     )
     .await;
@@ -337,7 +347,7 @@ pub(super) async fn dispatch_single_tool<'a>(
                     retries += 1;
                     let backoff = std::time::Duration::from_millis(100 * (1 << retries.min(4)));
                     tracing::warn!(
-                        task_id = %task_id,
+                        task_id = %ctx.task_id,
                         tool = %name,
                         retry = retries,
                         backoff_ms = backoff.as_millis() as u64,
@@ -346,16 +356,16 @@ pub(super) async fn dispatch_single_tool<'a>(
                     tokio::time::sleep(backoff).await;
                     result = run_with_heartbeat(
                         tool_heartbeat_interval(),
-                        || beat_activity(services, task_id),
+                        || beat_activity(ctx.services, ctx.task_id),
                         extension::call_tool(
-                            app_state,
-                            services,
+                            ctx.app_state,
+                            ctx.services,
                             &name,
                             args.clone(),
-                            worktree_path,
-                            Some(task_id),
-                            Some(role_name),
-                            mcp_registry,
+                            ctx.worktree_path,
+                            Some(ctx.task_id),
+                            Some(ctx.role_name),
+                            ctx.mcp_registry,
                         ),
                     )
                     .await;
@@ -373,7 +383,7 @@ pub(super) async fn dispatch_single_tool<'a>(
             (vec![ContentBlock::Text { text }], false)
         }
         Err(err) => {
-            tracing::warn!(task_id = %task_id, tool = %name, error = %err, "ReplyLoop: tool call returned error");
+            tracing::warn!(task_id = %ctx.task_id, tool = %name, error = %err, "ReplyLoop: tool call returned error");
             let err_text = format!("error: {err}");
             if let Some(ts) = &tool_span {
                 ts.record_output(&err_text, true);
@@ -435,22 +445,16 @@ pub(super) fn make_tool_future<'a>(
     });
     let stash = Arc::clone(&ctx.output_stash);
     let retry_safe = is_tool_retry_safe(ctx.tool_metadata, &name);
-    dispatch_single_tool(
+    let req = ToolDispatchRequest {
         idx,
         id,
         name,
-        input_json,
         args,
         tool_span,
         stash,
-        ctx.app_state,
-        ctx.services,
-        ctx.task_id,
-        ctx.worktree_path,
-        ctx.role_name,
-        ctx.mcp_registry,
         retry_safe,
-    )
+    };
+    dispatch_single_tool(req, ctx)
 }
 
 pub(super) async fn collect_tool_results(
