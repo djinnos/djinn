@@ -12524,6 +12524,12 @@ expression: signatures
         "id": {
           "description": "Debate-trail entry UUID.",
           "type": "string"
+        },
+        "user_id": {
+          "default": null,
+          "description": "Optional user ID to attribute the reopen action to. When omitted,\nfalls back to the current session user (if any). Passed through\nto the audit trail as `reopened_by_user_id`.",
+          "nullable": true,
+          "type": "string"
         }
       },
       "required": [
