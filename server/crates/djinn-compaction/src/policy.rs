@@ -514,19 +514,43 @@ fn estimate_message_chars(msg: &Message) -> usize {
         .sum()
 }
 
+/// Entry point for deterministic compaction. Orchestrates budget setup, recent-tail
+/// selection, tool-pair closure, budget pruning, and result assembly helpers.
 pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> Vec<Message> {
-    use djinn_provider::message::ContentBlock;
-
     if messages.is_empty() {
         return vec![];
     }
 
+    let (system_msg, rest, available) = deterministic_budget_setup(messages, max_chars);
+    let mut state = deterministic_select_recent_tail(rest, available);
+    deterministic_close_tool_pairs(rest, &mut state);
+    deterministic_prune_over_budget(rest, &mut state, available);
+    deterministic_assemble_result(system_msg, rest, &state)
+}
+
+/// Budget setup: extract the system message and compute the available character
+/// budget after accounting for the system message and compacted-notice overhead.
+fn deterministic_budget_setup(
+    messages: &[Message],
+    max_chars: usize,
+) -> (Message, &[Message], usize) {
     let system_msg = messages[0].clone();
     let system_chars = estimate_message_chars(&system_msg);
     let notice_overhead = 200;
     let available = max_chars.saturating_sub(system_chars + notice_overhead);
-
     let rest = &messages[1..];
+    (system_msg, rest, available)
+}
+
+/// Intermediate state for the deterministic compaction algorithm.
+struct DetCompactState {
+    kept_set: std::collections::HashSet<usize>,
+    accumulated: usize,
+}
+
+/// Initial recent-tail selection: walk from the end of `rest`, greedily keeping
+/// messages until the accumulated size would exceed the available budget.
+fn deterministic_select_recent_tail(rest: &[Message], available: usize) -> DetCompactState {
     let mut kept_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut accumulated = 0usize;
 
@@ -539,77 +563,112 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
         kept_set.insert(i);
     }
 
+    DetCompactState {
+        kept_set,
+        accumulated,
+    }
+}
+
+/// Return `true` when `content` contains a `ToolResult` block.
+fn content_block_contains_tool_result(content: &[djinn_provider::message::ContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|b| matches!(b, djinn_provider::message::ContentBlock::ToolResult { .. }))
+}
+
+/// Return `true` when `content` contains a `ToolUse` block.
+fn content_block_contains_tool_use(content: &[djinn_provider::message::ContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|b| matches!(b, djinn_provider::message::ContentBlock::ToolUse { .. }))
+}
+
+/// Return `true` when `msg` is a user message containing tool results.
+fn is_tool_result_msg(msg: &Message) -> bool {
+    msg.role == Role::User && content_block_contains_tool_result(&msg.content)
+}
+
+/// Return `true` when `msg` is an assistant message containing tool uses.
+fn is_tool_use_msg(msg: &Message) -> bool {
+    msg.role == Role::Assistant && content_block_contains_tool_use(&msg.content)
+}
+
+/// Tool-pair closure: ensure that every kept tool-result message has its
+/// preceding tool-use message in the kept set, and vice versa. This prevents
+/// orphaned tool results/uses in the compacted output.
+fn deterministic_close_tool_pairs(rest: &[Message], state: &mut DetCompactState) {
     let mut changed = true;
     while changed {
         changed = false;
-        let snapshot: Vec<usize> = kept_set.iter().copied().collect();
+        let snapshot: Vec<usize> = state.kept_set.iter().copied().collect();
         for &i in &snapshot {
             let msg = &rest[i];
-            if msg.role == Role::User
-                && msg
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-            {
-                if i > 0 && !kept_set.contains(&(i - 1)) {
-                    let prev = &rest[i - 1];
-                    if prev.role == Role::Assistant
-                        && prev
-                            .content
-                            .iter()
-                            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                    {
-                        accumulated += estimate_message_chars(prev);
-                        kept_set.insert(i - 1);
-                        changed = true;
-                    }
-                }
-            } else if msg.role == Role::Assistant
-                && msg
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                && i + 1 < rest.len()
-                && !kept_set.contains(&(i + 1))
-            {
-                let next = &rest[i + 1];
-                if next.role == Role::User
-                    && next
-                        .content
-                        .iter()
-                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
-                {
-                    accumulated += estimate_message_chars(next);
-                    kept_set.insert(i + 1);
+            if is_tool_result_msg(msg) {
+                // Keep the preceding assistant ToolUse if it exists but isn't kept yet.
+                if i > 0 && !state.kept_set.contains(&(i - 1)) && is_tool_use_msg(&rest[i - 1]) {
+                    state.accumulated += estimate_message_chars(&rest[i - 1]);
+                    state.kept_set.insert(i - 1);
                     changed = true;
                 }
+            } else if is_tool_use_msg(msg)
+                && i + 1 < rest.len()
+                && !state.kept_set.contains(&(i + 1))
+                && is_tool_result_msg(&rest[i + 1])
+            {
+                // Keep the following user ToolResult if it exists but isn't kept yet.
+                state.accumulated += estimate_message_chars(&rest[i + 1]);
+                state.kept_set.insert(i + 1);
+                changed = true;
             }
         }
     }
+}
 
-    if accumulated > available {
-        let mut sorted: Vec<usize> = kept_set.iter().copied().collect();
-        sorted.sort();
-        while accumulated > available && sorted.len() > 2 {
-            let oldest = sorted.remove(0);
-            accumulated = accumulated.saturating_sub(estimate_message_chars(&rest[oldest]));
-            kept_set.remove(&oldest);
-            if !sorted.is_empty() {
-                let partner = sorted[0];
-                let is_pair = (rest[oldest].role == Role::Assistant
-                    && rest[partner].role == Role::User)
-                    || (rest[oldest].role == Role::User && rest[partner].role == Role::Assistant);
-                if is_pair {
-                    accumulated =
-                        accumulated.saturating_sub(estimate_message_chars(&rest[partner]));
-                    kept_set.remove(&partner);
-                    sorted.remove(0);
-                }
+/// Budget pruning: when the accumulated kept messages exceed the available
+/// budget, remove the oldest entries (together with their pair partner when
+/// the next entry forms a consecutive pair) until we fit or only two entries
+/// remain.
+fn deterministic_prune_over_budget(
+    rest: &[Message],
+    state: &mut DetCompactState,
+    available: usize,
+) {
+    if state.accumulated <= available {
+        return;
+    }
+
+    let mut sorted: Vec<usize> = state.kept_set.iter().copied().collect();
+    sorted.sort();
+    while state.accumulated > available && sorted.len() > 2 {
+        let oldest = sorted.remove(0);
+        state.accumulated = state
+            .accumulated
+            .saturating_sub(estimate_message_chars(&rest[oldest]));
+        state.kept_set.remove(&oldest);
+        if !sorted.is_empty() {
+            let partner = sorted[0];
+            let is_pair = (rest[oldest].role == Role::Assistant
+                && rest[partner].role == Role::User)
+                || (rest[oldest].role == Role::User && rest[partner].role == Role::Assistant);
+            if is_pair {
+                state.accumulated = state
+                    .accumulated
+                    .saturating_sub(estimate_message_chars(&rest[partner]));
+                state.kept_set.remove(&partner);
+                sorted.remove(0);
             }
         }
     }
+}
 
-    let mut kept_indices: Vec<usize> = kept_set.into_iter().collect();
+/// Final result assembly: prepend the system message, insert a compacted-notice
+/// when messages were trimmed, and append the kept messages in order.
+fn deterministic_assemble_result(
+    system_msg: Message,
+    rest: &[Message],
+    state: &DetCompactState,
+) -> Vec<Message> {
+    let mut kept_indices: Vec<usize> = state.kept_set.iter().copied().collect();
     kept_indices.sort();
 
     let mut result = vec![system_msg];

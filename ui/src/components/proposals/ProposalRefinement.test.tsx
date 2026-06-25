@@ -42,7 +42,6 @@ describe("ProposalRefinement", () => {
     );
     expect(screen.getByText("Proposal refinement")).toBeInTheDocument();
     expect(screen.getByText("Start refinement")).toBeInTheDocument();
-    expect(screen.getByText("Checkpoint")).toBeInTheDocument();
   });
 
   it("renders active status panel", () => {
@@ -79,7 +78,7 @@ describe("ProposalRefinement", () => {
       current_round: 5,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "auto_accept",
+      update_authority: "checkpoint",
       stop_reason: "adversary_dry",
     };
     render(
@@ -91,7 +90,7 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(screen.getByText("Stopped")).toBeInTheDocument();
-    expect(screen.getByText("Auto-accept")).toBeInTheDocument();
+    expect(screen.getByText("Checkpoint")).toBeInTheDocument();
     expect(
       screen.getByText(/Adversary exhausted/),
     ).toBeInTheDocument();
@@ -122,7 +121,7 @@ describe("ProposalRefinement", () => {
     ).toBeInTheDocument();
   });
 
-  it("explains checkpoint vs auto-accept in kickoff affordance", () => {
+  it("explains checkpoint behavior in kickoff affordance", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -132,7 +131,7 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(
-      screen.getByText(/advocate revisions are proposed for approval/),
+      screen.getByText(/proposed for your approval before they're applied/),
     ).toBeInTheDocument();
   });
 
@@ -144,7 +143,7 @@ describe("ProposalRefinement", () => {
       current_round: 5,
       dry_rounds: 0,
       total_entries: 15,
-      update_authority: "auto_accept",
+      update_authority: "checkpoint",
       stop_reason: "round_cap",
     };
     render(
@@ -186,7 +185,7 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 0,
       total_entries: 10,
-      update_authority: "auto_accept",
+      update_authority: "checkpoint",
       stop_reason: "repeated_objection",
     };
     render(
@@ -266,7 +265,6 @@ describe("ProposalRefinement", () => {
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_start", {
       proposal_id: proposalId,
-      update_authority: "checkpoint",
     });
     expect(showToast.success).toHaveBeenCalledWith("Refinement started");
     expect(onChanged).toHaveBeenCalledTimes(1);
@@ -320,13 +318,13 @@ describe("ProposalRefinement", () => {
     expect(screen.getByText(/2 advocate revision\(s\) awaiting approval/)).toBeInTheDocument();
   });
 
-  it("does not show pending revisions in auto-accept mode", () => {
+  it("does not show pending revisions block when count is zero", () => {
     const status: ProposalRefinementStatus = {
       active: true,
       current_round: 2,
       dry_rounds: 0,
       total_entries: 4,
-      update_authority: "auto_accept",
+      update_authority: "checkpoint",
       stop_reason: null,
       pending_checkpoint_count: 0,
     };
@@ -338,7 +336,7 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
-    expect(screen.queryByText(/pending revision/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pending revisions/)).not.toBeInTheDocument();
   });
 
   it("shows checkpoint approval message when no pending revisions", () => {
@@ -364,28 +362,6 @@ describe("ProposalRefinement", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not show checkpoint explanation in auto-accept mode", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 3,
-      update_authority: "auto_accept",
-      stop_reason: null,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(
-      screen.queryByText(/Advocate revisions require explicit approval/),
-    ).not.toBeInTheDocument();
-  });
-
   it("does not show checkpoint explanation when stopped", () => {
     const status: ProposalRefinementStatus = {
       active: false,
@@ -409,10 +385,9 @@ describe("ProposalRefinement", () => {
     ).not.toBeInTheDocument();
   });
 
-  // ── Auto-accept kickoff mode ─────────────────────────────────────────────
+  // ── Checkpoint kickoff mode ──────────────────────────────────────────────
 
-  it("shows auto-accept explanation when auto_accept mode is selected", async () => {
-    const user = userEvent.setup();
+  it("shows checkpoint explanation in kickoff (checkpoint is the only mode)", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -422,9 +397,9 @@ describe("ProposalRefinement", () => {
       />,
     );
 
-    // Initially shows checkpoint explanation.
+    // Checkpoint is the only mode — always shows the checkpoint explanation.
     expect(
-      screen.getByText(/advocate revisions are proposed for approval/),
+      screen.getByText(/proposed for your approval before they're applied/),
     ).toBeInTheDocument();
   });
 

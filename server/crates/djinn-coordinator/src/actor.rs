@@ -931,7 +931,6 @@ impl CoordinatorActor {
             CoordinatorMessage::StartProposalRefinement {
                 proposal_id,
                 current_revision_seq,
-                update_authority,
                 owner_user_id,
                 reply,
             } => {
@@ -939,7 +938,6 @@ impl CoordinatorActor {
                     .handle_start_proposal_refinement(
                         &proposal_id,
                         current_revision_seq,
-                        &update_authority,
                         owner_user_id,
                     )
                     .await;
@@ -948,15 +946,10 @@ impl CoordinatorActor {
             CoordinatorMessage::DemandProposalRefinementRound {
                 proposal_id,
                 current_revision_seq,
-                update_authority,
                 reply,
             } => {
                 let result = self
-                    .handle_demand_proposal_refinement_round(
-                        &proposal_id,
-                        current_revision_seq,
-                        &update_authority,
-                    )
+                    .handle_demand_proposal_refinement_round(&proposal_id, current_revision_seq)
                     .await;
                 let _ = reply.send(result);
             }
@@ -969,10 +962,9 @@ impl CoordinatorActor {
         &mut self,
         proposal_id: &str,
         current_revision_seq: i32,
-        update_authority: &str,
         owner_user_id: Option<String>,
     ) -> Result<(), String> {
-        use super::refinement::{RefinementLoopState, UpdateAuthority};
+        use super::refinement::RefinementLoopState;
 
         // Coordinator-level duplicate rejection — this is authoritative over
         // the lifecycle-level check in the control-plane tool.
@@ -982,17 +974,7 @@ impl CoordinatorActor {
             ));
         }
 
-        let authority = match update_authority {
-            "checkpoint" => UpdateAuthority::Checkpoint,
-            "auto_accept" => UpdateAuthority::AutoAccept,
-            other => {
-                return Err(format!(
-                    "invalid update_authority: {other:?} (expected checkpoint or auto_accept)"
-                ));
-            }
-        };
-
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority)
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq)
             .with_attributed_user(owner_user_id.clone());
         self.active_refinements
             .insert(proposal_id.to_string(), state);
@@ -1000,7 +982,6 @@ impl CoordinatorActor {
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
-            update_authority,
             owner_user_id = ?owner_user_id,
             "CoordinatorActor: started proposal refinement"
         );
@@ -1016,9 +997,8 @@ impl CoordinatorActor {
         &mut self,
         proposal_id: &str,
         current_revision_seq: i32,
-        update_authority: &str,
     ) -> Result<(), String> {
-        use super::refinement::{RefinementLoopState, UpdateAuthority};
+        use super::refinement::RefinementLoopState;
 
         // If refinement is still actively running (not completed), reject.
         if let Some(state) = self.active_refinements.get(proposal_id)
@@ -1029,24 +1009,13 @@ impl CoordinatorActor {
             ));
         }
 
-        let authority = match update_authority {
-            "checkpoint" => UpdateAuthority::Checkpoint,
-            "auto_accept" => UpdateAuthority::AutoAccept,
-            other => {
-                return Err(format!(
-                    "invalid update_authority: {other:?} (expected checkpoint or auto_accept)"
-                ));
-            }
-        };
-
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority);
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq);
         self.active_refinements
             .insert(proposal_id.to_string(), state);
 
         tracing::info!(
             proposal_id = %proposal_id,
             current_revision_seq,
-            update_authority,
             "CoordinatorActor: demanded another refinement round"
         );
 
@@ -1785,7 +1754,6 @@ impl CoordinatorActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::refinement::UpdateAuthority;
     use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
     use std::collections::HashSet;
 
@@ -1934,7 +1902,6 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-1".to_string(),
                 current_revision_seq: 0,
-                update_authority: "checkpoint".to_string(),
                 owner_user_id: None,
                 reply: reply_tx,
             })
@@ -1944,7 +1911,6 @@ mod tests {
         let state = &actor.active_refinements["p-1"];
         assert_eq!(state.proposal_id, "p-1");
         assert_eq!(state.current_revision_seq, 0);
-        assert_eq!(state.update_authority, UpdateAuthority::Checkpoint);
     }
 
     #[tokio::test]
@@ -1956,7 +1922,6 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
-                update_authority: "auto_accept".to_string(),
                 owner_user_id: None,
                 reply: tx1,
             })
@@ -1969,7 +1934,6 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
-                update_authority: "auto_accept".to_string(),
                 owner_user_id: None,
                 reply: tx2,
             })
@@ -1986,25 +1950,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_update_authority_is_rejected() {
-        let mut actor = minimal_test_actor();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        actor
-            .handle_message(CoordinatorMessage::StartProposalRefinement {
-                proposal_id: "p-bad".to_string(),
-                current_revision_seq: 0,
-                update_authority: "invalid".to_string(),
-                owner_user_id: None,
-                reply: tx,
-            })
-            .await;
-        let result = rx.await.unwrap();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid update_authority"));
-        assert!(!actor.active_refinements.contains_key("p-bad"));
-    }
-
-    #[tokio::test]
     async fn separate_proposals_can_refine_independently() {
         let mut actor = minimal_test_actor();
         let (tx1, rx1) = tokio::sync::oneshot::channel();
@@ -2012,7 +1957,6 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-a".to_string(),
                 current_revision_seq: 0,
-                update_authority: "checkpoint".to_string(),
                 owner_user_id: None,
                 reply: tx1,
             })
@@ -2024,7 +1968,6 @@ mod tests {
             .handle_message(CoordinatorMessage::StartProposalRefinement {
                 proposal_id: "p-b".to_string(),
                 current_revision_seq: 2,
-                update_authority: "auto_accept".to_string(),
                 owner_user_id: None,
                 reply: tx2,
             })

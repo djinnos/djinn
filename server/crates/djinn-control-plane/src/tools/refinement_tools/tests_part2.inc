@@ -252,56 +252,11 @@
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refinement_auto_accept_authority_preserved_in_status() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "Auto Accept Authority",
-                body: "body",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-
-        // Start with auto_accept mode.
-        server
-            .dispatch_tool(
-                "proposal_refinement_start",
-                serde_json::json!({
-                    "proposal_id": proposal.id,
-                    "update_authority": "auto_accept",
-                }),
-            )
-            .await
-            .unwrap();
-
-        let status_resp = server
-            .dispatch_tool(
-                "proposal_refinement_status",
-                serde_json::json!({ "proposal_id": proposal.id }),
-            )
-            .await
-            .unwrap();
-        let refinement = status_resp.get("refinement").unwrap();
-        assert_eq!(
-            refinement.get("update_authority").and_then(|v| v.as_str()),
-            Some("auto_accept"),
-            "auto_accept authority must be preserved"
-        );
-        assert_eq!(
-            refinement.get("active").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-    }
-
     // ── Lifecycle attribution metadata ────────────────────────────────────────
 
     /// Refinement-start lifecycle entries carry the update_authority in
-    /// event_metadata; refinement-stop entries carry the stop_reason tag.
+    /// event_metadata (always `checkpoint`); refinement-stop entries carry the
+    /// stop_reason tag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refinement_lifecycle_entries_carry_attribution_metadata() {
         let (server, db) = test_server().await;
@@ -317,13 +272,12 @@
             .await
             .unwrap();
 
-        // Start refinement with auto_accept.
+        // Start refinement (always checkpoint-gated).
         server
             .dispatch_tool(
                 "proposal_refinement_start",
                 serde_json::json!({
                     "proposal_id": proposal.id,
-                    "update_authority": "auto_accept",
                 }),
             )
             .await
@@ -358,7 +312,7 @@
             serde_json::from_str(starts[0].event_metadata.as_deref().unwrap_or("{}")).unwrap();
         assert_eq!(
             start_meta.get("update_authority").and_then(|v| v.as_str()),
-            Some("auto_accept"),
+            Some("checkpoint"),
             "start metadata must include update_authority"
         );
 
