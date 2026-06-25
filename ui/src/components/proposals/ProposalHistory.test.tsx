@@ -205,4 +205,86 @@ describe("ProposalHistory", () => {
       expect(screen.getAllByText("Pat Manager").length).toBeGreaterThan(0),
     );
   });
+
+  // ── P4 regression: control events in history ────────────────────────
+
+  it("renders refinement lifecycle events in proposal history", () => {
+    render(
+      <ProposalHistory
+        detail={detail([
+          revision(1),
+          revision(1, {
+            id: "refinement-start",
+            event_kind: "status_change",
+            status_from: "draft",
+            status_to: "in_review",
+            created_at: "2026-06-02T00:00:00Z",
+          }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Revision history")).toBeInTheDocument();
+    expect(screen.getByText("Status changed")).toBeInTheDocument();
+    expect(screen.getByText("draft")).toBeInTheDocument();
+    expect(screen.getByText("in_review")).toBeInTheDocument();
+  });
+
+  it("renders multiple control events alongside spec revisions", () => {
+    render(
+      <ProposalHistory
+        detail={detail([
+          revision(1),
+          revision(2, {
+            title: "Updated proposal",
+            body: "Base body\nAdd error handling.",
+            created_at: "2026-06-02T00:00:00Z",
+          }),
+          revision(2, {
+            id: "status-to-review",
+            event_kind: "status_change",
+            status_from: "draft",
+            status_to: "in_review",
+            created_at: "2026-06-02T00:00:00Z",
+          }),
+          revision(2, {
+            id: "status-to-done",
+            event_kind: "status_change",
+            status_from: "in_review",
+            status_to: "done",
+            created_at: "2026-06-02T00:00:00Z",
+          }),
+        ])}
+      />,
+    );
+
+    // Both status events should be visible.
+    expect(screen.getAllByText("Status changed")).toHaveLength(2);
+    // Spec revision should be visible.
+    expect(screen.getByText("rev 2")).toBeInTheDocument();
+  });
+
+  it("renders verdict_override control event in history", () => {
+    render(
+      <ProposalHistory
+        detail={detail([
+          revision(1),
+          revision(1, {
+            id: "verdict-override",
+            event_kind: "status_change",
+            status_from: "draft",
+            status_to: "in_review",
+            created_at: "2026-06-02T00:00:00Z",
+            event_metadata: JSON.stringify({
+              source: "human_verdict_override",
+              reason: "PM approved scope as-is",
+            }),
+          }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Revision history")).toBeInTheDocument();
+    expect(screen.getByText("Status changed")).toBeInTheDocument();
+  });
 });
