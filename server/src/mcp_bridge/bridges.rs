@@ -43,6 +43,7 @@ impl CoordinatorOps for CoordinatorBridge {
                 request.proposal_id,
                 request.current_revision_seq,
                 request.update_authority,
+                request.owner_user_id,
             )
             .await
             .map_err(|e| e.to_string())

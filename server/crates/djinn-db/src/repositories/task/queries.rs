@@ -732,6 +732,11 @@ pub(super) fn build_ready_where(
                 AND p.build_frozen = true
          )"
         .to_owned(),
+        // Refinement (tribunal) tasks are driven by the dedicated refinement
+        // dispatch loop, never the worker ready pass. Excluding them here keeps
+        // them out of worker dispatch entirely (they are owner-less by design,
+        // so they would otherwise be repeatedly refused by the ownership guard).
+        "t.issue_type != 'refinement'".to_owned(),
     ];
     let mut params: Vec<SqlParam> = Vec::new();
 

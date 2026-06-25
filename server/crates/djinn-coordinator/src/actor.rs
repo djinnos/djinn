@@ -932,6 +932,7 @@ impl CoordinatorActor {
                 proposal_id,
                 current_revision_seq,
                 update_authority,
+                owner_user_id,
                 reply,
             } => {
                 let result = self
@@ -939,6 +940,7 @@ impl CoordinatorActor {
                         &proposal_id,
                         current_revision_seq,
                         &update_authority,
+                        owner_user_id,
                     )
                     .await;
                 let _ = reply.send(result);
@@ -968,6 +970,7 @@ impl CoordinatorActor {
         proposal_id: &str,
         current_revision_seq: i32,
         update_authority: &str,
+        owner_user_id: Option<String>,
     ) -> Result<(), String> {
         use super::refinement::{RefinementLoopState, UpdateAuthority};
 
@@ -989,7 +992,8 @@ impl CoordinatorActor {
             }
         };
 
-        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority);
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority)
+            .with_attributed_user(owner_user_id.clone());
         self.active_refinements
             .insert(proposal_id.to_string(), state);
 
@@ -997,6 +1001,7 @@ impl CoordinatorActor {
             proposal_id = %proposal_id,
             current_revision_seq,
             update_authority,
+            owner_user_id = ?owner_user_id,
             "CoordinatorActor: started proposal refinement"
         );
 
@@ -1930,6 +1935,7 @@ mod tests {
                 proposal_id: "p-1".to_string(),
                 current_revision_seq: 0,
                 update_authority: "checkpoint".to_string(),
+                owner_user_id: None,
                 reply: reply_tx,
             })
             .await;
@@ -1951,6 +1957,7 @@ mod tests {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
                 update_authority: "auto_accept".to_string(),
+                owner_user_id: None,
                 reply: tx1,
             })
             .await;
@@ -1963,6 +1970,7 @@ mod tests {
                 proposal_id: "p-dup".to_string(),
                 current_revision_seq: 1,
                 update_authority: "auto_accept".to_string(),
+                owner_user_id: None,
                 reply: tx2,
             })
             .await;
@@ -1986,6 +1994,7 @@ mod tests {
                 proposal_id: "p-bad".to_string(),
                 current_revision_seq: 0,
                 update_authority: "invalid".to_string(),
+                owner_user_id: None,
                 reply: tx,
             })
             .await;
@@ -2004,6 +2013,7 @@ mod tests {
                 proposal_id: "p-a".to_string(),
                 current_revision_seq: 0,
                 update_authority: "checkpoint".to_string(),
+                owner_user_id: None,
                 reply: tx1,
             })
             .await;
@@ -2015,6 +2025,7 @@ mod tests {
                 proposal_id: "p-b".to_string(),
                 current_revision_seq: 2,
                 update_authority: "auto_accept".to_string(),
+                owner_user_id: None,
                 reply: tx2,
             })
             .await;
