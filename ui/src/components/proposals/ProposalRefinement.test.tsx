@@ -546,4 +546,55 @@ describe("ProposalRefinement", () => {
     expect(await screen.findByText("Advocate R2 revision")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Diff/i })).toBeInTheDocument();
   });
+
+  // ── P4 regression: refinement status panel displays active round info ──
+
+  it("renders active refinement with multiple rounds and entries", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 0,
+      total_entries: 12,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      pending_checkpoint_count: 3,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText("Round")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("Entries")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(
+      screen.getByText(/3 advocate revision\(s\) awaiting approval/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders demand round explanation in stopped status", () => {
+    const status: ProposalRefinementStatus = {
+      active: false,
+      current_round: 3,
+      dry_rounds: 1,
+      total_entries: 8,
+      update_authority: "checkpoint",
+      stop_reason: "adversary_dry",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByText(/Adversary exhausted/)).toBeInTheDocument();
+  });
 });

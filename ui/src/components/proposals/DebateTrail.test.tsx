@@ -546,4 +546,134 @@ describe("DebateTrail", () => {
 
     expect(onChanged).not.toHaveBeenCalled();
   });
+
+  // ── P4 regression: human-authority debate entries ────────────────────
+
+  it("renders human-authored blocking objection with user attribution", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "human-obj",
+            kind: "objection",
+            body: "Missing error handling section — blocking until resolved",
+            blocking: true,
+            agent_role: "advocate",
+            author_kind: "user",
+            author_user_id: "user-42",
+            author_model: null,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("objection")).toBeInTheDocument();
+    expect(screen.getByText("Blocking")).toBeInTheDocument();
+    expect(screen.getByText("user")).toBeInTheDocument();
+    expect(screen.getByText("user-42")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Missing error handling section/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders human verdict override entry alongside agent entries", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "agent-verdict",
+            kind: "verdict",
+            body: "needs-work: scope too broad",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: "gpt-4o",
+          }),
+          row({
+            id: "human-override",
+            kind: "verdict",
+            body: "Override: PM approved scope as-is",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "user",
+            author_user_id: "user-1",
+            author_model: null,
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(/needs-work: scope too broad/)).toBeInTheDocument();
+    expect(screen.getByText(/Override: PM approved scope/)).toBeInTheDocument();
+    expect(screen.getAllByText("verdict")).toHaveLength(2);
+    expect(screen.getByText("judge")).toBeInTheDocument();
+    expect(screen.getByText("advocate")).toBeInTheDocument();
+  });
+
+  it("renders spike finding entry with source_task_id attribution", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "spike-finding",
+            kind: "rebuttal",
+            body: "Spike finding: X is feasible with approach Y",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: "test-advocate",
+            source_task_id: "spike-task-uuid",
+          }),
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Spike finding: X is feasible/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("advocate")).toBeInTheDocument();
+    expect(screen.getByText("test-advocate")).toBeInTheDocument();
+  });
+
+  it("renders multiple rounds with human and agent entries", () => {
+    render(
+      <DebateTrail
+        debateTrail={[
+          row({
+            id: "r1-obj",
+            round: 1,
+            kind: "objection",
+            body: "Agent objection R1",
+            agent_role: "adversary",
+            author_kind: "agent",
+          }),
+          row({
+            id: "r1-human-obj",
+            round: 1,
+            kind: "objection",
+            body: "Human blocking objection R1",
+            blocking: true,
+            agent_role: "advocate",
+            author_kind: "user",
+            author_user_id: "user-1",
+          }),
+          row({
+            id: "r2-verdict",
+            round: 2,
+            kind: "verdict",
+            body: "ready: all concerns addressed",
+            blocking: false,
+            agent_role: "judge",
+            author_kind: "agent",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("Round 1")).toBeInTheDocument();
+    expect(screen.getByText("Round 2")).toBeInTheDocument();
+    expect(screen.getByText(/Agent objection R1/)).toBeInTheDocument();
+    expect(screen.getByText(/Human blocking objection R1/)).toBeInTheDocument();
+    expect(screen.getByText(/all concerns addressed/)).toBeInTheDocument();
+  });
 });
