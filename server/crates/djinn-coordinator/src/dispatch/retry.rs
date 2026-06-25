@@ -784,15 +784,15 @@ impl CoordinatorActor {
         // source uuid (source_task.id) — add_blocker keys on tasks.id, and the
         // caller-supplied source_task_id may be a short_id. Non-fatal: a failed
         // link still leaves the escalation dispatched.
-        if let Some(src) = source_task.as_ref() {
-            if let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await {
-                tracing::warn!(
-                    error = %e,
-                    source_task_id = %src.short_id,
-                    review_task_id = %review_task.short_id,
-                    "CoordinatorActor: planner escalation — failed to block source task on review task"
-                );
-            }
+        if let Some(src) = source_task.as_ref()
+            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
+        {
+            tracing::warn!(
+                error = %e,
+                source_task_id = %src.short_id,
+                review_task_id = %review_task.short_id,
+                "CoordinatorActor: planner escalation — failed to block source task on review task"
+            );
         }
 
         // Log a comment on the source task linking to the planner review task.
