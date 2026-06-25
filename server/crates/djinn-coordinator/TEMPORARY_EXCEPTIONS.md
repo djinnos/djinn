@@ -9,7 +9,6 @@ migrated to `djinn-db` repository methods:
   `sqlx::query`, `sqlx::query_scalar`) against the `sessions` and
   `task_runs` tables
 - `src/reentrance.rs` — dispatch-state queries
-- `src/pr_poller/pr_review_handlers.rs` — PR review state queries
 
 Test files with direct sqlx (acceptable):
 - `src/tests/session_reaping.rs`

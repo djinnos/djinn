@@ -1111,6 +1111,34 @@ impl SessionRepository {
 
         Ok(total_updated)
     }
+
+    /// Candidates for the extraction backfill sweep: completed task-runs whose
+    /// sessions were never extracted (`event_taxonomy IS NULL`).  Returns
+    /// `(task_id, task_run_id)` pairs ordered by `task_run_id`.
+    pub async fn list_unextracted_completed_candidates(
+        &self,
+    ) -> Result<Vec<ExtractionBackfillCandidate>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ExtractionBackfillCandidate>(
+            "SELECT DISTINCT s.task_id, s.task_run_id \
+             FROM sessions s \
+             JOIN task_runs tr ON tr.id = s.task_run_id \
+             WHERE tr.status = 'completed' \
+               AND s.event_taxonomy IS NULL \
+               AND s.task_id IS NOT NULL \
+               AND s.task_run_id IS NOT NULL \
+             ORDER BY s.task_run_id",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+}
+
+/// Row returned by [`SessionRepository::list_unextracted_completed_candidates`].
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ExtractionBackfillCandidate {
+    pub task_id: String,
+    pub task_run_id: String,
 }
 
 #[cfg(test)]
