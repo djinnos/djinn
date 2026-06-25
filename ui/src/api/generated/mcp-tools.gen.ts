@@ -1942,6 +1942,42 @@ export namespace ExecutionKillTaskOutputSchema {
 
 }
 export type ExecutionKillTaskOutput = ExecutionKillTaskOutputSchema.ExecutionKillTaskOutput;
+export namespace GetBlockCatalogInputSchema {
+  /**
+   * Params for the lean `get_block_catalog` tool (no fields required).
+   */
+  export interface GetBlockCatalogInput {
+  [k: string]: any
+  }
+
+}
+export type GetBlockCatalogInput = GetBlockCatalogInputSchema.GetBlockCatalogInput;
+export namespace GetBlockCatalogOutputSchema {
+  /**
+   * Response envelope for `get_block_catalog`: a lean list of type/tag pairs.
+   */
+  export interface GetBlockCatalogOutput {
+  blocks: BlockCatalogEntry[]
+  [k: string]: any
+  }
+  /**
+   * A single entry in the lean block catalog: just the stable type tag and
+   * MDX component tag name, loaded from `proposal_block_catalog.json`.
+   */
+  export interface BlockCatalogEntry {
+  /**
+   * MDX component tag, e.g. `AnnotatedCode`.
+   */
+  tag: string
+  /**
+   * Stable kebab-case block type, e.g. `annotated-code`.
+   */
+  type: string
+  [k: string]: any
+  }
+
+}
+export type GetBlockCatalogOutput = GetBlockCatalogOutputSchema.GetBlockCatalogOutput;
 export namespace GetProjectDevcontainerStatusInputSchema {
   export interface GetProjectDevcontainerStatusInput {
   /**
@@ -5763,6 +5799,158 @@ export namespace ProposalAddTargetOutputSchema {
 
 }
 export type ProposalAddTargetOutput = ProposalAddTargetOutputSchema.ProposalAddTargetOutput;
+export namespace ProposalBlockPatchInputSchema {
+  export interface ProposalBlockPatchInput {
+  /**
+   * The MDX content to insert (a single block or arbitrary MDX text).
+   */
+  block_mdx: string
+  /**
+   * If set, reject the patch when the proposal's latest_revision_seq does
+   * not equal this value. Guards against concurrent edits.
+   */
+  expected_latest_revision_seq?: number
+  /**
+   * Proposal UUID or short_id.
+   */
+  id: string
+  /**
+   * Name of the native skill producing this patch (e.g. "visual-spec").
+   * Persisted in the revision event_metadata for provenance.
+   */
+  native_skill_name?: string
+  /**
+   * Pinned version of the native skill.
+   */
+  native_skill_version?: string
+  /**
+   * Optional free-form note persisted alongside the revision metadata.
+   */
+  note?: string
+  /**
+   * Operation: `replace` replaces the selected range, `wrap` wraps it.
+   */
+  operation: string
+  selector: BlockPatchSelector
+  [k: string]: any
+  }
+  /**
+   * Target selector: identifies the range in the body to patch.
+   */
+  export interface BlockPatchSelector {
+  /**
+   * Byte range selector: start is inclusive, end is exclusive. If
+   * `expected_text` is provided and does not match the body at that byte
+   * range, the patch is rejected (stale-range guard).
+   */
+  byte_range?: (ByteRangeSelector | null)
+  /**
+   * Match a contiguous substring of the body. Must occur exactly once;
+   * zero matches or ambiguous (multiple) matches are rejected.
+   */
+  exact_text?: string
+  /**
+   * Match a markdown heading by its text (without the `#` prefix). The
+   * matched range includes the heading line itself and all content up to
+   * (but not including) the next heading at the same or higher level, or
+   * the end of the body.
+   */
+  heading_text?: string
+  [k: string]: any
+  }
+  /**
+   * A byte-range selector with an optional verification text.
+   */
+  export interface ByteRangeSelector {
+  /**
+   * Exclusive byte offset of the target range.
+   */
+  end: number
+  /**
+   * When set, the body text at `[start..end)` must equal this value or the
+   * patch is rejected. Guards against stale ranges after concurrent edits.
+   */
+  expected_text?: string
+  /**
+   * Inclusive byte offset of the target range.
+   */
+  start: number
+  [k: string]: any
+  }
+
+}
+export type ProposalBlockPatchInput = ProposalBlockPatchInputSchema.ProposalBlockPatchInput;
+export namespace ProposalBlockPatchOutputSchema {
+  export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
+
+  export interface ProposalBlockPatchOutput {
+  /**
+   * Structured acceptance criteria (`{criterion, met}` or plain string),
+   * same shape as tasks. `met` means "agreed during scoping".
+   */
+  acceptance_criteria?: AcceptanceCriterionItem[]
+  author_user_id?: string
+  body?: string
+  /**
+   * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
+   */
+  body_format?: string
+  /**
+   * Build owner once graduated.
+   */
+  build_owner_user_id?: string
+  closed_at?: string
+  created_at?: string
+  error?: string
+  id?: string
+  /**
+   * Last proposal revision that the in-flight build has reconciled against.
+   */
+  last_reconciled_revision_seq?: number
+  /**
+   * Head revision number (sign-offs anchored earlier are stale).
+   */
+  latest_revision_seq?: number
+  /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
+   * Portable proposal.mdx representation (populated by `proposal_export`).
+   */
+  mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
+  /**
+   * True when the in-flight build is behind the latest proposal revision.
+   */
+  pending_reconcile?: boolean
+  short_id?: string
+  /**
+   * Lifecycle: draft | in_review | approved | building | done | rejected |
+   * archived | superseded.
+   */
+  status?: string
+  superseded_by?: string
+  title?: string
+  /**
+   * Count of unresolved feedback entries — drives the per-row badge in the
+   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   */
+  unresolved_feedback_count?: number
+  updated_at?: string
+  [k: string]: any
+  }
+  export interface AcceptanceCriterionStatus {
+  criterion: string
+  met?: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalBlockPatchOutput = ProposalBlockPatchOutputSchema.ProposalBlockPatchOutput;
 export namespace ProposalBlocksInputSchema {
   export interface ProposalBlocksInput {
   [k: string]: any
@@ -5883,9 +6071,17 @@ export namespace ProposalCreateOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -5914,6 +6110,334 @@ export namespace ProposalCreateOutputSchema {
 
 }
 export type ProposalCreateOutput = ProposalCreateOutputSchema.ProposalCreateOutput;
+export namespace ProposalDebateAppendInputSchema {
+  export interface ProposalDebateAppendInput {
+  /**
+   * The proposal revision this entry is written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` (default) or `user`.
+   */
+  author_kind?: string
+  /**
+   * Model id when `author_kind == "agent"`.
+   */
+  author_model?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   * Meaningful for objection and verdict kinds.
+   */
+  blocking?: boolean
+  /**
+   * Body text of the debate entry.
+   */
+  body: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  /**
+   * Optional source task attribution.
+   */
+  source_task_id?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateAppendInput = ProposalDebateAppendInputSchema.ProposalDebateAppendInput;
+export namespace ProposalDebateAppendOutputSchema {
+  export interface ProposalDebateAppendOutput {
+  entry?: (ProposalDebateTrailModel | null)
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A structured debate-trail row for the proposal tribunal. Separate from
+   * [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+   * (objection, rebuttal, verdict), track blocking state, and carry
+   * resolution/reopen lifecycle.
+   */
+  export interface ProposalDebateTrailModel {
+  /**
+   * The proposal revision this entry was written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` or `user`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   */
+  blocking: boolean
+  body: string
+  created_at: string
+  id: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  proposal_id: string
+  /**
+   * When set alongside `resolved_at`, the entry was reopened.
+   */
+  reopened_at?: string
+  reopened_by_user_id?: string
+  /**
+   * When set, the entry has been resolved. `None` while open.
+   */
+  resolved_at?: string
+  resolved_by_user_id?: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  source_task_id?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateAppendOutput = ProposalDebateAppendOutputSchema.ProposalDebateAppendOutput;
+export namespace ProposalDebateListInputSchema {
+  export interface ProposalDebateListInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateListInput = ProposalDebateListInputSchema.ProposalDebateListInput;
+export namespace ProposalDebateListOutputSchema {
+  export interface ProposalDebateListOutput {
+  entries?: ProposalDebateTrailModel[]
+  error?: string
+  proposal_id?: string
+  [k: string]: any
+  }
+  /**
+   * A structured debate-trail row for the proposal tribunal. Separate from
+   * [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+   * (objection, rebuttal, verdict), track blocking state, and carry
+   * resolution/reopen lifecycle.
+   */
+  export interface ProposalDebateTrailModel {
+  /**
+   * The proposal revision this entry was written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` or `user`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   */
+  blocking: boolean
+  body: string
+  created_at: string
+  id: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  proposal_id: string
+  /**
+   * When set alongside `resolved_at`, the entry was reopened.
+   */
+  reopened_at?: string
+  reopened_by_user_id?: string
+  /**
+   * When set, the entry has been resolved. `None` while open.
+   */
+  resolved_at?: string
+  resolved_by_user_id?: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  source_task_id?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateListOutput = ProposalDebateListOutputSchema.ProposalDebateListOutput;
+export namespace ProposalDebateReopenInputSchema {
+  export interface ProposalDebateReopenInput {
+  /**
+   * Debate-trail entry UUID.
+   */
+  id: string
+  /**
+   * Optional user ID to attribute the reopen action to. When omitted,
+   * falls back to the current session user (if any). Passed through
+   * to the audit trail as `reopened_by_user_id`.
+   */
+  user_id?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateReopenInput = ProposalDebateReopenInputSchema.ProposalDebateReopenInput;
+export namespace ProposalDebateReopenOutputSchema {
+  export interface ProposalDebateReopenOutput {
+  entry?: (ProposalDebateTrailModel | null)
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A structured debate-trail row for the proposal tribunal. Separate from
+   * [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+   * (objection, rebuttal, verdict), track blocking state, and carry
+   * resolution/reopen lifecycle.
+   */
+  export interface ProposalDebateTrailModel {
+  /**
+   * The proposal revision this entry was written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` or `user`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   */
+  blocking: boolean
+  body: string
+  created_at: string
+  id: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  proposal_id: string
+  /**
+   * When set alongside `resolved_at`, the entry was reopened.
+   */
+  reopened_at?: string
+  reopened_by_user_id?: string
+  /**
+   * When set, the entry has been resolved. `None` while open.
+   */
+  resolved_at?: string
+  resolved_by_user_id?: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  source_task_id?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateReopenOutput = ProposalDebateReopenOutputSchema.ProposalDebateReopenOutput;
+export namespace ProposalDebateResolveInputSchema {
+  export interface ProposalDebateResolveInput {
+  /**
+   * Debate-trail entry UUID.
+   */
+  id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateResolveInput = ProposalDebateResolveInputSchema.ProposalDebateResolveInput;
+export namespace ProposalDebateResolveOutputSchema {
+  export interface ProposalDebateResolveOutput {
+  entry?: (ProposalDebateTrailModel | null)
+  error?: string
+  [k: string]: any
+  }
+  /**
+   * A structured debate-trail row for the proposal tribunal. Separate from
+   * [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+   * (objection, rebuttal, verdict), track blocking state, and carry
+   * resolution/reopen lifecycle.
+   */
+  export interface ProposalDebateTrailModel {
+  /**
+   * The proposal revision this entry was written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` or `user`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   */
+  blocking: boolean
+  body: string
+  created_at: string
+  id: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  proposal_id: string
+  /**
+   * When set alongside `resolved_at`, the entry was reopened.
+   */
+  reopened_at?: string
+  reopened_by_user_id?: string
+  /**
+   * When set, the entry has been resolved. `None` while open.
+   */
+  resolved_at?: string
+  resolved_by_user_id?: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  source_task_id?: string
+  updated_at: string
+  [k: string]: any
+  }
+
+}
+export type ProposalDebateResolveOutput = ProposalDebateResolveOutputSchema.ProposalDebateResolveOutput;
 export namespace ProposalDeleteInputSchema {
   export interface ProposalDeleteInput {
   /**
@@ -5977,9 +6501,17 @@ export namespace ProposalExportOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -6118,88 +6650,6 @@ export namespace ProposalFeedbackResolveOutputSchema {
 
 }
 export type ProposalFeedbackResolveOutput = ProposalFeedbackResolveOutputSchema.ProposalFeedbackResolveOutput;
-export namespace ProposalDebateResolveInputSchema {
-  export interface ProposalDebateResolveInput {
-  /**
-   * Debate-trail entry UUID.
-   */
-  id: string
-  [k: string]: any
-  }
-
-}
-export type ProposalDebateResolveInput = ProposalDebateResolveInputSchema.ProposalDebateResolveInput;
-export namespace ProposalDebateResolveOutputSchema {
-  export interface ProposalDebateResolveOutput {
-  entry?: (ProposalDebateTrailModel | null)
-  error?: string
-  [k: string]: any
-  }
-  export interface ProposalDebateTrailModel {
-  against_revision_seq: number
-  agent_role: string
-  author_kind: string
-  author_model?: string
-  author_user_id?: string
-  blocking: boolean
-  body: string
-  created_at: string
-  id: string
-  kind: string
-  proposal_id: string
-  reopened_at?: string
-  reopened_by_user_id?: string
-  resolved_at?: string
-  resolved_by_user_id?: string
-  round: number
-  source_task_id?: string
-  updated_at: string
-  [k: string]: any
-  }
-
-}
-export type ProposalDebateResolveOutput = ProposalDebateResolveOutputSchema.ProposalDebateResolveOutput;
-export namespace ProposalDebateReopenInputSchema {
-  export interface ProposalDebateReopenInput {
-  /**
-   * Debate-trail entry UUID.
-   */
-  id: string
-  [k: string]: any
-  }
-
-}
-export type ProposalDebateReopenInput = ProposalDebateReopenInputSchema.ProposalDebateReopenInput;
-export namespace ProposalDebateReopenOutputSchema {
-  export interface ProposalDebateReopenOutput {
-  entry?: (ProposalDebateTrailModel | null)
-  error?: string
-  [k: string]: any
-  }
-  export interface ProposalDebateTrailModel {
-  against_revision_seq: number
-  agent_role: string
-  author_kind: string
-  author_model?: string
-  author_user_id?: string
-  blocking: boolean
-  body: string
-  created_at: string
-  id: string
-  kind: string
-  proposal_id: string
-  reopened_at?: string
-  reopened_by_user_id?: string
-  resolved_at?: string
-  resolved_by_user_id?: string
-  round: number
-  source_task_id?: string
-  updated_at: string
-  [k: string]: any
-  }
-
-}
-export type ProposalDebateReopenOutput = ProposalDebateReopenOutputSchema.ProposalDebateReopenOutput;
 export namespace ProposalGraduateInputSchema {
   export interface ProposalGraduateInput {
   /**
@@ -6248,9 +6698,17 @@ export namespace ProposalGraduateOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -6322,9 +6780,17 @@ export namespace ProposalImportOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -6419,6 +6885,14 @@ export namespace ProposalListOutputSchema {
    */
   latest_revision_seq: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
+  /**
    * True when the in-flight build is behind the latest proposal revision.
    */
   pending_reconcile: boolean
@@ -6510,43 +6984,434 @@ export namespace ProposalReconcileObsoleteEpicOutputSchema {
 
 }
 export type ProposalReconcileObsoleteEpicOutput = ProposalReconcileObsoleteEpicOutputSchema.ProposalReconcileObsoleteEpicOutput;
-export namespace ProposalRefinementStartInputSchema {
-  export interface ProposalRefinementStartInput {
+export namespace ProposalRefinementCheckpointApproveInputSchema {
+  export interface ProposalRefinementCheckpointApproveInput {
   /**
    * Proposal UUID or short_id.
    */
   proposal_id: string
   /**
-   * Update authority mode: `checkpoint` (advocate revisions require approval)
-   * or `auto_accept` (revisions applied automatically).
+   * Revision sequence number to approve.
    */
-  update_authority: string
+  revision_seq: number
   [k: string]: any
   }
 
 }
-export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.ProposalRefinementStartInput;
-export namespace ProposalRefinementStartOutputSchema {
-  export interface ProposalRefinementStartOutput {
+export type ProposalRefinementCheckpointApproveInput = ProposalRefinementCheckpointApproveInputSchema.ProposalRefinementCheckpointApproveInput;
+export namespace ProposalRefinementCheckpointApproveOutputSchema {
   /**
-   * Whether refinement was successfully started.
+   * Response for `proposal_refinement_checkpoint_approve`.
    */
-  active?: boolean
+  export interface ProposalRefinementCheckpointApproveOutput {
   /**
-   * Current debate round (1-based).
+   * True when the pending revision was found and applied.
    */
-  current_round?: number
+  approved: boolean
   error?: string
-  ok?: boolean
+  proposal_id?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementCheckpointApproveOutput = ProposalRefinementCheckpointApproveOutputSchema.ProposalRefinementCheckpointApproveOutput;
+export namespace ProposalRefinementCheckpointListInputSchema {
+  export interface ProposalRefinementCheckpointListInput {
   /**
-   * Update authority mode used for this refinement session.
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementCheckpointListInput = ProposalRefinementCheckpointListInputSchema.ProposalRefinementCheckpointListInput;
+export namespace ProposalRefinementCheckpointListOutputSchema {
+  /**
+   * Response for `proposal_refinement_checkpoint_list`.
+   */
+  export interface ProposalRefinementCheckpointListOutput {
+  error?: string
+  pending?: CheckpointRevisionModel[]
+  proposal_id?: string
+  [k: string]: any
+  }
+  /**
+   * A pending checkpoint revision visible in the UI for approval or rejection.
+   * Derived from a `proposal_revisions` row whose `event_metadata` marks it as
+   * `checkpoint_status: "pending"`.
+   */
+  export interface CheckpointRevisionModel {
+  /**
+   * Model that authored this revision.
+   */
+  author_model?: string
+  /**
+   * Short preview of the proposed body (first 300 chars).
+   */
+  body_preview: string
+  /**
+   * When the revision was created.
+   */
+  created_at: string
+  /**
+   * Advocate role attribution from event_metadata.
+   */
+  role?: string
+  /**
+   * Refinement round that produced this revision.
+   */
+  round?: number
+  /**
+   * The `proposal_revisions.seq` this pending revision targets.
+   */
+  seq: number
+  /**
+   * Title of the pending revision.
+   */
+  title: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementCheckpointListOutput = ProposalRefinementCheckpointListOutputSchema.ProposalRefinementCheckpointListOutput;
+export namespace ProposalRefinementCheckpointRejectInputSchema {
+  export interface ProposalRefinementCheckpointRejectInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Revision sequence number to reject.
+   */
+  revision_seq: number
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementCheckpointRejectInput = ProposalRefinementCheckpointRejectInputSchema.ProposalRefinementCheckpointRejectInput;
+export namespace ProposalRefinementCheckpointRejectOutputSchema {
+  /**
+   * Response for `proposal_refinement_checkpoint_reject`.
+   */
+  export interface ProposalRefinementCheckpointRejectOutput {
+  error?: string
+  proposal_id?: string
+  /**
+   * True when the pending revision was found and rejected.
+   */
+  rejected: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementCheckpointRejectOutput = ProposalRefinementCheckpointRejectOutputSchema.ProposalRefinementCheckpointRejectOutput;
+export namespace ProposalRefinementDemandRoundInputSchema {
+  export interface ProposalRefinementDemandRoundInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Why another round is being demanded. Recorded in proposal history.
+   */
+  reason?: string
+  /**
+   * Update authority mode: `checkpoint` (default) or `auto_accept`.
    */
   update_authority?: string
   [k: string]: any
   }
 
 }
+export type ProposalRefinementDemandRoundInput = ProposalRefinementDemandRoundInputSchema.ProposalRefinementDemandRoundInput;
+export namespace ProposalRefinementDemandRoundOutputSchema {
+  /**
+   * Response for `proposal_refinement_demand_round`.
+   */
+  export interface ProposalRefinementDemandRoundOutput {
+  /**
+   * True when the demand was accepted and a new round started.
+   */
+  accepted: boolean
+  error?: string
+  proposal_id?: string
+  /**
+   * Refinement status after the demand.
+   */
+  refinement?: (ProposalRefinementStatusModel | null)
+  [k: string]: any
+  }
+  /**
+   * Refinement session state tracked on the proposal's event_metadata.
+   * The coordinator refinement workflow populates these fields; the
+   * control-plane surfaces them read-only to the UI.
+   */
+  export interface ProposalRefinementStatusModel {
+  /**
+   * Whether refinement has been started for this proposal.
+   */
+  active: boolean
+  /**
+   * Current debate round (1-based). `None` when refinement has not started.
+   */
+  current_round?: number
+  /**
+   * How many consecutive adversary dry rounds have been observed.
+   */
+  dry_rounds: number
+  /**
+   * When the proposal is parked for a needs-evidence spike, this contains
+   * the claim and spike task reference. `None` when not parked.
+   */
+  needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Count of pending checkpoint revisions awaiting approval.
+   * Always 0 in auto-accept mode.
+   */
+  pending_checkpoint_count?: number
+  /**
+   * When set, refinement has stopped for this reason.
+   * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+   * `agent_failure`, or `null` (still running / not started).
+   */
+  stop_reason?: string
+  /**
+   * Total debate-trail entries produced so far.
+   */
+  total_entries: number
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions are proposed
+   * but not auto-applied) or `auto_accept` (revisions are applied as
+   * proposal updates).
+   */
+  update_authority: string
+  [k: string]: any
+  }
+  /**
+   * Needs-evidence parking state for a proposal.
+   */
+  export interface NeedsEvidenceStatus {
+  /**
+   * The named feasibility claim that the Judge identified.
+   */
+  claim: string
+  /**
+   * The spike task short id (human-readable).
+   */
+  spike_short_id: string
+  /**
+   * Current status of the spike task.
+   */
+  spike_status: string
+  /**
+   * The spike task id (UUID).
+   */
+  spike_task_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementDemandRoundOutput = ProposalRefinementDemandRoundOutputSchema.ProposalRefinementDemandRoundOutput;
+export namespace ProposalRefinementStartInputSchema {
+  export interface ProposalRefinementStartInput {
+  /**
+   * User the refinement run is attributed to: owner of the spawned
+   * refinement (tribunal) tasks and the scope for per-user role-model
+   * resolution. Omit to attribute the run to the proposal author.
+   */
+  owner_user_id?: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions are proposed
+   * but not auto-applied) or `auto_accept` (revisions are applied as
+   * proposal updates). Defaults to `checkpoint`.
+   */
+  update_authority?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.ProposalRefinementStartInput;
+export namespace ProposalRefinementStartOutputSchema {
+  /**
+   * Response for `proposal_refinement_start`.
+   */
+  export interface ProposalRefinementStartOutput {
+  error?: string
+  proposal_id?: string
+  /**
+   * The initial refinement status after starting.
+   */
+  refinement?: (ProposalRefinementStatusModel | null)
+  [k: string]: any
+  }
+  /**
+   * Refinement session state tracked on the proposal's event_metadata.
+   * The coordinator refinement workflow populates these fields; the
+   * control-plane surfaces them read-only to the UI.
+   */
+  export interface ProposalRefinementStatusModel {
+  /**
+   * Whether refinement has been started for this proposal.
+   */
+  active: boolean
+  /**
+   * Current debate round (1-based). `None` when refinement has not started.
+   */
+  current_round?: number
+  /**
+   * How many consecutive adversary dry rounds have been observed.
+   */
+  dry_rounds: number
+  /**
+   * When the proposal is parked for a needs-evidence spike, this contains
+   * the claim and spike task reference. `None` when not parked.
+   */
+  needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Count of pending checkpoint revisions awaiting approval.
+   * Always 0 in auto-accept mode.
+   */
+  pending_checkpoint_count?: number
+  /**
+   * When set, refinement has stopped for this reason.
+   * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+   * `agent_failure`, or `null` (still running / not started).
+   */
+  stop_reason?: string
+  /**
+   * Total debate-trail entries produced so far.
+   */
+  total_entries: number
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions are proposed
+   * but not auto-applied) or `auto_accept` (revisions are applied as
+   * proposal updates).
+   */
+  update_authority: string
+  [k: string]: any
+  }
+  /**
+   * Needs-evidence parking state for a proposal.
+   */
+  export interface NeedsEvidenceStatus {
+  /**
+   * The named feasibility claim that the Judge identified.
+   */
+  claim: string
+  /**
+   * The spike task short id (human-readable).
+   */
+  spike_short_id: string
+  /**
+   * Current status of the spike task.
+   */
+  spike_status: string
+  /**
+   * The spike task id (UUID).
+   */
+  spike_task_id: string
+  [k: string]: any
+  }
+
+}
 export type ProposalRefinementStartOutput = ProposalRefinementStartOutputSchema.ProposalRefinementStartOutput;
+export namespace ProposalRefinementStatusInputSchema {
+  export interface ProposalRefinementStatusInput {
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementStatusInput = ProposalRefinementStatusInputSchema.ProposalRefinementStatusInput;
+export namespace ProposalRefinementStatusOutputSchema {
+  /**
+   * Response for `proposal_refinement_status`.
+   */
+  export interface ProposalRefinementStatusOutput {
+  error?: string
+  proposal_id?: string
+  refinement?: (ProposalRefinementStatusModel | null)
+  [k: string]: any
+  }
+  /**
+   * Refinement session state tracked on the proposal's event_metadata.
+   * The coordinator refinement workflow populates these fields; the
+   * control-plane surfaces them read-only to the UI.
+   */
+  export interface ProposalRefinementStatusModel {
+  /**
+   * Whether refinement has been started for this proposal.
+   */
+  active: boolean
+  /**
+   * Current debate round (1-based). `None` when refinement has not started.
+   */
+  current_round?: number
+  /**
+   * How many consecutive adversary dry rounds have been observed.
+   */
+  dry_rounds: number
+  /**
+   * When the proposal is parked for a needs-evidence spike, this contains
+   * the claim and spike task reference. `None` when not parked.
+   */
+  needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Count of pending checkpoint revisions awaiting approval.
+   * Always 0 in auto-accept mode.
+   */
+  pending_checkpoint_count?: number
+  /**
+   * When set, refinement has stopped for this reason.
+   * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+   * `agent_failure`, or `null` (still running / not started).
+   */
+  stop_reason?: string
+  /**
+   * Total debate-trail entries produced so far.
+   */
+  total_entries: number
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions are proposed
+   * but not auto-applied) or `auto_accept` (revisions are applied as
+   * proposal updates).
+   */
+  update_authority: string
+  [k: string]: any
+  }
+  /**
+   * Needs-evidence parking state for a proposal.
+   */
+  export interface NeedsEvidenceStatus {
+  /**
+   * The named feasibility claim that the Judge identified.
+   */
+  claim: string
+  /**
+   * The spike task short id (human-readable).
+   */
+  spike_short_id: string
+  /**
+   * Current status of the spike task.
+   */
+  spike_status: string
+  /**
+   * The spike task id (UUID).
+   */
+  spike_task_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementStatusOutput = ProposalRefinementStatusOutputSchema.ProposalRefinementStatusOutput;
 export namespace ProposalRemoveTargetInputSchema {
   export interface ProposalRemoveTargetInput {
   /**
@@ -6607,17 +7472,83 @@ export namespace ProposalShowOutputSchema {
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface ProposalShowOutput {
+  /**
+   * Structured debate-trail rows (objections, rebuttals, verdicts).
+   * Kept separate from `feedback` (plain human discussion).
+   */
+  debate_trail?: ProposalDebateTrailModel[]
   epics?: ProposalEpicModel[]
   error?: string
   feedback?: ProposalFeedbackModel[]
+  /**
+   * Composed gate status: deterministic DoR + tribunal conditions.
+   * Always present on a successful `proposal_show` response.
+   */
+  gate_status?: (ProposalGateStatusModel | null)
   /**
    * Memory notes linked to this proposal's graduated epics/tasks.
    */
   memory_refs?: ProposalMemoryRefModel[]
   proposal?: (ProposalModel | null)
+  /**
+   * Refinement session status (active round, stop reason, update authority).
+   * `None` when refinement has not been started for this proposal.
+   */
+  refinement?: (ProposalRefinementStatusModel | null)
   revisions?: ProposalRevisionModel[]
   signoffs?: ProposalSignoffModel[]
   targets?: ProposalTargetModel[]
+  [k: string]: any
+  }
+  /**
+   * A structured debate-trail row for the proposal tribunal. Separate from
+   * [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+   * (objection, rebuttal, verdict), track blocking state, and carry
+   * resolution/reopen lifecycle.
+   */
+  export interface ProposalDebateTrailModel {
+  /**
+   * The proposal revision this entry was written against.
+   */
+  against_revision_seq: number
+  /**
+   * Agent role (e.g. "advocate", "adversary", "judge").
+   */
+  agent_role: string
+  /**
+   * `agent` or `user`.
+   */
+  author_kind: string
+  author_model?: string
+  author_user_id?: string
+  /**
+   * When true, this entry blocks proposal readiness.
+   */
+  blocking: boolean
+  body: string
+  created_at: string
+  id: string
+  /**
+   * `objection` | `rebuttal` | `verdict`.
+   */
+  kind: string
+  proposal_id: string
+  /**
+   * When set alongside `resolved_at`, the entry was reopened.
+   */
+  reopened_at?: string
+  reopened_by_user_id?: string
+  /**
+   * When set, the entry has been resolved. `None` while open.
+   */
+  resolved_at?: string
+  resolved_by_user_id?: string
+  /**
+   * Debate round (1-based).
+   */
+  round: number
+  source_task_id?: string
+  updated_at: string
   [k: string]: any
   }
   /**
@@ -6667,6 +7598,103 @@ export namespace ProposalShowOutputSchema {
   [k: string]: any
   }
   /**
+   * Composed gate status for a proposal: deterministic DoR + tribunal
+   * conditions. Returned by `proposal_show` so the UI can render readiness
+   * without recomputing it client-side.
+   */
+  export interface ProposalGateStatusModel {
+  /**
+   * Consecutive adversary dry rounds at the end of the trail.
+   */
+  adversary_dry_count: number
+  /**
+   * Human-readable explanations of all gate failures, each naming the
+   * exact blocking condition. Empty when `ready` is true.
+   */
+  blocked_explanations: string[]
+  /**
+   * Specific DoR failures (empty when `dor_ready` is true).
+   */
+  dor_failures: GateFailureModel[]
+  /**
+   * Whether the deterministic DoR checks pass.
+   */
+  dor_ready: boolean
+  /**
+   * Whether a current human override exists for this revision.
+   */
+  human_override_active: boolean
+  /**
+   * Whether the latest judge verdict contains "needs-work".
+   */
+  judge_needs_work: boolean
+  /**
+   * Latest judge verdict body text, when a judge has issued a verdict.
+   */
+  judge_verdict_body?: string
+  /**
+   * Latest judge verdict entry id, when a judge has issued a verdict.
+   */
+  judge_verdict_id?: string
+  /**
+   * Needs-evidence spike parking state. `None` when not parked.
+   */
+  needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Whether there are pending checkpoint revisions awaiting decision.
+   */
+  pending_checkpoint: boolean
+  /**
+   * Whether the composed gate passes (DoR ready + tribunal conditions met).
+   */
+  ready: boolean
+  /**
+   * Count of unresolved blocking debate-trail entries.
+   */
+  unresolved_blocking_count: number
+  /**
+   * IDs of unresolved blocking debate-trail entries.
+   */
+  unresolved_blocking_ids: string[]
+  [k: string]: any
+  }
+  /**
+   * One DoR failure in the gate status.
+   */
+  export interface GateFailureModel {
+  /**
+   * Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`).
+   */
+  check: string
+  /**
+   * Human-readable failure message.
+   */
+  message: string
+  [k: string]: any
+  }
+  /**
+   * Needs-evidence parking state for a proposal.
+   */
+  export interface NeedsEvidenceStatus {
+  /**
+   * The named feasibility claim that the Judge identified.
+   */
+  claim: string
+  /**
+   * The spike task short id (human-readable).
+   */
+  spike_short_id: string
+  /**
+   * Current status of the spike task.
+   */
+  spike_status: string
+  /**
+   * The spike task id (UUID).
+   */
+  spike_task_id: string
+  [k: string]: any
+  }
+  /**
    * A memory note linked to a proposal via its graduated epics/tasks.
    */
   export interface ProposalMemoryRefModel {
@@ -6711,6 +7739,14 @@ export namespace ProposalShowOutputSchema {
    */
   latest_revision_seq: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
+  /**
    * True when the in-flight build is behind the latest proposal revision.
    */
   pending_reconcile: boolean
@@ -6733,6 +7769,52 @@ export namespace ProposalShowOutputSchema {
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Refinement session state tracked on the proposal's event_metadata.
+   * The coordinator refinement workflow populates these fields; the
+   * control-plane surfaces them read-only to the UI.
+   */
+  export interface ProposalRefinementStatusModel {
+  /**
+   * Whether refinement has been started for this proposal.
+   */
+  active: boolean
+  /**
+   * Current debate round (1-based). `None` when refinement has not started.
+   */
+  current_round?: number
+  /**
+   * How many consecutive adversary dry rounds have been observed.
+   */
+  dry_rounds: number
+  /**
+   * When the proposal is parked for a needs-evidence spike, this contains
+   * the claim and spike task reference. `None` when not parked.
+   */
+  needs_evidence?: (NeedsEvidenceStatus | null)
+  /**
+   * Count of pending checkpoint revisions awaiting approval.
+   * Always 0 in auto-accept mode.
+   */
+  pending_checkpoint_count?: number
+  /**
+   * When set, refinement has stopped for this reason.
+   * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+   * `agent_failure`, or `null` (still running / not started).
+   */
+  stop_reason?: string
+  /**
+   * Total debate-trail entries produced so far.
+   */
+  total_entries: number
+  /**
+   * Update authority mode: `checkpoint` (advocate revisions are proposed
+   * but not auto-applied) or `auto_accept` (revisions are applied as
+   * proposal updates).
+   */
+  update_authority: string
   [k: string]: any
   }
   export interface ProposalRevisionModel {
@@ -6841,9 +7923,17 @@ export namespace ProposalSignoffOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -6919,9 +8009,17 @@ export namespace ProposalSignoffClearOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -7077,9 +8175,17 @@ export namespace ProposalUpdateOutputSchema {
    */
   latest_revision_seq?: number
   /**
+   * When parked for needs-evidence: the linked spike task id.
+   */
+  linked_spike_task_id?: string
+  /**
    * Portable proposal.mdx representation (populated by `proposal_export`).
    */
   mdx?: string
+  /**
+   * When parked for needs-evidence: the named feasibility claim.
+   */
+  needs_evidence_claim?: string
   /**
    * True when the in-flight build is behind the latest proposal revision.
    */
@@ -7108,6 +8214,47 @@ export namespace ProposalUpdateOutputSchema {
 
 }
 export type ProposalUpdateOutput = ProposalUpdateOutputSchema.ProposalUpdateOutput;
+export namespace ProposalVerdictOverrideInputSchema {
+  export interface ProposalVerdictOverrideInput {
+  /**
+   * Optional debate-trail entry id of the verdict being overridden.
+   */
+  overridden_verdict_entry_id?: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * Why the verdict is being overridden. Required — recorded in proposal
+   * history for audit.
+   */
+  reason: string
+  [k: string]: any
+  }
+
+}
+export type ProposalVerdictOverrideInput = ProposalVerdictOverrideInputSchema.ProposalVerdictOverrideInput;
+export namespace ProposalVerdictOverrideOutputSchema {
+  /**
+   * Response for `proposal_verdict_override`.
+   */
+  export interface ProposalVerdictOverrideOutput {
+  error?: string
+  /**
+   * True when the override was recorded.
+   */
+  overridden: boolean
+  /**
+   * The revision seq the override is scoped to. Later revisions make
+   * this override stale.
+   */
+  override_on_revision_seq?: number
+  proposal_id?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalVerdictOverrideOutput = ProposalVerdictOverrideOutputSchema.ProposalVerdictOverrideOutput;
 export namespace ProviderCatalogInputSchema {
   export interface ProviderCatalogInput {
   /**
@@ -8616,19 +9763,19 @@ export namespace UserSettingsGetOutputSchema {
    */
   auto_approve_prs: boolean
   /**
-   * Cross-model ("Thorough") review. When true (the default), a task
-   * dispatched to the reviewer role prefers a model id different from the one
-   * that implemented it. A degenerate single-model selection falls back to
-   * same-model review.
-   */
-  diverse_review: boolean
-  /**
    * Cross-model ("Diverse") refinement. When true (the default), the
    * proposal-refinement roles (advocate, adversary, judge) prefer a model id
    * different from the primary task model. Falls back to same-model when
    * alternatives are unavailable.
    */
   diverse_refinement: boolean
+  /**
+   * Cross-model ("Thorough") review. When true (the default), a task
+   * dispatched to the reviewer role prefers a model id different from the one
+   * that implemented it. A degenerate single-model selection falls back to
+   * same-model review.
+   */
+  diverse_review: boolean
   error?: string
   /**
    * True when the org AI policy locks lane assignment: the member may not
@@ -8682,18 +9829,18 @@ export namespace UserSettingsSetInputSchema {
    */
   auto_approve_prs?: boolean
   /**
-   * Enable or disable cross-model ("Thorough") review for THIS user. When on
-   * (the default), the reviewer prefers a model id different from the
-   * implementer's. Omit to keep the current value.
-   */
-  diverse_review?: boolean
-  /**
    * Enable or disable cross-model ("Diverse") refinement for THIS user. When
    * on (the default), proposal-refinement roles prefer a different model from
    * the primary task model. Falls back to same-model when alternatives are
    * unavailable. Omit to keep the current value.
    */
   diverse_refinement?: boolean
+  /**
+   * Enable or disable cross-model ("Thorough") review for THIS user. When on
+   * (the default), the reviewer prefers a model id different from the
+   * implementer's. Omit to keep the current value.
+   */
+  diverse_review?: boolean
   /**
    * Per-ROLE ordered model lanes for THIS user (each highest priority first),
    * as full `provider/model` ids: `plan` (planner/architect/chat),
@@ -8747,13 +9894,13 @@ export namespace UserSettingsSetOutputSchema {
   applied: boolean
   auto_approve_prs?: boolean
   /**
-   * The resulting cross-model review toggle after the patch.
-   */
-  diverse_review?: boolean
-  /**
    * The resulting cross-model refinement toggle after the patch.
    */
   diverse_refinement?: boolean
+  /**
+   * The resulting cross-model review toggle after the patch.
+   */
+  diverse_review?: boolean
   error?: string
   /**
    * The resulting per-role model lanes after the patch.
@@ -8793,7 +9940,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_blocks" | "proposal_create" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_debate_resolve" | "proposal_debate_reopen" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_start" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_checkpoint_approve" | "proposal_refinement_checkpoint_list" | "proposal_refinement_checkpoint_reject" | "proposal_refinement_demand_round" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -8828,6 +9975,7 @@ export interface McpToolMap {
   "epic_tasks": { input: EpicTasksInput; output: EpicTasksOutput };
   "epic_update": { input: EpicUpdateInput; output: EpicUpdateOutput };
   "execution_kill_task": { input: ExecutionKillTaskInput; output: ExecutionKillTaskOutput };
+  "get_block_catalog": { input: GetBlockCatalogInput; output: GetBlockCatalogOutput };
   "get_project_devcontainer_status": { input: GetProjectDevcontainerStatusInput; output: GetProjectDevcontainerStatusOutput };
   "get_project_stack": { input: GetProjectStackInput; output: GetProjectStackOutput };
   "github_app_install_url": { input: GithubAppInstallUrlInput; output: GithubAppInstallUrlOutput };
@@ -8879,25 +10027,34 @@ export interface McpToolMap {
   "project_remove": { input: ProjectRemoveInput; output: ProjectRemoveOutput };
   "project_set_image": { input: ProjectSetImageInput; output: ProjectSetImageOutput };
   "proposal_add_target": { input: ProposalAddTargetInput; output: ProposalAddTargetOutput };
+  "proposal_block_patch": { input: ProposalBlockPatchInput; output: ProposalBlockPatchOutput };
   "proposal_blocks": { input: ProposalBlocksInput; output: ProposalBlocksOutput };
   "proposal_create": { input: ProposalCreateInput; output: ProposalCreateOutput };
+  "proposal_debate_append": { input: ProposalDebateAppendInput; output: ProposalDebateAppendOutput };
+  "proposal_debate_list": { input: ProposalDebateListInput; output: ProposalDebateListOutput };
+  "proposal_debate_reopen": { input: ProposalDebateReopenInput; output: ProposalDebateReopenOutput };
+  "proposal_debate_resolve": { input: ProposalDebateResolveInput; output: ProposalDebateResolveOutput };
   "proposal_delete": { input: ProposalDeleteInput; output: ProposalDeleteOutput };
   "proposal_export": { input: ProposalExportInput; output: ProposalExportOutput };
   "proposal_feedback_add": { input: ProposalFeedbackAddInput; output: ProposalFeedbackAddOutput };
   "proposal_feedback_resolve": { input: ProposalFeedbackResolveInput; output: ProposalFeedbackResolveOutput };
-  "proposal_debate_resolve": { input: ProposalDebateResolveInput; output: ProposalDebateResolveOutput };
-  "proposal_debate_reopen": { input: ProposalDebateReopenInput; output: ProposalDebateReopenOutput };
   "proposal_graduate": { input: ProposalGraduateInput; output: ProposalGraduateOutput };
   "proposal_import": { input: ProposalImportInput; output: ProposalImportOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
   "proposal_reconcile_obsolete_epic": { input: ProposalReconcileObsoleteEpicInput; output: ProposalReconcileObsoleteEpicOutput };
+  "proposal_refinement_checkpoint_approve": { input: ProposalRefinementCheckpointApproveInput; output: ProposalRefinementCheckpointApproveOutput };
+  "proposal_refinement_checkpoint_list": { input: ProposalRefinementCheckpointListInput; output: ProposalRefinementCheckpointListOutput };
+  "proposal_refinement_checkpoint_reject": { input: ProposalRefinementCheckpointRejectInput; output: ProposalRefinementCheckpointRejectOutput };
+  "proposal_refinement_demand_round": { input: ProposalRefinementDemandRoundInput; output: ProposalRefinementDemandRoundOutput };
   "proposal_refinement_start": { input: ProposalRefinementStartInput; output: ProposalRefinementStartOutput };
+  "proposal_refinement_status": { input: ProposalRefinementStatusInput; output: ProposalRefinementStatusOutput };
   "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };
   "proposal_show": { input: ProposalShowInput; output: ProposalShowOutput };
   "proposal_signoff": { input: ProposalSignoffInput; output: ProposalSignoffOutput };
   "proposal_signoff_clear": { input: ProposalSignoffClearInput; output: ProposalSignoffClearOutput };
   "proposal_stop_build": { input: ProposalStopBuildInput; output: ProposalStopBuildOutput };
   "proposal_update": { input: ProposalUpdateInput; output: ProposalUpdateOutput };
+  "proposal_verdict_override": { input: ProposalVerdictOverrideInput; output: ProposalVerdictOverrideOutput };
   "provider_catalog": { input: ProviderCatalogInput; output: ProviderCatalogOutput };
   "provider_connected": { input: ProviderConnectedInput; output: ProviderConnectedOutput };
   "provider_model_lookup": { input: ProviderModelLookupInput; output: ProviderModelLookupOutput };
