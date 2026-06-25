@@ -119,9 +119,14 @@ pub(crate) async fn run_post_session_extraction(
 /// sessions (not just the latest), so retries / manually-repaired older runs
 /// aren't starved.
 pub async fn run_extraction_backfill(app_state: SlotContext) {
-    // Runtime (non-macro) query so this doesn't depend on the sqlx offline
-    // cache. `event_taxonomy` is the per-session extraction marker; a
-    // `completed` run includes PR-opened / closed / escalated outcomes.
+    // NOTE(djinn-slot/temporary-sqlx): this is a direct `sqlx::query_as` call
+    // that bypasses `djinn-db` repository helpers.  The query finds completed
+    // task-runs whose sessions have never been extracted (`event_taxonomy IS
+    // NULL`).  A follow-up should lift this into a
+    // `SessionRepository::list_unextracted_completed_candidates` method in
+    // `djinn-db` so that `djinn-slot` no longer needs a direct `sqlx`
+    // production dependency.  Until then, the raw runtime (non-macro) query is
+    // used so this crate does not depend on the sqlx offline data cache.
     let candidates: Vec<(String, String)> = match sqlx::query_as(
         "SELECT DISTINCT s.task_id, s.task_run_id \
          FROM sessions s \

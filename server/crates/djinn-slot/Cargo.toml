@@ -42,6 +42,15 @@ hex = "0.4"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v7"] }
 async-trait = "0.1"
+# NOTE(djinn-slot): direct sqlx usage is a temporary exception.
+# `session_extraction::run_extraction_backfill` uses a runtime `sqlx::query_as`
+# to find unextracted sessions without depending on the sqlx offline cache.
+# The `lifecycle::retry` module matches on `sqlx::Error` via the
+# `djinn_db::Error::Sqlx` variant but does not execute queries directly.
+# A follow-up should lift the backfill candidate query into `djinn-db` (e.g.
+# `SessionRepository::list_unextracted_completed_candidates`) and remove this
+# direct dependency.  See the boundary check test in `djinn-coordinator` that
+# guards the absence of `djinn-coordinator` and `djinn-agent` dependencies.
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "macros"] }
 workspace-hack.workspace = true
 

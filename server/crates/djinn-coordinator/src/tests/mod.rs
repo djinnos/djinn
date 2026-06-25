@@ -1287,3 +1287,8 @@ mod intervention;
 mod pause_is_not_fault;
 mod session_reaping;
 mod status_and_stuck;
+
+// ─── Boundary checks: orchestration crate dependency invariants ──────────────
+// Extracted to `boundary.rs` to stay under the server file-size guard.
+
+mod boundary;

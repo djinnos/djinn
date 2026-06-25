@@ -140,3 +140,42 @@ fn convert_role_registry(
     // (AgentType, DispatchRule) are also structurally identical across crates.
     unsafe { std::mem::transmute(registry) }
 }
+
+// ─── Facade smoke tests ────────────────────────────────────────────────────
+//
+// The canonical coordinator logic and its primary test coverage live in
+// `djinn-coordinator` (see `djinn-coordinator/src/tests/`).  These tests
+// verify that the agent's coordinator facade re-exports resolve correctly
+// through the `djinn_agent::actors::coordinator::*` import paths.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that the key public re-exports from `djinn-coordinator`
+    /// resolve through the `djinn-agent` facade.
+    #[test]
+    fn facade_reexports_resolve() {
+        // Types re-exported from djinn-coordinator
+        let _: CoordinatorHandle;
+        let _: CoordinatorError;
+        let _: CoordinatorStatus;
+        let _: CoordinatorDebugSnapshot;
+        let _: DebugSlot;
+        let _: DispatchPauseView;
+        let _: BackgroundWorkTracker;
+
+        // Adapter struct local to the facade
+        let _deps_ty = std::any::type_name::<CoordinatorDeps>();
+
+        // Submodule re-exports (module paths resolve at type level)
+        let _handle = std::any::type_name::<handle::CoordinatorHandle>();
+    }
+
+    /// Verify the facade spawn helper is callable (type-level check).
+    #[test]
+    fn spawn_coordinator_fn_exists() {
+        // Just verify the function signature is visible; don't call it.
+        let _: fn(CoordinatorDeps) -> CoordinatorHandle = spawn_coordinator;
+    }
+}
