@@ -60,7 +60,8 @@ use crate::tools::provider_tools::{
 };
 use crate::tools::refinement_tools::{
     CheckpointApproveParams, CheckpointListParams, CheckpointRejectParams,
-    ProposalRefinementStartParams, ProposalRefinementStatusParams,
+    ProposalRefinementDemandRoundParams, ProposalRefinementStartParams,
+    ProposalRefinementStatusParams, ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -580,6 +581,20 @@ impl DjinnMcpServer {
                     name, args
                 )?))
                 .await,
+            ),
+            "proposal_refinement_demand_round" => map_json(
+                name,
+                self.proposal_refinement_demand_round(Parameters(decode_args::<
+                    ProposalRefinementDemandRoundParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_verdict_override" => map_json(
+                name,
+                self.proposal_verdict_override(Parameters(decode_args::<
+                    ProposalVerdictOverrideParams,
+                >(name, args)?))
+                    .await,
             ),
             "model_health" => map_json(
                 name,

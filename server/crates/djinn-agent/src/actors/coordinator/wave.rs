@@ -694,7 +694,9 @@ mod tests {
             "foundation epic A should get a planning task"
         );
 
-        // Create epic B (dependent).
+        // Create epic B (dependent).  Pass blocked_by at creation time so
+        // the coordinator's has_unresolved_blockers gate sees them at event
+        // time — avoids the race between epic_created and add_blocker.
         let epic_b = epic_repo
             .create_for_project(
                 &project.id,
@@ -708,16 +710,11 @@ mod tests {
                     status: Some("open"),
                     auto_breakdown: None,
                     originating_adr_id: None,
-                    blocked_by: None,
+                    blocked_by: Some(&[&epic_a.id]),
                 },
             )
             .await
             .unwrap();
-
-        // B initially has no blockers — its planning task may or may not
-        // have fired by now. Wire the blocker immediately (simulates the
-        // proposal planner wiring edges after creation).
-        epic_repo.add_blocker(&epic_b.id, &epic_a.id).await.unwrap();
 
         // Wait a bit for any pending dispatches to settle.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
