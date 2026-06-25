@@ -164,5 +164,27 @@ describe("routeScopes", () => {
       expect(entries).toHaveLength(1);
       expect(entries[0].scope).toBe("global-project-context");
     });
+
+    it("/admin/usage note documents all URL keys and project_id distinction", () => {
+      const entry = ROUTE_SCOPES.find((e) => e.pattern === "/admin/usage");
+      expect(entry).toBeDefined();
+      const note = entry!.note ?? "";
+      // Every supported URL key must be documented.
+      const requiredKeys = [
+        "preset",
+        "start",
+        "end",
+        "granularity",
+        "project_id",
+        "model",
+        "agent_type",
+        "user_id",
+      ];
+      for (const key of requiredKeys) {
+        expect(note).toContain(key);
+      }
+      // Clarify project_id is not global project context.
+      expect(note).toContain("NOT the global project context");
+    });
   });
 });
