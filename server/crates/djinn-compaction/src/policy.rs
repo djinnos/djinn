@@ -1356,4 +1356,212 @@ mod tests {
         assert!(AGGRESSIVE_MICROCOMPACT_AGE <= MICROCOMPACT_AGE_THRESHOLD);
         assert!(AGGRESSIVE_MICROCOMPACT_AGE >= 1);
     }
+
+    /// Helper: build an assistant message with a single `ToolUse` block.
+    fn tool_use_msg(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            }],
+            metadata: None,
+        }
+    }
+
+    /// Helper: build a user message with a single `ToolResult` block.
+    fn tool_result_msg(tool_use_id: &str, text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.into(),
+                content: vec![ContentBlock::text(text)],
+                is_error: false,
+            }],
+            metadata: None,
+        }
+    }
+
+    /// Under a tight budget the most recent messages survive even when many
+    /// older messages are trimmed. The system prompt is always preserved.
+    #[test]
+    fn deterministic_compact_recent_tail_selection_under_tight_budget() {
+        let messages = vec![
+            Message::system("You are a coding agent."),
+            Message::user("task A"),
+            Message::assistant("response A"),
+            Message::user("task B"),
+            Message::assistant("response B"),
+            Message::user("task C"),
+            Message::assistant("response C"),
+            Message::user("task D"),
+            Message::assistant("response D"),
+            Message::user("task E"),
+            Message::assistant("response E"),
+        ];
+
+        // Budget large enough to hold system + 200 (notice overhead) + the last
+        // pair ("task E" + "response E") but not all prior pairs.
+        let sys_chars = estimate_message_chars(&messages[0]);
+        let tail_chars =
+            estimate_message_chars(&messages[9]) + estimate_message_chars(&messages[10]);
+        let budget = sys_chars + 200 + tail_chars + 20;
+
+        let result = deterministic_compact(&messages, budget);
+
+        // System prompt is always first.
+        assert_eq!(result[0].role, Role::System);
+        assert_eq!(result[0].text_content(), "You are a coding agent.");
+
+        // The very last message ("response E") must be present.
+        assert_eq!(result.last().unwrap().text_content(), "response E");
+
+        // A compacted notice must be inserted because messages were trimmed.
+        let has_notice = result
+            .iter()
+            .any(|m| m.text_content().contains("Context compacted"));
+        assert!(
+            has_notice,
+            "compacted notice must appear when messages are trimmed"
+        );
+    }
+
+    /// When the conversation contains multiple tool-use/tool-result pairs and
+    /// the budget allows only the most recent pair, the pair-closure step keeps
+    /// the recent pair adjacent and pruning removes the oldest pair together,
+    /// never leaving an orphan `ToolResult`.
+    #[test]
+    fn deterministic_compact_pair_preservation_and_orphan_freedom() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("turn 1"),
+            tool_use_msg("call_old", "bash"),
+            tool_result_msg("call_old", "old output"),
+            Message::assistant("continuing after old call"),
+            tool_use_msg("call_new", "bash"),
+            tool_result_msg("call_new", "new output"),
+            Message::assistant("done"),
+        ];
+
+        // Budget: system + 200 + last three messages (tool_use, tool_result, "done")
+        // but NOT the old pair.  This forces pair-closure and then pruning.
+        let sys_chars = estimate_message_chars(&messages[0]);
+        let recent_chars = estimate_message_chars(&messages[5])
+            + estimate_message_chars(&messages[6])
+            + estimate_message_chars(&messages[7]);
+        let budget = sys_chars + 200 + recent_chars + 20;
+
+        let result = deterministic_compact(&messages, budget);
+
+        // System prompt preserved.
+        assert_eq!(result[0].role, Role::System);
+
+        // No orphaned ToolResult in the output.
+        let orphan = find_orphaned_tool_result(&result);
+        assert!(
+            orphan.is_none(),
+            "deterministic_compact produced orphaned tool result: {orphan:?}"
+        );
+
+        // Every ToolResult in the result is immediately preceded by a ToolUse.
+        for (i, msg) in result.iter().enumerate() {
+            if msg.role == Role::User
+                && msg
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            {
+                assert!(
+                    i > 0,
+                    "ToolResult at result index 0 has no preceding ToolUse"
+                );
+                let prev = &result[i - 1];
+                assert!(
+                    prev.role == Role::Assistant
+                        && prev
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+                    "ToolResult at result index {i} is not preceded by assistant ToolUse"
+                );
+            }
+        }
+    }
+
+    /// When the budget allows every message, `deterministic_compact` must not
+    /// insert the "[Context compacted …]" notice.
+    #[test]
+    fn deterministic_compact_no_notice_when_nothing_trimmed() {
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("hello"),
+            Message::assistant("world"),
+        ];
+        let result = deterministic_compact(&messages, 100_000);
+
+        // No trimmed messages → no compacted notice.
+        assert_eq!(result.len(), 3, "all messages should be preserved");
+        assert!(
+            !result
+                .iter()
+                .any(|m| m.text_content().contains("Context compacted")),
+            "no compacted notice should appear when budget fits all messages"
+        );
+    }
+
+    /// With several tool-use/tool-result pairs and a very tight budget, the
+    /// over-budget pruning removes the oldest pairs first. The result contains
+    /// zero orphan `ToolResult` entries across a range of budget sizes.
+    #[test]
+    fn deterministic_compact_over_budget_pruning_removes_oldest_pairs() {
+        // 4 tool call rounds, each round: assistant(tool_use) + user(tool_result)
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("do the task"),
+            tool_use_msg("c1", "bash"),
+            tool_result_msg("c1", "output 1"),
+            Message::assistant("step 1 done"),
+            tool_use_msg("c2", "read_file"),
+            tool_result_msg("c2", "output 2"),
+            Message::assistant("step 2 done"),
+            tool_use_msg("c3", "edit_file"),
+            tool_result_msg("c3", "output 3"),
+            Message::assistant("step 3 done"),
+            tool_use_msg("c4", "bash"),
+            tool_result_msg("c4", "output 4"),
+            Message::assistant("all done"),
+        ];
+
+        // Sweep budget multipliers to exercise different pruning depths.
+        for multiplier in [1usize, 2, 3, 5, 8, 10] {
+            let budget = estimate_message_chars(&messages[0]) + 200 + (multiplier * 40);
+            let result = deterministic_compact(&messages, budget);
+            let orphan = find_orphaned_tool_result(&result);
+            assert!(
+                orphan.is_none(),
+                "orphaned tool result {orphan:?} at budget multiplier {multiplier}"
+            );
+
+            // Every ToolResult must be preceded by ToolUse.
+            for (i, msg) in result.iter().enumerate() {
+                if msg.role == Role::User
+                    && msg
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                {
+                    assert!(
+                        i > 0
+                            && result[i - 1].role == Role::Assistant
+                            && result[i - 1]
+                                .content
+                                .iter()
+                                .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+                        "orphaned ToolResult at result index {i} (multiplier {multiplier})"
+                    );
+                }
+            }
+        }
+    }
 }
