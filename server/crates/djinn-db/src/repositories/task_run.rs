@@ -200,6 +200,19 @@ impl TaskRunRepository {
 
         Ok(row.flatten())
     }
+
+    /// Return IDs of task-runs that are still `running` with `ended_at IS NULL`.
+    ///
+    /// Used by the coordinator's cargo-target-run-dir sweep to build the set
+    /// of "protected" run directories that must not be cleaned up.
+    pub async fn running_ids(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM task_runs WHERE status = 'running' AND ended_at IS NULL",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
 }
 
 #[cfg(test)]
