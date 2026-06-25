@@ -110,6 +110,8 @@ pub(in crate::extension) fn should_pre_resolve_chat_key(params: &CodeGraphParams
     !(params.workspace.is_some() && matches!(params.operation.as_str(), "impact" | "path"))
 }
 
+// Retained for test coverage; production dispatch goes through djinn-mcp-extension.
+#[allow(dead_code)]
 pub(crate) async fn call_lsp(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

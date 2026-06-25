@@ -79,7 +79,17 @@ pub use memory_enrichment::{
 
 // ─── Session extraction re-export ───────────────────────────────────────────
 
-pub use session_extraction::run_extraction_backfill;
+pub use session_extraction::{
+    ExtractionQuality, SessionSignals, SessionTaxonomy, derive_scope_paths,
+    extract_session_signals, run_extraction_backfill, run_post_session_extraction,
+    run_structural_extraction,
+};
+
+// ─── Supervisor runner re-export ────────────────────────────────────────────
+// hfhw cutover: expose `run_supervisor_dispatch` so the host (djinn-agent)
+// can call through the djinn-slot pathway from `actor.rs`.
+
+pub use supervisor_runner::run_supervisor_dispatch;
 
 // ─── SlotEvent ──────────────────────────────────────────────────────────────
 

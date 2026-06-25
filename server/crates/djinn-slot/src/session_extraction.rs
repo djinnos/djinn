@@ -40,7 +40,7 @@ use crate::host::SlotContext;
 /// a session whose `event_taxonomy` is already set is skipped (so retries /
 /// re-dispatches don't double-extract). All failures are best-effort logged —
 /// extraction must never affect task-run outcomes.
-pub(crate) async fn run_post_session_extraction(
+pub async fn run_post_session_extraction(
     task_id: String,
     task_run_id: String,
     app_state: SlotContext,
@@ -421,7 +421,7 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
 /// serialised.
 ///
 /// All errors are logged as warnings; nothing propagates back to the caller.
-pub(crate) async fn run_structural_extraction(
+pub async fn run_structural_extraction(
     session_id: String,
     messages: Vec<Message>,
     app_state: SlotContext,

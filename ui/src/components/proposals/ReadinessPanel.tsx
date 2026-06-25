@@ -43,8 +43,8 @@ function checkLabel(check: string): string {
  *
  * Displays deterministic DoR status, latest Judge verdict, adversary dry count,
  * unresolved blocking debate rows, needs-evidence parked spike state, checkpoint
- * revision diff approval/edit/reject, live checkpoint/auto-accept switch, and
- * disabled/blocked gate explanations naming exact failures.
+ * revision diff approval/edit/reject, and disabled/blocked gate explanations
+ * naming exact failures.
  *
  * The component renders backend-provided status only — it does NOT recompute
  * readiness logic client-side.
@@ -356,9 +356,8 @@ export function ReadinessPanel({
       {/* Mode explanation */}
       {refinement?.active && (
         <p className="text-xs text-muted-foreground">
-          {isCheckpoint
-            ? "Checkpoint mode: advocate revisions require explicit approval. Toggle to auto-accept to apply revisions automatically."
-            : "Auto-accept mode: advocate revisions are applied automatically as proposal updates."}
+          Checkpoint mode: advocate revisions require explicit approval before
+          they are applied.
         </p>
       )}
     </div>

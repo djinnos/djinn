@@ -158,7 +158,12 @@ pub(crate) struct PromptContextInputs<'a> {
 /// scoped to the task's paths. Non-fatal: every
 /// DB query falls back to `None` on error, mirroring the original inline
 /// block.
-pub(crate) async fn build_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
+///
+/// Called from `supervisor_impl::stage::execute_stage` which is only
+/// reachable through the host callback dispatch path
+/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
+/// `dispatch_task_runtime` → supervisor → stage).
+pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
     let PromptContextInputs {
         task,
         runtime_role,
@@ -620,7 +625,7 @@ mod tests {
         let app_state = agent_context_from_db(db, CancellationToken::new());
         let worktree = test_tempdir("prompt-context-worktree-");
         let role = LeadRole;
-        build_prompt_context(PromptContextInputs {
+        assemble_prompt_context(PromptContextInputs {
             task,
             runtime_role: &role,
             role_for_epic_check: &role,

@@ -42,7 +42,6 @@ impl CoordinatorOps for CoordinatorBridge {
             .start_proposal_refinement(
                 request.proposal_id,
                 request.current_revision_seq,
-                request.update_authority,
                 request.owner_user_id,
             )
             .await
@@ -57,7 +56,6 @@ impl CoordinatorOps for CoordinatorBridge {
             .demand_proposal_refinement_round(
                 request.proposal_id,
                 request.current_revision_seq,
-                request.update_authority,
             )
             .await
             .map_err(|e| e.to_string())
