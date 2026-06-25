@@ -16,6 +16,10 @@ describe("routeScopes", () => {
       expect(isGlobalProjectContextRoute("/task/xyz")).toBe(true);
     });
 
+    it("returns true for /memory (local picker removed)", () => {
+      expect(isGlobalProjectContextRoute("/memory")).toBe(true);
+    });
+
     it("returns false for /tasks (board — url-filtered)", () => {
       expect(isGlobalProjectContextRoute("/tasks")).toBe(false);
     });
@@ -90,6 +94,12 @@ describe("routeScopes", () => {
       expect(entry!.scope).toBe("global");
     });
 
+    it("returns global-project-context scope for /memory", () => {
+      const entry = getRouteScopeEntry("/memory");
+      expect(entry).toBeDefined();
+      expect(entry!.scope).toBe("global-project-context");
+    });
+
     it("returns undefined for unregistered paths", () => {
       expect(getRouteScopeEntry("/unknown")).toBeUndefined();
     });
@@ -125,6 +135,18 @@ describe("routeScopes", () => {
       for (const entry of ROUTE_SCOPES) {
         expect(validScopes.has(entry.scope)).toBe(true);
       }
+    });
+
+    it("has no duplicate pattern entries", () => {
+      const patterns = ROUTE_SCOPES.map((e) => e.pattern);
+      const unique = new Set(patterns);
+      expect(unique.size).toBe(patterns.length);
+    });
+
+    it("/memory appears exactly once with global-project-context scope", () => {
+      const memoryEntries = ROUTE_SCOPES.filter((e) => e.pattern === "/memory");
+      expect(memoryEntries).toHaveLength(1);
+      expect(memoryEntries[0].scope).toBe("global-project-context");
     });
   });
 });
