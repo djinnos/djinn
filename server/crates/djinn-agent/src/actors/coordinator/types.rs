@@ -18,8 +18,11 @@ use tokio_util::sync::CancellationToken;
 
 // ─── Re-exports from djinn-orchestration-types ─────────────────────────────
 // Types that are pure DTOs and shared between slot and coordinator sides.
+// The `pub(super)` items here are consumed by sibling submodules via
+// `use types::*;` in the coordinator parent module.
 
-pub use djinn_orchestration_types::coordinator::{
+#[allow(unused_imports)]
+pub(super) use djinn_orchestration_types::coordinator::{
     BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot, DebugCooldown,
     DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
     DispatchPauseView,

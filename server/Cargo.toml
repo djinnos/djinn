@@ -27,6 +27,8 @@ memory-mount = ["dep:fuser"]
 
 [dependencies]
 djinn-agent = { path = "crates/djinn-agent" }
+djinn-coordinator = { path = "crates/djinn-coordinator" }
+djinn-slot = { path = "crates/djinn-slot" }
 djinn-telemetry = { path = "crates/djinn-telemetry" }
 djinn-core = { path = "crates/djinn-core", features = ["sqlx"] }
 djinn-db = { path = "crates/djinn-db" }

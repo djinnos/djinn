@@ -53,7 +53,7 @@ pub(crate) mod reply_loop;
 #[cfg(test)]
 mod reply_loop_tests;
 pub(crate) mod session_extraction;
-mod supervisor_runner;
+pub(crate) mod supervisor_runner;
 
 pub use actor::*;
 pub(crate) use commands::*;

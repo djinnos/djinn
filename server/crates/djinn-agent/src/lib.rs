@@ -60,6 +60,11 @@ pub use actors::coordinator::{
     DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
 };
 
+// Phase 5 wiring: expose the canonical coordinator handle and deps from
+// djinn-coordinator through the agent facade so downstream crates can
+// import them without depending on djinn-coordinator directly.
+pub use actors::coordinator::{CoordinatorDeps, CoordinatorHandle};
+
 /// One-shot recovery sweep that backfills post-session knowledge extraction
 /// over completed-but-unextracted task-runs. Triggered from the server boot
 /// path behind an env flag — see `run_extraction_backfill` for the policy.

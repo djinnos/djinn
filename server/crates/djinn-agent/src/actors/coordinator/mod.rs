@@ -55,8 +55,13 @@ mod types;
 mod wave;
 
 // Re-export public types so the external API is unchanged.
-pub use handle::CoordinatorHandle;
-pub use types::{
+// Phase 5 wiring: canonical coordinator types now come from `djinn-coordinator`.
+// The local `types` module is retained for internal crate use; explicit
+// `use djinn_coordinator::*` imports shadow the overlapping names from
+// `use types::*` so child modules (via `super::*`) resolve to the
+// djinn-coordinator versions at this scope.
+pub use djinn_coordinator::CoordinatorHandle;
+pub use djinn_coordinator::{
     AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
     CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
     DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
@@ -64,6 +69,10 @@ pub use types::{
 };
 
 // Re-export internal types for sibling submodules that use `use super::*;`.
+// `use types::*` brings in all pub/pub(super) items from the local types
+// module.  The explicit `use djinn_coordinator::*` above shadows the
+// overlapping names (CoordinatorDeps, CoordinatorError, CoordinatorStatus)
+// so there is no ambiguity at this scope.
 use actor::CoordinatorActor;
 use types::*;
 

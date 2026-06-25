@@ -209,7 +209,7 @@ impl CoordinatorHandle {
     /// evidence, then receive the pure supervisor-side summary without importing
     /// PR-open disposition code.
     #[allow(dead_code)]
-    pub(crate) async fn live_mover_summary(
+    pub async fn live_mover_summary(
         &self,
         task_id: &str,
     ) -> Result<LiveMoverSummary, CoordinatorError> {

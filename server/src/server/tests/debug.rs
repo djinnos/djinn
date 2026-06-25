@@ -5,8 +5,9 @@ use djinn_agent::actors::coordinator::{
     BreakerDebugEntry, CoordinatorDeps, CoordinatorHandle, DebugDispatchState, DebugSlot,
     DebugTotals, DispatchPauseView,
 };
-use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
+use djinn_agent::actors::slot::SlotPoolConfig;
 use djinn_db::{CreateUserAuthSession, Database, SessionAuthRepository, UserRepository};
+use djinn_slot::SlotPoolHandle;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,7 @@ use crate::test_helpers;
 async fn app_state_with_agents(db: Database) -> AppState {
     let state = AppState::new(db, CancellationToken::new());
     let pool = SlotPoolHandle::spawn(
-        state.agent_context(),
+        state.agent_context().to_slot_context(),
         state.cancel().clone(),
         SlotPoolConfig {
             models: Vec::new(),
@@ -32,7 +33,7 @@ async fn app_state_with_agents(db: Database) -> AppState {
         pool.clone(),
         state.catalog().clone(),
         state.health_tracker().clone(),
-        std::sync::Arc::new(djinn_agent::roles::RoleRegistry::new()),
+        std::sync::Arc::new(djinn_coordinator::roles::RoleRegistry::new()),
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         state.lsp().clone(),
     ));

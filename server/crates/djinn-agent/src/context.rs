@@ -21,13 +21,16 @@ use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
 use crate::actors::coordinator::CoordinatorHandle;
+use crate::actors::slot::supervisor_runner::run_supervisor_dispatch;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
+use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_slot::host::{ResolvedMcpTools, SlotContext, SlotHostCallbacks};
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
@@ -854,6 +857,37 @@ impl AgentContext {
             Err(e) => tracing::warn!(error = %e, "failed to serialize model health state"),
         }
     }
+
+    /// Construct a `djinn_slot::SlotContext` from this `AgentContext`.
+    ///
+    /// Bridges the agent-side state into the slot crate's host context so
+    /// `djinn_slot::SlotPoolHandle::spawn()` can be used instead of the
+    /// local pool.  Host-specific operations are delegated through
+    /// [`AgentHostCallbacks`] which wraps this `AgentContext`.
+    pub fn to_slot_context(&self) -> SlotContext {
+        let callbacks: Arc<dyn SlotHostCallbacks> =
+            Arc::new(AgentHostCallbacks { ctx: self.clone() });
+        let coordinator_trigger: Option<Arc<dyn CoordinatorTrigger>> = {
+            let handle_guard = self.coordinator.clone();
+            Some(Arc::new(LazyCoordinatorTrigger {
+                coordinator: handle_guard,
+            }) as Arc<dyn CoordinatorTrigger>)
+        };
+        SlotContext {
+            db: self.db.clone(),
+            event_bus: self.event_bus.clone(),
+            catalog: self.catalog.clone(),
+            health_tracker: self.health_tracker.clone(),
+            background_work_tasks: self.background_work_tasks.clone(),
+            active_tasks: self.active_tasks.clone(),
+            default_project_id: self.default_project_id.clone(),
+            working_root: self.working_root.clone(),
+            coordinator_trigger,
+            runtime_ops: self.runtime_ops.clone(),
+            repo_graph_ops: self.repo_graph_ops.clone(),
+            callbacks,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -888,5 +922,142 @@ impl djinn_mcp_extension::ExtensionContext for AgentContext {
 
     fn default_project_id(&self) -> Option<&str> {
         self.default_project_id.as_deref()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CoordinatorTrigger adapter for AgentContext
+// ---------------------------------------------------------------------------
+//
+// Bridges the `Arc<Mutex<Option<CoordinatorHandle>>>` stored in `AgentContext`
+// to the `CoordinatorTrigger` trait expected by `SlotContext`.  Uses
+// `try_lock()` (non-blocking) so the dispatch trigger remains fire-and-forget.
+
+/// Adapter that lazily resolves the coordinator handle from `AgentContext`'s
+/// `Arc<Mutex<Option<CoordinatorHandle>>>` and delegates to
+/// `CoordinatorTrigger::try_trigger_dispatch`.
+struct LazyCoordinatorTrigger {
+    coordinator: Arc<tokio::sync::Mutex<Option<CoordinatorHandle>>>,
+}
+
+impl CoordinatorTrigger for LazyCoordinatorTrigger {
+    fn try_trigger_dispatch(&self) {
+        if let Ok(guard) = self.coordinator.try_lock()
+            && let Some(ref coord) = *guard
+        {
+            coord.try_trigger_dispatch();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SlotHostCallbacks implementation
+// ---------------------------------------------------------------------------
+//
+// Delegates `SlotHostCallbacks` trait methods to the concrete `AgentContext`
+// fields, bridging the slot crate's host-seam back to the agent's
+// supervisor_runner, MCP state builder, and project-ID resolver.
+
+/// Host-callback adapter that implements `djinn_slot::SlotHostCallbacks`
+/// by delegating to `AgentContext` methods and sibling module functions.
+struct AgentHostCallbacks {
+    ctx: AgentContext,
+}
+
+impl SlotHostCallbacks for AgentHostCallbacks {
+    fn interrupt_paused_worker_session<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async { /* no-op: local pool handles pause via slot actor */ })
+    }
+
+    fn resolve_mcp_tools<'a>(
+        &'a self,
+        _worktree_path: &'a str,
+        _role_name: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ResolvedMcpTools, String>> + Send + 'a>,
+    > {
+        Box::pin(async {
+            Err(
+                "resolve_mcp_tools not yet wired through SlotHostCallbacks; \
+                 the local pool still uses AgentContext-based MCP resolution"
+                    .into(),
+            )
+        })
+    }
+
+    fn render_prompt(
+        &self,
+        _role_name: &str,
+        _task: &djinn_core::models::Task,
+        _context_json: &serde_json::Value,
+    ) -> String {
+        // Prompt rendering is not yet wired through the callback trait.
+        // The local pool delegates to the supervisor_runner which handles
+        // prompt construction internally.
+        String::new()
+    }
+
+    fn initial_user_message<'a>(
+        &'a self,
+        _task_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
+        Box::pin(async { String::new() })
+    }
+
+    fn build_mcp_state(&self, _ctx: &SlotContext) -> djinn_control_plane::McpState {
+        self.ctx.to_mcp_state()
+    }
+
+    fn require_project_id_for_task_ops<'a>(
+        &'a self,
+        project: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<String, djinn_control_plane::tools::task_tools::ErrorResponse>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.ctx.require_project_id_for_task_ops(project))
+    }
+
+    fn resolve_provider_credential<'a>(
+        &'a self,
+        _provider_id: &'a str,
+        _ctx: &'a SlotContext,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<djinn_slot::helpers::ProviderCredential, String>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err("resolve_provider_credential not yet wired through SlotHostCallbacks".into())
+        })
+    }
+
+    fn run_task_dispatch<'a>(
+        &'a self,
+        task_id: String,
+        project_path: String,
+        model_id: String,
+        _ctx: SlotContext,
+        kill: tokio_util::sync::CancellationToken,
+        pause: tokio_util::sync::CancellationToken,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        let ctx = self.ctx.clone();
+        Box::pin(async move {
+            run_supervisor_dispatch(task_id, project_path, model_id, ctx, kill, pause).await
+        })
     }
 }

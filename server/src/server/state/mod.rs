@@ -8,12 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::runtime::{DatabaseRuntimeHealth, DatabaseRuntimeManager};
 use crate::events::DjinnEventEnvelope;
-use djinn_agent::actors::coordinator::CoordinatorHandle;
-use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
+use djinn_agent::actors::slot::SlotPoolConfig;
 use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
+use djinn_coordinator::CoordinatorHandle;
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
     QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
@@ -25,6 +25,7 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
 use djinn_runtime::GraphWarmerService;
+use djinn_slot::SlotPoolHandle;
 use djinn_supervisor::{AllowAllValidator, ConnectionRegistry, ServeHandle, serve_on_tcp};
 use djinn_workspace::{MirrorManager, WorkspaceStore, mirrors_root, workspaces_root};
 
@@ -987,25 +988,24 @@ impl AppState {
         }
 
         let pool = SlotPoolHandle::spawn(
-            self.agent_context(),
+            self.agent_context().to_slot_context(),
             self.cancel().clone(),
             SlotPoolConfig {
                 models: Vec::new(),
                 role_priorities: std::collections::HashMap::new(),
             },
         );
-        let coordinator =
-            CoordinatorHandle::spawn(djinn_agent::actors::coordinator::CoordinatorDeps::new(
-                self.events().clone(),
-                self.cancel().clone(),
-                self.db().clone(),
-                pool.clone(),
-                self.catalog().clone(),
-                self.health_tracker().clone(),
-                self.inner.role_registry.clone(),
-                self.inner.background_work_tasks.clone(),
-                self.inner.lsp.clone(),
-            ));
+        let coordinator = CoordinatorHandle::spawn(djinn_coordinator::CoordinatorDeps::new(
+            self.events().clone(),
+            self.cancel().clone(),
+            self.db().clone(),
+            pool.clone(),
+            self.catalog().clone(),
+            self.health_tracker().clone(),
+            Arc::new(djinn_coordinator::roles::RoleRegistry::new()),
+            self.inner.background_work_tasks.clone(),
+            self.inner.lsp.clone(),
+        ));
 
         self.set_agent_handles_for_tests(pool, coordinator).await;
     }
@@ -1048,7 +1048,7 @@ impl AppState {
         }
 
         let pool = SlotPoolHandle::spawn(
-            self.agent_context(),
+            self.agent_context().to_slot_context(),
             self.cancel().clone(),
             SlotPoolConfig {
                 models: Vec::new(),
@@ -1056,14 +1056,14 @@ impl AppState {
             },
         );
         let coordinator = CoordinatorHandle::spawn(
-            djinn_agent::actors::coordinator::CoordinatorDeps::new(
+            djinn_coordinator::CoordinatorDeps::new(
                 self.events().clone(),
                 self.cancel().clone(),
                 self.db().clone(),
                 pool.clone(),
                 self.catalog().clone(),
                 self.health_tracker().clone(),
-                self.inner.role_registry.clone(),
+                Arc::new(djinn_coordinator::roles::RoleRegistry::new()),
                 self.inner.background_work_tasks.clone(),
                 self.inner.lsp.clone(),
             )

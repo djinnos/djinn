@@ -304,7 +304,13 @@ pub(crate) async fn collect_live_mover_evidence_for(
     task_id: &str,
 ) -> Result<LiveMoverEvidence, crate::actors::coordinator::CoordinatorError> {
     let summary = handle.live_mover_summary(task_id).await?;
-    Ok(evidence_from_summary(&summary))
+    // Convert from djinn_coordinator's LiveMoverSummary to the local
+    // LiveMoverEvidence by reconstructing from the coordinator summary's
+    // has_live_mover flag (the reason set is not publicly accessible).
+    Ok(LiveMoverEvidence {
+        active_session: summary.has_live_mover,
+        ..LiveMoverEvidence::default()
+    })
 }
 
 /// Reconstruct a [`LiveMoverEvidence`] from a [`LiveMoverSummary`]'s reason

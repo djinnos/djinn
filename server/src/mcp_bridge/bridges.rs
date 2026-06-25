@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use djinn_agent::actors::coordinator::CoordinatorHandle;
-use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 use djinn_control_plane::bridge::{
     CoordinatorOps, CoordinatorStatus, LspOps, LspWarning, ModelPoolStatus, PoolStatus,
     ProposalRefinementStartRequest, RunningTaskInfo, SlotPoolOps,
 };
+use djinn_coordinator::CoordinatorHandle;
+use djinn_slot::SlotPoolHandle;
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
 
