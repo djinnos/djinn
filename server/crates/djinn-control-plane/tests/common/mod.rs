@@ -135,6 +135,7 @@ pub async fn create_test_session(db: &Database, project_id: &str, task_id: &str)
         metadata_json: None,
         task_run_id: None,
         pricing: None,
+        cost_basis: "unpriced",
     })
     .await
     .expect("failed to create test session")

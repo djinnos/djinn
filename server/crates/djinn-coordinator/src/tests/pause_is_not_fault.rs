@@ -362,6 +362,7 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
             metadata_json: None,
             task_run_id: Some(run_id),
             pricing: None,
+            cost_basis: "unpriced",
         })
         .await
         .unwrap();

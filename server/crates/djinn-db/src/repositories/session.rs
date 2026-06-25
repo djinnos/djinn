@@ -34,6 +34,11 @@ pub struct CreateSessionParams<'a> {
     /// passes plain pricing data here) so `djinn-db` has no dependency on
     /// `djinn-provider`.
     pub pricing: Option<&'a Pricing>,
+    /// Per-session cost basis classification: `'actual'` for API-key sessions,
+    /// `'projected'` for subscription/coding-plan sessions, `'unpriced'` when
+    /// no usable price exists. Derived by the caller from catalog + credential
+    /// class. Added as part of the cost-basis split (migration 83).
+    pub cost_basis: &'a str,
 }
 
 impl SessionRepository {
@@ -59,8 +64,9 @@ impl SessionRepository {
                  input_price_per_million_snapshot,
                  output_price_per_million_snapshot,
                  cache_read_price_per_million_snapshot,
-                 cache_write_price_per_million_snapshot)
-             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
+                 cache_write_price_per_million_snapshot,
+                 cost_basis)
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11, $12)",
             id,
             params.project_id,
             params.task_id,
@@ -72,6 +78,7 @@ impl SessionRepository {
             params.pricing.map(|p| p.output_per_million),
             params.pricing.map(|p| p.cache_read_per_million),
             params.pricing.map(|p| p.cache_write_per_million),
+            params.cost_basis,
         )
         .execute(self.db.pool())
         .await?;
@@ -85,7 +92,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -120,7 +128,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -222,7 +231,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -262,7 +272,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -301,7 +312,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -324,7 +336,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -344,7 +357,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -365,7 +379,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -388,7 +403,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -409,7 +425,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -463,7 +480,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -489,7 +507,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -511,7 +530,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -679,7 +699,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -762,7 +783,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -830,7 +852,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -894,7 +917,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -921,7 +945,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -958,7 +983,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+                cost_basis
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at

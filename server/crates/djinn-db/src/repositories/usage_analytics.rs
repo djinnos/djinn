@@ -4,10 +4,18 @@
 // for the admin usage analytics dashboard.  All day bucketing uses
 // `substring(s.started_at, 1, 10)` — no `date_trunc` or `generate_series`.
 //
-// Cost semantics: `cost_usd` is nullable on the sessions table.  When ANY
-// session in an aggregate group has a NULL cost (unpriced model), the group
-// aggregate cost is returned as NULL so the UI can render an em-dash instead
-// of $0.
+// Cost-basis semantics (migration 83): every session carries a `cost_basis`
+// column with values `'actual'`, `'projected'`, or `'unpriced'`.
+//
+//   - `actual_spend_usd`: sum of `cost_usd` where `cost_basis = 'actual'`.
+//     Real API-key spend.
+//   - `projected_usd`: sum of `cost_usd` where `cost_basis = 'projected'`.
+//     List-rate projection for subscription/coding-plan sessions.
+//   - `unpriced_session_count`: sessions with `cost_basis = 'unpriced'`,
+//     excluded from both dollar figures but counted visibly.
+//   - `total_cost_usd` / `cost` / `spend_usd`: **deprecated** list-rate
+//     sum across all priced bases (actual + projected). Retained for
+//     backward compatibility; new UI surfaces should not use them.
 //
 // The dashboard consumes a single response shaped exactly like the frontend
 // contract:
@@ -36,8 +44,15 @@ use crate::database::Database;
 pub struct ModelEffectivenessRow {
     pub model_id: String,
     pub sessions: i64,
-    /// Aggregate cost in USD for worker sessions of this model.
-    /// `None` when all sessions used unpriced models (NULL cost_usd).
+    /// Real API-key spend in USD. `None` when no `actual` sessions exist.
+    pub actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost in USD. `None` when no
+    /// `projected` sessions exist.
+    pub projected_usd: Option<f64>,
+    /// Unpriced sessions excluded from both dollar figures.
+    pub unpriced_session_count: i64,
+    /// @deprecated Aggregate list-rate cost (actual + projected).
+    /// Retained for backward compat; new UI should use the split fields.
     pub spend_usd: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
@@ -72,8 +87,13 @@ pub struct ProjectModelMatrixRow {
     pub project_name: String,
     pub model_id: String,
     pub sessions: i64,
-    /// Aggregate cost in USD. `None` when ANY session in the group had a NULL
-    /// cost_usd (unpriced model).
+    /// Real API-key spend in USD.
+    pub actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost in USD.
+    pub projected_usd: Option<f64>,
+    /// Unpriced sessions excluded from both dollar figures.
+    pub unpriced_session_count: i64,
+    /// @deprecated Aggregate list-rate cost (actual + projected).
     pub spend_usd: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
@@ -198,14 +218,17 @@ pub struct UsageTotals {
     pub tokens_out: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
-    /// Estimated spend in USD: the sum of `cost_usd` over the *priced* sessions
-    /// only (unpriced sessions are skipped, not treated as $0). This is a
-    /// notional figure at public API rates — usage on subscription/coding
-    /// plans is billed separately. `None` only when no matching session was
-    /// priced at all.
+    /// Real API-key spend in USD (basis = 'actual'). `None` when no actual
+    /// sessions are priced.
+    pub actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost in USD (basis = 'projected').
+    /// `None` when no projected sessions are priced.
+    pub projected_usd: Option<f64>,
+    /// @deprecated Aggregate list-rate cost across all priced bases.
+    /// Retained for backward compatibility; new UI should use the split fields.
     pub total_cost_usd: Option<f64>,
-    /// Number of matching sessions whose `cost_usd` was NULL (unpriced model),
-    /// hence excluded from `total_cost_usd`. Lets the UI qualify the estimate.
+    /// Number of matching sessions with `cost_basis = 'unpriced'`, excluded
+    /// from both `actual_spend_usd` and `projected_usd`.
     pub unpriced_session_count: i64,
 }
 
@@ -229,8 +252,13 @@ pub struct SeriesDetailRow {
     pub cache_read_tokens: i64,
     /// Distinct tasks touched in this bucket.
     pub task_count: i64,
-    /// Aggregate cost in USD.  `None` when any session in the bucket was
-    /// unpriced (NULL `cost_usd`).
+    /// Real API-key spend in USD.
+    pub actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost in USD.
+    pub projected_usd: Option<f64>,
+    /// Unpriced sessions excluded from both dollar figures.
+    pub unpriced_session_count: i64,
+    /// @deprecated Aggregate list-rate cost (actual + projected).
     pub cost: Option<f64>,
 }
 
@@ -242,7 +270,13 @@ pub struct EntityBreakdownRow {
     pub id: String,
     /// Human-readable display name; empty when unknown.
     pub name: String,
-    /// Aggregate cost in USD.  NULL-unpriced semantics preserved.
+    /// Real API-key spend in USD.
+    pub actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost in USD.
+    pub projected_usd: Option<f64>,
+    /// Unpriced sessions excluded from both dollar figures.
+    pub unpriced_session_count: i64,
+    /// @deprecated Aggregate list-rate cost (actual + projected).
     pub cost: Option<f64>,
     pub tokens_in: i64,
     pub tokens_out: i64,
@@ -338,10 +372,12 @@ impl UsageAnalyticsRepository {
     /// (`t.id = s.task_id`) so it cannot inflate counts; it exists only so the
     /// optional user filter can fall back to the task creator.
     ///
-    /// Spend is the priced subtotal — `SUM(s.cost_usd)` naturally skips
-    /// unpriced (NULL-cost) sessions — and `unpriced_session_count` reports
-    /// how many sessions were excluded, so the UI can show an honest estimate
-    /// instead of collapsing the whole total to "—".
+    /// Cost is split by `cost_basis`:
+    ///   - `actual_spend_usd`: `cost_basis = 'actual'` sessions only.
+    ///   - `projected_usd`: `cost_basis = 'projected'` sessions only.
+    ///   - `unpriced_session_count`: `cost_basis = 'unpriced'` sessions,
+    ///     excluded from both dollar figures.
+    ///   - `total_cost_usd` (deprecated): sum of all priced sessions.
     pub async fn totals(&self, params: &UsageAnalyticsQuery) -> Result<UsageTotals> {
         self.db.ensure_initialized().await?;
 
@@ -355,8 +391,11 @@ impl UsageAnalyticsRepository {
                 COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
                 COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS cache_read_tokens, \
                 COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS cache_write_tokens, \
+                SUM(CASE WHEN s.cost_basis = 'actual' THEN s.cost_usd END)    AS actual_spend_usd, \
+                SUM(CASE WHEN s.cost_basis = 'projected' THEN s.cost_usd END) AS projected_usd, \
                 SUM(s.cost_usd)                                AS total_cost_usd, \
-                COUNT(*) FILTER (WHERE s.cost_usd IS NULL)     AS unpriced_session_count \
+                COUNT(*) FILTER (WHERE s.cost_basis = 'unpriced') \
+                                                               AS unpriced_session_count \
              FROM sessions s \
              LEFT JOIN tasks t ON t.id = s.task_id \
              {where_clause}"
@@ -371,6 +410,8 @@ impl UsageAnalyticsRepository {
             tokens_out: row.get("tokens_out"),
             cache_read_tokens: row.get("cache_read_tokens"),
             cache_write_tokens: row.get("cache_write_tokens"),
+            actual_spend_usd: row.get("actual_spend_usd"),
+            projected_usd: row.get("projected_usd"),
             total_cost_usd: row.get("total_cost_usd"),
             unpriced_session_count: row.get("unpriced_session_count"),
         })
@@ -401,6 +442,10 @@ impl UsageAnalyticsRepository {
                 COALESCE(SUM(s.tokens_out)::bigint, 0)         AS tokens_out, \
                 COALESCE(SUM(s.cache_read_tokens)::bigint, 0)  AS cache_read_tokens, \
                 COUNT(DISTINCT s.task_id)                      AS task_count, \
+                SUM(CASE WHEN s.cost_basis = 'actual' THEN s.cost_usd END)    AS actual_spend_usd, \
+                SUM(CASE WHEN s.cost_basis = 'projected' THEN s.cost_usd END) AS projected_usd, \
+                COUNT(*) FILTER (WHERE s.cost_basis = 'unpriced') \
+                                                               AS unpriced_session_count, \
                 SUM(s.cost_usd)                                AS cost \
              FROM sessions s \
              LEFT JOIN projects p ON p.id = s.project_id \
@@ -427,6 +472,9 @@ impl UsageAnalyticsRepository {
                 tokens_out: r.get("tokens_out"),
                 cache_read_tokens: r.get("cache_read_tokens"),
                 task_count: r.get("task_count"),
+                actual_spend_usd: r.get("actual_spend_usd"),
+                projected_usd: r.get("projected_usd"),
+                unpriced_session_count: r.get("unpriced_session_count"),
                 cost: r.get("cost"),
             })
             .collect())
@@ -456,7 +504,8 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     {key_expr}  AS entity_id, \
                     {name_expr} AS entity_name, \
-                    s.cost_usd, s.tokens_in, s.tokens_out, s.cache_read_tokens, s.task_id, \
+                    s.cost_usd, s.cost_basis, s.tokens_in, s.tokens_out, s.cache_read_tokens, \
+                    s.task_id, \
                     t.status, t.close_reason, t.total_reopen_count \
                 FROM sessions s {joins} {where_clause} \
              ), \
@@ -464,6 +513,9 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     entity_id, \
                     MAX(entity_name) AS entity_name, \
+                    SUM(CASE WHEN cost_basis = 'actual' THEN cost_usd END)    AS actual_spend, \
+                    SUM(CASE WHEN cost_basis = 'projected' THEN cost_usd END) AS projected, \
+                    COUNT(*) FILTER (WHERE cost_basis = 'unpriced')            AS unpriced_count, \
                     SUM(cost_usd) AS cost, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
@@ -488,6 +540,9 @@ impl UsageAnalyticsRepository {
              SELECT \
                  sess.entity_id    AS entity_id, \
                  sess.entity_name  AS entity_name, \
+                 sess.actual_spend AS actual_spend_usd, \
+                 sess.projected    AS projected_usd, \
+                 sess.unpriced_count AS unpriced_session_count, \
                  sess.cost         AS cost, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
@@ -511,6 +566,9 @@ impl UsageAnalyticsRepository {
             .map(|r| EntityBreakdownRow {
                 id: r.get("entity_id"),
                 name: r.get("entity_name"),
+                actual_spend_usd: r.get("actual_spend_usd"),
+                projected_usd: r.get("projected_usd"),
+                unpriced_session_count: r.get("unpriced_session_count"),
                 cost: r.get("cost"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
@@ -596,7 +654,8 @@ impl UsageAnalyticsRepository {
         let sql = format!(
             "WITH filtered_sessions AS ( \
                 SELECT \
-                    s.model_id, s.task_id, s.cost_usd, s.tokens_in, s.tokens_out, \
+                    s.model_id, s.task_id, s.cost_usd, s.cost_basis, \
+                    s.tokens_in, s.tokens_out, \
                     s.cache_read_tokens, \
                     t.status, t.close_reason, t.total_reopen_count \
                 {from_clause} {where_clause} \
@@ -605,6 +664,9 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     model_id, \
                     COUNT(*) AS sessions, \
+                    SUM(CASE WHEN cost_basis = 'actual' THEN cost_usd END)    AS actual_spend_usd, \
+                    SUM(CASE WHEN cost_basis = 'projected' THEN cost_usd END) AS projected_usd, \
+                    COUNT(*) FILTER (WHERE cost_basis = 'unpriced')            AS unpriced_session_count, \
                     SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
@@ -629,6 +691,9 @@ impl UsageAnalyticsRepository {
              SELECT \
                  sa.model_id                     AS model_id, \
                  sa.sessions                     AS sessions, \
+                 sa.actual_spend_usd             AS actual_spend_usd, \
+                 sa.projected_usd                AS projected_usd, \
+                 sa.unpriced_session_count       AS unpriced_session_count, \
                  sa.spend_usd                    AS spend_usd, \
                  sa.tokens_in                    AS tokens_in, \
                  sa.tokens_out                   AS tokens_out, \
@@ -668,6 +733,9 @@ impl UsageAnalyticsRepository {
                 ModelEffectivenessRow {
                     model_id: r.get("model_id"),
                     sessions,
+                    actual_spend_usd: r.get("actual_spend_usd"),
+                    projected_usd: r.get("projected_usd"),
+                    unpriced_session_count: r.get("unpriced_session_count"),
                     spend_usd,
                     tokens_in,
                     tokens_out,
@@ -699,7 +767,8 @@ impl UsageAnalyticsRepository {
                     COALESCE(s.project_id, '') AS project_id, \
                     COALESCE(p.name, '')       AS project_name, \
                     s.model_id                 AS model_id, \
-                    s.cost_usd, s.tokens_in, s.tokens_out, s.cache_read_tokens, s.task_id, \
+                    s.cost_usd, s.cost_basis, s.tokens_in, s.tokens_out, s.cache_read_tokens, \
+                    s.task_id, \
                     t.status, t.close_reason, t.total_reopen_count \
                 FROM sessions s \
                 LEFT JOIN projects p ON p.id = s.project_id \
@@ -710,6 +779,9 @@ impl UsageAnalyticsRepository {
                 SELECT \
                     project_id, MAX(project_name) AS project_name, model_id, \
                     COUNT(*) AS sessions, \
+                    SUM(CASE WHEN cost_basis = 'actual' THEN cost_usd END)    AS actual_spend_usd, \
+                    SUM(CASE WHEN cost_basis = 'projected' THEN cost_usd END) AS projected_usd, \
+                    COUNT(*) FILTER (WHERE cost_basis = 'unpriced')            AS unpriced_session_count, \
                     SUM(cost_usd) AS spend_usd, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
                     COALESCE(SUM(tokens_out)::bigint, 0) AS tokens_out, \
@@ -737,6 +809,9 @@ impl UsageAnalyticsRepository {
                  sess.project_name AS project_name, \
                  sess.model_id     AS model_id, \
                  sess.sessions     AS sessions, \
+                 sess.actual_spend_usd AS actual_spend_usd, \
+                 sess.projected_usd    AS projected_usd, \
+                 sess.unpriced_session_count AS unpriced_session_count, \
                  sess.spend_usd    AS spend_usd, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
@@ -762,6 +837,9 @@ impl UsageAnalyticsRepository {
                 project_name: r.get("project_name"),
                 model_id: r.get("model_id"),
                 sessions: r.get("sessions"),
+                actual_spend_usd: r.get("actual_spend_usd"),
+                projected_usd: r.get("projected_usd"),
+                unpriced_session_count: r.get("unpriced_session_count"),
                 spend_usd: r.get("spend_usd"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
@@ -855,6 +933,9 @@ mod tests {
         let totals = UsageTotals::default();
         assert_eq!(totals.session_count, 0);
         assert!(totals.total_cost_usd.is_none());
+        assert!(totals.actual_spend_usd.is_none());
+        assert!(totals.projected_usd.is_none());
+        assert_eq!(totals.unpriced_session_count, 0);
     }
 
     #[test]
@@ -863,6 +944,9 @@ mod tests {
         assert_eq!(row.day, "");
         assert_eq!(row.session_count, 0);
         assert!(row.cost.is_none());
+        assert!(row.actual_spend_usd.is_none());
+        assert!(row.projected_usd.is_none());
+        assert_eq!(row.unpriced_session_count, 0);
     }
 
     #[test]
@@ -871,6 +955,9 @@ mod tests {
         assert_eq!(row.id, "");
         assert_eq!(row.task_count, 0);
         assert!(row.cost.is_none());
+        assert!(row.actual_spend_usd.is_none());
+        assert!(row.projected_usd.is_none());
+        assert_eq!(row.unpriced_session_count, 0);
         assert!(row.success_rate.is_none());
     }
 
@@ -880,6 +967,9 @@ mod tests {
         assert_eq!(row.project_id, "");
         assert_eq!(row.project_name, "");
         assert!(row.spend_usd.is_none());
+        assert!(row.actual_spend_usd.is_none());
+        assert!(row.projected_usd.is_none());
+        assert_eq!(row.unpriced_session_count, 0);
         assert!(row.success_rate.is_none());
     }
 
@@ -888,6 +978,9 @@ mod tests {
         let row = ModelEffectivenessRow {
             model_id: "gpt-4".into(),
             sessions: 5,
+            actual_spend_usd: Some(0.8),
+            projected_usd: Some(0.43),
+            unpriced_session_count: 0,
             spend_usd: Some(1.23),
             tokens_in: 100,
             tokens_out: 50,
@@ -901,6 +994,7 @@ mod tests {
         let row2 = row.clone();
         assert_eq!(row2.model_id, "gpt-4");
         assert_eq!(row2.shared_credit_completed_task_count, 3);
+        assert_eq!(row2.unpriced_session_count, 0);
         let _dbg = format!("{row:?}");
     }
 }

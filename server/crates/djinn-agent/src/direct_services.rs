@@ -190,10 +190,23 @@ impl SupervisorServices for DirectServices {
         // Resolve the current catalog pricing at session start so later cost
         // calculations don't require catalog access. Uncatalogued models
         // produce `None` — all snapshot columns and `cost_usd` stay NULL.
-        let pricing = ctx
-            .catalog
-            .find_model(params.model.as_str())
-            .map(|m| m.pricing);
+        let catalog_entry = ctx.catalog.find_model(params.model.as_str());
+        let pricing = catalog_entry.as_ref().map(|m| m.pricing.clone());
+        // Derive cost basis from catalog credential class:
+        //   uncatalogued/missing → 'unpriced'
+        //   subscription/coding-plan → 'projected'
+        //   API-key → 'actual'
+        let cost_basis = match &catalog_entry {
+            None => "unpriced",
+            Some(entry)
+                if djinn_provider::catalog::builtin::is_subscription_provider(
+                    &entry.provider_id,
+                ) =>
+            {
+                "projected"
+            }
+            Some(_) => "actual",
+        };
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
             task_id: params.task_id.as_deref(),
@@ -202,6 +215,7 @@ impl SupervisorServices for DirectServices {
             metadata_json: params.metadata_json.as_deref(),
             task_run_id: params.task_run_id.as_deref(),
             pricing: pricing.as_ref(),
+            cost_basis,
         })
         .await
         .map_err(|e| e.to_string())

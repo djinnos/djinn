@@ -528,6 +528,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -701,6 +702,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -713,6 +715,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -725,6 +728,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -891,6 +895,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -903,6 +908,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();

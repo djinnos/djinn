@@ -82,6 +82,9 @@ async fn seed_task(
 }
 
 /// Seed a worker session linked to a task with a given cost (or NULL).
+///
+/// `cost_basis` defaults to `'actual'` for priced sessions and `'unpriced'`
+/// for NULL-cost sessions.  Callers can override with a different basis.
 #[allow(clippy::too_many_arguments)]
 async fn seed_worker_session(
     db: &Database,
@@ -94,13 +97,18 @@ async fn seed_worker_session(
     tokens_out: i64,
     started_at: &str,
 ) {
+    let basis = if cost_usd.is_some() {
+        "actual"
+    } else {
+        "unpriced"
+    };
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, 'worker', 'completed', \
-                 $5, $6, $7, 0, 0, $8)",
+                 $5, $6, $7, 0, 0, $8, $9)",
     )
     .bind(session_id)
     .bind(project_id)
@@ -110,9 +118,46 @@ async fn seed_worker_session(
     .bind(tokens_in)
     .bind(tokens_out)
     .bind(cost_usd)
+    .bind(basis)
     .execute(db.pool())
     .await
     .expect("insert worker session");
+}
+
+/// Seed a worker session with an explicit cost_basis value.
+#[allow(clippy::too_many_arguments)]
+async fn seed_worker_session_with_basis(
+    db: &Database,
+    session_id: &str,
+    project_id: &str,
+    task_id: &str,
+    model_id: &str,
+    cost_usd: Option<f64>,
+    tokens_in: i64,
+    tokens_out: i64,
+    started_at: &str,
+    cost_basis: &str,
+) {
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, project_id, task_id, model_id, agent_type, status, \
+          started_at, tokens_in, tokens_out, \
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, 'worker', 'completed', \
+                 $5, $6, $7, 0, 0, $8, $9)",
+    )
+    .bind(session_id)
+    .bind(project_id)
+    .bind(task_id)
+    .bind(model_id)
+    .bind(started_at)
+    .bind(tokens_in)
+    .bind(tokens_out)
+    .bind(cost_usd)
+    .bind(cost_basis)
+    .execute(db.pool())
+    .await
+    .expect("insert worker session with basis");
 }
 
 /// Find a model effectiveness row by model_id, panicking if not found.
@@ -148,8 +193,8 @@ async fn seed_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -162,6 +207,7 @@ async fn seed_session(db: &Database) {
     .bind(100_i64) // cache_read_tokens
     .bind(200_i64) // cache_write_tokens
     .bind(0.042_f64) // cost_usd
+    .bind("actual") // cost_basis
     .execute(db.pool())
     .await
     .expect("insert session");
@@ -189,8 +235,8 @@ async fn seed_unpriced_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -203,6 +249,7 @@ async fn seed_unpriced_session(db: &Database) {
     .bind(50_i64)
     .bind(75_i64)
     .bind(None::<f64>) // NULL cost_usd (unpriced)
+    .bind("unpriced") // cost_basis
     .execute(db.pool())
     .await
     .expect("insert unpriced session");
@@ -618,4 +665,277 @@ async fn effectiveness_null_cost_spend_remains_none() {
     assert_eq!(unpriced.tokens_in, 500, "tokens_in should be counted");
     assert_eq!(unpriced.tokens_out, 600, "tokens_out should be counted");
     assert_eq!(unpriced.sessions, 1, "should have 1 session");
+}
+
+// ── Split cost-basis tests ────────────────────────────────────────────────
+
+/// Seed three sessions with different cost bases (actual, projected, unpriced)
+/// and verify the split fields on totals, effectiveness, and entity breakdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_cost_basis_totals_and_effectiveness() {
+    let db = create_test_db();
+    db.ensure_initialized().await.expect("ensure_initialized");
+
+    let proj = seed_project(&db, "split-basis-proj").await;
+
+    // Task with all three session types.
+    seed_task(&db, "task-split-1", &proj, "closed", Some("completed"), 0).await;
+
+    // actual session: cost_basis='actual', cost_usd=0.10
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-a",
+        Some(0.10),
+        100,
+        200,
+        "2025-06-10T10:00:00.000Z",
+        "actual",
+    )
+    .await;
+
+    // projected session: cost_basis='projected', cost_usd=0.05
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-a",
+        Some(0.05),
+        80,
+        120,
+        "2025-06-10T11:00:00.000Z",
+        "projected",
+    )
+    .await;
+
+    // unpriced session: cost_basis='unpriced', cost_usd=NULL
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-a",
+        None,
+        50,
+        60,
+        "2025-06-10T12:00:00.000Z",
+        "unpriced",
+    )
+    .await;
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let params = effectiveness_params();
+
+    // ── Totals ──
+    let totals = repo.totals(&params).await.expect("totals");
+    assert_eq!(totals.session_count, 3, "3 sessions total");
+    // actual_spend_usd = 0.10
+    let actual = totals
+        .actual_spend_usd
+        .expect("actual_spend_usd should be Some");
+    assert!(
+        (actual - 0.10_f64).abs() < 1e-9,
+        "actual_spend_usd mismatch: {actual}"
+    );
+    // projected_usd = 0.05
+    let projected = totals.projected_usd.expect("projected_usd should be Some");
+    assert!(
+        (projected - 0.05_f64).abs() < 1e-9,
+        "projected_usd mismatch: {projected}"
+    );
+    // unpriced_session_count = 1
+    assert_eq!(
+        totals.unpriced_session_count, 1,
+        "exactly 1 unpriced session"
+    );
+    // total_cost_usd (deprecated) = 0.10 + 0.05 = 0.15
+    let total = totals
+        .total_cost_usd
+        .expect("total_cost_usd should be Some");
+    assert!(
+        (total - 0.15_f64).abs() < 1e-9,
+        "total_cost_usd mismatch: {total}"
+    );
+    // Token counts span all three sessions.
+    assert_eq!(totals.tokens_in, 100 + 80 + 50);
+    assert_eq!(totals.tokens_out, 200 + 120 + 60);
+
+    // ── Effectiveness (model-a) ──
+    let (effectiveness, _matrix) = repo
+        .query_effectiveness(&params)
+        .await
+        .expect("query_effectiveness");
+    let model_a = find_model(&effectiveness, "model-a");
+    assert_eq!(model_a.sessions, 3, "model-a has 3 sessions");
+    let a_actual = model_a
+        .actual_spend_usd
+        .expect("model-a actual_spend_usd should be Some");
+    assert!(
+        (a_actual - 0.10_f64).abs() < 1e-9,
+        "model-a actual mismatch: {a_actual}"
+    );
+    let a_projected = model_a
+        .projected_usd
+        .expect("model-a projected_usd should be Some");
+    assert!(
+        (a_projected - 0.05_f64).abs() < 1e-9,
+        "model-a projected mismatch: {a_projected}"
+    );
+    assert_eq!(model_a.unpriced_session_count, 1, "model-a has 1 unpriced");
+    // Deprecated spend_usd still works (sum of all priced).
+    let a_spend = model_a
+        .spend_usd
+        .expect("model-a spend_usd (deprecated) should be Some");
+    assert!(
+        (a_spend - 0.15_f64).abs() < 1e-9,
+        "model-a spend_usd mismatch: {a_spend}"
+    );
+}
+
+/// Seed two projects with different cost bases and verify entity breakdown
+/// carries the split.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_cost_basis_entity_breakdown() {
+    let db = create_test_db();
+    db.ensure_initialized().await.expect("ensure_initialized");
+
+    let proj = seed_project(&db, "entity-split-proj").await;
+
+    seed_task(&db, "task-entity-1", &proj, "closed", Some("completed"), 0).await;
+
+    // actual session in project.
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-entity-1",
+        "model-x",
+        Some(0.20),
+        100,
+        100,
+        "2025-06-10T10:00:00.000Z",
+        "actual",
+    )
+    .await;
+
+    // projected session in same project.
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-entity-1",
+        "model-y",
+        Some(0.08),
+        50,
+        50,
+        "2025-06-10T11:00:00.000Z",
+        "projected",
+    )
+    .await;
+
+    // unpriced session in same project.
+    seed_worker_session_with_basis(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-entity-1",
+        "model-z",
+        None,
+        30,
+        30,
+        "2025-06-10T12:00:00.000Z",
+        "unpriced",
+    )
+    .await;
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let params = effectiveness_params();
+
+    let rows = repo
+        .entity_breakdown(&params, GroupDimension::Project)
+        .await
+        .expect("entity_breakdown");
+
+    // Only one project.
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+
+    let actual = row
+        .actual_spend_usd
+        .expect("entity actual_spend_usd should be Some");
+    assert!(
+        (actual - 0.20_f64).abs() < 1e-9,
+        "entity actual mismatch: {actual}"
+    );
+    let projected = row
+        .projected_usd
+        .expect("entity projected_usd should be Some");
+    assert!(
+        (projected - 0.08_f64).abs() < 1e-9,
+        "entity projected mismatch: {projected}"
+    );
+    assert_eq!(
+        row.unpriced_session_count, 1,
+        "entity has 1 unpriced session"
+    );
+    // Deprecated cost = sum of all priced.
+    let cost = row.cost.expect("entity cost should be Some");
+    assert!(
+        (cost - 0.28_f64).abs() < 1e-9,
+        "entity cost mismatch: {cost}"
+    );
+}
+
+/// Unpriced sessions are excluded from both dollar figures but counted visibly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_cost_basis_unpriced_excluded_from_dollars() {
+    let db = create_test_db();
+    db.ensure_initialized().await.expect("ensure_initialized");
+
+    let proj = seed_project(&db, "unpriced-only-proj").await;
+    seed_task(&db, "task-unp-1", &proj, "closed", Some("completed"), 0).await;
+
+    // Two unpriced sessions.
+    for i in 0..2 {
+        seed_worker_session_with_basis(
+            &db,
+            &uuid::Uuid::now_v7().to_string(),
+            &proj,
+            "task-unp-1",
+            "model-u",
+            None,
+            100 * (i as i64 + 1),
+            200 * (i as i64 + 1),
+            &format!("2025-06-1{:?}T10:00:00.000Z", i),
+            "unpriced",
+        )
+        .await;
+    }
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let params = effectiveness_params();
+
+    let totals = repo.totals(&params).await.expect("totals");
+    assert_eq!(totals.session_count, 2);
+    // Both dollars should be None since there are no actual/projected sessions.
+    assert!(
+        totals.actual_spend_usd.is_none(),
+        "no actual sessions → actual_spend_usd is None"
+    );
+    assert!(
+        totals.projected_usd.is_none(),
+        "no projected sessions → projected_usd is None"
+    );
+    assert_eq!(
+        totals.unpriced_session_count, 2,
+        "both sessions are unpriced"
+    );
+    // Deprecated total_cost_usd is also None (no priced sessions).
+    assert!(
+        totals.total_cost_usd.is_none(),
+        "no priced sessions → total_cost_usd is None"
+    );
 }
