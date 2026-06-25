@@ -1,0 +1,16 @@
+{
+   "db_name" : "PostgreSQL",
+   "describe" : {
+      "columns" : [],
+      "nullable" : [],
+      "parameters" : {
+         "Left" : [
+            "Varchar",
+            "Varchar",
+            "Varchar"
+         ]
+      }
+   },
+   "hash" : "5295424dc42c6da3f0286bafa65466ddfec71c654c14ef2b2471520420f0f3e3",
+   "query" : "INSERT INTO sessions (\n            id,\n            project_id,\n            task_id,\n            model_id,\n            agent_type,\n            started_at,\n            status,\n            tokens_in,\n            tokens_out,\n            cost_basis\n        )\n        VALUES (\n            $1,\n            $2,\n            $3,\n            'test-model',\n            'worker',\n            to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),\n            'completed',\n            0,\n            0,\n            'unpriced'\n        )"
+}

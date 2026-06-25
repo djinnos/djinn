@@ -98,9 +98,9 @@ async fn seed_worker_session(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, 'worker', 'completed', \
-                 $5, $6, $7, 0, 0, $8)",
+                 $5, $6, $7, 0, 0, $8, 'actual')",
     )
     .bind(session_id)
     .bind(project_id)
@@ -148,8 +148,8 @@ async fn seed_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'actual')",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -189,8 +189,8 @@ async fn seed_unpriced_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'unpriced')",
     )
     .bind(&session_id)
     .bind(&project_id)

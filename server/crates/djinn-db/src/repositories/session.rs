@@ -34,6 +34,16 @@ pub struct CreateSessionParams<'a> {
     /// passes plain pricing data here) so `djinn-db` has no dependency on
     /// `djinn-provider`.
     pub pricing: Option<&'a Pricing>,
+    /// Cost-basis classification derived by the caller from the catalog's
+    /// provider credential class and pricing availability:
+    /// - `"actual"` — API-key provider with usable pricing (real spend).
+    /// - `"projected"` — subscription/coding-plan provider (list-rate
+    ///   projection; actual API spend is $0).
+    /// - `"unpriced"` — uncatalogued or missing-price session.
+    ///
+    /// Owned by the agent layer so `djinn-db` has no dependency on
+    /// `djinn-provider`. Added in migration 83.
+    pub cost_basis: &'a str,
 }
 
 impl SessionRepository {
@@ -56,11 +66,12 @@ impl SessionRepository {
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
                  created_by_user_id, task_run_id,
+                 cost_basis,
                  input_price_per_million_snapshot,
                  output_price_per_million_snapshot,
                  cache_read_price_per_million_snapshot,
                  cache_write_price_per_million_snapshot)
-             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, $8, $9, $10, $11, $12)",
             id,
             params.project_id,
             params.task_id,
@@ -68,6 +79,7 @@ impl SessionRepository {
             params.agent_type,
             created_by_user_id,
             params.task_run_id,
+            params.cost_basis,
             params.pricing.map(|p| p.input_per_million),
             params.pricing.map(|p| p.output_per_million),
             params.pricing.map(|p| p.cache_read_per_million),
@@ -85,7 +97,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -120,7 +133,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -222,7 +236,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -262,7 +277,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -301,7 +317,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -324,7 +341,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -344,7 +362,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -365,7 +384,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -388,7 +408,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -409,7 +430,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -463,7 +485,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -489,7 +512,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+             s.cost_basis
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -511,7 +535,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -679,7 +704,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -762,7 +788,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -808,8 +835,8 @@ impl SessionRepository {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id, title)
-             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4)
+                 created_by_user_id, task_run_id, title, cost_basis)
+             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4, 'unpriced')
              ON CONFLICT (id) DO UPDATE
                 SET status = 'running', ended_at = NULL
               WHERE sessions.status <> 'running'",
@@ -830,7 +857,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -894,7 +922,8 @@ impl SessionRepository {
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
-                cache_write_price_per_million_snapshot
+                cache_write_price_per_million_snapshot,
+             cost_basis
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -921,7 +950,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+             s.cost_basis
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -958,7 +988,8 @@ impl SessionRepository {
                     s.cost_usd, s.input_price_per_million_snapshot,
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
-                    s.cache_write_price_per_million_snapshot
+                    s.cache_write_price_per_million_snapshot,
+             s.cost_basis
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -1188,6 +1219,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1201,6 +1233,7 @@ mod tests {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: "unpriced",
         })
         .await
         .unwrap();
@@ -1271,6 +1304,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1284,6 +1318,7 @@ mod tests {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: "unpriced",
         })
         .await
         .unwrap();
@@ -1295,8 +1330,8 @@ mod tests {
         sqlx::query!(
             "INSERT INTO sessions
                 (id, project_id, task_id, model_id, agent_type, status,
-                 created_by_user_id, task_run_id, title)
-             VALUES ($1, NULL, NULL, 'openai/gpt', 'chat', 'running', $2, NULL, 'New Chat')",
+                 created_by_user_id, task_run_id, title, cost_basis)
+             VALUES ($1, NULL, NULL, 'openai/gpt', 'chat', 'running', $2, NULL, 'New Chat', 'unpriced')",
             chat_id,
             user_a
         )
@@ -1339,6 +1374,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1393,6 +1429,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1423,6 +1460,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1499,6 +1537,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1538,6 +1577,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1565,6 +1605,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1614,6 +1655,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1647,6 +1689,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1705,6 +1748,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1718,6 +1762,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1732,6 +1777,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1745,6 +1791,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1827,6 +1874,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1841,6 +1889,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1855,6 +1904,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1869,6 +1919,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -1923,6 +1974,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2059,6 +2111,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2111,6 +2164,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2158,6 +2212,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2207,6 +2262,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2245,6 +2301,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&pricing),
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2297,6 +2354,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2339,6 +2397,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2404,6 +2463,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: Some(&original_pricing),
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2446,6 +2506,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2498,6 +2559,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2541,6 +2603,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: "unpriced",
             })
             .await
             .unwrap();
@@ -2568,5 +2631,202 @@ mod tests {
         assert_eq!(fetched.output_price_per_million_snapshot, Some(15.0));
         assert_eq!(fetched.cache_read_price_per_million_snapshot, Some(1.0));
         assert_eq!(fetched.cache_write_price_per_million_snapshot, Some(3.0));
+    }
+
+    // ── Cost basis tests (migration 83) ─────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_persists_cost_basis_actual() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: "actual",
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.cost_basis, "actual");
+
+        // Round-trip via get.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.cost_basis, "actual");
+
+        // Round-trip via list_for_task.
+        let listed = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].cost_basis, "actual");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_persists_cost_basis_projected() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = djinn_core::models::provider::Pricing {
+            input_per_million: 2.0,
+            output_per_million: 10.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 2.5,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "minimax-coding-plan/minimax-m1",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+                cost_basis: "projected",
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.cost_basis, "projected");
+        // Pricing snapshots must still be set.
+        assert_eq!(created.input_price_per_million_snapshot, Some(2.0));
+        assert_eq!(created.output_price_per_million_snapshot, Some(10.0));
+        // cost_usd is NULL at creation (no tokens yet).
+        assert!(created.cost_usd.is_none());
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.cost_basis, "projected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_persists_cost_basis_unpriced() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "uncatalogued/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: "unpriced",
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.cost_basis, "unpriced");
+        assert!(created.cost_usd.is_none());
+        assert!(created.input_price_per_million_snapshot.is_none());
+
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.cost_basis, "unpriced");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cost_basis_appears_in_all_list_paths() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = djinn_core::models::provider::Pricing {
+            input_per_million: 1.5,
+            output_per_million: 6.0,
+            cache_read_per_million: 0.15,
+            cache_write_per_million: 1.875,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+                cost_basis: "actual",
+            })
+            .await
+            .unwrap();
+
+        // get_in_project
+        let in_project = repo
+            .get_in_project(&project_id, &created.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_project.cost_basis, "actual");
+
+        // list_for_task_in_project
+        let task_in_project = repo
+            .list_for_task_in_project(&project_id, &task_id)
+            .await
+            .unwrap();
+        assert_eq!(task_in_project[0].cost_basis, "actual");
+
+        // active_for_task (session is running)
+        let active = repo.active_for_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(active.cost_basis, "actual");
+
+        // list_active
+        let active_list = repo.list_active().await.unwrap();
+        assert_eq!(active_list[0].cost_basis, "actual");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cost_basis_preserved_through_update_and_cost_usd_computed() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let pricing = djinn_core::models::provider::Pricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_read_per_million: 1.0,
+            cache_write_per_million: 3.0,
+        };
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: Some(&pricing),
+                cost_basis: "actual",
+            })
+            .await
+            .unwrap();
+        assert!(created.cost_usd.is_none());
+
+        // Update with tokens to trigger cost_usd computation.
+        let updated = repo
+            .update(
+                &created.id,
+                SessionStatus::Completed,
+                100,
+                200,
+                50,
+                30,
+                None,
+            )
+            .await
+            .unwrap();
+        // cost_basis must survive the update.
+        assert_eq!(updated.cost_basis, "actual");
+        // cost_usd must be computed from snapshot rates.
+        let expected = (100.0 * 3.0 + 200.0 * 15.0 + 50.0 * 1.0 + 30.0 * 3.0) / 1_000_000.0;
+        assert!(
+            (updated.cost_usd.unwrap() - expected).abs() < 0.0001,
+            "expected cost_usd ~{expected}, got {:?}",
+            updated.cost_usd
+        );
     }
 }

@@ -84,6 +84,19 @@ pub struct SessionRecord {
     /// (cache creation) token price (USD). Added in migration 66.
     #[serde(default)]
     pub cache_write_price_per_million_snapshot: Option<f64>,
+    /// Classification of `cost_usd` semantics: `'actual'` for API-key
+    /// provider sessions where cost is real spend, `'projected'` for
+    /// subscription/coding-plan sessions where cost is a list-rate
+    /// projection, and `'unpriced'` for uncatalogued/missing-price
+    /// sessions. Added in migration 83.
+    #[serde(default = "default_cost_basis")]
+    pub cost_basis: String,
+}
+
+/// Default serde value for `cost_basis` when deserializing older payloads
+/// that lack the field (e.g. events emitted before migration 83).
+fn default_cost_basis() -> String {
+    "unpriced".to_owned()
 }
 
 #[cfg(test)]
@@ -112,6 +125,7 @@ mod tests {
             output_price_per_million_snapshot: None,
             cache_read_price_per_million_snapshot: None,
             cache_write_price_per_million_snapshot: None,
+            cost_basis: "unpriced".to_owned(),
         }
     }
 
@@ -164,5 +178,8 @@ mod tests {
         assert!(decoded.output_price_per_million_snapshot.is_none());
         assert!(decoded.cache_read_price_per_million_snapshot.is_none());
         assert!(decoded.cache_write_price_per_million_snapshot.is_none());
+        // Missing `cost_basis` field defaults to "unpriced" for backward
+        // compatibility with payloads emitted before migration 83.
+        assert_eq!(decoded.cost_basis, "unpriced");
     }
 }

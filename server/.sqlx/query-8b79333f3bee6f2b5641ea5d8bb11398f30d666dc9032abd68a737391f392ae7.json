@@ -1,0 +1,17 @@
+{
+   "db_name" : "PostgreSQL",
+   "describe" : {
+      "columns" : [],
+      "nullable" : [],
+      "parameters" : {
+         "Left" : [
+            "Varchar",
+            "Varchar",
+            "Varchar",
+            "Varchar"
+         ]
+      }
+   },
+   "hash" : "8b79333f3bee6f2b5641ea5d8bb11398f30d666dc9032abd68a737391f392ae7",
+   "query" : "INSERT INTO sessions\n                (id, project_id, task_id, model_id, agent_type, status,\n                 created_by_user_id, task_run_id, title, cost_basis)\n             VALUES ($1, NULL, NULL, $2, 'chat', 'running', $3, NULL, $4, 'unpriced')\n             ON CONFLICT (id) DO UPDATE\n                SET status = 'running', ended_at = NULL\n              WHERE sessions.status <> 'running'"
+}

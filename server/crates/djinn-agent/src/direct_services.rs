@@ -194,6 +194,26 @@ impl SupervisorServices for DirectServices {
             .catalog
             .find_model(params.model.as_str())
             .map(|m| m.pricing);
+        // Derive cost basis from catalog pricing and provider credential class:
+        // - No pricing available → "unpriced" (uncatalogued or missing-price).
+        // - Subscription/coding-plan provider → "projected" (list-rate
+        //   projection; actual API spend is $0).
+        // - Ordinary API-key provider → "actual" (real spend).
+        let cost_basis = match pricing {
+            None => "unpriced",
+            Some(_) => {
+                let provider_id = params
+                    .model
+                    .split_once('/')
+                    .map(|(p, _)| p)
+                    .unwrap_or(&params.model);
+                if djinn_provider::catalog::builtin::is_subscription_provider(provider_id) {
+                    "projected"
+                } else {
+                    "actual"
+                }
+            }
+        };
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
             task_id: params.task_id.as_deref(),
@@ -202,6 +222,7 @@ impl SupervisorServices for DirectServices {
             metadata_json: params.metadata_json.as_deref(),
             task_run_id: params.task_run_id.as_deref(),
             pricing: pricing.as_ref(),
+            cost_basis,
         })
         .await
         .map_err(|e| e.to_string())
