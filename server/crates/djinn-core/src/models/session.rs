@@ -22,6 +22,46 @@ impl SessionStatus {
     }
 }
 
+/// How to interpret a session's `cost_usd` value for usage analytics.
+///
+/// - `Actual` — API-key / pay-as-you-go provider; `cost_usd` is real API spend.
+/// - `Projected` — subscription / coding-plan provider; `cost_usd` is a
+///   list-rate projection and actual API spend is $0.
+/// - `Unpriced` — uncatalogued or missing-price session; excluded from both
+///   actual and projected dollar aggregates, but counted visibly.
+///
+/// Derived at session creation from the resolved catalog pricing and provider
+/// credential class, then persisted as a denormalized text label on the session
+/// row. No credential foreign key is introduced.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostBasis {
+    Actual,
+    Projected,
+    #[default]
+    Unpriced,
+}
+
+impl CostBasis {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Actual => "actual",
+            Self::Projected => "projected",
+            Self::Unpriced => "unpriced",
+        }
+    }
+
+    /// Parse from the database text representation.
+    /// Returns `Unpriced` for any unknown value (defensive).
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "actual" => Self::Actual,
+            "projected" => Self::Projected,
+            _ => Self::Unpriced,
+        }
+    }
+}
+
 /// Persisted lifecycle record for a supervisor-run agent session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -84,6 +124,17 @@ pub struct SessionRecord {
     /// (cache creation) token price (USD). Added in migration 66.
     #[serde(default)]
     pub cache_write_price_per_million_snapshot: Option<f64>,
+    /// How to interpret `cost_usd` for usage analytics: `actual` (real API
+    /// spend), `projected` (subscription-equivalent list-rate projection), or
+    /// `unpriced` (excluded from dollar aggregates). Derived at session
+    /// creation from catalog pricing + provider credential class.
+    /// Added in migration 83.
+    #[serde(default = "default_cost_basis")]
+    pub cost_basis: String,
+}
+
+fn default_cost_basis() -> String {
+    "unpriced".to_string()
 }
 
 #[cfg(test)]
@@ -112,6 +163,7 @@ mod tests {
             output_price_per_million_snapshot: None,
             cache_read_price_per_million_snapshot: None,
             cache_write_price_per_million_snapshot: None,
+            cost_basis: "unpriced".to_owned(),
         }
     }
 
@@ -164,5 +216,6 @@ mod tests {
         assert!(decoded.output_price_per_million_snapshot.is_none());
         assert!(decoded.cache_read_price_per_million_snapshot.is_none());
         assert!(decoded.cache_write_price_per_million_snapshot.is_none());
+        assert_eq!(decoded.cost_basis, "unpriced");
     }
 }

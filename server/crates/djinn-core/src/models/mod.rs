@@ -26,7 +26,7 @@ pub use proposal::{
     ProposalTarget,
 };
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
-pub use session::{SessionRecord, SessionStatus};
+pub use session::{CostBasis, SessionRecord, SessionStatus};
 pub use session_message::SessionMessage;
 pub use settings::{DispatchPause, DispatchPauseScope, DispatchPauseState, DjinnSettings, Setting};
 pub use task::{

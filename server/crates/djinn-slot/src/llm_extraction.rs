@@ -2166,6 +2166,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .expect("create session");
@@ -2240,6 +2241,7 @@ mod tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .expect("create session");

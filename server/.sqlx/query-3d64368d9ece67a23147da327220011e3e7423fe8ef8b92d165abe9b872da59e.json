@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot\n             FROM sessions WHERE status = 'running'",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis\n             FROM sessions WHERE task_id = $1 ORDER BY started_at DESC",
   "describe": {
     "columns": [
       {
@@ -102,10 +102,17 @@
         "ordinal": 19,
         "name": "cache_write_price_per_million_snapshot",
         "type_info": "Float8"
+      },
+      {
+        "ordinal": 20,
+        "name": "cost_basis",
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -127,8 +134,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "a6fa4d0e241aa6a7e926eeba1b7fbec1d3c79786582d670d1b269310ceea6a3c"
+  "hash": "3d64368d9ece67a23147da327220011e3e7423fe8ef8b92d165abe9b872da59e"
 }

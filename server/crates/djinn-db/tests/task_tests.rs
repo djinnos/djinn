@@ -162,6 +162,7 @@ pub(crate) async fn create_test_session(
         metadata_json: None,
         task_run_id: None,
         pricing: None,
+        cost_basis: None,
     })
     .await
     .expect("failed to create test session")
