@@ -1207,6 +1207,74 @@ impl SessionRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Backdate a session's `started_at` by a PostgreSQL `interval` string
+    /// (e.g. `'20 minutes'`, `'30 seconds'`).
+    ///
+    /// Test-fixture helper: production sessions are stamped at creation time
+    /// and never backdated.  Used by coordinator zombie / orphan tests to
+    /// fabricate sessions that predate the zombie hard-cap window.
+    pub async fn backdate_started_at(&self, id: &str, interval: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE sessions SET started_at = to_char(
+                 now() AT TIME ZONE 'utc' - $1::interval,
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+             WHERE id = $2",
+        )
+        .bind(interval)
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Set `tokens_in` and `tokens_out` on a session without changing its
+    /// status or `ended_at`.
+    ///
+    /// Test-fixture helper: production token accounting goes through
+    /// [`SessionRepository::update`] or [`SessionRepository::flush_tokens`].
+    pub async fn set_token_counts(&self, id: &str, tokens_in: i64, tokens_out: i64) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query("UPDATE sessions SET tokens_in = $1, tokens_out = $2 WHERE id = $3")
+            .bind(tokens_in)
+            .bind(tokens_out)
+            .bind(id)
+            .execute(self.db.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Set `tokens_in`, `tokens_out`, and backdate `started_at` on a session
+    /// without changing its status or `ended_at`.
+    ///
+    /// Test-fixture helper combining [`Self::set_token_counts`] and
+    /// [`Self::backdate_started_at`] in a single UPDATE so tests that need
+    /// both adjustments issue one round-trip.
+    pub async fn set_tokens_and_backdate(
+        &self,
+        id: &str,
+        interval: &str,
+        tokens_in: i64,
+        tokens_out: i64,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            "UPDATE sessions
+             SET tokens_in = $1, tokens_out = $2,
+                 started_at = to_char(
+                     now() AT TIME ZONE 'utc' - $3::interval,
+                     'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+             WHERE id = $4",
+        )
+        .bind(tokens_in)
+        .bind(tokens_out)
+        .bind(interval)
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
 }
 
 /// Row returned by [`SessionRepository::list_unextracted_completed_candidates`].

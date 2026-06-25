@@ -52,9 +52,8 @@ async fn zombie_running_session_doctor_e2e() {
 
     // ── 2. Create a task/note and set task status to in_progress ────────
     let (task, _note) = create_task_with_note(&db, &tx, "doctor-zombie-e2e").await;
-    sqlx::query("UPDATE tasks SET status = 'in_progress' WHERE id = $1")
-        .bind(&task.id)
-        .execute(db.pool())
+    TaskRepository::new(db.clone(), event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
         .await
         .unwrap();
 
@@ -76,17 +75,10 @@ async fn zombie_running_session_doctor_e2e() {
         .unwrap();
 
     // Backdate started_at by ~30 s (well inside the 600 s reaper window).
-    sqlx::query(
-        "UPDATE sessions
-           SET started_at = to_char(
-                 now() AT TIME ZONE 'utc' - interval '30 seconds',
-                 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
-         WHERE id = $1",
-    )
-    .bind(&session.id)
-    .execute(db.pool())
-    .await
-    .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "30 seconds")
+        .await
+        .unwrap();
 
     // ── 4. Preconditions ────────────────────────────────────────────────
     assert!(

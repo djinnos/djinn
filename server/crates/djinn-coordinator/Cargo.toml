@@ -46,12 +46,6 @@ sha2 = "0.10"
 hex = "0.4"
 git2 = "0.20"
 libc = "0.2"
-# NOTE(djinn-coordinator): direct sqlx usage is a temporary exception.
-# The dispatch_pause module uses djinn_db::DispatchPauseRepository which
-# transitively pulls in sqlx; we also re-export the repository call from
-# the coordinator's task dispatch path.  This will be removed when the
-# dispatch-pause query surface is lifted into djinn-db proper.
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "macros"] }
 workspace-hack.workspace = true
 
 [dev-dependencies]

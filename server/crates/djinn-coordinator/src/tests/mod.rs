@@ -15,7 +15,8 @@ use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::TaskRepository;
 use djinn_db::{
-    CreateSessionParams, DispatchPauseRepository, DispatchPauseTarget, SessionRepository,
+    CreateSessionParams, CreateTaskRunParams, DispatchPauseRepository, DispatchPauseTarget,
+    SessionRepository, TaskRunRepository,
 };
 use djinn_provider::catalog::health::HealthTracker;
 use djinn_slot::{ModelSlotConfig, SlotHandle, SlotPoolConfig, SlotPoolHandle};

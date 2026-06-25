@@ -112,17 +112,22 @@ fn boundary_djinn_coordinator_source_has_no_agent_import() {
     );
 }
 
-/// `djinn-coordinator` has a documented temporary `sqlx` dependency.
+/// `djinn-coordinator` must NOT have a direct `sqlx` dependency.
 ///
-/// The Cargo.toml must contain the `NOTE(djinn-coordinator)` annotation
-/// explaining which files use direct sqlx and the plan to remove it.
+/// All coordinator SQL is routed through `djinn-db` repository and
+/// test-support helpers; the crate's `Cargo.toml` must not list `sqlx`
+/// as a dependency.
 #[test]
-fn boundary_djinn_coordinator_sqlx_is_documented() {
+fn boundary_djinn_coordinator_has_no_sqlx_dependency() {
     let cargo_toml = include_str!("../../../djinn-coordinator/Cargo.toml");
+    let has_sqlx = cargo_toml.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.starts_with("sqlx =")
+    });
     assert!(
-        cargo_toml.contains("NOTE(djinn-coordinator)"),
-        "djinn-coordinator Cargo.toml must document its sqlx dependency with a \
-         NOTE(djinn-coordinator) comment explaining the temporary exception"
+        !has_sqlx,
+        "djinn-coordinator Cargo.toml must not contain a direct sqlx dependency; \
+         all SQL should go through djinn-db helpers"
     );
 }
 

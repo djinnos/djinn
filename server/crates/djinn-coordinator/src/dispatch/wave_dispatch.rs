@@ -249,8 +249,7 @@ impl CoordinatorActor {
                     // ForceClose is legal from any non-closed state and moves the
                     // task out of `approved`, so the escalation fires exactly once
                     // (no per-tick duplicate review tasks).
-                    let push_rejected_oversized_blob =
-                        is_oversized_blob_push_rejection(&reason);
+                    let push_rejected_oversized_blob = is_oversized_blob_push_rejection(&reason);
                     if push_rejected_oversized_blob && task.pr_url.is_none() {
                         let escalation_reason = format!(
                             "PR push for approved task was rejected by GitHub: an oversized file \
@@ -283,8 +282,12 @@ impl CoordinatorActor {
                             error = %reason,
                             "CoordinatorActor: PR push rejected (oversized blob in history) — escalating to Planner to rewrite history"
                         );
-                        self.dispatch_planner_escalation(&task.id, &escalation_reason, &task.project_id)
-                            .await;
+                        self.dispatch_planner_escalation(
+                            &task.id,
+                            &escalation_reason,
+                            &task.project_id,
+                        )
+                        .await;
                         if let Err(e) = repo
                             .transition(
                                 &task.id,
