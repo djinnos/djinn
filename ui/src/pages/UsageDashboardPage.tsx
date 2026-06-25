@@ -18,6 +18,7 @@ import { UsageBreakdownsTab } from "@/components/usage/UsageBreakdownsTab";
 import { UsageModelsTab } from "@/components/usage/UsageModelsTab";
 import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
 import { UsageProjectModelMatrixTab } from "@/components/usage/UsageProjectModelMatrixTab";
+import { EmptyState } from "@/components/EmptyState";
 import { cn } from "@/lib/utils";
 
 /** Tab values for the dashboard. */
@@ -141,13 +142,19 @@ export function UsageDashboardPage() {
             retrying={isFetching}
           />
         ) : isEmpty ? (
-          <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-12 text-center">
-            <p className="text-sm font-medium text-foreground">No usage data</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Analytics will appear here once the deployment has completed task
-              activity within the selected range.
-            </p>
-          </div>
+          <EmptyState
+            title="No usage data"
+            message="Analytics will appear here once the deployment has completed task activity within the selected range."
+            illustration={
+              <HugeiconsIcon
+                icon={Analytics01Icon}
+                size={32}
+                className="text-muted-foreground"
+              />
+            }
+            actionLabel="Refresh"
+            onAction={() => void refetch()}
+          />
         ) : (
           <Tabs defaultValue={TAB_OVERVIEW} className="flex flex-col gap-4">
             <TabsList className="w-fit">

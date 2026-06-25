@@ -22,9 +22,12 @@ import {
   RefreshIcon,
 } from "@hugeicons/core-free-icons";
 
+import { EmptyState } from "@/components/EmptyState";
+import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
   SelectContent,
@@ -109,21 +112,77 @@ export function ProjectEnvironmentPage() {
   };
 
   if (!projectId) {
-    return <EmptyState message="No project id in URL." />;
+    return (
+      <EmptyState
+        title="No project selected"
+        message="A project ID is required in the URL to view its environment settings."
+      />
+    );
   }
 
   if (loading || !config) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <HugeiconsIcon icon={Loading02Icon} className="size-5 animate-spin text-muted-foreground" />
+      <div className="flex h-full flex-col overflow-hidden">
+        <PageHeader
+          title="Environment"
+          subtitle="A project's runtime image comes from a shared catalog image. Code-graph workspaces stay per-project."
+          leading={
+            <Button variant="ghost" size="sm" className="h-8 gap-1.5 px-2 text-xs" disabled>
+              <HugeiconsIcon icon={ArrowLeft02Icon} size={14} />
+              Back
+            </Button>
+          }
+          actions={
+            <div className="flex items-center gap-3">
+              <Skeleton className="h-8 w-36" />
+              <Skeleton className="h-8 w-20" />
+              <Skeleton className="h-8 w-16" />
+            </div>
+          }
+          className="shrink-0 border-b px-6 py-4"
+        />
+        <div className="flex-1 overflow-y-auto px-6 py-6">
+          <div className="mx-auto flex max-w-4xl flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <Skeleton className="h-5 w-56" />
+              <Skeleton className="h-3 w-80" />
+            </div>
+            {Array.from({ length: 2 }).map((_, i) => (
+              <div
+                key={i}
+                className="flex items-end gap-2 rounded-lg border bg-background/30 px-4 py-3"
+              >
+                <div className="flex flex-1 flex-col gap-1.5">
+                  <Skeleton className="h-3 w-10" />
+                  <Skeleton className="h-9 w-full" />
+                </div>
+                <div className="flex w-44 flex-col gap-1.5">
+                  <Skeleton className="h-3 w-14" />
+                  <Skeleton className="h-9 w-full" />
+                </div>
+                <Skeleton className="h-9 w-9 rounded" />
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex items-center justify-between gap-3 border-b px-6 py-4">
-        <div className="flex items-center gap-3">
+      <PageHeader
+        title="Environment"
+        subtitle={
+          <>
+            {project?.name ? (
+              <span className="text-muted-foreground">· {project.name} · </span>
+            ) : null}
+            A project&apos;s runtime image comes from a shared catalog image. Code-graph workspaces
+            stay per-project.
+          </>
+        }
+        leading={
           <Button
             variant="ghost"
             size="sm"
@@ -133,46 +192,39 @@ export function ProjectEnvironmentPage() {
             <HugeiconsIcon icon={ArrowLeft02Icon} size={14} />
             Back
           </Button>
-          <div>
-            <h1 className="text-lg font-semibold">
-              Environment
-              {project?.name ? <span className="text-muted-foreground"> · {project.name}</span> : null}
-            </h1>
-            <p className="text-xs text-muted-foreground">
-              A project's runtime image comes from a shared catalog image. Code-graph workspaces stay
-              per-project.
-            </p>
+        }
+        actions={
+          <div className="flex items-center gap-3">
+            <ProjectImagePicker projectId={projectId} initialImageId={selectedImageId} />
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                onClick={() => void load()}
+                disabled={saving}
+              >
+                <HugeiconsIcon icon={RefreshIcon} size={14} />
+                Reload
+              </Button>
+              <Button
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                onClick={() => void handleSaveWorkspaces()}
+                disabled={saving}
+              >
+                {saving ? (
+                  <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
+                ) : (
+                  <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
+                )}
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <ProjectImagePicker projectId={projectId} initialImageId={selectedImageId} />
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => void load()}
-              disabled={saving}
-            >
-              <HugeiconsIcon icon={RefreshIcon} size={14} />
-              Reload
-            </Button>
-            <Button
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => void handleSaveWorkspaces()}
-              disabled={saving}
-            >
-              {saving ? (
-                <HugeiconsIcon icon={Loading02Icon} size={14} className="animate-spin" />
-              ) : (
-                <HugeiconsIcon icon={FloppyDiskIcon} size={14} />
-              )}
-              {saving ? "Saving…" : "Save"}
-            </Button>
-          </div>
-        </div>
-      </header>
+        }
+        className="shrink-0 border-b px-6 py-4"
+      />
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto flex max-w-4xl flex-col gap-4">
@@ -209,32 +261,43 @@ function WorkspacesEditor({
   return (
     <section className="flex flex-col gap-3">
       <div>
-        <h3 className="text-sm font-semibold">Code-graph workspaces (optional)</h3>
+        <h3 className="text-sm font-semibold">Code-graph workspaces</h3>
         <p className="text-xs text-muted-foreground">
-          Per-project SCIP path→language hints for the code graph. Each row maps a directory to the
-          language its indexer should run for.
+          Map project directories to their primary language so the code-graph indexer targets the
+          right SCIP toolchain. Leave empty to default to the repo root.
         </p>
       </div>
       <div className="flex flex-col gap-2">
         {workspaces.length === 0 && (
-          <p className="text-xs text-muted-foreground">No workspaces configured.</p>
+          <div className="rounded-lg border border-dashed bg-background/30 px-4 py-6 text-center">
+            <p className="text-xs text-muted-foreground">
+              No workspaces configured. Add one below to tell the indexer which directory uses which
+              language.
+            </p>
+          </div>
         )}
         {workspaces.map((ws, idx) => (
           <div
             key={idx}
-            className="flex items-end gap-2 rounded-md border bg-background/30 px-3 py-2.5"
+            className="flex items-end gap-2 rounded-lg border bg-card/50 px-4 py-3 shadow-sm"
           >
             <div className="flex flex-1 flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Root</Label>
+              <Label className="text-xs text-muted-foreground">
+                Root{" "}
+                <span className="font-normal text-muted-foreground/70">(relative to repo root)</span>
+              </Label>
               <Input
                 value={ws.root}
                 onChange={(e) => updateAt(idx, { root: e.target.value })}
-                placeholder="server/ (empty = repo root)"
+                placeholder="e.g. server/ — leave empty for repo root"
                 className="font-mono text-xs"
               />
             </div>
             <div className="flex w-44 flex-col gap-1">
-              <Label className="text-xs text-muted-foreground">Language</Label>
+              <Label className="text-xs text-muted-foreground">
+                Language{" "}
+                <span className="font-normal text-muted-foreground/70">(indexer)</span>
+              </Label>
               <Select
                 value={ws.language}
                 onValueChange={(v) => typeof v === "string" && updateAt(idx, { language: v })}
@@ -274,15 +337,5 @@ function WorkspacesEditor({
         </Button>
       </div>
     </section>
-  );
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="flex h-full items-center justify-center">
-      <p className="text-sm text-muted-foreground">{message}</p>
-    </div>
   );
 }

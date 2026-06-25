@@ -1,5 +1,7 @@
+import { EmptyState } from '@/components/EmptyState';
 import { InlineError } from '@/components/InlineError';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Switch } from '@/components/ui/switch';
 import { ModelSection } from '@/components/userConfig/ModelSection';
 import { AiPolicyTab } from '@/components/settings/AiPolicyTab';
 import { ConnectionsTab } from '@/components/settings/ConnectionsTab';
@@ -7,7 +9,6 @@ import { useAuthUser } from '@/components/AuthGate';
 import { SELF_TARGET } from '@/api/userConfig';
 import { useUserSettings } from '@/hooks/settings/useUserSettings';
 import { useServerHealth } from '@/hooks/useServerHealth';
-import { cn } from '@/lib/utils';
 
 /** Model Roles tab — per-user, per-role model lanes for the signed-in caller. */
 function ModelRolesTab() {
@@ -55,28 +56,12 @@ function PreferencesTab() {
               pinned to the head commit, so a fresh push invalidates them.
             </p>
           </div>
-          <button
+          <Switch
             id="auto-approve-prs"
-            type="button"
-            role="switch"
-            aria-checked={settings.autoApprovePrs}
+            checked={settings.autoApprovePrs}
+            onCheckedChange={(checked) => void setAutoApprovePrs(checked)}
             disabled={saving}
-            onClick={() => void setAutoApprovePrs(!settings.autoApprovePrs)}
-            className={cn(
-              'relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border transition-colors',
-              settings.autoApprovePrs
-                ? 'border-primary bg-primary'
-                : 'border-border bg-muted',
-              saving && 'opacity-60',
-            )}
-          >
-            <span
-              className={cn(
-                'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform',
-                settings.autoApprovePrs ? 'translate-x-6' : 'translate-x-1',
-              )}
-            />
-          </button>
+          />
         </div>
       ) : null}
     </div>
@@ -116,11 +101,10 @@ export function SettingsPage() {
           </div>
         </Tabs>
       ) : (
-        <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-6 text-center">
-          <p className="text-sm text-muted-foreground">
-            Connect to a server to manage providers and agents.
-          </p>
-        </div>
+        <EmptyState
+          title="Server disconnected"
+          message="Connect to a server to manage providers and agents."
+        />
       )}
     </div>
   );

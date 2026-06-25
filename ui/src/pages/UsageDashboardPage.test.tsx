@@ -40,25 +40,41 @@ vi.mock("@/components/usage/UsageProjectModelMatrixTab", () => ({
   UsageProjectModelMatrixTab: () => <div data-testid="matrix-tab" />,
 }));
 
+// Control variable: set to true before rendering to get an empty-data response.
+let mockReturnEmptyData = false;
+
 // Provide a minimal stub for the analytics query so the page never actually
-// fetches. The stub returns data that satisfies the non-empty check.
+// fetches. The stub returns data that satisfies the non-empty check by default,
+// or empty arrays when mockReturnEmptyData is true.
 vi.mock("@/api/queryOptions", () => ({
   usageAnalyticsQueryOptions: (filters: UsageAnalyticsFilters) => ({
     queryKey: ["admin", "usage", filters],
     queryFn: () =>
-      Promise.resolve({
-        kpis: [{ label: "Tasks", value: 42, delta_pct: null, formatted: "42" }],
-        time_series: [],
-        breakdowns: { by_user: [], by_project: [], by_proposal: [], by_task: [] },
-        model_effectiveness: [],
-        project_model_matrix: [],
-        generated_at: "2026-06-25T00:00:00Z",
-      }),
+      Promise.resolve(
+        mockReturnEmptyData
+          ? {
+              kpis: [],
+              time_series: [],
+              breakdowns: { by_user: [], by_project: [], by_proposal: [], by_task: [] },
+              model_effectiveness: [],
+              project_model_matrix: [],
+              generated_at: "2026-06-25T00:00:00Z",
+            }
+          : {
+              kpis: [{ label: "Tasks", value: 42, delta_pct: null, formatted: "42" }],
+              time_series: [],
+              breakdowns: { by_user: [], by_project: [], by_proposal: [], by_task: [] },
+              model_effectiveness: [],
+              project_model_matrix: [],
+              generated_at: "2026-06-25T00:00:00Z",
+            },
+      ),
   }),
 }));
 
 beforeEach(() => {
   lastFiltersBarProps = null;
+  mockReturnEmptyData = false;
 });
 
 // ── URL-state restore ─────────────────────────────────────────────────────────
@@ -239,6 +255,52 @@ describe("UsageDashboardPage — filter changes update URL", () => {
       expect(lastFiltersBarProps!.filters.start).toBe("2026-01-01");
       expect(lastFiltersBarProps!.filters.end).toBe("2026-03-31");
     });
+  });
+});
+
+// ── Empty state renders shared EmptyState ─────────────────────────────────────
+
+describe("UsageDashboardPage — empty state", () => {
+  it("renders shared EmptyState with title and Refresh action when query returns empty data", async () => {
+    mockReturnEmptyData = true;
+
+    const { getByText, getByRole, getAllByRole } = render(<UsageDashboardPage />, {
+      wrapperOptions: {
+        routerProps: { initialEntries: ["/admin/usage?preset=30d"] },
+      },
+    });
+
+    // The shared EmptyState renders the title as an <h3>.
+    await waitFor(() => {
+      expect(getByText("No usage data")).toBeTruthy();
+    });
+
+    // The descriptive message is present.
+    expect(
+      getByText(/Analytics will appear here once the deployment/),
+    ).toBeTruthy();
+
+    // The Refresh action button is rendered by the shared EmptyState (the
+    // header also has a Refresh button, so there should be at least two).
+    const refreshButtons = getAllByRole("button", { name: "Refresh" });
+    expect(refreshButtons.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the filter bar visible when the empty state is shown", async () => {
+    mockReturnEmptyData = true;
+
+    const { getByTestId } = render(<UsageDashboardPage />, {
+      wrapperOptions: {
+        routerProps: { initialEntries: ["/admin/usage?preset=30d"] },
+      },
+    });
+
+    await waitFor(() => {
+      expect(lastFiltersBarProps).not.toBeNull();
+    });
+
+    // The mocked filter bar placeholder is still in the DOM.
+    expect(getByTestId("filters-bar")).toBeTruthy();
   });
 });
 
