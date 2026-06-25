@@ -511,4 +511,108 @@ describe("ReadinessPanel", () => {
       screen.getByText(/Auto-accept mode/),
     ).toBeInTheDocument();
   });
+
+  // ── P4 regression: needs-evidence with closed spike ──────────────────
+
+  it("renders needs-evidence with closed spike status", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          needs_evidence: {
+            claim: "Y handles 10k rps",
+            spike_task_id: "uuid-spike-2",
+            spike_short_id: "cd34",
+            spike_status: "done",
+          },
+          ready: false,
+          blocked_explanations: [
+            "Proposal parked on needs-evidence spike cd34 (claim: Y handles 10k rps)",
+          ],
+        })}
+        refinement={refinement()}
+        proposalId="p-1"
+        pendingRevisions={[]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Parked: needs-evidence spike")).toBeInTheDocument();
+    expect(screen.getByText(/Y handles 10k rps/)).toBeInTheDocument();
+    expect(screen.getByText(/cd34/)).toBeInTheDocument();
+    expect(screen.getByText(/done/)).toBeInTheDocument();
+  });
+
+  // ── P4 regression: multiple blocked explanations ─────────────────────
+
+  it("renders multiple blocked explanations simultaneously", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          dor_ready: false,
+          dor_failures: [
+            { check: "problem_coverage", message: "Missing required coverage: problem" },
+            { check: "grounding", message: "Missing grounding: add entry points" },
+          ],
+          judge_needs_work: true,
+          unresolved_blocking_count: 1,
+          unresolved_blocking_ids: ["e-1"],
+          pending_checkpoint: true,
+          blocked_explanations: [
+            "Missing required coverage: problem",
+            "Missing grounding: add entry points",
+            "Judge returned needs-work (verdict v-1); no current human override",
+            "Unresolved blocking debate entries: e-1",
+            "Pending checkpoint revision awaiting approval or rejection",
+          ],
+        })}
+        refinement={refinement()}
+        proposalId="p-1"
+        pendingRevisions={[]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Blocked because")).toBeInTheDocument();
+    expect(screen.getByText(/Missing required coverage: problem/)).toBeInTheDocument();
+    expect(/Missing grounding/);
+    expect(screen.getByText(/Judge returned needs-work/)).toBeInTheDocument();
+    expect(screen.getByText(/Unresolved blocking debate entries/)).toBeInTheDocument();
+    expect(screen.getByText(/Pending checkpoint revision/)).toBeInTheDocument();
+  });
+
+  // ── P4 regression: pending checkpoint badge ──────────────────────────
+
+  it("renders Pending checkpoint badge when pending_checkpoint is true", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({ pending_checkpoint: true })}
+        refinement={refinement()}
+        proposalId="p-1"
+        pendingRevisions={[]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Pending checkpoint")).toBeInTheDocument();
+  });
+
+  // ── P4 regression: Judge Ready verdict with override ─────────────────
+
+  it("shows both judge Ready verdict and human override badge", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          judge_verdict_body: "Looks good",
+          judge_verdict_id: "v-3",
+          judge_needs_work: false,
+          human_override_active: true,
+        })}
+        refinement={refinement()}
+        proposalId="p-1"
+        pendingRevisions={[]}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Judge verdict")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Human override")).toBeInTheDocument();
+  });
 });
