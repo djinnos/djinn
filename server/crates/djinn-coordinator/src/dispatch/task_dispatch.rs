@@ -1994,6 +1994,7 @@ mod inflight_ledger_tests {
                 metadata_json: None,
                 task_run_id: None,
                 pricing: None,
+                cost_basis: None,
             })
             .await
             .expect("materialize delayed wnd1 running session row")
@@ -2772,6 +2773,7 @@ mod inflight_ledger_tests {
                     metadata_json: None,
                     task_run_id: None,
                     pricing: None,
+                    cost_basis: None,
                 })
                 .await
                 .expect("create mixed-role running session");

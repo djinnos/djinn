@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
 use crate::supervisor_impl::{SupervisorCallbackContext, execute_stage, supervisor_pr_open};
+use djinn_provider::catalog::builtin::classify_provider;
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{LlmProvider, LlmResponse, StreamEvent, TokenUsage, ToolChoice};
 use futures::StreamExt;
@@ -190,10 +191,22 @@ impl SupervisorServices for DirectServices {
         // Resolve the current catalog pricing at session start so later cost
         // calculations don't require catalog access. Uncatalogued models
         // produce `None` — all snapshot columns and `cost_usd` stay NULL.
-        let pricing = ctx
-            .catalog
-            .find_model(params.model.as_str())
-            .map(|m| m.pricing);
+        let catalog_model = ctx.catalog.find_model(params.model.as_str());
+        let pricing = catalog_model.as_ref().map(|m| m.pricing.clone());
+        // Derive cost basis from pricing availability and provider credential
+        // class: subscription/coding-plan providers → "projected"; ordinary
+        // API-key providers with pricing → "actual"; uncatalogued or
+        // missing-price sessions → "unpriced".
+        let cost_basis = match &catalog_model {
+            Some(model) if pricing.is_some() => {
+                if classify_provider(&model.provider_id).is_subscription() {
+                    "projected"
+                } else {
+                    "actual"
+                }
+            }
+            _ => "unpriced",
+        };
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
             task_id: params.task_id.as_deref(),
@@ -202,6 +215,7 @@ impl SupervisorServices for DirectServices {
             metadata_json: params.metadata_json.as_deref(),
             task_run_id: params.task_run_id.as_deref(),
             pricing: pricing.as_ref(),
+            cost_basis: Some(cost_basis),
         })
         .await
         .map_err(|e| e.to_string())

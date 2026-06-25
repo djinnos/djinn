@@ -200,6 +200,7 @@ async fn make_context() -> (
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+                cost_basis: None,
         })
         .await
         .expect("create session");
