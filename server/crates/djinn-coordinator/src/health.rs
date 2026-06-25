@@ -1595,7 +1595,8 @@ async fn list_sessions_for_task_run(
             cost_usd, input_price_per_million_snapshot,
             output_price_per_million_snapshot,
             cache_read_price_per_million_snapshot,
-            cache_write_price_per_million_snapshot
+            cache_write_price_per_million_snapshot,
+            cost_basis
          FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
     )
     .bind(task_run_id)

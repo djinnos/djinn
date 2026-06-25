@@ -115,6 +115,7 @@ struct SessionSeed<'a> {
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     cost_usd: Option<f64>,
+    cost_basis: &'a str,
     task_id: Option<&'a str>,
 }
 
@@ -164,8 +165,8 @@ async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
-          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11)",
+          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(seed.project_id)
@@ -178,6 +179,7 @@ async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     .bind(seed.cache_read_tokens)
     .bind(seed.cache_write_tokens)
     .bind(seed.cost_usd)
+    .bind(seed.cost_basis)
     .execute(db.pool())
     .await
     .expect("failed to seed session row");
@@ -370,6 +372,7 @@ async fn weekly_rollup_buckets_to_week_start_and_counts_sessions() {
                 cache_read_tokens: 10,
                 cache_write_tokens: 5,
                 cost_usd: Some(cost),
+                cost_basis: "actual",
                 task_id: None,
             },
         )
@@ -424,6 +427,7 @@ async fn null_cost_yields_null_spend_kpi_and_series_cost() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: None,
+            cost_basis: "unpriced",
             task_id: None,
         },
     )
@@ -565,6 +569,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(1.00),
+            cost_basis: "actual",
             task_id: Some(&task_id),
         },
     )
@@ -633,6 +638,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: None,
+            cost_basis: "unpriced",
             task_id: Some(&task_id),
         },
     )
@@ -684,6 +690,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(4.00),
+            cost_basis: "actual",
             task_id: Some(&task_id),
         },
     )
