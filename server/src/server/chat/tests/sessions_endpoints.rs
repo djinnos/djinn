@@ -83,6 +83,7 @@ async fn list_sessions_filters_to_chat_agent_type() {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: None,
         })
         .await
         .unwrap();
