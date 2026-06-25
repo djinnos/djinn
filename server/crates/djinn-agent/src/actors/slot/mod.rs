@@ -24,8 +24,8 @@ pub use djinn_slot::SlotEvent;
 // been removed; the public API delegates to `djinn-slot`'s implementation.
 
 pub use djinn_slot::{
-    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport,
-    run_memory_enrichment, run_memory_enrichment_with_db,
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
+    run_memory_enrichment_with_db,
 };
 
 // ─── Submodules ────────────────────────────────────────────────────────────

@@ -79,7 +79,11 @@ pub use memory_enrichment::{
 
 // ─── Session extraction re-export ───────────────────────────────────────────
 
-pub use session_extraction::run_extraction_backfill;
+pub use session_extraction::{
+    ExtractionQuality, SessionSignals, SessionTaxonomy, derive_scope_paths,
+    extract_session_signals, run_extraction_backfill, run_post_session_extraction,
+    run_structural_extraction,
+};
 
 // ─── SlotEvent ──────────────────────────────────────────────────────────────
 

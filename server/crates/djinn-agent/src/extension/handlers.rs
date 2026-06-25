@@ -51,6 +51,11 @@ mod task_admin;
 mod task_epic;
 mod workspace;
 
+// ── Re-exports for agent-internal callers ────────────────────────────────
+// These handler functions are called directly from `direct_services.rs`,
+// `chat_tools.rs`, and other agent-internal modules.  They remain local
+// because they need concrete `AgentContext` / workspace / MCP-registry
+// internals that `djinn-mcp-extension` does not own.
 pub(crate) use ci::call_ci_job_log;
 pub(crate) use code_intel::{
     call_code_graph, call_github_fetch_file, call_github_search, call_lsp,
@@ -59,31 +64,44 @@ pub(crate) use code_intel::{
 pub(super) use code_intel::{call_code_graph_inner, should_pre_resolve_chat_key};
 #[cfg(test)]
 pub(super) use memory_agent::call_agent_amend_prompt;
-#[cfg(not(test))]
-use memory_agent::call_agent_amend_prompt;
-use memory_agent::{
-    call_agent_create, call_agent_metrics, call_memory_broken_links, call_memory_build_context,
-    call_memory_edit, call_memory_extracted_audit, call_memory_health, call_memory_list,
-    call_memory_move, call_memory_orphans, call_memory_read, call_memory_search, call_memory_write,
-};
 pub(crate) use task_admin::call_task_kill_session;
-use task_admin::{
-    call_task_archive_activity, call_task_blocked_list, call_task_delete_branch,
-    call_task_reset_counters, call_task_transition,
-};
-use task_epic::{
-    call_epic_blocked_list, call_epic_blockers_list, call_epic_close, call_epic_create,
-    call_proposal_complete, call_proposal_show, call_request_lead, call_request_planner,
-    call_task_activity_list, call_task_comment_add, call_task_create, call_task_list,
-    call_task_show, call_task_update, call_task_update_ac,
-};
-pub(crate) use task_epic::{
-    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend,
-    call_proposal_ac_set, call_proposal_reconcile_obsolete_epic,
-};
 pub(crate) use workspace::{
     call_apply_patch, call_code_search, call_edit, call_read, call_shell, call_write,
 };
+
+// Re-export task_epic functions used by the local fallback dispatch.
+use task_epic::{call_request_lead, call_request_planner};
+// Re-export task_admin functions used by the local fallback dispatch.
+use task_admin::{call_task_delete_branch, call_task_transition};
+
+// ── Test-only re-exports ────────────────────────────────────────────────
+// These handler functions are no longer in the production fallback dispatch
+// (djinn-mcp-extension handles them), but extension tests still exercise
+// them directly.  Re-export under `#[cfg(test)]` so tests compile.
+#[cfg(test)]
+pub(super) use task_epic::{
+    call_epic_show, call_epic_tasks, call_epic_update, call_proposal_ac_amend,
+    call_proposal_ac_set, call_proposal_reconcile_obsolete_epic,
+};
+
+// ─── hfhw cutover note ──────────────────────────────────────────────────
+//
+// Tool dispatch is now two-phase (see `extension/mod.rs`):
+//
+// 1. `djinn_mcp_extension::dispatch::dispatch_tool_call` handles most tools
+//    through `ExtensionContext` / `SupervisorServices`:
+//      task_*, epic_*, proposal_*, memory_*, agent_*, lsp, ci_job_log,
+//      github_search, task_archive_activity, task_reset_counters,
+//      task_blocked_list.
+//
+// 2. This local fallback handles ONLY tools that require djinn-agent
+//    internals (workspace mutation, code_graph, skill_read, destructive
+//    task admin, request_lead / request_planner, dynamic MCP registry).
+//
+// Duplicated production handlers for tools in group (1) have been removed
+// from this fallback dispatch.  The handler modules (`memory_agent`,
+// `task_epic`, etc.) are retained for their sub-handler implementations
+// and test coverage.
 
 // Central tool-call dispatch: each arg is a distinct collaborator/context the
 // handlers need; a bag struct would only relocate the same fields.
@@ -107,12 +125,6 @@ where
 
     let project = {
         let repo = djinn_db::ProjectRepository::new(state.db.clone(), state.event_bus.clone());
-        // `resolve` accepts UUIDs and `owner/repo` slugs; the old path-based
-        // lookup is gone. Try the worktree path first so any `.djinn/worktrees/<task>`
-        // layout keyed by its canonical owner/repo still maps back, then fall back
-        // to the tool-call's own `project` argument (the shape every MCP caller
-        // now uses). This keeps single-project tests and multi-project workers
-        // pointing at the same project row.
         let mut candidates: Vec<String> = vec![worktree_path.to_string_lossy().into_owned()];
         if let Some(args) = call.arguments.as_ref()
             && let Some(proj) = args.get("project").and_then(|v| v.as_str())
@@ -128,11 +140,6 @@ where
                 break;
             }
         }
-        // K8s worker pods set `default_project_id` from their spec — fall
-        // back to it when the LLM passed a bogus value (most commonly the
-        // worktree path `/workspace/.tmpXXX`) so memory_*, build_context,
-        // and other project-scoped tools keep working instead of returning
-        // "project not found" and looping the planner.
         if resolved.is_none()
             && let Some(default_id) = state.default_project_id.as_deref()
             && !default_id.is_empty()
@@ -143,14 +150,6 @@ where
         resolved
     };
     let project_id = project.as_ref().map(|project| project.id.clone());
-    // `project_ref` is what downstream MCP tools resolve — UUID or
-    // `owner/repo` slug. Previously this variable handed out the
-    // filesystem path, but every MCP tool now parses `project` via
-    // `ProjectRepository::resolve` which only matches UUID/slug. Fall
-    // back to the worktree path string only when no project row was
-    // found, so tests with empty DBs still route to a handler that
-    // surfaces a meaningful error instead of blowing up at the
-    // dispatcher.
     let project_ref = project
         .as_ref()
         .map(|project| project.slug())
@@ -167,85 +166,19 @@ where
     }
 
     match call.name.as_str() {
-        "task_list" => call_task_list(state, &call.arguments, project_id.as_deref()).await,
-        "task_show" => call_task_show(state, &call.arguments).await,
-        "task_create" => call_task_create(state, &call.arguments, &worktree_project_path).await,
-        "task_update" => call_task_update(state, &call.arguments, &worktree_project_path).await,
-        "task_update_ac" => call_task_update_ac(state, &call.arguments).await,
-        "task_comment_add" => {
-            call_task_comment_add(state, &call.arguments, session_role, &worktree_project_path)
-                .await
-        }
+        // ── Agent-local task admin tools ─────────────────────────────────
+        // These require djinn-agent internals (task_merge, knowledge_promotion)
+        // and are NOT handled by djinn-mcp-extension.
         "request_lead" => call_request_lead(state, &call.arguments).await,
         "request_planner" => call_request_planner(state, &call.arguments).await,
         "task_transition" => {
             call_task_transition(state, &call.arguments, &worktree_project_path).await
         }
         "task_delete_branch" => call_task_delete_branch(state, &call.arguments).await,
-        "task_archive_activity" => call_task_archive_activity(state, &call.arguments).await,
-        "task_reset_counters" => call_task_reset_counters(state, &call.arguments).await,
         "task_kill_session" => call_task_kill_session(state, &call.arguments).await,
-        "task_blocked_list" => call_task_blocked_list(state, &call.arguments).await,
-        "task_activity_list" => call_task_activity_list(state, &call.arguments).await,
-        "epic_show" => call_epic_show(state, &call.arguments, project_id.as_deref()).await,
-        "epic_create" => call_epic_create(state, &call.arguments, project_id.as_deref()).await,
-        "epic_update" => call_epic_update(state, &call.arguments, project_id.as_deref()).await,
-        "epic_tasks" => call_epic_tasks(state, &call.arguments, project_id.as_deref()).await,
-        "epic_close" => call_epic_close(state, &call.arguments, project_id.as_deref()).await,
-        "epic_blockers_list" => {
-            call_epic_blockers_list(state, &call.arguments, project_id.as_deref()).await
-        }
-        "epic_blocked_list" => {
-            call_epic_blocked_list(state, &call.arguments, project_id.as_deref()).await
-        }
-        "proposal_show" => call_proposal_show(state, &call.arguments).await,
-        "proposal_complete" => call_proposal_complete(state, &call.arguments).await,
-        "proposal_ac_set" => call_proposal_ac_set(state, &call.arguments).await,
-        "proposal_ac_amend" => call_proposal_ac_amend(state, &call.arguments).await,
-        "proposal_reconcile_obsolete_epic" => {
-            call_proposal_reconcile_obsolete_epic(state, &call.arguments).await
-        }
-        "memory_read" => call_memory_read(state, &call.arguments, &project_ref).await,
-        "memory_search" => {
-            call_memory_search(state, &call.arguments, session_task_id, &project_ref).await
-        }
-        "memory_list" => call_memory_list(state, &call.arguments, &project_ref).await,
-        "memory_build_context" => {
-            call_memory_build_context(state, &call.arguments, session_task_id, &project_ref).await
-        }
-        "memory_write" => {
-            call_memory_write(state, &call.arguments, &project_ref, worktree_path).await
-        }
-        "memory_edit" => {
-            call_memory_edit(state, &call.arguments, &project_ref, worktree_path).await
-        }
-        "memory_move" => call_memory_move(state, &call.arguments, &project_ref).await,
-        "memory_health" => call_memory_health(state, &call.arguments, &project_ref).await,
-        "memory_extracted_audit" => {
-            call_memory_extracted_audit(state, &call.arguments, &project_ref).await
-        }
-        "memory_broken_links" => {
-            call_memory_broken_links(state, &call.arguments, &project_ref).await
-        }
-        "memory_orphans" => call_memory_orphans(state, &call.arguments, &project_ref).await,
-        "agent_metrics" => call_agent_metrics(state, &call.arguments, &project_ref).await,
-        "agent_amend_prompt" => {
-            call_agent_amend_prompt(state, &call.arguments, &worktree_project_path).await
-        }
-        "agent_create" => call_agent_create(state, &call.arguments, &worktree_project_path).await,
-        "ci_job_log" => {
-            // Route through SupervisorServices so worker-side sessions
-            // (no GitHub credentials mounted in-Pod) round-trip the call
-            // to djinn-server via RPC. Host-side `DirectServices` re-enters
-            // `call_ci_job_log` against the local AgentContext + GitHub
-            // installation token. Single code path host + worker.
-            services
-                .tool_ci_job_log(
-                    session_task_id.map(str::to_string),
-                    call.arguments.clone().unwrap_or_default(),
-                )
-                .await
-        }
+
+        // ── Workspace mutation / execution tools ────────────────────────
+        // Need concrete AgentContext::working_root_for, sandbox, repo_access.
         "shell" => {
             let root = state.working_root_for(worktree_path);
             call_shell(state, &call.arguments, &root, session_role).await
@@ -255,39 +188,31 @@ where
             call_read(state, &call.arguments, &root).await
         }
         "code_search" => call_code_search(state, &call.arguments).await,
-        "skill_read" => {
-            let root = state.working_root_for(worktree_path);
-            call_skill_read(&call.arguments, &root, state, session_role, session_task_id).await
-        }
         "write" => call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await,
         "edit" => call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await,
         "apply_patch" => {
             call_apply_patch(state, &call.arguments, worktree_path, project_id.as_deref()).await
         }
-        "lsp" => {
-            let root = state.working_root_for(worktree_path);
-            call_lsp(state, &call.arguments, &root).await
-        }
+
+        // ── Code graph (agent-local bridge) ─────────────────────────────
+        // djinn-mcp-extension returns Unhandled for code_graph because it
+        // needs control-plane graph bridges + chat pre-resolve.
         "code_graph" => {
             let root = state.working_root_for(worktree_path);
             let root_str = root.to_string_lossy().into_owned();
-            // Hand off to the handler regardless of whether the dispatcher
-            // could resolve a project row — graph_ops is the owner of the
-            // "no active project" surface, and stubbed tests rely on that
-            // layer producing the failure message. When project_id is
-            // absent, pass an empty placeholder; the handler + downstream
-            // graph ops layer will surface a project-specific error.
             let pid = project_id.as_deref().unwrap_or("");
             call_code_graph(state, &call.arguments, pid, &root_str).await
         }
-        "github_search" => {
-            services
-                .tool_github_search(
-                    project_id.clone(),
-                    call.arguments.clone().unwrap_or_default(),
-                )
-                .await
+
+        // ── Skill read (agent-local) ────────────────────────────────────
+        // Needs native_skills, skills_manifest, task lookup for session context.
+        "skill_read" => {
+            let root = state.working_root_for(worktree_path);
+            call_skill_read(&call.arguments, &root, state, session_role, session_task_id).await
         }
+
+        // ── Dynamic MCP registry fallback ───────────────────────────────
+        // Tools registered via McpToolRegistry (external MCP servers).
         other => {
             if let Some(registry) = mcp_registry
                 && registry.has_tool(other)
@@ -326,10 +251,6 @@ async fn call_skill_read(
         .ok_or_else(|| "skill_read requires a non-empty `name` argument".to_string())?;
 
     // ── Native skill path ──────────────────────────────────────────────────
-    // If the requested name matches a native skill, check whether the session
-    // role has it assigned.  Native skill bodies are immutable and come from
-    // the compiled-in registry — they never touch `.djinn/skills.json` or
-    // worktree skill paths.
     if let Some(native) = crate::native_skills::native_skill(name) {
         let role = session_role.unwrap_or("");
         let recommended = crate::native_skills::native_skill_names_for_role(role);
@@ -339,8 +260,6 @@ async fn call_skill_read(
             ));
         }
 
-        // Check the authoring trigger: native skills are only served when the
-        // current task qualifies as an authoring session.
         let task_issue_type = if let Some(task_id) = session_task_id {
             let task_repo =
                 djinn_db::TaskRepository::new(state.db.clone(), state.event_bus.clone());
@@ -381,10 +300,6 @@ async fn call_skill_read(
     }
 
     // ── Project/worktree skill path ────────────────────────────────────────
-    // `load_verified_skills` resolves the named skill file from the worktree's
-    // skill directories and returns at most one entry for a single requested
-    // name (frontmatter may override the display name, so match on the single
-    // resolved entry rather than the requested string).
     let skill = crate::skills_manifest::load_verified_skills(worktree_root, &[name.to_string()])
         .map_err(|err| format!("skill_read refused to serve `{name}`: {err}"))?
         .into_iter()
