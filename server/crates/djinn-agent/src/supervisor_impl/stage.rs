@@ -418,6 +418,16 @@ pub(crate) async fn execute_stage(
         specialist_overrode_runtime_role,
     } = resolve_role_overrides(task, role_kind, agent_context).await;
 
+    // The CONCRETE role actually running this stage after overrides. For a
+    // refinement tribunal stage `role_kind` is the generic `Refinement` (whose
+    // default arc is Advocate), but `runtime_role` is resolved from
+    // `task.agent_type` to advocate/adversary/judge. Everything that defines
+    // what the agent IS — the session `agent_type`, telemetry, tool schemas,
+    // the system/initial prompt, and the finalize tools — must key off this,
+    // not the generic `role`/`role_name`, or the adversary/judge would run the
+    // advocate prompt + `submit_work` tool and never produce objections/verdicts.
+    let runtime_role_name = runtime_role.config().name;
+
     // ── Conflict-retry context ────────────────────────────────────────────────
     // Populated when a prior task-run aborted with merge conflicts; drives
     // the `TaskContext::conflict_files` + `merge_*_branch` prompt fields the
@@ -577,7 +587,7 @@ pub(crate) async fn execute_stage(
                 project_id: task.project_id.clone(),
                 task_id: Some(task.id.clone()),
                 model: model_id.clone(),
-                agent_type: role_name.to_string(),
+                agent_type: runtime_role_name.to_string(),
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
             },
@@ -601,7 +611,7 @@ pub(crate) async fn execute_stage(
     } else {
         let resolved = resolved
             .expect("resolved model credential must be populated when provider_override is absent");
-        let telemetry_meta = build_telemetry_meta(role_name, &task.id);
+        let telemetry_meta = build_telemetry_meta(runtime_role_name, &task.id);
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own). Soft fallback to `default_base_url` on a missing
         // catalog entry / empty URL, matching the pre-Phase-6b behaviour.
@@ -649,7 +659,7 @@ pub(crate) async fn execute_stage(
 
     // ── Build the initial conversation ───────────────────────────────────────
     let agent_type =
-        crate::AgentType::parse(role.config().name).unwrap_or(crate::AgentType::Worker);
+        crate::AgentType::parse(runtime_role_name).unwrap_or(crate::AgentType::Worker);
     let mut tools = crate::roles::tool_schemas_for(agent_type);
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
@@ -657,7 +667,9 @@ pub(crate) async fn execute_stage(
 
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
-    let initial_user_message = role.initial_user_message(&task.id, agent_context).await;
+    let initial_user_message = runtime_role
+        .initial_user_message(&task.id, agent_context)
+        .await;
     conversation.push(Message::user(initial_user_message));
 
     // ── Run the reply loop ───────────────────────────────────────────────────
@@ -683,8 +695,8 @@ pub(crate) async fn execute_stage(
             session_id: &session_id,
             project_path: &project_path_str,
             worktree_path,
-            role_name,
-            finalize_tool_names: role.config().finalize_tool_names,
+            role_name: runtime_role_name,
+            finalize_tool_names: runtime_role.config().finalize_tool_names,
             context_window,
             model_id: &model_id,
             cancel: &callbacks.cancel,
