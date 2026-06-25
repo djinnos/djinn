@@ -568,40 +568,15 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
 /// Called from [`sweep_stale_resources`] on every periodic tick after the
 /// stale-task-run reaping.
 async fn sweep_orphan_worker_sessions(db: &djinn_db::Database) {
-    // (session_id, task_id, started_at, task_status, task_closed_at)
-    #[allow(clippy::type_complexity)]
-    type OrphanSessionRow = (
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        Option<String>,
-    );
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
 
     // Find running sessions whose backing task is closed (or missing).
     //
-    // We use a LEFT JOIN so that sessions whose task_id no longer exists in
-    // the `tasks` table are also detected. The grace-period filter is applied
-    // at the Rust level (not SQL) so we can reuse `parse_iso_elapsed` with
-    // the same ISO-8601 parsing the rest of the codebase uses.
-    let rows: Vec<OrphanSessionRow> = match sqlx::query_as(
-        r#"SELECT
-                 s.id          AS "id!",
-                 s.task_id     AS "task_id?",
-                 s.started_at  AS "started_at!",
-                 t.status      AS "task_status?",
-                 t.closed_at   AS "task_closed_at?"
-               FROM sessions s
-               LEFT JOIN tasks t ON t.id = s.task_id
-               WHERE s.status = 'running'
-                 AND s.task_id IS NOT NULL
-                 AND (t.id IS NULL
-                      OR t.status IN ('closed', 'force_closed',
-                                      'parked_permanently', 'parked_for_review'))"#,
-    )
-    .fetch_all(db.pool())
-    .await
-    {
+    // The grace-period filter is applied at the Rust level (not SQL) so we
+    // can reuse `parse_iso_elapsed` with the same ISO-8601 parsing the rest
+    // of the codebase uses.
+    let rows = match session_repo.orphan_session_candidates().await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(
@@ -619,17 +594,17 @@ async fn sweep_orphan_worker_sessions(db: &djinn_db::Database) {
     let now = time::OffsetDateTime::now_utc();
     let mut reaped = 0usize;
 
-    for (session_id, task_id, started_at, task_status, task_closed_at) in &rows {
+    for row in &rows {
         // Grace-period check: only reap sessions that have been running past
         // the task's close timestamp by at least ORPHAN_SESSION_GRACE_SECS.
         // This avoids racing with inline session teardown that fires during
         // the task-close transition.
-        if let Some(closed_at) = task_closed_at {
+        if let Some(closed_at) = &row.task_closed_at {
             if let Some(elapsed_since_close) = parse_iso_elapsed_with(closed_at, now) {
                 if elapsed_since_close < ORPHAN_SESSION_GRACE_SECS as u64 {
                     tracing::debug!(
-                        session_id = %session_id,
-                        task_id = ?task_id,
+                        session_id = %row.session_id,
+                        task_id = ?row.task_id,
                         closed_at = %closed_at,
                         elapsed_since_task_close = elapsed_since_close,
                         "CoordinatorActor: skipping orphan session within grace period"
@@ -642,55 +617,46 @@ async fn sweep_orphan_worker_sessions(db: &djinn_db::Database) {
             }
         }
 
-        let elapsed_since_task_close = task_closed_at
+        let elapsed_since_task_close = row
+            .task_closed_at
             .as_deref()
             .and_then(|ts| parse_iso_elapsed_with(ts, now));
 
         tracing::warn!(
-            session_id = %session_id,
-            task_id = ?task_id,
-            started_at = %started_at,
-            task_status = ?task_status,
+            session_id = %row.session_id,
+            task_id = ?row.task_id,
+            started_at = %row.started_at,
+            task_status = ?row.task_status,
             elapsed_since_task_close = ?elapsed_since_task_close,
             "CoordinatorActor: orphan worker session detected (task closed/missing)"
         );
 
-        // Interrupt the session via direct SQL. We don't go through the
+        // Interrupt the session via djinn-db helper. We don't go through the
         // full SessionRepository::update path because we don't have an
         // EventBus reference here and the token counts are unknown (the
         // session was never properly finalized).
-        let result = sqlx::query(
-            r#"UPDATE sessions
-               SET status = 'interrupted',
-                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-               WHERE id = $1 AND status = 'running'"#,
-        )
-        .bind(session_id.as_str())
-        .execute(db.pool())
-        .await;
-
-        match result {
-            Ok(res) if res.rows_affected() > 0 => {
+        match session_repo.interrupt_by_id(&row.session_id).await {
+            Ok(true) => {
                 reaped += 1;
                 djinn_telemetry::stale_sweep::increment_orphan_session_reaped();
                 tracing::info!(
-                    session_id = %session_id,
-                    task_id = ?task_id,
+                    session_id = %row.session_id,
+                    task_id = ?row.task_id,
                     "CoordinatorActor: interrupted orphan worker session"
                 );
             }
-            Ok(_) => {
+            Ok(false) => {
                 // Session was already interrupted or completed between our
                 // SELECT and UPDATE — benign race, nothing to do.
                 tracing::debug!(
-                    session_id = %session_id,
+                    session_id = %row.session_id,
                     "CoordinatorActor: orphan session already finalized; skip"
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    session_id = %session_id,
-                    task_id = ?task_id,
+                    session_id = %row.session_id,
+                    task_id = ?row.task_id,
                     error = %e,
                     "CoordinatorActor: failed to interrupt orphan worker session"
                 );
@@ -802,21 +768,19 @@ async fn sweep_durable_output_stash(db: &djinn_db::Database) {
 async fn load_output_stash_gc_sessions(
     db: &djinn_db::Database,
 ) -> djinn_db::Result<HashMap<String, crate::output_stash::OutputStashGcSession>> {
-    db.ensure_initialized().await?;
-    let rows: Vec<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT id, status, ended_at FROM sessions")
-            .fetch_all(db.pool())
-            .await?;
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let rows = session_repo.list_all_status_ended_at().await?;
 
     Ok(rows
         .into_iter()
-        .filter_map(|(id, status, ended_at)| {
-            let status = session_status_from_db(&status)?;
+        .filter_map(|snap| {
+            let status = session_status_from_db(&snap.status)?;
             Some((
-                id,
+                snap.id,
                 crate::output_stash::OutputStashGcSession {
                     status,
-                    ended_at_unix_secs: parse_session_timestamp_unix_secs(ended_at.as_deref()),
+                    ended_at_unix_secs: parse_session_timestamp_unix_secs(snap.ended_at.as_deref()),
                 },
             ))
         })
@@ -1430,20 +1394,12 @@ pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(
 async fn protected_cargo_target_run_ids(
     db: &djinn_db::Database,
 ) -> djinn_db::Result<HashSet<String>> {
-    db.ensure_initialized().await?;
+    let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
 
-    let task_run_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM task_runs WHERE status = 'running' AND ended_at IS NULL",
-    )
-    .fetch_all(db.pool())
-    .await?;
-
-    let session_task_run_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT task_run_id FROM sessions
-         WHERE status = 'running' AND ended_at IS NULL AND task_run_id IS NOT NULL",
-    )
-    .fetch_all(db.pool())
-    .await?;
+    let task_run_ids = task_run_repo.running_ids().await?;
+    let session_task_run_ids = session_repo.running_task_run_ids().await?;
 
     Ok(task_run_ids
         .into_iter()
@@ -1586,21 +1542,9 @@ async fn list_sessions_for_task_run(
     db: &djinn_db::Database,
     task_run_id: &str,
 ) -> djinn_db::Result<Vec<djinn_core::models::SessionRecord>> {
-    db.ensure_initialized().await?;
-    Ok(sqlx::query_as::<_, djinn_core::models::SessionRecord>(
-        r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
-            status, tokens_in, tokens_out,
-            cache_read_tokens, cache_write_tokens, task_run_id, title,
-            parked_reason,
-            cost_usd, input_price_per_million_snapshot,
-            output_price_per_million_snapshot,
-            cache_read_price_per_million_snapshot,
-            cache_write_price_per_million_snapshot
-         FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
-    )
-    .bind(task_run_id)
-    .fetch_all(db.pool())
-    .await?)
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    session_repo.list_for_task_run(task_run_id).await
 }
 
 /// Startup/rollout pass for the task-run Job backstop. Server boot first marks

@@ -361,7 +361,7 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?",
+                parked_reason,
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1132,6 +1132,81 @@ impl SessionRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Detect running sessions whose backing task is closed (or missing).
+    ///
+    /// Used by the coordinator's orphan-worker-session health sweep. Returns
+    /// lightweight [`OrphanSessionCandidate`] rows so the coordinator can apply
+    /// its grace-period logic without loading full [`SessionRecord`] payloads.
+    pub async fn orphan_session_candidates(&self) -> Result<Vec<OrphanSessionCandidate>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, OrphanSessionCandidate>(
+            r#"SELECT
+                     s.id          AS "session_id",
+                     s.task_id,
+                     s.started_at,
+                     t.status      AS "task_status",
+                     t.closed_at   AS "task_closed_at"
+                   FROM sessions s
+                   LEFT JOIN tasks t ON t.id = s.task_id
+                   WHERE s.status = 'running'
+                     AND s.task_id IS NOT NULL
+                     AND (t.id IS NULL
+                          OR t.status IN ('closed', 'force_closed',
+                                          'parked_permanently', 'parked_for_review'))"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Interrupt a single session by id, setting `status = 'interrupted'` and
+    /// stamping `ended_at`.  No-op if the session is no longer `running`.
+    ///
+    /// Returns `true` when a row was actually updated.  This is the
+    /// "fire-and-forget" variant used by the orphan-session health sweep where
+    /// we don't have an `EventBus` reference and token counts are unknown.
+    pub async fn interrupt_by_id(&self, session_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            r#"UPDATE sessions
+               SET status = 'interrupted',
+                   ended_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1 AND status = 'running'"#,
+        )
+        .bind(session_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Lightweight projection of all sessions: `(id, status, ended_at)`.
+    ///
+    /// Used by the output-stash GC to build its id→unix_secs map without
+    /// loading full [`SessionRecord`] payloads with all their token/price
+    /// columns.
+    pub async fn list_all_status_ended_at(&self) -> Result<Vec<SessionStatusSnapshot>> {
+        self.db.ensure_initialized().await?;
+        Ok(
+            sqlx::query_as::<_, SessionStatusSnapshot>("SELECT id, status, ended_at FROM sessions")
+                .fetch_all(self.db.pool())
+                .await?,
+        )
+    }
+
+    /// Return distinct `task_run_id` values from sessions that are still
+    /// `running` with `ended_at IS NULL` and a linked `task_run_id`.
+    ///
+    /// Used by the coordinator's cargo-target-run-dir sweep to protect live
+    /// run directories from cleanup.
+    pub async fn running_task_run_ids(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT task_run_id FROM sessions
+             WHERE status = 'running' AND ended_at IS NULL AND task_run_id IS NOT NULL",
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
 }
 
 /// Row returned by [`SessionRepository::list_unextracted_completed_candidates`].
@@ -1139,6 +1214,31 @@ impl SessionRepository {
 pub struct ExtractionBackfillCandidate {
     pub task_id: String,
     pub task_run_id: String,
+}
+
+/// Lightweight row for orphan-session detection in the coordinator health sweep.
+///
+/// Contains just enough columns for the coordinator to apply its grace-period
+/// logic and log diagnostics — the full [`SessionRecord`] projection is not
+/// needed here.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrphanSessionCandidate {
+    pub session_id: String,
+    pub task_id: Option<String>,
+    pub started_at: String,
+    pub task_status: Option<String>,
+    pub task_closed_at: Option<String>,
+}
+
+/// Lightweight session status snapshot for output-stash GC.
+///
+/// Only projects `(id, status, ended_at)` — far cheaper than a full
+/// [`SessionRecord`] when the GC only needs to map id→unix_secs.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SessionStatusSnapshot {
+    pub id: String,
+    pub status: String,
+    pub ended_at: Option<String>,
 }
 
 #[cfg(test)]
