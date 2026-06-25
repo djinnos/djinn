@@ -1209,11 +1209,11 @@
             .await
             .unwrap();
 
-        // Reopen it.
+        // Reopen it with explicit user attribution for audit trail.
         let reopen_resp = server
             .dispatch_tool(
                 "proposal_debate_reopen",
-                serde_json::json!({ "id": entry_id }),
+                serde_json::json!({ "id": entry_id, "user_id": "test-user-reopener" }),
             )
             .await
             .unwrap();

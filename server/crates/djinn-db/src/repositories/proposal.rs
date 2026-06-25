@@ -711,8 +711,22 @@ impl ProposalRepository {
     /// Reopen a previously resolved debate-trail entry. Stamps the reopening
     /// user via `current_user_id()`. No-op (idempotent) if already open.
     pub async fn reopen_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.reopen_debate_trail_entry_with_user(entry_id, None)
+            .await
+    }
+
+    /// Reopen a previously resolved debate-trail entry with an explicit user
+    /// attribution. When `user_id` is `None`, falls back to
+    /// `current_user_id()`. No-op (idempotent) if already open.
+    pub async fn reopen_debate_trail_entry_with_user(
+        &self,
+        entry_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<ProposalDebateTrail> {
         self.db.ensure_initialized().await?;
-        let reopened_by = djinn_core::auth_context::current_user_id();
+        let reopened_by = user_id
+            .map(|s| Some(s.to_string()))
+            .unwrap_or_else(djinn_core::auth_context::current_user_id);
         sqlx::query!(
             r#"UPDATE proposal_debate_trail SET
                     reopened_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),

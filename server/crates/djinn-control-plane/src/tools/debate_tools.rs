@@ -79,6 +79,11 @@ pub struct ProposalDebateResolveParams {
 pub struct ProposalDebateReopenParams {
     /// Debate-trail entry UUID.
     pub id: String,
+    /// Optional user ID to attribute the reopen action to. When omitted,
+    /// falls back to the current session user (if any). Passed through
+    /// to the audit trail as `reopened_by_user_id`.
+    #[serde(default)]
+    pub user_id: Option<String>,
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -228,7 +233,10 @@ impl DjinnMcpServer {
         if let Err(e) = self.gate_proposal_edit(author.as_deref()).await {
             return Json(err_debate(e));
         }
-        match repo.reopen_debate_trail_entry(&p.id).await {
+        match repo
+            .reopen_debate_trail_entry_with_user(&p.id, p.user_id.as_deref())
+            .await
+        {
             Ok(updated) => Json(ProposalDebateTrailResponse {
                 entry: Some((&updated).into()),
                 error: None,
