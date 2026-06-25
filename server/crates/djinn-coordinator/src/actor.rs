@@ -943,6 +943,21 @@ impl CoordinatorActor {
                     .await;
                 let _ = reply.send(result);
             }
+            CoordinatorMessage::DemandProposalRefinementRound {
+                proposal_id,
+                current_revision_seq,
+                update_authority,
+                reply,
+            } => {
+                let result = self
+                    .handle_demand_proposal_refinement_round(
+                        &proposal_id,
+                        current_revision_seq,
+                        &update_authority,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
         }
     }
 
@@ -983,6 +998,51 @@ impl CoordinatorActor {
             current_revision_seq,
             update_authority,
             "CoordinatorActor: started proposal refinement"
+        );
+
+        Ok(())
+    }
+
+    /// Handle a demand-round request. Unlike start, this allows restarting
+    /// a completed refinement loop. If the loop is still active (not complete),
+    /// it returns an error. If the loop has completed or been cleaned up, it
+    /// creates a fresh loop and inserts it.
+    async fn handle_demand_proposal_refinement_round(
+        &mut self,
+        proposal_id: &str,
+        current_revision_seq: i32,
+        update_authority: &str,
+    ) -> Result<(), String> {
+        use super::refinement::{RefinementLoopState, UpdateAuthority};
+
+        // If refinement is still actively running (not completed), reject.
+        if let Some(state) = self.active_refinements.get(proposal_id)
+            && !state.is_complete()
+        {
+            return Err(format!(
+                "refinement is already active for proposal {proposal_id}"
+            ));
+        }
+
+        let authority = match update_authority {
+            "checkpoint" => UpdateAuthority::Checkpoint,
+            "auto_accept" => UpdateAuthority::AutoAccept,
+            other => {
+                return Err(format!(
+                    "invalid update_authority: {other:?} (expected checkpoint or auto_accept)"
+                ));
+            }
+        };
+
+        let state = RefinementLoopState::new(proposal_id, current_revision_seq, authority);
+        self.active_refinements
+            .insert(proposal_id.to_string(), state);
+
+        tracing::info!(
+            proposal_id = %proposal_id,
+            current_revision_seq,
+            update_authority,
+            "CoordinatorActor: demanded another refinement round"
         );
 
         Ok(())

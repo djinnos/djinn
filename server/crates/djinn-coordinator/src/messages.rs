@@ -70,4 +70,12 @@ pub(super) enum CoordinatorMessage {
         update_authority: String,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// Demand another tribunal round for a proposal whose refinement has
+    /// stopped.  Unlike start, this allows restarting a completed loop.
+    DemandProposalRefinementRound {
+        proposal_id: String,
+        current_revision_seq: i32,
+        update_authority: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }

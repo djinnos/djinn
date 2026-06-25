@@ -32,15 +32,29 @@ use djinn_provider::catalog::CatalogService;
 
 // ─── Submodules ──────────────────────────────────────────────────────────────
 
+// Phase 5 extraction: coordinator logic now lives in `djinn-coordinator`;
+// the modules below are retained temporarily for facade re-exports and will
+// be thinned in a follow-up task (3nvm).  Allow dead_code on each submodule
+// until the legacy files are removed.
+#[allow(dead_code)]
 mod actor;
+#[allow(dead_code)]
 mod consolidation;
+#[allow(dead_code)]
 mod dispatch;
+#[allow(dead_code)]
 mod evidence;
+#[allow(dead_code)]
 mod handle;
+#[allow(dead_code)]
 mod health;
+#[allow(dead_code)]
 mod messages;
+#[allow(dead_code)]
 pub(crate) mod pr_poller;
+#[allow(dead_code)]
 mod prompt_eval;
+#[allow(dead_code)]
 mod reentrance;
 // Refinement workflow skeleton — types are `pub` for future integration by
 // coordinator dispatch/actor modules, but nothing in the crate consumes them
@@ -49,9 +63,13 @@ mod reentrance;
 pub(crate) mod refinement;
 // Refinement tribunal dispatch orchestration — drives the advocate/adversary/
 // judge phase loop.
+#[allow(dead_code)]
 mod refinement_dispatch;
+#[allow(dead_code)]
 pub(crate) mod rules;
+#[allow(dead_code)]
 mod types;
+#[allow(dead_code)]
 mod wave;
 
 // Re-export public types so the external API is unchanged.

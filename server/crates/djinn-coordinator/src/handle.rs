@@ -301,6 +301,30 @@ impl CoordinatorHandle {
             .map_err(|_| CoordinatorError::NoResponse)?
             .map_err(CoordinatorError::Other)
     }
+
+    /// Demand another tribunal round for a proposal whose refinement has
+    /// stopped. The coordinator clears the stop state and re-enqueues
+    /// the refinement loop for another Advocate→Adversary→Judge cycle.
+    pub async fn demand_proposal_refinement_round(
+        &self,
+        proposal_id: String,
+        current_revision_seq: i32,
+        update_authority: String,
+    ) -> Result<(), CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::DemandProposalRefinementRound {
+                proposal_id,
+                current_revision_seq,
+                update_authority,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await
+            .map_err(|_| CoordinatorError::NoResponse)?
+            .map_err(CoordinatorError::Other)
+    }
 }
 
 // ─── CoordinatorTrigger impl ───────────────────────────────────────────────
