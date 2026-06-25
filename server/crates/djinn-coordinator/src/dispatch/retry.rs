@@ -664,12 +664,13 @@ impl CoordinatorActor {
         // on behalf of); resolves to None → automation via create_in_project
         // when the source is itself unowned. Used for both model eligibility and
         // creation attribution so they stay consistent.
-        let source_creator = task_repo
-            .get(source_task_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|t| t.created_by_user_id);
+        // Fetch the full source task once: its creator drives model eligibility
+        // and attribution, and its short_id/title give the review task a name
+        // with real line-of-sight into WHAT is being escalated.
+        let source_task = task_repo.get(source_task_id).await.ok().flatten();
+        let source_creator = source_task
+            .as_ref()
+            .and_then(|t| t.created_by_user_id.clone());
         let model_ids = self
             .resolve_dispatch_models_for_role("planner", source_creator.as_deref())
             .await;
@@ -727,9 +728,25 @@ impl CoordinatorActor {
             return;
         };
 
-        let title = format!("Planner escalation: {}", &reason[..reason.len().min(80)]);
+        // Name the review task after the work it is solving, not just a
+        // truncated reason. "[<short_id>] <title>" gives the board immediate
+        // line-of-sight into which task the Planner is remediating; the reason
+        // still lives in the description below. (char-safe truncation — the old
+        // byte slice could panic on a multi-byte boundary.)
+        let reason_snippet: String = reason.chars().take(80).collect();
+        let title = match source_task.as_ref() {
+            Some(t) => {
+                let name: String = t.title.chars().take(70).collect();
+                format!("Planner remediation [{}]: {}", t.short_id, name)
+            }
+            None => format!("Planner escalation: {reason_snippet}"),
+        };
+        let source_label = source_task
+            .as_ref()
+            .map(|t| format!("{} ({})", t.title, t.short_id))
+            .unwrap_or_else(|| source_task_id.to_string());
         let description = format!(
-            "Escalated from task {source_task_id}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
+            "Escalated from task {source_label}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
         );
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
             .scope(
@@ -760,6 +777,23 @@ impl CoordinatorActor {
                 return;
             }
         };
+
+        // Block the source task on the review task so it stops being
+        // re-dispatched while the Planner investigates, and auto-resurfaces
+        // (emit_unblocked_tasks) once the review task closes. Use the resolved
+        // source uuid (source_task.id) — add_blocker keys on tasks.id, and the
+        // caller-supplied source_task_id may be a short_id. Non-fatal: a failed
+        // link still leaves the escalation dispatched.
+        if let Some(src) = source_task.as_ref()
+            && let Err(e) = task_repo.add_blocker(&src.id, &review_task.id).await
+        {
+            tracing::warn!(
+                error = %e,
+                source_task_id = %src.short_id,
+                review_task_id = %review_task.short_id,
+                "CoordinatorActor: planner escalation — failed to block source task on review task"
+            );
+        }
 
         // Log a comment on the source task linking to the planner review task.
         let comment_payload = serde_json::json!({

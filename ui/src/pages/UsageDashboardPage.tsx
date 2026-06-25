@@ -1,9 +1,14 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Analytics01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
 import { usageAnalyticsQueryOptions } from "@/api/queryOptions";
 import type { UsageAnalyticsFilters } from "@/api/analytics";
+import {
+  parseUsageAnalyticsFiltersFromSearchParams,
+  serializeUsageAnalyticsFiltersToSearchParams,
+} from "@/lib/usageAnalyticsFiltersUrl";
 import { InlineError } from "@/components/InlineError";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
@@ -15,12 +20,6 @@ import { UsageOverviewTab } from "@/components/usage/UsageOverviewTab";
 import { UsageProjectModelMatrixTab } from "@/components/usage/UsageProjectModelMatrixTab";
 import { cn } from "@/lib/utils";
 
-/** Default filters: last 30 days, daily granularity. */
-const DEFAULT_FILTERS: UsageAnalyticsFilters = {
-  preset: "30d",
-  granularity: "day",
-};
-
 /** Tab values for the dashboard. */
 const TAB_OVERVIEW = "overview";
 const TAB_MODELS = "models";
@@ -31,14 +30,36 @@ const TAB_MATRIX = "matrix";
  * Admin-only usage analytics dashboard. Non-admin access is blocked by the
  * route guard in App.tsx which redirects to /tasks.
  *
- * The page owns a single canonical `UsageAnalyticsFilters` object that is
- * passed to the React Query option and consumed by every tab, so all tabs
- * share the same fetched data and there is no per-tab duplicated filter
- * logic or divergent request.
+ * Filter state lives in URL search params (`/admin/usage?preset=30d&…`),
+ * making filters shareable, restorable after reload, and bookmarkable.  The
+ * page parses the current search params into a canonical `UsageAnalyticsFilters`
+ * object that is passed to the React Query option and consumed by every tab,
+ * so all tabs share the same fetched data and there is no per-tab duplicated
+ * filter logic or divergent request.
+ *
+ * Filter changes use `replace` semantics so interactive adjustments do not
+ * spam browser history.
  */
 export function UsageDashboardPage() {
-  const [filters, setFilters] =
-    useState<UsageAnalyticsFilters>(DEFAULT_FILTERS);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Derive canonical filters from URL search params (defaults to 30d/daily).
+  const filters: UsageAnalyticsFilters = useMemo(
+    () => parseUsageAnalyticsFiltersFromSearchParams(searchParams),
+    [searchParams],
+  );
+
+  // Replace URL search params when the user changes a filter — use replace
+  // semantics so interactive filter changes do not spam browser history.
+  const handleFiltersChange = useCallback(
+    (next: UsageAnalyticsFilters) => {
+      setSearchParams(
+        serializeUsageAnalyticsFiltersToSearchParams(next),
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     ...usageAnalyticsQueryOptions(filters),
@@ -101,7 +122,7 @@ export function UsageDashboardPage() {
       {/* ── Global filter bar ──────────────────────────────────────────────── */}
       <UsageDashboardFiltersBar
         filters={filters}
-        onChange={setFilters}
+        onChange={handleFiltersChange}
         data={data}
       />
 
