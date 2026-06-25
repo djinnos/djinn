@@ -26,6 +26,7 @@ use std::time::{Duration, Instant as StdInstant};
 
 use djinn_control_plane::tools::epic_ops::AcceptanceCriterionItem;
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
+use djinn_core::models::TransitionAction;
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
@@ -95,6 +96,8 @@ impl CoordinatorActor {
                         phase = ?session.phase,
                         "Refinement session timed out"
                     );
+                    self.close_refinement_task(&session.task_id, "refinement session timed out")
+                        .await;
                     self.terminate_refinement(
                         proposal_id,
                         StopReason::AgentFailure {
@@ -107,8 +110,11 @@ impl CoordinatorActor {
                 return;
             }
 
-            // Session completed — process the outcome.
+            // Session completed — process the outcome, then close the task so
+            // finished phase/round tasks don't linger `open` on the board.
             self.process_refinement_outcome(proposal_id, &session).await;
+            self.close_refinement_task(&session.task_id, "refinement phase complete")
+                .await;
             self.refinement_sessions.remove(proposal_id);
             return;
         }
@@ -131,6 +137,12 @@ impl CoordinatorActor {
         let round = state.current_round;
         let revision_seq = state.current_revision_seq;
 
+        // The user this run is attributed to (task owner + model scope).
+        // Falls back to the proposal author when not explicitly set.
+        let attributed_user_id = self
+            .resolve_refinement_attributed_user(proposal_id, state.attributed_user_id.clone())
+            .await;
+
         // Read diverse_refinement setting at the round boundary.
         let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
 
@@ -150,8 +162,13 @@ impl CoordinatorActor {
         }
 
         // Determine the agent_type and model for this phase.
-        let (agent_type, model_id) =
-            self.resolve_refinement_dispatch_params(phase, diverse_refinement);
+        let (agent_type, model_id) = self
+            .resolve_refinement_dispatch_params(
+                phase,
+                diverse_refinement,
+                attributed_user_id.as_deref(),
+            )
+            .await;
 
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
@@ -168,6 +185,7 @@ impl CoordinatorActor {
                 round,
                 revision_seq,
                 &readiness_context,
+                attributed_user_id.as_deref(),
             )
             .await
         {
@@ -662,10 +680,11 @@ impl CoordinatorActor {
 
     /// Resolve the dispatch parameters (agent_type, model_id) for a
     /// refinement phase.
-    fn resolve_refinement_dispatch_params(
+    async fn resolve_refinement_dispatch_params(
         &self,
         phase: RefinementPhase,
         diverse_refinement: bool,
+        attributed_user_id: Option<&str>,
     ) -> (String, String) {
         let agent_type = match phase {
             RefinementPhase::AdvocateRevision => "advocate",
@@ -674,8 +693,15 @@ impl CoordinatorActor {
             RefinementPhase::Complete => return ("advocate".into(), String::new()),
         };
 
-        let primary_model = self.resolve_refinement_primary_model();
-        let candidates = self.resolve_refinement_model_candidates();
+        // The tribunal runs on the attributed user's "Plan" role models
+        // (planner/architect lane) — the same per-user resolution the worker
+        // dispatch path uses — rather than the legacy global priority list.
+        let user_models = self
+            .resolve_dispatch_models_for_role("planner", attributed_user_id)
+            .await;
+
+        let primary_model = self.resolve_refinement_primary_model(&user_models);
+        let candidates = self.resolve_refinement_model_candidates(&user_models);
 
         let (model_id, _same_fallback) =
             select_refinement_model(diverse_refinement, &primary_model, &candidates);
@@ -683,8 +709,13 @@ impl CoordinatorActor {
         (agent_type.to_string(), model_id)
     }
 
-    /// Resolve the primary model for a refinement session.
-    fn resolve_refinement_primary_model(&self) -> String {
+    /// Resolve the primary model for a refinement session: prefer the
+    /// attributed user's Plan-role models, then the legacy global priority
+    /// list, then a last-resort default.
+    fn resolve_refinement_primary_model(&self, user_models: &[String]) -> String {
+        if let Some(first) = user_models.first() {
+            return first.clone();
+        }
         self.model_priorities
             .values()
             .next()
@@ -692,12 +723,62 @@ impl CoordinatorActor {
             .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string())
     }
 
-    /// Resolve candidate models for diverse-refinement selection.
-    fn resolve_refinement_model_candidates(&self) -> Vec<String> {
+    /// Resolve candidate models for diverse-refinement selection: the
+    /// attributed user's Plan-role models if any, else the legacy global list.
+    fn resolve_refinement_model_candidates(&self, user_models: &[String]) -> Vec<String> {
+        if !user_models.is_empty() {
+            return user_models.to_vec();
+        }
         self.model_priorities
             .values()
             .flat_map(|models| models.iter().cloned())
             .collect()
+    }
+
+    /// Resolve the user a refinement run is attributed to: the explicitly
+    /// chosen user if present, else the proposal author. Used for both task
+    /// ownership and per-user model resolution.
+    async fn resolve_refinement_attributed_user(
+        &self,
+        proposal_id: &str,
+        explicit: Option<String>,
+    ) -> Option<String> {
+        if explicit.is_some() {
+            return explicit;
+        }
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        proposal_repo
+            .get(proposal_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.author_user_id)
+    }
+
+    /// Force-close a finished refinement task so phase/round tasks don't pile
+    /// up `open` on the board after their session ends. Best-effort: a failure
+    /// to close is logged, not propagated.
+    async fn close_refinement_task(&self, task_id: &str, reason: &str) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let task_repo = TaskRepository::new(self.db.clone(), event_bus);
+        if let Err(e) = task_repo
+            .transition(
+                task_id,
+                TransitionAction::ForceClose,
+                "coordinator",
+                "system",
+                Some(reason),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "Failed to close completed refinement task"
+            );
+        }
     }
 
     /// Resolve the project path for the slot pool dispatch.
@@ -719,11 +800,22 @@ impl CoordinatorActor {
         round: i32,
         against_revision_seq: i32,
         readiness_context: &str,
+        attributed_user_id: Option<&str>,
     ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus.clone());
 
-        let title = format!("Refinement {agent_type} — proposal {proposal_id} (round {round})");
+        // Prefer the human-readable proposal title over the raw UUID so the
+        // task is identifiable on the board (falls back to the id if the
+        // proposal can't be loaded).
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let proposal = proposal_repo.get(proposal_id).await.ok().flatten();
+        let proposal_label = proposal
+            .as_ref()
+            .map(|p| format!("\"{}\"", p.title))
+            .unwrap_or_else(|| proposal_id.to_string());
+
+        let title = format!("Refinement {agent_type} — {proposal_label} (round {round})");
         let description = format!(
             "Proposal refinement session: {agent_type} role for proposal {proposal_id}, \
              round {round}, against revision {against_revision_seq}.\n\n\
@@ -731,7 +823,6 @@ impl CoordinatorActor {
         );
 
         // Find a project_id from the proposal's targets.
-        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
         let project_id = match proposal_repo.targets(proposal_id).await {
             Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
             _ => return None,
@@ -768,6 +859,19 @@ impl CoordinatorActor {
                         agent_type,
                         error = %e,
                         "Failed to set agent_type on refinement task"
+                    );
+                }
+                // Attribute the task to the chosen/author user so it has a real
+                // owner (refinement tasks are otherwise created owner-less, which
+                // trips the ownership guard) and so per-user model resolution is
+                // consistent with how it was dispatched.
+                if let Some(uid) = attributed_user_id
+                    && let Err(e) = task_repo2.set_created_by_user_id(&task.id, uid).await
+                {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        error = %e,
+                        "Failed to attribute refinement task to user"
                     );
                 }
                 Some(task.id)

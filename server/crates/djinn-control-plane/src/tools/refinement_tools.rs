@@ -52,6 +52,11 @@ pub struct ProposalRefinementStartParams {
     /// proposal updates). Defaults to `checkpoint`.
     #[serde(default = "default_update_authority")]
     pub update_authority: String,
+    /// User the refinement run is attributed to: owner of the spawned
+    /// refinement (tribunal) tasks and the scope for per-user role-model
+    /// resolution. Omit to attribute the run to the proposal author.
+    #[serde(default)]
+    pub owner_user_id: Option<String>,
 }
 
 fn default_update_authority() -> String {
@@ -198,6 +203,14 @@ impl DjinnMcpServer {
                     proposal_id: proposal.id.clone(),
                     current_revision_seq: proposal.latest_revision_seq,
                     update_authority: authority.to_string(),
+                    // Attribute to the explicitly-chosen user, else the proposal
+                    // author. This owns the tribunal tasks and scopes per-user
+                    // model resolution (so refinement uses the attributed user's
+                    // Plan-role models instead of a hardcoded fallback).
+                    owner_user_id: p
+                        .owner_user_id
+                        .clone()
+                        .or_else(|| proposal.author_user_id.clone()),
                 };
                 if let Err(e) = coordinator_handle.start_proposal_refinement(request).await {
                     let stop_metadata = json!({
@@ -480,6 +493,8 @@ impl DjinnMcpServer {
                     proposal_id: proposal.id.clone(),
                     current_revision_seq: proposal.latest_revision_seq,
                     update_authority: authority.to_string(),
+                    // Demand-round reuses the proposal author for attribution.
+                    owner_user_id: proposal.author_user_id.clone(),
                 };
                 if let Err(e) = coordinator_handle
                     .demand_proposal_refinement_round(request)

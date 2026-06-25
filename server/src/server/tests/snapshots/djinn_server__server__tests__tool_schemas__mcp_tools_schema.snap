@@ -14188,6 +14188,12 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "owner_user_id": {
+          "default": null,
+          "description": "User the refinement run is attributed to: owner of the spawned\nrefinement (tribunal) tasks and the scope for per-user role-model\nresolution. Omit to attribute the run to the proposal author.",
+          "nullable": true,
+          "type": "string"
+        },
         "proposal_id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
