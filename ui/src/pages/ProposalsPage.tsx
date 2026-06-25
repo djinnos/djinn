@@ -30,6 +30,7 @@ import {
 import { ProposalSignoffs } from "@/components/proposals/ProposalSignoffs";
 import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalRefinement } from "@/components/proposals/ProposalRefinement";
+import { ReadinessPanel } from "@/components/proposals/ReadinessPanel";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
 import { DebateTrail } from "@/components/proposals/DebateTrail";
 import { Badge } from "@/components/ui/badge";
@@ -606,6 +607,16 @@ function ProposalDetailView({
             (proposal.status === "draft" || proposal.status === "in_review") &&
             !detail.refinement?.active
           }
+          onChanged={onChanged}
+        />
+
+        {/* Readiness panel: DoR status, tribunal metrics, blocked explanations,
+            needs-evidence spike parking, checkpoint diff/approve/reject. */}
+        <ReadinessPanel
+          gateStatus={detail.gate_status}
+          refinement={detail.refinement}
+          proposalId={proposal.id}
+          pendingRevisions={[]}
           onChanged={onChanged}
         />
 

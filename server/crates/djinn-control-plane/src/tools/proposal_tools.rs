@@ -771,6 +771,210 @@ async fn evaluate_composed_gate(
     ComposedGateResult { failures }
 }
 
+/// Build a structured [`ProposalGateStatusModel`] for `proposal_show`.
+///
+/// Collects DoR failures, tribunal conditions, and human-readable explanations
+/// so the UI can render readiness without recomputing it client-side.
+async fn build_gate_status(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+    body: &str,
+    ac_json: &str,
+    target_count: usize,
+) -> crate::tools::proposal_ops::ProposalGateStatusModel {
+    use crate::tools::proposal_ops::{GateFailureModel, ProposalGateStatusModel};
+
+    // 1. Deterministic DoR
+    let ac_items = parse_ac_items(ac_json);
+    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+    let dor_failures: Vec<GateFailureModel> = readiness
+        .failures
+        .iter()
+        .map(|f| {
+            let message = match &f.detail {
+                crate::tools::proposal_readiness::ReadinessFailureDetail::MissingSection {
+                    check_name,
+                } => format!("Missing required coverage: {check_name}"),
+                crate::tools::proposal_readiness::ReadinessFailureDetail::VagueAc {
+                    index,
+                    text,
+                } => format!("Vague/unverifiable acceptance criterion #{index}: {text}"),
+                crate::tools::proposal_readiness::ReadinessFailureDetail::Generic { message } => {
+                    message.clone()
+                }
+            };
+            GateFailureModel {
+                check: format!("{:?}", f.check).to_snake_case(),
+                message,
+            }
+        })
+        .collect();
+    let dor_ready = readiness.ready;
+
+    // 2. Tribunal conditions
+    let proposal_id = &proposal.id;
+    let mut blocked_explanations: Vec<String> = Vec::new();
+
+    // Add DoR failures to explanations
+    if !dor_ready {
+        for f in &dor_failures {
+            blocked_explanations.push(f.message.clone());
+        }
+    }
+
+    // 2a. Human override check
+    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
+        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
+        _ => false,
+    };
+
+    // 2b. Unresolved blocking debate entries
+    let (unresolved_blocking_ids, unresolved_count) = match repo
+        .list_unresolved_blocking_debate_entries(proposal_id)
+        .await
+    {
+        Ok(entries) => {
+            let remaining: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
+                })
+                .collect();
+            if !remaining.is_empty() {
+                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+                blocked_explanations.push(format!(
+                    "Unresolved blocking debate entries: {}",
+                    ids.join(", ")
+                ));
+                (ids, remaining.len() as i32)
+            } else {
+                (vec![], 0)
+            }
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check debate trail: {e}"));
+            (vec![], 0)
+        }
+    };
+
+    // 2c. Latest judge verdict
+    let (judge_verdict_body, judge_verdict_id, judge_needs_work) =
+        match repo.latest_judge_verdict(proposal_id).await {
+            Ok(Some(verdict)) => {
+                let verdict_lower = verdict.body.to_lowercase();
+                let needs_work = (verdict_lower.contains("needs-work")
+                    || verdict_lower.contains("needs_work")
+                    || verdict_lower.contains("needs work"))
+                    && !override_is_current;
+                if needs_work {
+                    blocked_explanations.push(format!(
+                        "Judge returned needs-work (verdict {}); no current human override",
+                        verdict.id
+                    ));
+                }
+                (
+                    Some(verdict.body.clone()),
+                    Some(verdict.id.clone()),
+                    needs_work,
+                )
+            }
+            Err(e) => {
+                blocked_explanations.push(format!("Failed to check judge verdict: {e}"));
+                (None, None, false)
+            }
+            _ => (None, None, false),
+        };
+
+    // 2d. Needs-evidence spike parking
+    let needs_evidence = match repo.has_open_needs_evidence_spike(proposal_id).await {
+        Ok(true) => {
+            let claim = proposal
+                .needs_evidence_claim
+                .as_deref()
+                .unwrap_or("unspecified");
+            let spike_id = proposal
+                .linked_spike_task_id
+                .as_deref()
+                .unwrap_or("unknown");
+            blocked_explanations.push(format!(
+                "Proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
+            ));
+            Some(crate::tools::proposal_ops::NeedsEvidenceStatus {
+                claim: claim.to_string(),
+                spike_task_id: spike_id.to_string(),
+                spike_short_id: spike_id.to_string(),
+                spike_status: "open".to_string(),
+            })
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check needs-evidence spike: {e}"));
+            None
+        }
+        _ => None,
+    };
+
+    // 2e. Pending checkpoint revisions
+    let pending_checkpoint = match repo.has_pending_checkpoint_revisions(proposal_id).await {
+        Ok(true) => {
+            blocked_explanations
+                .push("Pending checkpoint revision awaiting approval or rejection".to_string());
+            true
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check pending checkpoints: {e}"));
+            false
+        }
+        _ => false,
+    };
+
+    // Adversary dry count from refinement status (non-critical)
+    let adversary_dry_count =
+        match crate::tools::refinement_tools::build_refinement_status(repo, proposal_id).await {
+            Ok(status) => status.dry_rounds,
+            _ => 0,
+        };
+
+    let ready = blocked_explanations.is_empty();
+
+    ProposalGateStatusModel {
+        ready,
+        dor_ready,
+        dor_failures,
+        judge_verdict_body,
+        judge_verdict_id,
+        judge_needs_work,
+        adversary_dry_count,
+        unresolved_blocking_count: unresolved_count,
+        unresolved_blocking_ids,
+        needs_evidence,
+        pending_checkpoint,
+        human_override_active: override_is_current,
+        blocked_explanations,
+    }
+}
+
+/// Helper: convert CamelCase/PascalCase enum variant to snake_case.
+trait ToSnakeCase {
+    fn to_snake_case(&self) -> String;
+}
+
+impl ToSnakeCase for String {
+    fn to_snake_case(&self) -> String {
+        let mut out = String::with_capacity(self.len() + 4);
+        for (i, ch) in self.chars().enumerate() {
+            if ch.is_uppercase() {
+                if i > 0 {
+                    out.push('_');
+                }
+                out.extend(ch.to_lowercase());
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -1153,6 +1357,12 @@ impl DjinnMcpServer {
             crate::tools::refinement_tools::build_refinement_status(&repo, &proposal.id)
                 .await
                 .ok();
+        // Build composed gate status (DoR + tribunal conditions).
+        // Non-critical — swallow errors so proposal_show still works.
+        let ac_json = &proposal.acceptance_criteria;
+        let target_count = targets.len();
+        let gate_status =
+            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await);
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -1163,6 +1373,7 @@ impl DjinnMcpServer {
             memory_refs,
             debate_trail,
             refinement,
+            gate_status,
             error: None,
         })
     }
@@ -2434,6 +2645,7 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         memory_refs: vec![],
         debate_trail: None,
         refinement: None,
+        gate_status: None,
         error: Some(error.into()),
     }
 }
