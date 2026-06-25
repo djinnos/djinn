@@ -1065,6 +1065,7 @@ dependencies = [
  "base64 0.22.1",
  "djinn-compaction",
  "djinn-control-plane",
+ "djinn-coordinator",
  "djinn-core",
  "djinn-db",
  "djinn-git",

@@ -761,7 +761,7 @@ pub(crate) fn record_pr_transition_reopen_metric(action: &TransitionAction) -> b
 /// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
 ///
 /// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.
-pub(crate) fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
+pub fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
     let path = url.strip_prefix("https://github.com/")?;
     let mut parts = path.splitn(5, '/');
     let owner = parts.next()?;
