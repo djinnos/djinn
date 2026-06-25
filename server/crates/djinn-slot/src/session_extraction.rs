@@ -119,27 +119,9 @@ pub(crate) async fn run_post_session_extraction(
 /// sessions (not just the latest), so retries / manually-repaired older runs
 /// aren't starved.
 pub async fn run_extraction_backfill(app_state: SlotContext) {
-    // NOTE(djinn-slot/temporary-sqlx): this is a direct `sqlx::query_as` call
-    // that bypasses `djinn-db` repository helpers.  The query finds completed
-    // task-runs whose sessions have never been extracted (`event_taxonomy IS
-    // NULL`).  A follow-up should lift this into a
-    // `SessionRepository::list_unextracted_completed_candidates` method in
-    // `djinn-db` so that `djinn-slot` no longer needs a direct `sqlx`
-    // production dependency.  Until then, the raw runtime (non-macro) query is
-    // used so this crate does not depend on the sqlx offline data cache.
-    let candidates: Vec<(String, String)> = match sqlx::query_as(
-        "SELECT DISTINCT s.task_id, s.task_run_id \
-         FROM sessions s \
-         JOIN task_runs tr ON tr.id = s.task_run_id \
-         WHERE tr.status = 'completed' \
-           AND s.event_taxonomy IS NULL \
-           AND s.task_id IS NOT NULL \
-           AND s.task_run_id IS NOT NULL \
-         ORDER BY s.task_run_id",
-    )
-    .fetch_all(app_state.db.pool())
-    .await
-    {
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let candidates = match session_repo.list_unextracted_completed_candidates().await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!(error = %e, "extraction_backfill: candidate query failed; aborting sweep");
@@ -153,14 +135,15 @@ pub async fn run_extraction_backfill(app_state: SlotContext) {
         "extraction_backfill: starting one-shot sweep over completed, unextracted task-runs"
     );
 
-    for (idx, (task_id, task_run_id)) in candidates.into_iter().enumerate() {
+    for (idx, candidate) in candidates.into_iter().enumerate() {
         tracing::info!(
-            task_id = %task_id,
-            task_run_id = %task_run_id,
+            task_id = %candidate.task_id,
+            task_run_id = %candidate.task_run_id,
             progress = format!("{}/{}", idx + 1, total),
             "extraction_backfill: extracting task-run"
         );
-        run_post_session_extraction(task_id, task_run_id, app_state.clone()).await;
+        run_post_session_extraction(candidate.task_id, candidate.task_run_id, app_state.clone())
+            .await;
     }
 
     tracing::info!(task_runs = total, "extraction_backfill: sweep complete");

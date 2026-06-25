@@ -126,16 +126,21 @@ fn boundary_djinn_coordinator_sqlx_is_documented() {
     );
 }
 
-/// `djinn-slot` has a documented temporary `sqlx` dependency.
+/// `djinn-slot` must NOT have a direct `sqlx` dependency.
 ///
-/// The Cargo.toml must contain the `NOTE(djinn-slot)` annotation.
+/// All slot SQL is routed through `djinn-db` helpers; the crate's
+/// `Cargo.toml` must not list `sqlx` as a dependency.
 #[test]
-fn boundary_djinn_slot_sqlx_is_documented() {
+fn boundary_djinn_slot_has_no_sqlx_dependency() {
     let cargo_toml = include_str!("../../../djinn-slot/Cargo.toml");
+    let has_sqlx = cargo_toml.lines().any(|line| {
+        let trimmed = line.trim_start();
+        !trimmed.starts_with('#') && trimmed.starts_with("sqlx =")
+    });
     assert!(
-        cargo_toml.contains("NOTE(djinn-slot)"),
-        "djinn-slot Cargo.toml must document its sqlx dependency with a \
-         NOTE(djinn-slot) comment explaining the temporary exception"
+        !has_sqlx,
+        "djinn-slot Cargo.toml must not contain a direct sqlx dependency; \
+         all SQL should go through djinn-db helpers"
     );
 }
 

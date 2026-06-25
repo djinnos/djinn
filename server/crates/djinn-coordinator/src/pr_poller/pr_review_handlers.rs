@@ -722,15 +722,8 @@ impl CoordinatorActor {
     /// so the auto-approve branch reads it directly here. Returns `None` for
     /// background-agent-created tasks (column is NULL) or on DB error.
     pub(crate) async fn task_created_by_user_id(&self, task_id: &str) -> Option<String> {
-        match sqlx::query_scalar!(
-            "SELECT created_by_user_id FROM tasks WHERE id = $1",
-            task_id,
-        )
-        .fetch_optional(self.db.pool())
-        .await
-        {
-            Ok(Some(opt)) => opt,
-            Ok(None) => None,
+        match self.task_repo().created_by_user_id(task_id).await {
+            Ok(opt) => opt,
             Err(e) => {
                 tracing::warn!(
                     task_id = %task_id,

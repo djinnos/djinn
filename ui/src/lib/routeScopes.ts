@@ -8,10 +8,7 @@
  *  **global-project-context**
  *    The page reads `useProjectStore` (selectedProjectId / useSelectedProject).
  *    A single shared ProjectSelector in the application chrome writes that
- *    store.  Routes: `/agents`, `/task/:taskId`, `/memory`.
- *
- *    *Pending* (will move here once its local picker is removed):
- *    `/code-graph`.
+ *    store.  Routes: `/agents`, `/task/:taskId`, `/memory`, `/code-graph`.
  *
  *  **url-filtered**
  *    The page keeps its own filter state in URL search-params (query-string).
@@ -79,8 +76,11 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
     scope: "global-project-context",
     note: "TaskSessionPage reads useSelectedProject() for session context/back-nav",
   },
-  // pending — local picker still present; will move here after follow-up task
-  // { pattern: "/code-graph", scope: "global-project-context", note: "pending removal of local picker" },
+  {
+    pattern: "/code-graph",
+    scope: "global-project-context",
+    note: "CodeGraphPage reads useSelectedProject() for snapshot/workspace data; local picker removed",
+  },
   {
     pattern: "/memory",
     scope: "global-project-context",
@@ -122,7 +122,6 @@ export const ROUTE_SCOPES: readonly RouteScopeEntry[] = [
   { pattern: "/settings/*", scope: "global" },
   { pattern: "/chat", scope: "global" },
   { pattern: "/chat/:sessionId", scope: "global" },
-  { pattern: "/code-graph", scope: "global", note: "pending: will move to global-project-context after local picker removal" },
 ];
 
 // ---------------------------------------------------------------------------

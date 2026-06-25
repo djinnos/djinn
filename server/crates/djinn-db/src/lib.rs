@@ -101,7 +101,7 @@ pub use repositories::{
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     service::{ServicePreset, ServicePresetRepository},
-    session::{CreateSessionParams, SessionRepository},
+    session::{CreateSessionParams, ExtractionBackfillCandidate, SessionRepository},
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,

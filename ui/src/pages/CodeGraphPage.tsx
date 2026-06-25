@@ -1,7 +1,8 @@
 /**
  * CodeGraphPage — top-level shell for `/code-graph`.
  *
- * D1 stood up an empty Sigma canvas and a project picker.
+ * D1 stood up an empty Sigma canvas and a project picker
+ *   (local picker later removed in favor of shared chrome context).
  * D2 swapped the empty canvas for `<CodeGraphCanvas>`, fetching the
  *   `code_graph snapshot` payload and rendering through Sigma + FA2.
  * D3 layered:
@@ -26,8 +27,6 @@ import { QueryPalette } from "@/components/codegraph/QueryPalette";
 import { SymbolDetailPanel } from "@/components/codegraph/SymbolDetailPanel";
 import { useCodeGraphStore } from "@/stores/codeGraphStore";
 import {
-  useProjectStore,
-  useProjects,
   useSelectedProject,
   useSelectedProjectId,
 } from "@/stores/useProjectStore";
@@ -105,53 +104,28 @@ function WorkspaceSelector({
   );
 }
 
-function ProjectPicker({
+/**
+ * Page-local toolbar for workspace selection and Cmd-K hint.
+ * The project selector lives in the shared chrome — see routeScopes.ts.
+ */
+function CodeGraphToolbar({
   workspaceState,
 }: {
   workspaceState: WorkspaceFetchState;
 }) {
-  const projects = useProjects();
   const selectedProjectId = useSelectedProjectId();
-  const setSelectedProjectId = useProjectStore(
-    (state) => state.setSelectedProjectId,
-  );
 
-  if (projects.length === 0) {
-    return (
-      <div className="border-b border-border/60 bg-background/40 px-4 py-2.5 text-sm text-muted-foreground">
-        No projects yet. Add one from the Repositories page.
-      </div>
-    );
+  if (!selectedProjectId || workspaceState.projectId !== selectedProjectId) {
+    return null;
   }
 
   return (
     <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border/60 bg-background/40 px-4 py-2.5">
-      <label
-        htmlFor="code-graph-project"
-        className="shrink-0 text-xs uppercase tracking-wide text-muted-foreground/70"
-      >
-        Project
-      </label>
-      <select
-        id="code-graph-project"
-        className="rounded-md border border-border/60 bg-background px-2 py-1 text-sm text-foreground"
-        value={selectedProjectId ?? ""}
-        onChange={(e) => setSelectedProjectId(e.target.value || null)}
-        aria-label="Select project"
-      >
-        {projects.map((project) => (
-          <option key={project.id} value={project.id}>
-            {project.name}
-          </option>
-        ))}
-      </select>
-      {selectedProjectId && workspaceState.projectId === selectedProjectId ? (
-        <WorkspaceSelector
-          status={workspaceState.status}
-          workspaces={workspaceState.workspaces}
-          error={workspaceState.error}
-        />
-      ) : null}
+      <WorkspaceSelector
+        status={workspaceState.status}
+        workspaces={workspaceState.workspaces}
+        error={workspaceState.error}
+      />
       <span className="ml-auto text-[10px] uppercase tracking-wide text-muted-foreground/60">
         Press{" "}
         <kbd className="rounded border border-border/60 bg-background px-1 py-0.5 font-mono text-[10px]">
@@ -247,7 +221,7 @@ export function CodeGraphPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ProjectPicker workspaceState={workspaceState} />
+      <CodeGraphToolbar workspaceState={workspaceState} />
       {project && selectedProjectId && <GraphToolbar />}
       <div className={cn("relative flex min-h-0 flex-1")}>
         {project && selectedProjectId ? (
