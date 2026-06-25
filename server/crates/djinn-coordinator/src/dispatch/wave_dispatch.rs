@@ -5,6 +5,21 @@ use djinn_core::models::TaskStatus;
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
 
+/// Classify a `supervisor_pr_open` push failure as "an oversized blob is
+/// committed in the branch history" (GitHub's 100 MB hard limit, enforced by
+/// the remote pre-receive hook). Such a push is rejected identically on every
+/// retry — the offending blob never leaves the branch history on its own — so
+/// the coordinator must escalate (Planner rewrites the history) rather than
+/// loop a transient-retry banner. Matches the verbatim remote error text
+/// GitHub emits (`GH001` / `exceeds GitHub's file size limit` /
+/// `Large files detected` / `pre-receive hook declined`).
+fn is_oversized_blob_push_rejection(reason: &str) -> bool {
+    reason.contains("pre-receive hook declined")
+        || reason.contains("GH001")
+        || reason.contains("exceeds GitHub's file size limit")
+        || reason.contains("Large files detected")
+}
+
 impl CoordinatorActor {
     #[tracing::instrument(
         name = "djinn.coordinator.approved_pass",
@@ -221,7 +236,77 @@ impl CoordinatorActor {
                     // worker run that recreates and pushes the branch.
                     let branch_missing = reason.contains("clone_ephemeral")
                         && reason.contains("not found in upstream origin");
-                    if branch_missing && task.pr_url.is_none() {
+                    // GitHub rejected the push because a blob in the branch's
+                    // history exceeds the 100 MB hard limit — almost always a
+                    // cache/store directory swept into a commit (e.g. a pnpm or
+                    // cargo store when HOME drifted into the worktree). This is
+                    // NON-TRANSIENT: the oversized blob stays in history, so
+                    // every retry is declined identically by the pre-receive
+                    // hook (the symptom is an endless `pr_errors` banner). Don't
+                    // treat it as a transient race; escalate to the Planner/Lead
+                    // to rewrite the branch history and re-land, then ForceClose
+                    // the source so this approved pass stops re-selecting it.
+                    // ForceClose is legal from any non-closed state and moves the
+                    // task out of `approved`, so the escalation fires exactly once
+                    // (no per-tick duplicate review tasks).
+                    let push_rejected_oversized_blob =
+                        is_oversized_blob_push_rejection(&reason);
+                    if push_rejected_oversized_blob && task.pr_url.is_none() {
+                        let escalation_reason = format!(
+                            "PR push for approved task was rejected by GitHub: an oversized file \
+                             (>100 MB) is committed in branch `{branch}`'s history, so every push \
+                             is declined by the pre-receive hook and the task cannot land. Rewrite \
+                             the branch history to drop the oversized blob — it is almost always a \
+                             cache/store artifact (e.g. `.local/share/pnpm`, a cargo target dir, or \
+                             `node_modules`) that must be git-ignored, not committed — then re-cut / \
+                             force-push `{branch}` and re-open the PR. Underlying push error: {reason}",
+                            branch = spec.task_branch,
+                        );
+                        let comment_payload = serde_json::json!({
+                            "body": format!(
+                                "**PR push blocked — oversized blob in branch history**\n\n{escalation_reason}"
+                            )
+                        })
+                        .to_string();
+                        let _ = repo
+                            .log_activity(
+                                Some(&task.id),
+                                "coordinator",
+                                "system",
+                                "comment",
+                                &comment_payload,
+                            )
+                            .await;
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            branch = %spec.task_branch,
+                            error = %reason,
+                            "CoordinatorActor: PR push rejected (oversized blob in history) — escalating to Planner to rewrite history"
+                        );
+                        self.dispatch_planner_escalation(&task.id, &escalation_reason, &task.project_id)
+                            .await;
+                        if let Err(e) = repo
+                            .transition(
+                                &task.id,
+                                TransitionAction::ForceClose,
+                                "coordinator",
+                                "system",
+                                Some(
+                                    "push rejected: oversized blob in branch history; escalated to Planner to rewrite history",
+                                ),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                "CoordinatorActor: failed to force-close push-rejected approved task after escalation"
+                            );
+                        }
+                        self.pr_errors.remove(&task.project_id);
+                        self.publish_status();
+                    } else if branch_missing && task.pr_url.is_none() {
                         tracing::warn!(
                             task_id = %task.short_id,
                             error = %reason,
@@ -636,6 +721,62 @@ mod e6_tests {
         assert!(
             out.is_ok(),
             "after a clean rebase, main must be an ancestor of the task branch HEAD"
+        );
+    }
+
+    // ── Oversized-blob push rejection → Planner escalation ────────────────────
+
+    /// The classifier must fire on the verbatim error GitHub's pre-receive hook
+    /// emits when a >100 MB blob is in the pushed history, as it reaches the
+    /// coordinator (wrapped by `push_task_branch_to_github` into the
+    /// `"push task_branch to GitHub failed: {e}"` reason, stderr included). This
+    /// is the exact failure that previously looped a `pr_errors` banner forever.
+    #[test]
+    fn oversized_blob_push_rejection_is_classified() {
+        let reason = "push task_branch to GitHub failed: git command failed (exit 1) in \
+            /tmp/.tmp86MbxD: git push --force ... stdout: stderr: \
+            remote: error: File .local/share/pnpm/store/v11/files/ed/63a1c1... is 112.45 MB; \
+            this exceeds GitHub's file size limit of 100.00 MB \
+            remote: error: GH001: Large files detected. \
+            ! [remote rejected] task/aqmk -> task/aqmk (pre-receive hook declined)";
+        assert!(
+            is_oversized_blob_push_rejection(reason),
+            "the real GH001 oversized-blob rejection must be classified for escalation"
+        );
+    }
+
+    /// Negative: ordinary transient push/transition failures must NOT be
+    /// classified as oversized-blob rejections — those still take the existing
+    /// retry-next-tick path, not a (history-rewriting) Planner escalation.
+    #[test]
+    fn transient_push_failures_are_not_oversized_blob_rejections() {
+        for reason in [
+            "push task_branch to GitHub failed: git command failed (exit 1): \
+             fatal: unable to access 'https://github.com/...': Could not resolve host",
+            "push task_branch to GitHub failed: ! [rejected] (non-fast-forward)",
+            "pr_open transition failed: InvalidTransition",
+        ] {
+            assert!(
+                !is_oversized_blob_push_rejection(reason),
+                "transient failure must not be misclassified as an oversized-blob rejection: {reason}"
+            );
+        }
+    }
+
+    /// Idempotency lock: after escalating, the coordinator `ForceClose`s the
+    /// source task so it leaves the `approved` status that `process_approved_tasks`
+    /// re-queries every tick. If `ForceClose` ever stopped being legal from
+    /// `approved` (→ Closed), the task would stay approved and the escalation
+    /// would fire — spawning a duplicate Planner review task — every tick.
+    #[test]
+    fn force_close_moves_approved_task_out_of_queried_state() {
+        let apply = compute_transition(&TransitionAction::ForceClose, &TaskStatus::Approved, None)
+            .expect("ForceClose must be legal from approved");
+        assert_eq!(
+            apply.to_status,
+            Some(TaskStatus::Closed),
+            "ForceClose must move the push-rejected approved task out of `approved` so the \
+             per-tick escalation fires exactly once"
         );
     }
 }
