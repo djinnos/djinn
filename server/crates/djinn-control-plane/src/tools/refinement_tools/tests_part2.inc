@@ -825,3 +825,424 @@
             .unwrap();
         assert_eq!(resp2.get("rejected").and_then(|v| v.as_bool()), Some(true));
     }
+
+    // ── Human authority: demand round tool ──────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_tool_accepts_and_records_action() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Demand Round Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_demand_round",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "Need another round after judge feedback",
+                    "update_authority": "checkpoint",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        assert_eq!(
+            resp.get("accepted").and_then(|v| v.as_bool()),
+            Some(true),
+            "demand should be accepted"
+        );
+        assert_eq!(
+            resp.get("proposal_id").and_then(|v| v.as_str()),
+            Some(proposal.id.as_str()),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_tool_rejects_non_draft_proposal() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Building Proposal",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("building"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_demand_round",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "test",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(resp.get("error").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            resp.get("accepted").and_then(|v| v.as_bool()),
+            Some(false),
+        );
+    }
+
+    // ── Human authority: verdict override tool ──────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verdict_override_records_and_scopes_to_revision() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Override Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_verdict_override",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "PM reviewed and approves despite judge concerns",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        assert_eq!(
+            resp.get("overridden").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        // Override should be scoped to the current revision.
+        let override_seq = resp
+            .get("override_on_revision_seq")
+            .and_then(|v| v.as_i64())
+            .expect("should have override_on_revision_seq");
+        assert_eq!(override_seq, 1, "should be scoped to revision 1");
+
+        // Verify the lifecycle event was recorded in revisions.
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let override_event = revisions
+            .iter()
+            .find(|r| r.event_kind == "verdict_override");
+        assert!(
+            override_event.is_some(),
+            "verdict_override lifecycle event should exist in revisions"
+        );
+        let meta = override_event.unwrap();
+        let meta_json: serde_json::Value =
+            serde_json::from_str(meta.event_metadata.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(
+            meta_json
+                .get("override_reason")
+                .and_then(|v| v.as_str()),
+            Some("PM reviewed and approves despite judge concerns")
+        );
+        assert_eq!(
+            meta_json
+                .get("override_on_revision_seq")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verdict_override_rejects_empty_reason() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "No Reason Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_verdict_override",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(resp.get("error").and_then(|v| v.as_str()).is_some());
+        assert_eq!(
+            resp.get("overridden").and_then(|v| v.as_bool()),
+            Some(false),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verdict_override_stale_after_revision_advance() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Staleness Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Override at revision 1.
+        let resp1 = server
+            .dispatch_tool(
+                "proposal_verdict_override",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "PM override at rev 1",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp1.get("overridden").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        let override_seq_1 = resp1
+            .get("override_on_revision_seq")
+            .and_then(|v| v.as_i64())
+            .unwrap();
+        assert_eq!(override_seq_1, 1);
+
+        // Edit the proposal to advance the revision.
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Staleness Test",
+                body: "updated body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify the proposal now has latest_revision_seq > override_seq.
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            updated.latest_revision_seq > override_seq_1 as i32,
+            "proposal revision should have advanced: {} > {}",
+            updated.latest_revision_seq,
+            override_seq_1
+        );
+
+        // The override at seq 1 is now stale — the latest_verdict_override
+        // query still returns it, but gate composition (task cuzf) should
+        // compare it to latest_revision_seq and reject it.
+        let (override_seq, _meta) = repo
+            .latest_verdict_override(&proposal.id)
+            .await
+            .unwrap()
+            .expect("override should exist");
+        assert!(
+            override_seq < updated.latest_revision_seq,
+            "override at seq {} is stale when proposal is at seq {}",
+            override_seq,
+            updated.latest_revision_seq
+        );
+    }
+
+    // ── Human authority: blocking objection via debate trail ────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn human_blocking_objection_via_debate_append() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Human Objection Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Human adds a blocking objection via proposal_debate_append.
+        let resp = server
+            .dispatch_tool(
+                "proposal_debate_append",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "kind": "objection",
+                    "body": "Security review required before approval",
+                    "blocking": true,
+                    "agent_role": "human",
+                    "author_kind": "user",
+                    "against_revision_seq": 1,
+                    "round": 1,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.get("error").and_then(|v| v.as_str()).is_none(),
+            "expected no error, got: {:?}",
+            resp.get("error")
+        );
+        let entry = resp.get("entry").expect("response should have entry");
+        assert_eq!(
+            entry.get("kind").and_then(|v| v.as_str()),
+            Some("objection")
+        );
+        assert_eq!(
+            entry.get("blocking").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            entry.get("author_kind").and_then(|v| v.as_str()),
+            Some("user")
+        );
+        assert_eq!(
+            entry.get("agent_role").and_then(|v| v.as_str()),
+            Some("human")
+        );
+        assert!(entry.get("created_at").and_then(|v| v.as_str()).is_some());
+        assert!(entry.get("id").and_then(|v| v.as_str()).is_some());
+
+        // Verify it shows up in proposal_show debate_trail.
+        let show = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        let debate = show
+            .get("debate_trail")
+            .and_then(|v| v.as_array())
+            .expect("should have debate_trail");
+        assert_eq!(debate.len(), 1);
+        assert_eq!(
+            debate[0].get("blocking").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            debate[0].get("author_kind").and_then(|v| v.as_str()),
+            Some("user")
+        );
+    }
+
+    // ── Human authority: reopen preserves audit metadata ────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_preserves_audit_metadata_in_tool_response() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Reopen Audit Test",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Create a debate entry.
+        let create_resp = server
+            .dispatch_tool(
+                "proposal_debate_append",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "kind": "objection",
+                    "body": "Needs more detail",
+                    "blocking": true,
+                    "agent_role": "human",
+                    "author_kind": "user",
+                    "against_revision_seq": 1,
+                    "round": 1,
+                }),
+            )
+            .await
+            .unwrap();
+        let entry_id = create_resp
+            .get("entry")
+            .and_then(|e| e.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // Resolve it.
+        server
+            .dispatch_tool(
+                "proposal_debate_resolve",
+                serde_json::json!({ "id": entry_id }),
+            )
+            .await
+            .unwrap();
+
+        // Reopen it with explicit user attribution for audit trail.
+        let reopen_resp = server
+            .dispatch_tool(
+                "proposal_debate_reopen",
+                serde_json::json!({ "id": entry_id, "user_id": "test-user-reopener" }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            reopen_resp.get("error").and_then(|v| v.as_str()).is_none(),
+        );
+        let reopened = reopen_resp.get("entry").expect("should have entry");
+        // Both resolved_at and reopened_at should be present.
+        assert!(
+            reopened.get("resolved_at").and_then(|v| v.as_str()).is_some(),
+            "resolved_at should persist after reopen"
+        );
+        assert!(
+            reopened.get("reopened_at").and_then(|v| v.as_str()).is_some(),
+            "reopened_at should be set"
+        );
+        assert!(
+            reopened
+                .get("reopened_by_user_id")
+                .is_some(),
+            "reopened_by_user_id should be set"
+        );
+        // The entry should still carry the original blocking and kind.
+        assert_eq!(
+            reopened.get("kind").and_then(|v| v.as_str()),
+            Some("objection")
+        );
+        assert_eq!(
+            reopened.get("blocking").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }

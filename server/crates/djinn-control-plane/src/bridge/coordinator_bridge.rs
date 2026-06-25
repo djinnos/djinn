@@ -38,4 +38,13 @@ pub trait CoordinatorOps: Send + Sync {
         &self,
         request: ProposalRefinementStartRequest,
     ) -> Result<(), String>;
+    /// Demand another tribunal round for a proposal whose refinement has
+    /// stopped (e.g. after a judge verdict or round-cap). The coordinator
+    /// clears the stop state and re-enqueues the refinement loop for
+    /// another Advocate→Adversary→Judge cycle. Returns an error if
+    /// refinement is still active (already running).
+    async fn demand_proposal_refinement_round(
+        &self,
+        request: ProposalRefinementStartRequest,
+    ) -> Result<(), String>;
 }

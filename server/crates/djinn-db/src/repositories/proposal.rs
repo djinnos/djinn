@@ -711,8 +711,22 @@ impl ProposalRepository {
     /// Reopen a previously resolved debate-trail entry. Stamps the reopening
     /// user via `current_user_id()`. No-op (idempotent) if already open.
     pub async fn reopen_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.reopen_debate_trail_entry_with_user(entry_id, None)
+            .await
+    }
+
+    /// Reopen a previously resolved debate-trail entry with an explicit user
+    /// attribution. When `user_id` is `None`, falls back to
+    /// `current_user_id()`. No-op (idempotent) if already open.
+    pub async fn reopen_debate_trail_entry_with_user(
+        &self,
+        entry_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<ProposalDebateTrail> {
         self.db.ensure_initialized().await?;
-        let reopened_by = djinn_core::auth_context::current_user_id();
+        let reopened_by = user_id
+            .map(|s| Some(s.to_string()))
+            .unwrap_or_else(djinn_core::auth_context::current_user_id);
         sqlx::query!(
             r#"UPDATE proposal_debate_trail SET
                     reopened_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -890,6 +904,42 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         Ok(())
+    }
+
+    /// Find the latest verdict override for a proposal. Returns
+    /// `Some((override_on_revision_seq, override_metadata_json))` when an
+    /// active override exists, or `None` when no override has been recorded.
+    ///
+    /// Gate composition (task cuzf) uses this to check whether a human
+    /// override supersedes a judge `needs-work` verdict: the override is
+    /// active when its `override_on_revision_seq` equals the proposal's
+    /// current `latest_revision_seq`.
+    pub async fn latest_verdict_override(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<(i32, String)>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            r#"SELECT event_metadata::text FROM proposal_revisions
+               WHERE proposal_id = $1
+                 AND event_kind = 'verdict_override'
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        if let Some(Some(meta_str)) = row {
+            // Extract override_on_revision_seq from the JSON.
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str)
+                && let Some(seq) = meta
+                    .get("override_on_revision_seq")
+                    .and_then(|v| v.as_i64())
+            {
+                return Ok(Some((seq as i32, meta_str)));
+            }
+        }
+        Ok(None)
     }
 
     /// Patch the `event_metadata` column on the latest `spec_revision` row for
