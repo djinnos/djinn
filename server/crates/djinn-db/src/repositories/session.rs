@@ -361,7 +361,7 @@ impl SessionRepository {
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
                 status, tokens_in, tokens_out,
                 cache_read_tokens, cache_write_tokens, task_run_id, title,
-                parked_reason AS "parked_reason?",
+                parked_reason,
                 cost_usd, input_price_per_million_snapshot,
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
@@ -1143,10 +1143,10 @@ impl SessionRepository {
         Ok(sqlx::query_as::<_, OrphanSessionCandidate>(
             r#"SELECT
                      s.id          AS "session_id",
-                     s.task_id     AS "task_id?",
-                     s.started_at  AS "started_at!",
-                     t.status      AS "task_status?",
-                     t.closed_at   AS "task_closed_at?"
+                     s.task_id,
+                     s.started_at,
+                     t.status      AS "task_status",
+                     t.closed_at   AS "task_closed_at"
                    FROM sessions s
                    LEFT JOIN tasks t ON t.id = s.task_id
                    WHERE s.status = 'running'
