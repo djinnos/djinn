@@ -14124,7 +14124,7 @@ expression: signatures
               "type": "integer"
             },
             "update_authority": {
-              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
               "type": "string"
             }
           },
@@ -14276,7 +14276,7 @@ expression: signatures
               "type": "integer"
             },
             "update_authority": {
-              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
               "type": "string"
             }
           },
@@ -14415,7 +14415,7 @@ expression: signatures
               "type": "integer"
             },
             "update_authority": {
-              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
               "type": "string"
             }
           },
@@ -15090,7 +15090,7 @@ expression: signatures
               "type": "integer"
             },
             "update_authority": {
-              "description": "Update authority mode: `checkpoint` (advocate revisions are proposed\nbut not auto-applied) or `auto_accept` (revisions are applied as\nproposal updates).",
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
               "type": "string"
             }
           },
