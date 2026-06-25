@@ -354,6 +354,10 @@ pub struct ProposalShowResponse {
     /// `None` when refinement has not been started for this proposal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refinement: Option<ProposalRefinementStatusModel>,
+    /// Composed gate status: deterministic DoR + tribunal conditions.
+    /// Always present on a successful `proposal_show` response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_status: Option<ProposalGateStatusModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -646,6 +650,54 @@ impl CheckpointRevisionModel {
             created_at: rev.created_at.clone(),
         }
     }
+}
+
+// ── Gate status models (task g11d) ────────────────────────────────────────
+
+/// Composed gate status for a proposal: deterministic DoR + tribunal
+/// conditions. Returned by `proposal_show` so the UI can render readiness
+/// without recomputing it client-side.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalGateStatusModel {
+    /// Whether the composed gate passes (DoR ready + tribunal conditions met).
+    pub ready: bool,
+    /// Whether the deterministic DoR checks pass.
+    pub dor_ready: bool,
+    /// Specific DoR failures (empty when `dor_ready` is true).
+    pub dor_failures: Vec<GateFailureModel>,
+    /// Latest judge verdict body text, when a judge has issued a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_verdict_body: Option<String>,
+    /// Latest judge verdict entry id, when a judge has issued a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_verdict_id: Option<String>,
+    /// Whether the latest judge verdict contains "needs-work".
+    pub judge_needs_work: bool,
+    /// Consecutive adversary dry rounds at the end of the trail.
+    pub adversary_dry_count: i32,
+    /// Count of unresolved blocking debate-trail entries.
+    pub unresolved_blocking_count: i32,
+    /// IDs of unresolved blocking debate-trail entries.
+    pub unresolved_blocking_ids: Vec<String>,
+    /// Needs-evidence spike parking state. `None` when not parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence: Option<NeedsEvidenceStatus>,
+    /// Whether there are pending checkpoint revisions awaiting decision.
+    pub pending_checkpoint: bool,
+    /// Whether a current human override exists for this revision.
+    pub human_override_active: bool,
+    /// Human-readable explanations of all gate failures, each naming the
+    /// exact blocking condition. Empty when `ready` is true.
+    pub blocked_explanations: Vec<String>,
+}
+
+/// One DoR failure in the gate status.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct GateFailureModel {
+    /// Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`).
+    pub check: String,
+    /// Human-readable failure message.
+    pub message: String,
 }
 
 /// Response for `proposal_refinement_checkpoint_list`.

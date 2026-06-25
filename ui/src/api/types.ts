@@ -120,3 +120,61 @@ export interface CheckpointRevision {
   /** When the revision was created. */
   created_at: string;
 }
+
+/**
+ * One DoR failure in the gate status.
+ */
+export interface GateFailure {
+  /** Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`). */
+  check: string;
+  /** Human-readable failure message. */
+  message: string;
+}
+
+/**
+ * Needs-evidence parking state for a proposal.
+ */
+export interface NeedsEvidenceStatus {
+  /** The named feasibility claim that the Judge identified. */
+  claim: string;
+  /** The spike task id (UUID). */
+  spike_task_id: string;
+  /** The spike task short id (human-readable). */
+  spike_short_id: string;
+  /** Current status of the spike task. */
+  spike_status: string;
+}
+
+/**
+ * Composed gate status for a proposal: deterministic DoR + tribunal
+ * conditions. Returned by `proposal_show` so the UI can render readiness
+ * without recomputing it client-side.
+ */
+export interface ProposalGateStatus {
+  /** Whether the composed gate passes (DoR ready + tribunal conditions met). */
+  ready: boolean;
+  /** Whether the deterministic DoR checks pass. */
+  dor_ready: boolean;
+  /** Specific DoR failures (empty when dor_ready is true). */
+  dor_failures: GateFailure[];
+  /** Latest judge verdict body text, when a judge has issued a verdict. */
+  judge_verdict_body?: string | null;
+  /** Latest judge verdict entry id, when a judge has issued a verdict. */
+  judge_verdict_id?: string | null;
+  /** Whether the latest judge verdict contains "needs-work". */
+  judge_needs_work: boolean;
+  /** Consecutive adversary dry rounds at the end of the trail. */
+  adversary_dry_count: number;
+  /** Count of unresolved blocking debate-trail entries. */
+  unresolved_blocking_count: number;
+  /** IDs of unresolved blocking debate-trail entries. */
+  unresolved_blocking_ids: string[];
+  /** Needs-evidence spike parking state. null when not parked. */
+  needs_evidence?: NeedsEvidenceStatus | null;
+  /** Whether there are pending checkpoint revisions awaiting decision. */
+  pending_checkpoint: boolean;
+  /** Whether a current human override exists for this revision. */
+  human_override_active: boolean;
+  /** Human-readable explanations of all gate failures. Empty when ready is true. */
+  blocked_explanations: string[];
+}

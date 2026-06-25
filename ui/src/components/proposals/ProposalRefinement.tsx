@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { showToast } from "@/lib/toast";
+import { DiffView } from "@/components/proposals/DiffView";
 import type { CheckpointRevision, ProposalRefinementStatus } from "@/api/types";
 
 /**
@@ -77,6 +78,7 @@ export function ProposalRefinement({
     CheckpointRevision[]
   >([]);
   const [actionBusy, setActionBusy] = useState<number | null>(null);
+  const [diffOpen, setDiffOpen] = useState<number | null>(null);
 
   // Fetch pending checkpoint revisions when in checkpoint mode.
   const fetchPending = useCallback(async () => {
@@ -259,6 +261,16 @@ export function ProposalRefinement({
                       <div className="flex items-center gap-1">
                         <Button
                           size="sm"
+                          variant="ghost"
+                          className="h-6 text-xs"
+                          onClick={() =>
+                            setDiffOpen(diffOpen === rev.seq ? null : rev.seq)
+                          }
+                        >
+                          {diffOpen === rev.seq ? "Hide diff" : "Diff"}
+                        </Button>
+                        <Button
+                          size="sm"
                           variant="default"
                           className="h-6 text-xs"
                           disabled={actionBusy === rev.seq}
@@ -288,6 +300,15 @@ export function ProposalRefinement({
                       <p className="line-clamp-2 text-xs text-muted-foreground">
                         {rev.body_preview}
                       </p>
+                    )}
+                    {diffOpen === rev.seq && rev.body_preview && (
+                      <div className="mt-1">
+                        <DiffView before="" after={rev.body_preview} />
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                          Preview of proposed revision — full diff available
+                          after approval.
+                        </p>
+                      </div>
                     )}
                   </div>
                 );

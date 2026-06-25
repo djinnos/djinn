@@ -507,4 +507,43 @@ describe("ProposalRefinement", () => {
     expect(screen.queryByText("objection")).not.toBeInTheDocument();
     expect(screen.queryByText("verdict")).not.toBeInTheDocument();
   });
+
+  // ── Diff button in checkpoint revisions ────────────────────────────────
+
+  it("renders Diff button for pending checkpoint revisions when loaded", async () => {
+    const pendingRev = {
+      seq: 3,
+      role: "advocate",
+      round: 2,
+      author_model: "gpt-4o",
+      body_preview: "Updated body text",
+      title: "Advocate R2 revision",
+      created_at: "2026-06-22T10:00:00Z",
+    };
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      pending: [pendingRev],
+    } as never);
+
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      pending_checkpoint_count: 1,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    // Wait for the pending revisions to load.
+    expect(await screen.findByText("Advocate R2 revision")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Diff/i })).toBeInTheDocument();
+  });
 });
