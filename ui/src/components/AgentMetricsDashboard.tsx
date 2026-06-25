@@ -150,7 +150,14 @@ function ChartSection({
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export function AgentMetricsDashboard({ projectId }: { projectId: string | null }) {
+export function AgentMetricsDashboard({
+  projectId,
+  projectContextText,
+}: {
+  projectId: string | null;
+  /** Optional context copy describing project scope; shown in the no-project state. */
+  projectContextText?: string;
+}) {
   const [metrics, setMetrics] = useState<AgentMetrics[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -313,7 +320,7 @@ export function AgentMetricsDashboard({ projectId }: { projectId: string | null 
       {/* States */}
       {!projectId && (
         <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
-          Select a project to view metrics.
+          {projectContextText ?? 'Select a project to view metrics.'}
         </div>
       )}
       {error && <InlineError message={error} onRetry={() => void load()} />}
