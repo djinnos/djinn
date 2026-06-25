@@ -14590,6 +14590,24 @@ expression: signatures
           ],
           "type": "object"
         },
+        "GateFailureModel": {
+          "description": "One DoR failure in the gate status.",
+          "properties": {
+            "check": {
+              "description": "Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`).",
+              "type": "string"
+            },
+            "message": {
+              "description": "Human-readable failure message.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check",
+            "message"
+          ],
+          "type": "object"
+        },
         "NeedsEvidenceStatus": {
           "description": "Needs-evidence parking state for a proposal.",
           "properties": {
@@ -14807,6 +14825,97 @@ expression: signatures
             "body",
             "created_at",
             "updated_at"
+          ],
+          "type": "object"
+        },
+        "ProposalGateStatusModel": {
+          "description": "Composed gate status for a proposal: deterministic DoR + tribunal\nconditions. Returned by `proposal_show` so the UI can render readiness\nwithout recomputing it client-side.",
+          "properties": {
+            "adversary_dry_count": {
+              "description": "Consecutive adversary dry rounds at the end of the trail.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "blocked_explanations": {
+              "description": "Human-readable explanations of all gate failures, each naming the\nexact blocking condition. Empty when `ready` is true.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dor_failures": {
+              "description": "Specific DoR failures (empty when `dor_ready` is true).",
+              "items": {
+                "$ref": "#/$defs/GateFailureModel"
+              },
+              "type": "array"
+            },
+            "dor_ready": {
+              "description": "Whether the deterministic DoR checks pass.",
+              "type": "boolean"
+            },
+            "human_override_active": {
+              "description": "Whether a current human override exists for this revision.",
+              "type": "boolean"
+            },
+            "judge_needs_work": {
+              "description": "Whether the latest judge verdict contains \"needs-work\".",
+              "type": "boolean"
+            },
+            "judge_verdict_body": {
+              "description": "Latest judge verdict body text, when a judge has issued a verdict.",
+              "nullable": true,
+              "type": "string"
+            },
+            "judge_verdict_id": {
+              "description": "Latest judge verdict entry id, when a judge has issued a verdict.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Needs-evidence spike parking state. `None` when not parked."
+            },
+            "pending_checkpoint": {
+              "description": "Whether there are pending checkpoint revisions awaiting decision.",
+              "type": "boolean"
+            },
+            "ready": {
+              "description": "Whether the composed gate passes (DoR ready + tribunal conditions met).",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking debate-trail entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "unresolved_blocking_ids": {
+              "description": "IDs of unresolved blocking debate-trail entries.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "ready",
+            "dor_ready",
+            "dor_failures",
+            "judge_needs_work",
+            "adversary_dry_count",
+            "unresolved_blocking_count",
+            "unresolved_blocking_ids",
+            "pending_checkpoint",
+            "human_override_active",
+            "blocked_explanations"
           ],
           "type": "object"
         },
@@ -15148,6 +15257,18 @@ expression: signatures
           },
           "nullable": true,
           "type": "array"
+        },
+        "gate_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalGateStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Composed gate status: deterministic DoR + tribunal conditions.\nAlways present on a successful `proposal_show` response."
         },
         "memory_refs": {
           "description": "Memory notes linked to this proposal's graduated epics/tasks.",
