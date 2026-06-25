@@ -81,7 +81,7 @@ async fn seed_task(
     .expect("insert task");
 }
 
-/// Seed a worker session linked to a task with a given cost (or NULL).
+/// Seed a worker session linked to a task with a given cost (or NULL) and cost basis.
 #[allow(clippy::too_many_arguments)]
 async fn seed_worker_session(
     db: &Database,
@@ -93,14 +93,15 @@ async fn seed_worker_session(
     tokens_in: i64,
     tokens_out: i64,
     started_at: &str,
+    cost_basis: &str,
 ) {
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, 'worker', 'completed', \
-                 $5, $6, $7, 0, 0, $8)",
+                 $5, $6, $7, 0, 0, $8, $9)",
     )
     .bind(session_id)
     .bind(project_id)
@@ -110,6 +111,7 @@ async fn seed_worker_session(
     .bind(tokens_in)
     .bind(tokens_out)
     .bind(cost_usd)
+    .bind(cost_basis)
     .execute(db.pool())
     .await
     .expect("insert worker session");
@@ -148,8 +150,8 @@ async fn seed_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'actual')",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -189,8 +191,8 @@ async fn seed_unpriced_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'unpriced')",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -233,8 +235,8 @@ async fn usage_totals_decodes_i64_from_sum() {
     assert_eq!(totals.tokens_out, 5678);
     assert_eq!(totals.cache_read_tokens, 100);
     assert_eq!(totals.cache_write_tokens, 200);
-    // total_cost_usd should be Some(0.042) — the only session is priced.
-    let cost = totals.total_cost_usd.expect("cost should be Some");
+    // actual_spend_usd should be Some(0.042) — the only session is priced.
+    let cost = totals.actual_spend_usd.expect("cost should be Some");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
     assert_eq!(totals.unpriced_session_count, 0);
 
@@ -280,7 +282,7 @@ async fn usage_totals_reports_priced_subtotal_and_unpriced_count() {
     // Spend is the priced subtotal (only the 0.042 session is priced); the
     // unpriced session is excluded from the sum but counted.
     let cost = totals
-        .total_cost_usd
+        .actual_spend_usd
         .expect("priced subtotal should be Some when at least one session is priced");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
     assert_eq!(
@@ -311,9 +313,9 @@ async fn usage_totals_all_unpriced_yields_none_subtotal() {
 
     assert_eq!(totals.session_count, 1);
     assert!(
-        totals.total_cost_usd.is_none(),
+        totals.actual_spend_usd.is_none(),
         "expected NULL subtotal when no session is priced, got {:?}",
-        totals.total_cost_usd,
+        totals.actual_spend_usd,
     );
     assert_eq!(totals.unpriced_session_count, 1);
 }
@@ -384,6 +386,7 @@ async fn effectiveness_shared_credit_attribution() {
         100,
         200,
         "2025-06-10T10:00:00.000Z",
+        "actual",
     )
     .await;
     seed_worker_session(
@@ -396,6 +399,7 @@ async fn effectiveness_shared_credit_attribution() {
         150,
         250,
         "2025-06-11T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -410,6 +414,7 @@ async fn effectiveness_shared_credit_attribution() {
         200,
         300,
         "2025-06-10T11:00:00.000Z",
+        "actual",
     )
     .await;
     seed_worker_session(
@@ -422,6 +427,7 @@ async fn effectiveness_shared_credit_attribution() {
         80,
         120,
         "2025-06-12T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -446,7 +452,7 @@ async fn effectiveness_shared_credit_attribution() {
         "model-a success_rate should be 1.0, got {sr_a}"
     );
     // Spend = 0.05 + 0.03
-    let spend_a = a.spend_usd.expect("model-a spend should be Some");
+    let spend_a = a.actual_spend_usd.expect("model-a spend should be Some");
     assert!(
         (spend_a - 0.08_f64).abs() < 1e-9,
         "model-a spend mismatch: {spend_a}"
@@ -467,7 +473,7 @@ async fn effectiveness_shared_credit_attribution() {
         "model-b success_rate should be 0.5, got {sr_b}"
     );
     // Spend = 0.08 + 0.01
-    let spend_b = b.spend_usd.expect("model-b spend should be Some");
+    let spend_b = b.actual_spend_usd.expect("model-b spend should be Some");
     assert!(
         (spend_b - 0.09_f64).abs() < 1e-9,
         "model-b spend mismatch: {spend_b}"
@@ -500,6 +506,7 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
             100 * (i as i64 + 1),
             200 * (i as i64 + 1),
             &format!("2025-06-1{:?}T10:00:00.000Z", i),
+            "actual",
         )
         .await;
     }
@@ -539,14 +546,14 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
         "avg_reopens should be 2.0, got {avg}"
     );
 
-    // cost_per_completed_task = total_spend / 1 task.
+    // actual_cost_per_completed_task = total_spend / 1 task.
     let total_spend = 0.01 + 0.02 + 0.03; // 0.06
     let cpt = x
-        .cost_per_completed_task
-        .expect("cost_per_completed_task should be Some");
+        .actual_cost_per_completed_task
+        .expect("actual_cost_per_completed_task should be Some");
     assert!(
         (cpt - total_spend).abs() < 1e-9,
-        "cost_per_completed_task should be {total_spend}, got {cpt}"
+        "actual_cost_per_completed_task should be {total_spend}, got {cpt}"
     );
 }
 
@@ -574,6 +581,7 @@ async fn effectiveness_null_cost_spend_remains_none() {
         100,
         200,
         "2025-06-15T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -588,6 +596,7 @@ async fn effectiveness_null_cost_spend_remains_none() {
         500,
         600,
         "2025-06-15T11:00:00.000Z",
+        "unpriced",
     )
     .await;
 
@@ -599,7 +608,9 @@ async fn effectiveness_null_cost_spend_remains_none() {
 
     // ── model-priced: spend_usd = Some(0.05) ──
     let priced = find_model(&effectiveness, "model-priced");
-    let spend_priced = priced.spend_usd.expect("priced model spend should be Some");
+    let spend_priced = priced
+        .actual_spend_usd
+        .expect("priced model spend should be Some");
     assert!(
         (spend_priced - 0.05_f64).abs() < 1e-9,
         "priced spend mismatch: {spend_priced}"
@@ -610,9 +621,9 @@ async fn effectiveness_null_cost_spend_remains_none() {
     // ── model-unpriced: spend_usd must be None (not 0.0) ──
     let unpriced = find_model(&effectiveness, "model-unpriced");
     assert!(
-        unpriced.spend_usd.is_none(),
+        unpriced.actual_spend_usd.is_none(),
         "model-unpriced spend_usd must be None (NULL cost), got {:?}",
-        unpriced.spend_usd,
+        unpriced.actual_spend_usd,
     );
     // Tokens are still counted despite NULL cost.
     assert_eq!(unpriced.tokens_in, 500, "tokens_in should be counted");
