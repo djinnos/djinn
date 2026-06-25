@@ -85,6 +85,12 @@ pub use session_extraction::{
     run_structural_extraction,
 };
 
+// ─── Supervisor runner re-export ────────────────────────────────────────────
+// hfhw cutover: expose `run_supervisor_dispatch` so the host (djinn-agent)
+// can call through the djinn-slot pathway from `actor.rs`.
+
+pub use supervisor_runner::run_supervisor_dispatch;
+
 // ─── SlotEvent ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

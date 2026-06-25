@@ -34,17 +34,19 @@ mod actor;
 mod commands;
 pub(crate) mod finalize_handlers;
 pub mod helpers;
+// hfhw cutover: host callback implementation for the djinn-slot dispatch pathway.
+// `AgentDispatchCallbacks` implements `SlotHostCallbacks::run_task_dispatch`
+// by delegating to `supervisor_runner::dispatch_task_runtime`.
+pub(crate) mod host_callbacks;
 // Task #8: `lifecycle` is now a thin module owning only the per-stage helpers
 // (setup / model / mcp / prompt-context / teardown / retry) reused by the
 // supervisor's `execute_stage`.  The legacy `run_task_lifecycle` entry point
 // and worktree orchestration have been deleted.
 //
-// NOTE: the lifecycle helpers (`build_prompt_context`, etc.) remain in
-// `djinn-agent` because `supervisor_impl::stage::execute_stage` calls them
-// with `AgentContext`.  They are NOT duplicated production implementations —
-// the djinn-slot equivalents are thin host-callback delegates.  These agent-
-// side helpers will become unreachable once `SlotHostCallbacks` is implemented
-// on the agent and `execute_stage` is ported to use `SlotContext`.
+// hfhw cutover: the lifecycle helper `build_prompt_context` is now a thin
+// adapter that delegates to `assemble_prompt_context`.  The actual prompt
+// assembly logic remains in `djinn-agent` because `stage::execute_stage`
+// calls it with `AgentContext` through the host callback dispatch path.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
 mod pool;
@@ -55,10 +57,11 @@ mod reply_loop_tests;
 // `AgentContext` → `SlotContext` and delegates to `djinn_slot::run_extraction_backfill`.
 // The full structural extraction implementation now lives in `djinn-slot`.
 pub(crate) mod session_extraction;
-// NOTE: `supervisor_runner` remains in `djinn-agent` because the slot actor
-// spawns it with `AgentContext`.  The djinn-slot equivalent delegates to
-// `SlotHostCallbacks::run_task_dispatch`.  This will become unreachable once
-// the agent-side pool/actor are ported to use `SlotContext`.
+// hfhw cutover: `supervisor_runner` contains the host-side dispatch logic
+// (`dispatch_task_runtime`) called through `host_callbacks::AgentDispatchCallbacks`.
+// The old `run_supervisor_dispatch` is an `unreachable!()` stub — the slot
+// actor now dispatches through `djinn_slot::run_supervisor_dispatch` →
+// `SlotHostCallbacks::run_task_dispatch`.
 mod supervisor_runner;
 
 pub use actor::*;

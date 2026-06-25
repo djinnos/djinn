@@ -8,7 +8,6 @@ use tracing::Instrument;
 
 use crate::context::AgentContext;
 
-use super::supervisor_runner::run_supervisor_dispatch;
 use super::{SlotCommand, SlotError, SlotEvent};
 
 type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
@@ -227,20 +226,26 @@ impl SlotHandle {
         // NewTask, or the flow-specific sequence for Spike / Planning /
         // ReviewResponse / ConflictRetry).
         //
-        // The legacy `run_task_lifecycle` path is kept behind
-        // `#[allow(dead_code)]` for rollback and test coverage; see
-        // `lifecycle_tests.rs` which exercises it directly.  Task #8 will
-        // delete the worktree/lifecycle code entirely after soak.
+        // hfhw cutover: dispatch now goes through the djinn-slot pathway.
+        // `djinn_slot::run_supervisor_dispatch` delegates to
+        // `SlotHostCallbacks::run_task_dispatch`, which is implemented by
+        // `host_callbacks::AgentDispatchCallbacks` and calls
+        // `supervisor_runner::dispatch_task_runtime`.
         let runner: LifecycleRunner =
             Arc::new(|task_id, project_path, model_id, app_state, kill, pause| {
-                Box::pin(run_supervisor_dispatch(
-                    task_id,
-                    project_path,
-                    model_id,
-                    app_state,
-                    kill,
-                    pause,
-                ))
+                Box::pin(async move {
+                    let slot_ctx =
+                        super::host_callbacks::agent_to_dispatch_slot_context(&app_state);
+                    djinn_slot::supervisor_runner::run_supervisor_dispatch(
+                        task_id,
+                        project_path,
+                        model_id,
+                        slot_ctx,
+                        kill,
+                        pause,
+                    )
+                    .await
+                })
             });
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
