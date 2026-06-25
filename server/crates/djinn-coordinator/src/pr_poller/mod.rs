@@ -102,7 +102,7 @@ pub(crate) use pr_commands::{
     AutoMergeTickDecision, decide_auto_merge_tick, record_auto_merge_decision_metrics,
 };
 use pr_review_handlers::effective_review_decision;
-pub(crate) use pr_review_handlers::parse_pr_url;
+pub use pr_review_handlers::parse_pr_url;
 
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;

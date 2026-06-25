@@ -258,12 +258,15 @@ pub(crate) fn flow_for_task_dispatch(
 pub(crate) struct DispatchContext;
 
 pub(crate) struct DispatchRule {
+    #[allow(dead_code)]
     pub(crate) role_name: &'static str,
+    #[allow(dead_code)]
     pub(crate) claims: fn(&Task, &DispatchContext) -> bool,
 }
 
 pub struct RoleRegistry {
     pub(crate) roles: HashMap<&'static str, crate::AgentType>,
+    #[allow(dead_code)]
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
@@ -314,6 +317,7 @@ impl RoleRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn role_for_task(&self, task: &Task, ctx: &DispatchContext) -> Option<&'static str> {
         self.dispatch_rules
             .iter()
@@ -338,6 +342,7 @@ impl RoleRegistry {
     }
 
     /// Get the model-pool role (dispatch_role) for a task.
+    #[allow(dead_code)]
     pub(crate) fn dispatch_role_for_task(
         &self,
         task: &Task,

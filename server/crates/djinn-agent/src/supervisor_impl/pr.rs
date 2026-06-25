@@ -798,6 +798,7 @@ pub(crate) async fn handle_noop_disposition(
 /// no-op disposition ladder.  It deliberately delegates to
 /// [`handle_noop_disposition`] so nudges, `continuation_count`, release actions,
 /// and terminal no-op close semantics stay shared with the original fork.
+#[allow(dead_code)]
 pub(crate) async fn handle_settled_noop_without_live_mover(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
@@ -821,6 +822,7 @@ pub(crate) async fn handle_settled_noop_without_live_mover(
     Some(handle_noop_disposition(task, task_repo, merge_target).await)
 }
 
+#[allow(dead_code)]
 pub(super) fn should_route_settled_noop_without_live_mover(
     _task: &djinn_core::models::Task,
     evidence: &LiveMoverEvidence,

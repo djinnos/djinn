@@ -2,8 +2,8 @@ use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Request, StatusCode};
 use djinn_agent::actors::coordinator::{
-    BreakerDebugEntry, CoordinatorDeps, CoordinatorHandle, DebugDispatchState, DebugSlot,
-    DebugTotals, DispatchPauseView,
+    BreakerDebugEntry, CoordinatorDeps, DebugDispatchState, DebugSlot, DebugTotals,
+    DispatchPauseView, spawn_coordinator,
 };
 use djinn_agent::actors::slot::{SlotPoolConfig, SlotPoolHandle};
 use djinn_db::{CreateUserAuthSession, Database, SessionAuthRepository, UserRepository};
@@ -25,7 +25,7 @@ async fn app_state_with_agents(db: Database) -> AppState {
             role_priorities: std::collections::HashMap::new(),
         },
     );
-    let coordinator = CoordinatorHandle::spawn(CoordinatorDeps::new(
+    let coordinator = spawn_coordinator(CoordinatorDeps::new(
         state.events().clone(),
         state.cancel().clone(),
         state.db().clone(),
