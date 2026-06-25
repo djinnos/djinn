@@ -2181,6 +2181,86 @@ impl ProposalRepository {
             )
             .collect())
     }
+
+    // ── Composed gate helpers (task cuzf) ─────────────────────────────
+
+    /// List unresolved blocking debate-trail entries for a proposal.
+    ///
+    /// An entry is "unresolved" when `resolved_at IS NULL` OR
+    /// (`resolved_at IS NOT NULL AND reopened_at IS NOT NULL`).
+    /// Only `blocking = true` entries are returned.
+    pub async fn list_unresolved_blocking_debate_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalDebateTrail>(
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND blocking = true
+               AND (resolved_at IS NULL
+                    OR (resolved_at IS NOT NULL AND reopened_at IS NOT NULL))
+             ORDER BY round, created_at"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the latest judge verdict entry for a proposal.
+    ///
+    /// Looks for debate-trail entries with `kind = 'verdict'` and
+    /// `agent_role = 'judge'`, ordered newest-first.
+    pub async fn latest_judge_verdict(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalDebateTrail>(
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND kind = 'verdict'
+               AND agent_role = 'judge'
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Check whether a proposal is currently parked on an open
+    /// needs-evidence spike.
+    pub async fn has_open_needs_evidence_spike(&self, proposal_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM proposals
+             WHERE id = $1
+               AND linked_spike_task_id IS NOT NULL"#,
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(count > 0)
+    }
+
+    /// Check whether any pending checkpoint revisions exist.
+    pub async fn has_pending_checkpoint_revisions(&self, proposal_id: &str) -> Result<bool> {
+        let pending = self.pending_checkpoint_revisions(proposal_id).await?;
+        Ok(!pending.is_empty())
+    }
 }
 
 // ── Short ID helpers ─────────────────────────────────────────────────────────

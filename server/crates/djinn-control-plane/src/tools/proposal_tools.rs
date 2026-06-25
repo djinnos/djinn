@@ -634,6 +634,135 @@ fn format_readiness_error(
         .map(|details| format!("proposal not ready for review: {details}"))
 }
 
+// ── Composed gate: DoR + tribunal (task cuzf) ─────────────────────────────
+
+/// Result of the composed tribunal gate check.
+struct ComposedGateResult {
+    failures: Vec<String>,
+}
+
+impl ComposedGateResult {
+    fn to_error_string(&self) -> Option<String> {
+        if self.failures.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "proposal not ready for review: {}",
+            self.failures.join("; ")
+        ))
+    }
+}
+
+/// Run the composed gate: deterministic DoR check + tribunal conditions.
+///
+/// Returns `ComposedGateResult` with all failures collected. Callers
+/// (proposal_create, proposal_update, proposal_signoff, proposal_graduate)
+/// convert failures into tool error responses.
+async fn evaluate_composed_gate(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+    body: &str,
+    ac_json: &str,
+    target_count: usize,
+) -> ComposedGateResult {
+    let mut failures: Vec<String> = Vec::new();
+
+    // 1. Deterministic DoR check (existing evaluator, reused not duplicated).
+    let ac_items = parse_ac_items(ac_json);
+    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+    if let Some(err) = format_readiness_error(&readiness) {
+        failures.push(err);
+        // DoR failed — no point checking tribunal conditions since
+        // the gate is already blocked.
+        return ComposedGateResult { failures };
+    }
+
+    // 2. Tribunal conditions.
+    let proposal_id = &proposal.id;
+
+    // 2a. Unresolved blocking debate-trail entries.
+    match repo
+        .list_unresolved_blocking_debate_entries(proposal_id)
+        .await
+    {
+        Ok(entries) if !entries.is_empty() => {
+            let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+            failures.push(format!(
+                "unresolved blocking debate entries: {}",
+                ids.join(", ")
+            ));
+        }
+        Err(e) => {
+            failures.push(format!("failed to check debate trail: {e}"));
+        }
+        _ => {}
+    }
+
+    // 2b. Latest judge verdict.
+    match repo.latest_judge_verdict(proposal_id).await {
+        Ok(Some(verdict)) => {
+            let verdict_lower = verdict.body.to_lowercase();
+            // A "needs-work" verdict blocks unless overridden.
+            if verdict_lower.contains("needs-work")
+                || verdict_lower.contains("needs_work")
+                || verdict_lower.contains("needs work")
+            {
+                // Check for a current human override.
+                let override_is_current = match repo.latest_verdict_override(proposal_id).await {
+                    Ok(Some((override_on_seq, _))) => {
+                        override_on_seq == proposal.latest_revision_seq
+                    }
+                    _ => false,
+                };
+                if !override_is_current {
+                    failures.push(format!(
+                        "judge returned needs-work (verdict {}); no current human override",
+                        verdict.id
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            failures.push(format!("failed to check judge verdict: {e}"));
+        }
+        _ => {}
+    }
+
+    // 2c. Needs-evidence spike parking.
+    match repo.has_open_needs_evidence_spike(proposal_id).await {
+        Ok(true) => {
+            let claim = proposal
+                .needs_evidence_claim
+                .as_deref()
+                .unwrap_or("unspecified");
+            let spike_id = proposal
+                .linked_spike_task_id
+                .as_deref()
+                .unwrap_or("unknown");
+            failures.push(format!(
+                "proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
+            ));
+        }
+        Err(e) => {
+            failures.push(format!("failed to check needs-evidence spike: {e}"));
+        }
+        _ => {}
+    }
+
+    // 2d. Pending checkpoint revisions (stale/pending).
+    match repo.has_pending_checkpoint_revisions(proposal_id).await {
+        Ok(true) => {
+            failures.push("pending checkpoint revision awaiting approval or rejection".to_string());
+        }
+        Err(e) => {
+            failures.push(format!("failed to check pending checkpoints: {e}"));
+        }
+        _ => {}
+    }
+
+    ComposedGateResult { failures }
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -725,6 +854,41 @@ impl DjinnMcpServer {
             let _ = repo.add_target(&proposal.id, pid, "primary").await;
         }
 
+        // Composed gate (task cuzf): after seeding targets, verify the full
+        // composed gate (DoR + tribunal) for `in_review` proposals. If
+        // tribunal conditions block the transition, downgrade to `draft`
+        // instead of blocking creation.
+        let proposal = if effective_status == "in_review" {
+            let gate =
+                evaluate_composed_gate(&repo, &proposal, body, &ac_json, resolved_target_ids.len())
+                    .await;
+            if let Some(_err) = gate.to_error_string() {
+                // Tribunal blocked — downgrade to draft.
+                match repo
+                    .update(
+                        &proposal.id,
+                        djinn_db::ProposalUpdateInput {
+                            title: &proposal.title,
+                            body: &proposal.body,
+                            acceptance_criteria: &proposal.acceptance_criteria,
+                            status: "draft",
+                            superseded_by: None,
+                            body_format: Some(&proposal.body_format),
+                            event_metadata: None,
+                        },
+                    )
+                    .await
+                {
+                    Ok(downgraded) => downgraded,
+                    Err(_) => proposal,
+                }
+            } else {
+                proposal
+            }
+        } else {
+            proposal
+        };
+
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             mdx: None,
@@ -770,17 +934,23 @@ impl DjinnMcpServer {
             {
                 return Json(err_single(e));
             }
-            // Deterministic DoR gate: block import that would leave an
-            // `in_review` proposal in a non-ready state.
+            // Composed gate (task cuzf): block import that would leave an
+            // `in_review` proposal failing DoR or tribunal conditions.
             if existing.status == "in_review" {
-                let ac_items = parse_ac_items(&imported.acceptance_criteria_json);
                 let target_count = repo
                     .targets(&existing.id)
                     .await
                     .map(|t| t.len())
                     .unwrap_or(0);
-                let readiness = evaluate_proposal_readiness(imported.body, &ac_items, target_count);
-                if let Some(err) = format_readiness_error(&readiness) {
+                let gate = evaluate_composed_gate(
+                    &repo,
+                    &existing,
+                    imported.body,
+                    &imported.acceptance_criteria_json,
+                    target_count,
+                )
+                .await;
+                if let Some(err) = gate.to_error_string() {
                     return Json(err_single(err));
                 }
             }
@@ -1111,18 +1281,17 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
 
-        // Deterministic DoR gate: block entering `in_review` when the
-        // effective proposal body/AC/targets are not ready. Existing
-        // body/MDX/AC-count validation already passed above.
+        // Composed gate (task cuzf): block entering `in_review` when
+        // DoR or tribunal conditions are not met. Existing body/MDX/AC-count
+        // validation already passed above.
         if status == "in_review" {
-            let ac_items = parse_ac_items(&ac_json);
             let target_count = repo
                 .targets(&existing.id)
                 .await
                 .map(|t| t.len())
                 .unwrap_or(0);
-            let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
-            if let Some(err) = format_readiness_error(&readiness) {
+            let gate = evaluate_composed_gate(&repo, &existing, body, &ac_json, target_count).await;
+            if let Some(err) = gate.to_error_string() {
                 return Json(err_single(err));
             }
         }
@@ -1527,19 +1696,25 @@ impl DjinnMcpServer {
             return Json(err_single(proposal_not_found_error(&p.id)));
         };
 
-        // Deterministic DoR gate: block sign-off on draft/in_review proposals
-        // whose body/AC/targets are not ready.  This prevents sign-off-driven
-        // auto-advance (draft→in_review, draft→approved, in_review→approved)
-        // from bypassing readiness checks.
+        // Composed gate (task cuzf): block sign-off on draft/in_review
+        // proposals when DoR or tribunal conditions are not met.  This
+        // prevents sign-off-driven auto-advance from bypassing readiness
+        // or tribunal checks.
         if matches!(proposal.status.as_str(), "draft" | "in_review") {
-            let ac_items = parse_ac_items(&proposal.acceptance_criteria);
             let target_count = repo
                 .targets(&proposal.id)
                 .await
                 .map(|t| t.len())
                 .unwrap_or(0);
-            let readiness = evaluate_proposal_readiness(&proposal.body, &ac_items, target_count);
-            if let Some(err) = format_readiness_error(&readiness) {
+            let gate = evaluate_composed_gate(
+                &repo,
+                &proposal,
+                &proposal.body,
+                &proposal.acceptance_criteria,
+                target_count,
+            )
+            .await;
+            if let Some(err) = gate.to_error_string() {
                 return Json(err_single(err));
             }
         }
@@ -1648,15 +1823,22 @@ impl DjinnMcpServer {
         };
         let home_project_id = home_target.project_id.clone();
 
-        // Deterministic DoR gate: block graduation when the approved
-        // proposal's persisted body/AC/targets are not ready.  This
-        // prevents a malformed-but-approved proposal from spawning a
-        // breakdown task.  Earlier guardrails (capability, status,
+        // Composed gate (task cuzf): block graduation when DoR or tribunal
+        // conditions are not met.  This prevents a malformed-but-approved
+        // proposal from spawning a breakdown task, and also blocks when the
+        // proposal is parked on a needs-evidence spike or blocked by
+        // unresolved debate rows.  Earlier guardrails (capability, status,
         // build owner, primary target) already passed.
         {
-            let ac_items = parse_ac_items(&proposal.acceptance_criteria);
-            let readiness = evaluate_proposal_readiness(&proposal.body, &ac_items, targets.len());
-            if let Some(err) = format_readiness_error(&readiness) {
+            let gate = evaluate_composed_gate(
+                &repo,
+                &proposal,
+                &proposal.body,
+                &proposal.acceptance_criteria,
+                targets.len(),
+            )
+            .await;
+            if let Some(err) = gate.to_error_string() {
                 return Json(err_single(err));
             }
         }
@@ -5067,6 +5249,452 @@ What happens if D fails?
                 "all gates must report missing problem: {err}"
             );
         }
+    }
+}
+
+// ── Composed gate regression tests (task cuzf) ────────────────────────────
+//
+// These tests verify that draft→in_review, sign-off, and graduation all
+// use the composed gate: DoR + tribunal conditions, with deterministic
+// error messages. They also cover the valid human override path.
+
+#[cfg(test)]
+mod composed_gate_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
+        ProposalRepository, TaskRepository, UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_900, "gate-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    async fn force_approved(db: &Database, proposal_id: &str) {
+        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
+            .bind(proposal_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// Create a complete, ready proposal in draft with a target.
+    async fn create_ready_proposal(
+        repo: &ProposalRepository,
+        project_repo: &ProjectRepository,
+        user_id: &str,
+        title: &str,
+    ) -> djinn_core::models::proposal::Proposal {
+        let project = project_repo
+            .create(
+                &format!("svc-gate-{}", uuid::Uuid::now_v7()),
+                "test",
+                &format!("svc-gate-{}", uuid::Uuid::now_v7()),
+            )
+            .await
+            .unwrap();
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.to_string()), async {
+                repo.create(ProposalCreateInput {
+                    title,
+                    body: ready_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        proposal
+    }
+
+    /// A needs-work judge verdict blocks sign-off with a deterministic
+    /// message naming the verdict id and missing override.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_work_verdict_blocks_signoff_with_deterministic_message() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "NW Verdict Block").await;
+
+        // Add a needs-work judge verdict.
+        let verdict = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "verdict",
+                body: "needs-work: spec is unclear on X",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("test-judge"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Attempt sign-off — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("judge returned needs-work"),
+            "error should mention needs-work: {error}"
+        );
+        assert!(
+            error.contains(&verdict.id),
+            "error should name the verdict id: {error}"
+        );
+        assert!(
+            error.contains("no current human override"),
+            "error should mention missing override: {error}"
+        );
+
+        // Proposal should still be draft — no sign-off recorded.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "draft");
+    }
+
+    /// A needs-evidence spike blocks graduation with a deterministic
+    /// message naming the spike task id and claim.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_spike_blocks_graduation_with_deterministic_message() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "NE Spike Block").await;
+
+        // Create a spike task and park the proposal.
+        let targets = repo.targets(&proposal.id).await.unwrap();
+        let target_project_id = &targets[0].project_id;
+        let spike = task_repo
+            .create_in_project(
+                target_project_id,
+                None,
+                "Spike: feasibility of X",
+                "Research whether X is feasible",
+                "Research whether X is feasible",
+                "spike",
+                djinn_core::models::task::PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        repo.set_needs_evidence_spike(&proposal.id, &spike.id, "X is load-bearing")
+            .await
+            .unwrap();
+
+        // Force to approved for graduation test.
+        force_approved(&db, &proposal.id).await;
+
+        // Attempt graduation — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal parked on needs-evidence spike"),
+            "error should mention needs-evidence: {error}"
+        );
+        assert!(
+            error.contains(&spike.id),
+            "error should name the spike task id: {error}"
+        );
+        assert!(
+            error.contains("X is load-bearing"),
+            "error should name the claim: {error}"
+        );
+
+        // Proposal should still be approved — graduation was blocked.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "approved");
+    }
+
+    /// An unresolved blocking debate objection blocks sign-off with a
+    /// deterministic message naming the entry id(s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_debate_entry_blocks_signoff_with_entry_ids() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Blocking Debate").await;
+
+        // Add a blocking objection from adversary.
+        let objection = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "objection",
+                body: "Missing error handling section",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: Some("test-adversary"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Attempt sign-off — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("unresolved blocking debate entries"),
+            "error should mention blocking debate: {error}"
+        );
+        assert!(
+            error.contains(&objection.id),
+            "error should name the objection id: {error}"
+        );
+
+        // After resolving the objection, sign-off should succeed.
+        repo.resolve_debate_trail_entry(&objection.id)
+            .await
+            .unwrap();
+
+        let response2 = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response2.get("error").is_none(),
+            "sign-off after resolve should succeed: {:?}",
+            response2.get("error")
+        );
+    }
+
+    /// A current human override allows sign-off despite a needs-work
+    /// judge verdict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_override_allows_signoff_past_needs_work_verdict() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_ready_proposal(&repo, &project_repo, &user_id, "Override Path").await;
+
+        // Add a needs-work judge verdict.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: missing scope detail",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Without override, sign-off should fail.
+        let fail_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            fail_resp.get("error").is_some(),
+            "sign-off should fail without override"
+        );
+
+        // Record a verdict override at the current revision.
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "PM reviewed and approved scope as-is",
+            "override_by_user_id": user_id
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        // Now sign-off should succeed because the override is current.
+        let ok_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            ok_resp.get("error").is_none(),
+            "sign-off with current override should succeed: {:?}",
+            ok_resp.get("error")
+        );
+
+        // Sign-off should be recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
+    }
+
+    /// A stale override (different revision) does not unlock a needs-work
+    /// verdict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_override_does_not_unlock_needs_work() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Stale Override").await;
+
+        // Add a needs-work judge verdict.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: unclear boundaries",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Record a stale override at revision 0 (proposal is at revision 1).
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": 0,
+            "reason": "earlier override before spec changed"
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        // Sign-off should still fail — the override is stale.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "sign-off should fail with stale override");
+        let error = error.unwrap();
+        assert!(
+            error.contains("no current human override"),
+            "error should mention stale/missing override: {error}"
+        );
     }
 }
 
