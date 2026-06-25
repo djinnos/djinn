@@ -26,6 +26,9 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { TaskIdLabel } from "@/components/TaskIdLabel";
+import { PageHeader } from "@/components/PageHeader";
+import { EmptyState } from "@/components/EmptyState";
+import { Skeleton, PanelSkeleton, TextSkeleton } from "@/components/ui/skeleton";
 
 // ── Status labels ────────────────────────────────────────────────────────────
 
@@ -92,6 +95,45 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   );
 }
 
+// ── Token totals derived from sessions ──────────────────────────────────────
+
+function TokenTotals({ sessions }: { sessions: { tokensIn: number; tokensOut: number; cacheReadTokens: number; cacheWriteTokens: number }[] }) {
+  const totalIn = sessions.reduce((sum, s) => sum + s.tokensIn, 0);
+  const totalOut = sessions.reduce((sum, s) => sum + s.tokensOut, 0);
+  const totalCacheRead = sessions.reduce((sum, s) => sum + s.cacheReadTokens, 0);
+  const totalCacheWrite = sessions.reduce((sum, s) => sum + s.cacheWriteTokens, 0);
+  return (
+    <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+      <span>{formatTokens(totalIn)} in</span>
+      <span>/</span>
+      <span>{formatTokens(totalOut)} out</span>
+      {(totalCacheRead > 0 || totalCacheWrite > 0) && (
+        <span title="Prompt cache: reads (hits) / writes (creation)">
+          ({formatTokens(totalCacheRead)} cache hit / {formatTokens(totalCacheWrite)} write)
+        </span>
+      )}
+    </span>
+  );
+}
+
+// ── Sidebar skeleton ─────────────────────────────────────────────────────────
+
+function TaskSidebarSkeleton() {
+  return (
+    <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
+      <PanelSkeleton rowCount={4} />
+      <div className="rounded-lg bg-card p-4 ring-1 ring-foreground/10">
+        <div className="flex items-center gap-2 pb-2 border-b border-border">
+          <Skeleton className="h-4 w-24" />
+        </div>
+        <div className="pt-3">
+          <TextSkeleton lines={4} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Left panel ───────────────────────────────────────────────────────────────
 
 function TaskSidebar({ task }: { task: Task }) {
@@ -100,9 +142,9 @@ function TaskSidebar({ task }: { task: Task }) {
     <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-border p-4">
       {/* Acceptance Criteria */}
       {criteria.length > 0 && (
-        <div className="space-y-2">
+        <div className="rounded-lg bg-card p-4 ring-1 ring-foreground/10">
           <SectionHeader>Acceptance Criteria</SectionHeader>
-          <ul className="space-y-1">
+          <ul className="mt-3 space-y-2">
             {criteria.map((item: { criterion: string; met: boolean }, idx: number) => (
               <li key={idx} className="flex items-start gap-2 text-xs">
                 <span
@@ -126,14 +168,13 @@ function TaskSidebar({ task }: { task: Task }) {
 
       {/* Description */}
       {task.description && (
-        <div className="space-y-2">
+        <div className="rounded-lg bg-card p-4 ring-1 ring-foreground/10">
           <SectionHeader>Description</SectionHeader>
-          <div className="prose prose-sm max-w-none text-xs dark:prose-invert">
+          <div className="prose prose-sm max-w-none pt-3 text-xs dark:prose-invert">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.description}</ReactMarkdown>
           </div>
         </div>
       )}
-
     </div>
   );
 }
@@ -149,12 +190,20 @@ export function TaskSessionPage() {
     : null;
   const tasks = useTaskStore((s) => s.tasks);
   const [task, setTask] = useState<Task | null>(null);
+  const [loadingTask, setLoadingTask] = useState(true);
 
   // Find task from store
   useEffect(() => {
     if (!taskId) return;
     const found = tasks.get(taskId);
-    if (found) setTask(found);
+    if (found) {
+      setTask(found);
+      setLoadingTask(false);
+    } else {
+      // Give a brief moment for the store to populate before showing not-found
+      const timer = setTimeout(() => setLoadingTask(false), 500);
+      return () => clearTimeout(timer);
+    }
   }, [taskId, tasks]);
 
   // Keep task updated from store
@@ -162,7 +211,10 @@ export function TaskSessionPage() {
     if (!taskId) return;
     const unsub = taskStore.subscribe((state) => {
       const updated = state.tasks.get(taskId);
-      if (updated) setTask(updated);
+      if (updated) {
+        setTask(updated);
+        setLoadingTask(false);
+      }
     });
     return unsub;
   }, [taskId]);
@@ -177,57 +229,78 @@ export function TaskSessionPage() {
     (s) => s.status === "running" || s.status === "active"
   );
 
+  // Loading / skeleton state
+  if (loadingTask || loading) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="shrink-0 border-b border-border px-4 py-3">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-8 w-8 rounded" />
+            <Skeleton className="h-5 w-48" />
+            <span className="flex-1" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+        </div>
+        <div className="flex min-h-0 flex-1">
+          <TaskSidebarSkeleton />
+          <div className="flex min-w-0 flex-1 flex-col p-4">
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="mt-2 h-20 w-5/6" />
+            <Skeleton className="mt-2 h-20 w-4/5" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Not-found state
   if (!task) {
     return (
-      <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-        Task not found
+      <div className="flex h-full flex-col">
+        <div className="flex-1 p-6">
+          <EmptyState
+            title="Task not found"
+            message="The task you're looking for doesn't exist or you don't have access to it."
+            actionLabel="Go back"
+            onAction={() => navigate(-1)}
+          />
+        </div>
       </div>
     );
   }
 
   return (
     <div className="flex h-full flex-col">
-      {/* Top bar */}
-      <div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2">
-        <button
-          type="button"
-          className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={() => navigate(-1)}
-          title="Back to board"
-        >
-          <HugeiconsIcon icon={ArrowLeft02Icon} size={16} />
-        </button>
-        <PriorityBadge priority={task.priority} />
-        <span className="text-sm font-medium">{task.title}</span>
-        <TaskIdLabel taskId={task.id} shortId={task.short_id} />
-        <span className="flex-1" />
-        {sessions.length > 0 && (() => {
-          const totalIn = sessions.reduce((sum, s) => sum + s.tokensIn, 0);
-          const totalOut = sessions.reduce((sum, s) => sum + s.tokensOut, 0);
-          const totalCacheRead = sessions.reduce((sum, s) => sum + s.cacheReadTokens, 0);
-          const totalCacheWrite = sessions.reduce((sum, s) => sum + s.cacheWriteTokens, 0);
-          return (
-            <span className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-              <span>{formatTokens(totalIn)} in</span>
-              <span>/</span>
-              <span>{formatTokens(totalOut)} out</span>
-              {(totalCacheRead > 0 || totalCacheWrite > 0) && (
-                <span title="Prompt cache: reads (hits) / writes (creation)">
-                  ({formatTokens(totalCacheRead)} cache hit / {formatTokens(totalCacheWrite)} write)
-                </span>
+      {/* Top bar via PageHeader */}
+      <PageHeader
+        title={task.title}
+        leading={
+          <button
+            type="button"
+            className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={() => navigate(-1)}
+            title="Back to board"
+          >
+            <HugeiconsIcon icon={ArrowLeft02Icon} size={16} />
+          </button>
+        }
+        actions={
+          <>
+            <PriorityBadge priority={task.priority} />
+            <TaskIdLabel taskId={task.id} shortId={task.short_id} />
+            {sessions.length > 0 && <TokenTotals sessions={sessions} />}
+            <span
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[10px] font-semibold",
+                STATUS_COLORS[task.status] ?? "bg-muted text-muted-foreground"
               )}
+            >
+              {STATUS_LABELS[task.status] ?? task.status}
             </span>
-          );
-        })()}
-        <span
-          className={cn(
-            "rounded px-1.5 py-0.5 text-[10px] font-semibold",
-            STATUS_COLORS[task.status] ?? "bg-muted text-muted-foreground"
-          )}
-        >
-          {STATUS_LABELS[task.status] ?? task.status}
-        </span>
-      </div>
+          </>
+        }
+        className="shrink-0 border-b border-border px-4 py-2 mb-0"
+      />
 
       {/* Content: sidebar + thread */}
       <div className="flex min-h-0 flex-1">
