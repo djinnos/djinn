@@ -1,5 +1,10 @@
 import { useState, useCallback, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
+import { usersQueryOptions } from "@/api/queryOptions";
+import { userDisplayName, type OrgUser } from "@/api/users";
+import { useAuthUser } from "@/components/AuthGate";
+import { UserAvatar } from "@/components/UserAvatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -74,6 +79,23 @@ export function ProposalRefinement({
 }) {
   const [busy, setBusy] = useState(false);
   const [authority, setAuthority] = useState<string>("checkpoint");
+  const me = useAuthUser();
+  const usersQuery = useQuery(usersQueryOptions());
+  const users: OrgUser[] = usersQuery.data ?? [];
+  const userFor = (id: string | null | undefined) =>
+    id ? users.find((u) => u.id === id) : undefined;
+  const nameFor = (id: string | null | undefined) => {
+    if (!id) return "unknown";
+    const u = userFor(id);
+    return u ? userDisplayName(u) : id;
+  };
+  // User the tribunal runs are attributed to (task owner + model scope),
+  // mirroring the kick-off owner picker. Defaults to the current user; the
+  // backend falls back to the proposal author when left blank.
+  const [owner, setOwner] = useState<string>("");
+  useEffect(() => {
+    if (!owner && me?.id) setOwner(me.id);
+  }, [owner, me?.id]);
   const [pendingRevisions, setPendingRevisions] = useState<
     CheckpointRevision[]
   >([]);
@@ -154,6 +176,7 @@ export function ProposalRefinement({
       const res = await callMcpTool("proposal_refinement_start", {
         proposal_id: proposalId,
         update_authority: authority,
+        owner_user_id: owner || undefined,
       });
       if (res.error) throw new Error(res.error);
       showToast.success("Refinement started");
@@ -165,7 +188,7 @@ export function ProposalRefinement({
     } finally {
       setBusy(false);
     }
-  }, [proposalId, authority, onChanged]);
+  }, [proposalId, authority, owner, onChanged]);
 
   // Active or stopped refinement status panel.
   if (status && (status.active || status.stop_reason)) {
@@ -363,6 +386,35 @@ export function ProposalRefinement({
           <SelectContent>
             <SelectItem value="checkpoint">Checkpoint</SelectItem>
             <SelectItem value="auto_accept">Auto-accept</SelectItem>
+          </SelectContent>
+        </Select>
+        <span className="text-sm">Attribute to</span>
+        <Select
+          value={owner}
+          onValueChange={(v) => typeof v === "string" && setOwner(v)}
+        >
+          <SelectTrigger className="h-8 w-[200px] text-sm">
+            {/* Render the resolved name explicitly: `owner` is set
+                programmatically, so Radix never captures the selected item's
+                text and SelectValue would otherwise fall back to the raw id. */}
+            <SelectValue placeholder="Pick a user">
+              {owner ? (
+                <span className="flex items-center gap-2">
+                  <UserAvatar user={userFor(owner)} className="size-4" />
+                  {nameFor(owner)}
+                </span>
+              ) : undefined}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            {users.map((u) => (
+              <SelectItem key={u.id} value={u.id}>
+                <span className="flex items-center gap-2">
+                  <UserAvatar user={u} className="size-4" />
+                  {userDisplayName(u)}
+                </span>
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Button size="sm" disabled={busy} onClick={handleStart}>

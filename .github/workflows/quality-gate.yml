@@ -499,6 +499,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Regenerate the TS client types from the committed MCP tool-schema
+      # snapshot and fail if they drift. Keeps src/api/generated/mcp-tools.gen.ts
+      # in lockstep with the Rust tool params so a backend schema change can't
+      # silently leave the frontend types stale.
+      - name: Generated MCP types are up to date
+        run: pnpm mcp:types:check
+
       - name: Type check
         run: pnpm tsc --noEmit
 

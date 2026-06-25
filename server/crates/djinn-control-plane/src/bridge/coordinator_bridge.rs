@@ -13,6 +13,10 @@ pub struct ProposalRefinementStartRequest {
     pub current_revision_seq: i32,
     /// Update authority mode: `"checkpoint"` or `"auto_accept"`.
     pub update_authority: String,
+    /// User the refinement run is attributed to: owner of the spawned
+    /// refinement tasks and the scope for per-user role-model resolution.
+    /// `None` falls back to the proposal author at dispatch time.
+    pub owner_user_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
