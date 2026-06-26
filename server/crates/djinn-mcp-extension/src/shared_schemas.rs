@@ -265,6 +265,40 @@ pub fn tool_proposal_show() -> RmcpTool {
     )
 }
 
+pub fn tool_proposal_debate_append() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_debate_append".to_string(),
+        "Record a tribunal debate-trail entry against a proposal. This is the ONLY channel the refinement loop reads: an Adversary's objections and a Judge's verdict MUST be filed here — text placed in `submit_review`/`submit_decision` is NOT read by the loop. File one entry per objection. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` means it blocks readiness (use for blocking objections and for a not-ready verdict). Read `proposal_id`, `round`, and `against_revision_seq` from your task description and pass them on every call; `agent_role` is your role (`adversary` or `judge`).".to_string(),
+        object!({
+            "type": "object",
+            "required": ["proposal_id", "kind", "body", "agent_role", "against_revision_seq", "round"],
+            "properties": {
+                "proposal_id": {"type": "string", "description": "Proposal UUID or short_id (from your task description)"},
+                "kind": {"type": "string", "description": "objection | rebuttal | verdict"},
+                "body": {"type": "string", "description": "The objection/verdict text. For objections include summary, evidence, and a falsifiable resolution criterion."},
+                "blocking": {"type": "boolean", "description": "True if this blocks readiness. Use for blocking objections and for a not-ready verdict. Default false."},
+                "agent_role": {"type": "string", "description": "Your tribunal role: adversary | judge"},
+                "against_revision_seq": {"type": "integer", "description": "The proposal revision this entry is written against (from your task description)"},
+                "round": {"type": "integer", "description": "The 1-based debate round (from your task description)"}
+            }
+        }),
+    )
+}
+
+pub fn tool_proposal_debate_list() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_debate_list".to_string(),
+        "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds, with `round`, `agent_role`, `kind`, `blocking`, `resolved`, `against_revision_seq`, and `body`. Read this FIRST: the Adversary uses it to avoid re-raising objections already filed in prior rounds; the Advocate uses it to see exactly which objections it must address; the Judge uses it to verify each blocking objection was resolved or rebutted.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["proposal_id"],
+            "properties": {
+                "proposal_id": {"type": "string", "description": "Proposal UUID or short_id"}
+            }
+        }),
+    )
+}
+
 pub fn tool_proposal_complete() -> RmcpTool {
     RmcpTool::new(
         "proposal_complete".to_string(),

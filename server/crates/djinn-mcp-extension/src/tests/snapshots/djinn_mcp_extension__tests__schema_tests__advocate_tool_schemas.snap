@@ -1,6 +1,5 @@
 ---
 source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
-assertion_line: 768
 expression: tool_schemas_advocate()
 ---
 [
@@ -684,6 +683,27 @@ expression: tool_schemas_advocate()
         "id": {
           "type": "string",
           "description": "Proposal UUID or short ID"
+        }
+      }
+    },
+    "readOnly": true,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": true
+  },
+  {
+    "name": "proposal_debate_list",
+    "description": "List the tribunal debate trail for a proposal: every objection, rebuttal, and verdict across all rounds, with `round`, `agent_role`, `kind`, `blocking`, `resolved`, `against_revision_seq`, and `body`. Read this FIRST: the Adversary uses it to avoid re-raising objections already filed in prior rounds; the Advocate uses it to see exactly which objections it must address; the Judge uses it to verify each blocking objection was resolved or rebutted.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "proposal_id"
+      ],
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "description": "Proposal UUID or short_id"
         }
       }
     },

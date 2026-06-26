@@ -63,6 +63,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "epic_blockers_list"
         | "epic_blocked_list"
         | "proposal_show"
+        | "proposal_debate_list"
         | "get_block_catalog"
         | "proposal_blocks"
         | "memory_read"
@@ -97,6 +98,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "proposal_ac_amend"
         | "proposal_update"
         | "proposal_block_patch"
+        | "proposal_debate_append"
         | "submit_work"
         | "submit_review"
         | "submit_decision"
@@ -273,6 +275,11 @@ fn tool_schemas_include_role_specific_tools() {
         adversary.iter().any(|n| n == "task_comment_add"),
         "adversary should have task_comment_add"
     );
+    assert!(
+        adversary.iter().any(|n| n == "proposal_debate_append"),
+        "adversary MUST have proposal_debate_append — the only channel the \
+         refinement loop reads for objections"
+    );
     // Adversary must NOT have write/edit tools.
     assert!(
         !adversary.iter().any(|n| n == "write"),
@@ -312,6 +319,11 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(
         judge.iter().any(|n| n == "task_comment_add"),
         "judge should have task_comment_add"
+    );
+    assert!(
+        judge.iter().any(|n| n == "proposal_debate_append"),
+        "judge MUST have proposal_debate_append — the only channel the \
+         refinement loop reads for the verdict"
     );
     // Judge must NOT have write/edit tools.
     assert!(
