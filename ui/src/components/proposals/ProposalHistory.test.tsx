@@ -292,4 +292,30 @@ describe("ProposalHistory", () => {
     expect(screen.getByText("Revision history")).toBeInTheDocument();
     expect(screen.getByText("Status changed")).toBeInTheDocument();
   });
+
+  it("collapses a tribunal refinement run into a single entry", () => {
+    render(
+      <ProposalHistory
+        detail={detail([
+          revision(1, { body: "Original thin spec." }),
+          revision(2, {
+            body: "Round 1 revision.",
+            created_at: "2026-06-02T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 1 }),
+          }),
+          revision(3, {
+            body: "Round 2 converged spec.",
+            created_at: "2026-06-03T00:00:00Z",
+            event_metadata: JSON.stringify({ source: "refinement_loop", round: 2 }),
+          }),
+        ])}
+      />,
+    );
+
+    // One collapsed "Refined via tribunal" entry across 2 rounds, spanning rev 2–3.
+    expect(screen.getByText("Refined via tribunal (2 rounds)")).toBeInTheDocument();
+    expect(screen.getByText("rev 2–3")).toBeInTheDocument();
+    // The intermediate per-round revisions are NOT shown as separate rows.
+    expect(screen.queryByText("rev 2")).not.toBeInTheDocument();
+  });
 });

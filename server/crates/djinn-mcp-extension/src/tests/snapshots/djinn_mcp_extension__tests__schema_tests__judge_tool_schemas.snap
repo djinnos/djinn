@@ -572,6 +572,27 @@ expression: tool_schemas_judge()
     "concurrent_safe": true
   },
   {
+    "name": "proposal_debate_resolve",
+    "description": "Mark a debate-trail objection as resolved, by its entry `id` (from `proposal_debate_list`). The Advocate calls this for each blocking objection it has addressed in its revision — this is what clears the objection from the readiness gate's `unresolved_blocking` set. Resolving WITHOUT actually fixing the spec leaves the gate technically green but the work undone, so only resolve objections your revision genuinely satisfies; pair it with a `proposal_debate_append` rebuttal (`kind=\"rebuttal\"`) that explains how.",
+    "inputSchema": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The debate-trail entry id to resolve (from proposal_debate_list)"
+        }
+      }
+    },
+    "readOnly": false,
+    "destructive": false,
+    "idempotent": true,
+    "openWorld": false,
+    "concurrent_safe": false
+  },
+  {
     "name": "proposal_debate_append",
     "description": "Record a tribunal debate-trail entry against a proposal. This is the ONLY channel the refinement loop reads: an Adversary's objections and a Judge's verdict MUST be filed here — text placed in `submit_review`/`submit_decision` is NOT read by the loop. File one entry per objection. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` means it blocks readiness (use for blocking objections and for a not-ready verdict). Read `proposal_id`, `round`, and `against_revision_seq` from your task description and pass them on every call; `agent_role` is your role (`adversary` or `judge`).",
     "inputSchema": {

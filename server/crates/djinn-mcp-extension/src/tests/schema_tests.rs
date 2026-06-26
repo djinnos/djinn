@@ -237,21 +237,26 @@ fn tool_schemas_include_role_specific_tools() {
         "advocate should have proposal_show"
     );
     assert!(
-        advocate.iter().any(|n| n == "proposal_ac_amend"),
-        "advocate should have proposal_ac_amend"
-    );
-    assert!(
         advocate.iter().any(|n| n == "proposal_update"),
         "advocate should have proposal_update"
     );
     assert!(
-        advocate.iter().any(|n| n == "proposal_debate_resolve"),
-        "advocate MUST have proposal_debate_resolve — without it objections \
-         never clear the readiness gate and the tribunal can't converge"
+        advocate.iter().any(|n| n == "proposal_ac_set"),
+        "advocate should have proposal_ac_set (silent AC update)"
+    );
+    // The advocate ONLY revises the spec. Resolution + rebuttal are the
+    // Judge's job, and `proposal_ac_amend` spams AI feedback comments.
+    assert!(
+        !advocate.iter().any(|n| n == "proposal_ac_amend"),
+        "advocate must NOT have proposal_ac_amend (it persists AI feedback noise)"
     );
     assert!(
-        advocate.iter().any(|n| n == "proposal_debate_append"),
-        "advocate should have proposal_debate_append to file rebuttals"
+        !advocate.iter().any(|n| n == "proposal_debate_resolve"),
+        "advocate must NOT resolve objections — the Judge adjudicates resolution"
+    );
+    assert!(
+        !advocate.iter().any(|n| n == "proposal_debate_append"),
+        "advocate must NOT write the debate trail — it only revises the spec"
     );
     assert!(
         advocate.iter().any(|n| n == "proposal_block_patch"),
@@ -332,6 +337,11 @@ fn tool_schemas_include_role_specific_tools() {
         judge.iter().any(|n| n == "proposal_debate_append"),
         "judge MUST have proposal_debate_append — the only channel the \
          refinement loop reads for the verdict"
+    );
+    assert!(
+        judge.iter().any(|n| n == "proposal_debate_resolve"),
+        "judge MUST have proposal_debate_resolve — it adjudicates which \
+         objections the revision satisfies and clears them from the gate"
     );
     // Judge must NOT have write/edit tools.
     assert!(

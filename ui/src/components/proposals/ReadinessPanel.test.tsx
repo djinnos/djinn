@@ -33,7 +33,6 @@ function gateStatus(
     unresolved_blocking_count: 0,
     unresolved_blocking_ids: [],
     needs_evidence: null,
-    pending_checkpoint: false,
     human_override_active: false,
     blocked_explanations: [],
     ...overrides,
@@ -48,7 +47,6 @@ function refinement(
     current_round: 1,
     dry_rounds: 0,
     total_entries: 0,
-    update_authority: "checkpoint",
     stop_reason: null,
     ...overrides,
   };
@@ -340,16 +338,6 @@ describe("ReadinessPanel", () => {
   });
 
   // ── P4 regression: pending checkpoint badge ──────────────────────────
-
-  it("renders Pending checkpoint badge when pending_checkpoint is true", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus({ pending_checkpoint: true })}
-        refinement={refinement()}
-      />,
-    );
-    expect(screen.getByText("Pending checkpoint")).toBeInTheDocument();
-  });
 
   // ── P4 regression: Judge Ready verdict with override ─────────────────
 

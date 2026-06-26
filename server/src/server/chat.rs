@@ -15,13 +15,13 @@ use djinn_provider::message::Message;
 pub(super) use project_resolver::{ProjectResolver, ProjectResolverError};
 
 pub(super) const DJINN_CHAT_SYSTEM_PROMPT: &str =
-    include_str!("../../crates/djinn-agent/src/prompts/chat.md");
+    include_str!("../../crates/djinn-roles/src/prompts/chat.md");
 
 /// System prompt overlay for a proposal-scoped chat ("Address with djinn").
 /// `{{PROPOSAL_CONTEXT}}` is replaced with the rendered spec + unresolved
 /// feedback before it's merged into the chat system message.
 pub(super) const PROPOSAL_ADDRESS_SYSTEM_PROMPT: &str =
-    include_str!("../../crates/djinn-agent/src/prompts/proposal_address.md");
+    include_str!("../../crates/djinn-roles/src/prompts/proposal_address.md");
 
 /// Apply globally-configured chat skills to the base system message.
 ///

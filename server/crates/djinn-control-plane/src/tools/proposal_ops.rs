@@ -540,9 +540,6 @@ pub struct ProposalRefinementStatusModel {
     pub dry_rounds: i32,
     /// Total debate-trail entries produced so far.
     pub total_entries: i32,
-    /// Update authority mode. Always `checkpoint` (advocate revisions are
-    /// proposed for approval, never auto-applied); retained for display compat.
-    pub update_authority: String,
     /// When set, refinement has stopped for this reason.
     /// Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
     /// `agent_failure`, or `null` (still running / not started).
@@ -632,8 +629,6 @@ pub struct ProposalGateStatusModel {
     /// Needs-evidence spike parking state. `None` when not parked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_evidence: Option<NeedsEvidenceStatus>,
-    /// Whether there are pending checkpoint revisions awaiting decision.
-    pub pending_checkpoint: bool,
     /// Whether a current human override exists for this revision.
     pub human_override_active: bool,
     /// Human-readable explanations of all gate failures, each naming the

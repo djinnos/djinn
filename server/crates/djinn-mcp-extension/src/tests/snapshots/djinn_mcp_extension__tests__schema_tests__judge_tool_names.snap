@@ -21,6 +21,7 @@ expression: names
   "memory_build_context",
   "proposal_show",
   "proposal_debate_list",
+  "proposal_debate_resolve",
   "proposal_debate_append",
   "task_comment_add",
   "submit_decision"

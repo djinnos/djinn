@@ -43,6 +43,11 @@ pub mod env {
     pub const REGISTRY_HOST: &str = "DJINN_IMAGE_REGISTRY_HOST";
     pub const BUILDER_IMAGE: &str = "DJINN_IMAGE_BUILDER_IMAGE";
     pub const AGENT_WORKER_IMAGE: &str = "DJINN_IMAGE_AGENT_WORKER_IMAGE";
+    /// The djinn release version (e.g. `0.6.57`). Folded into the catalog
+    /// image hash so a version bump forces every project image to rebuild —
+    /// guaranteeing new agent prompts/tools propagate even if
+    /// `DJINN_IMAGE_AGENT_WORKER_IMAGE` is an unversioned tag (`:latest`).
+    pub const DJINN_VERSION: &str = "DJINN_VERSION";
     pub const MAX_CONCURRENT: &str = "DJINN_IMAGE_MAX_CONCURRENT";
     pub const NAMESPACE: &str = "DJINN_IMAGE_NAMESPACE";
     pub const REGISTRY_AUTH_SECRET: &str = "DJINN_IMAGE_REGISTRY_AUTH_SECRET";
@@ -71,6 +76,10 @@ pub struct ImageControllerConfig {
     /// Tilt publishes `djinn/agent-runtime:dev` to the local registry;
     /// prod ships a sha-tagged image to the shared registry.
     pub agent_worker_image: String,
+    /// The djinn release version, folded into the catalog image hash so a
+    /// version bump always forces a rebuild with the current agent worker
+    /// (prompts + tool schemas). Empty/`dev` outside a tagged release.
+    pub build_version: String,
     /// Namespace where build Jobs are created and the registry-auth Secret
     /// is mounted from.
     pub namespace: String,
@@ -103,6 +112,7 @@ impl ImageControllerConfig {
             registry_host: DEFAULT_REGISTRY_HOST.into(),
             builder_image: DEFAULT_BUILDER_IMAGE.into(),
             agent_worker_image: DEFAULT_AGENT_WORKER_IMAGE.into(),
+            build_version: "dev".into(),
             namespace: DEFAULT_NAMESPACE.into(),
             registry_auth_secret: DEFAULT_REGISTRY_AUTH_SECRET.into(),
             mirror_pvc: DEFAULT_MIRROR_PVC.into(),
@@ -129,6 +139,11 @@ impl ImageControllerConfig {
         }
         if let Ok(v) = std::env::var(env::AGENT_WORKER_IMAGE) {
             cfg.agent_worker_image = v;
+        }
+        if let Ok(v) = std::env::var(env::DJINN_VERSION)
+            && !v.trim().is_empty()
+        {
+            cfg.build_version = v;
         }
         if let Ok(v) = std::env::var(env::NAMESPACE) {
             cfg.namespace = v;

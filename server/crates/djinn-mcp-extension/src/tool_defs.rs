@@ -751,34 +751,23 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         read_only(),
     ));
     // Read the debate trail to see exactly which adversary objections this
-    // revision must address.
+    // revision must address. The advocate only READS the trail — it does not
+    // rebut or resolve. The Judge adjudicates and resolves objections.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_debate_list(),
         read_only(),
-    ));
-    // Respond to objections in the trail: file a rebuttal explaining how the
-    // revision addresses each one, then resolve it so it clears the readiness
-    // gate's unresolved-blocking set. Without these the objection→resolution
-    // cycle never closes and the tribunal cannot converge.
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_proposal_debate_append(),
-        mutation(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_proposal_debate_resolve(),
-        idempotent_mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_update(),
         mutation(),
     ));
+    // Silent AC update (no feedback comment). `proposal_ac_amend` is
+    // deliberately NOT given to the advocate: its per-amendment "reason" is
+    // persisted as an AI feedback comment, which spams the proposal during
+    // refinement.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_ac_set(),
         idempotent_mutation(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_proposal_ac_amend(),
-        mutation(),
     ));
     // Block-catalog enrichment tools for progressive MDX refinement (k9zw).
     // These are default-but-optional enrichment; failure to enrich must not
@@ -861,6 +850,14 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_debate_list(),
         read_only(),
+    ));
+    // The Judge adjudicates resolution: for each blocking objection the
+    // current revision now satisfies, it calls `proposal_debate_resolve` to
+    // clear it from the readiness gate's unresolved-blocking set. This is the
+    // tribunal's resolution authority (the advocate only revises the spec).
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_resolve(),
+        idempotent_mutation(),
     ));
     // The Judge records its readiness verdict here (kind="verdict") — the ONLY
     // channel the refinement loop reads. A verdict in `submit_decision` text is

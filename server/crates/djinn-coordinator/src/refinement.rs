@@ -466,13 +466,14 @@ pub fn select_refinement_model(
 
 /// Build the `event_metadata` JSON for an advocate revision attributed to the
 /// refinement loop. This is persisted in `proposal_revisions.event_metadata`
-/// so revisions are attributable by role, round, and authority mode.
+/// so revisions are attributable by role and round, and so the proposal
+/// history UI can collapse a whole refinement run (all `source ==
+/// "refinement_loop"` revisions) into a single "Refined via tribunal" entry.
 pub fn build_revision_event_metadata(round: i32, author_model: Option<&str>) -> serde_json::Value {
     let mut meta = serde_json::json!({
         "source": "refinement_loop",
         "role": "advocate",
         "round": round,
-        "authority": "checkpoint",
     });
     if let Some(model) = author_model {
         meta["author_model"] = serde_json::Value::String(model.to_string());

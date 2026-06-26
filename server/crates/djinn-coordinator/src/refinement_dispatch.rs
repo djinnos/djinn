@@ -233,6 +233,19 @@ impl CoordinatorActor {
             return;
         }
 
+        // Administrative dispatch-pause gate: a global or project-scoped pause
+        // halts the refinement loop just like ordinary task dispatch, so an
+        // operator can stop an in-flight run. The state machine is left intact;
+        // dispatch resumes on the next tick once the pause is lifted.
+        if self.refinement_dispatch_paused(proposal_id).await {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                phase = ?phase,
+                "Refinement dispatch deferred by administrative dispatch pause"
+            );
+            return;
+        }
+
         // The user this run is attributed to (task owner + model scope).
         // Falls back to the proposal author when not explicitly set.
         let attributed_user_id = self
@@ -444,8 +457,16 @@ impl CoordinatorActor {
                 build_revision_event_metadata(state.current_round, model_id.as_deref());
             let event_bus2 = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+            // Tag EVERY revision this advocate session produced this round (a
+            // single session may do a body edit + an AC edit), so the history
+            // UI can collapse the whole refinement run into one entry.
             if let Err(e) = proposal_repo2
-                .set_latest_revision_event_metadata(proposal_id, new_revision_seq, &event_meta)
+                .set_spec_revisions_event_metadata_range(
+                    proposal_id,
+                    state.current_revision_seq,
+                    new_revision_seq,
+                    &event_meta,
+                )
                 .await
             {
                 tracing::warn!(
@@ -1031,6 +1052,47 @@ impl CoordinatorActor {
             Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
             _ => "default".to_string(),
         }
+    }
+
+    /// Whether refinement dispatch is currently halted by an administrative
+    /// dispatch pause — global, or scoped to the proposal's primary project.
+    /// On a DB error loading the pause state, returns `false` (fail open so a
+    /// transient blip doesn't silently wedge refinement).
+    async fn refinement_dispatch_paused(&self, proposal_id: &str) -> bool {
+        let pause_state = match crate::dispatch_pause::load_dispatch_pause_state(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to load dispatch-pause state for refinement; proceeding"
+                );
+                return false;
+            }
+        };
+        if crate::dispatch_pause::active_global_dispatch_pause(&pause_state).is_some() {
+            return true;
+        }
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let Some(project_id) = proposal_repo
+            .targets(proposal_id)
+            .await
+            .ok()
+            .and_then(|t| t.first().map(|x| x.project_id.clone()))
+        else {
+            return false;
+        };
+        pause_state
+            .projects
+            .get(&project_id)
+            .map(crate::dispatch_pause::dispatch_pause_is_active)
+            .unwrap_or(false)
     }
 
     /// Create a refinement task in the DB for the given tribunal role,

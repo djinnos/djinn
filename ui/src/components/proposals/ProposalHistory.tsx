@@ -58,10 +58,46 @@ function revisionBodyPreview(revision: ProposalHistoryEntry): string {
   return textPreview ? `${blockSummary} · ${textPreview}` : blockSummary;
 }
 
+/** Parsed `event_metadata` (it arrives as a JSON string on the wire). */
+function parsedMeta(
+  r: ProposalHistoryEntry,
+): { source?: string; round?: number } | null {
+  const meta = (r as { event_metadata?: unknown }).event_metadata;
+  if (!meta) return null;
+  try {
+    return typeof meta === "string" ? JSON.parse(meta) : (meta as object);
+  } catch {
+    return null;
+  }
+}
+
+/** A spec revision produced by the autonomous refinement tribunal. */
+function isRefinementRevision(r: ProposalHistoryEntry): boolean {
+  return r.event_kind === "spec_revision" && parsedMeta(r)?.source === "refinement_loop";
+}
+
+/**
+ * One row in the rendered timeline. A whole tribunal run (its contiguous
+ * `refinement_loop` revisions) collapses into a single `refinement` row whose
+ * diff is the pre-refinement snapshot → the converged head.
+ */
+type HistoryRow =
+  | { type: "status"; entry: ProposalHistoryEntry; at: string }
+  | { type: "rev"; entry: ProposalHistoryEntry; at: string }
+  | {
+      type: "refinement";
+      head: ProposalHistoryEntry;
+      before?: ProposalHistoryEntry;
+      fromSeq: number;
+      rounds: number;
+      at: string;
+    };
+
 /**
  * Revision history for a proposal's spec. Every material edit (title/body/AC)
  * appends a full snapshot to `proposal_revisions`; this lists them newest-first
  * with the editor + timestamp, and expands to a diff against the prior revision.
+ * A tribunal refinement run is collapsed into one "Refined via tribunal" entry.
  */
 export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
   const proposal = detail.proposal!;
@@ -97,10 +133,50 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
     );
 
   // Only genuine status transitions count as history rows (refinement
-  // lifecycle events and checkpoint reverts are dropped at render time).
+  // lifecycle events carry no transition and are dropped at render time).
   const statusEvents = history.filter(
     (r) => r.event_kind !== "spec_revision" && (r.status_from || r.status_to),
   );
+
+  // Build the rendered timeline, collapsing each contiguous run of tribunal
+  // `refinement_loop` revisions into one "Refined via tribunal" row.
+  const rows = useMemo<HistoryRow[]>(() => {
+    const asc = [...specRevisions].sort((a, b) => a.seq - b.seq);
+    const out: HistoryRow[] = [];
+    let i = 0;
+    while (i < asc.length) {
+      if (isRefinementRevision(asc[i])) {
+        let j = i;
+        while (j < asc.length && isRefinementRevision(asc[j])) j++;
+        const group = asc.slice(i, j);
+        const head = group[group.length - 1];
+        const fromSeq = group[0].seq;
+        const rounds =
+          new Set(
+            group
+              .map((g) => parsedMeta(g)?.round)
+              .filter((x): x is number => typeof x === "number"),
+          ).size || group.length;
+        out.push({
+          type: "refinement",
+          head,
+          before: bySeq.get(fromSeq - 1),
+          fromSeq,
+          rounds,
+          at: head.created_at,
+        });
+        i = j;
+      } else {
+        out.push({ type: "rev", entry: asc[i], at: asc[i].created_at });
+        i++;
+      }
+    }
+    statusEvents.forEach((e) => out.push({ type: "status", entry: e, at: e.created_at }));
+    out.sort(
+      (a, b) => b.at.localeCompare(a.at) || (b.type === "status" ? -1 : 1),
+    );
+    return out;
+  }, [specRevisions, statusEvents, bySeq]);
 
   // A lone seed revision has nothing to compare against yet, but status audit
   // events still need to be visible even when no material spec edit exists.
@@ -112,7 +188,64 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
         Revision history
       </Label>
       <ul className="divide-y rounded-md border">
-        {history.map((r) => {
+        {rows.map((row) => {
+          // ── Collapsed tribunal run ──────────────────────────────────────
+          if (row.type === "refinement") {
+            const { head, before, fromSeq, rounds } = row;
+            const isHead = head.seq === proposal.latest_revision_seq;
+            const isOpen = open.includes(head.id);
+            const rangeLabel =
+              head.seq === fromSeq ? `rev ${head.seq}` : `rev ${fromSeq}–${head.seq}`;
+            return (
+              <li key={`refine-${head.id}`}>
+                <button
+                  onClick={() => toggle(head.id)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
+                >
+                  <HugeiconsIcon
+                    icon={ArrowDown01Icon}
+                    size={14}
+                    className={cn(
+                      "shrink-0 text-muted-foreground transition-transform",
+                      isOpen && "rotate-180",
+                    )}
+                  />
+                  <Badge variant={isHead ? "default" : "outline"} className="font-mono">
+                    {rangeLabel}
+                  </Badge>
+                  <Badge variant="secondary">tribunal</Badge>
+                  <span className="font-medium">
+                    Refined via tribunal ({rounds} {rounds === 1 ? "round" : "rounds"})
+                  </span>
+                  {isHead && (
+                    <span className="text-xs text-muted-foreground">current</span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {revisionBodyPreview(head)}
+                  </span>
+                  <time
+                    dateTime={head.created_at}
+                    title={head.created_at}
+                    className="ml-auto shrink-0 text-xs text-muted-foreground"
+                  >
+                    {relativeTime(head.created_at)}
+                  </time>
+                </button>
+                {isOpen && (
+                  <div className="space-y-2 px-3 pb-3">
+                    <p className="text-xs text-muted-foreground">
+                      The autonomous Adversary → Advocate → Judge tribunal revised
+                      the spec over {rounds} {rounds === 1 ? "round" : "rounds"};
+                      diff is your original → the converged result.
+                    </p>
+                    <DiffView before={before?.body ?? ""} after={head.body} />
+                  </div>
+                )}
+              </li>
+            );
+          }
+
+          const r = row.entry;
           const prev = bySeq.get(r.seq - 1);
           const editor = userFor(r.edited_by_user_id);
           const isHead = r.seq === proposal.latest_revision_seq;

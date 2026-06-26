@@ -13938,17 +13938,12 @@ expression: signatures
               "description": "Total debate-trail entries produced so far.",
               "format": "int32",
               "type": "integer"
-            },
-            "update_authority": {
-              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
-              "type": "string"
             }
           },
           "required": [
             "active",
             "dry_rounds",
-            "total_entries",
-            "update_authority"
+            "total_entries"
           ],
           "type": "object"
         }
@@ -14156,17 +14151,12 @@ expression: signatures
               "description": "Total debate-trail entries produced so far.",
               "format": "int32",
               "type": "integer"
-            },
-            "update_authority": {
-              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
-              "type": "string"
             }
           },
           "required": [
             "active",
             "dry_rounds",
-            "total_entries",
-            "update_authority"
+            "total_entries"
           ],
           "type": "object"
         }
@@ -14305,17 +14295,12 @@ expression: signatures
               "description": "Total debate-trail entries produced so far.",
               "format": "int32",
               "type": "integer"
-            },
-            "update_authority": {
-              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
-              "type": "string"
             }
           },
           "required": [
             "active",
             "dry_rounds",
-            "total_entries",
-            "update_authority"
+            "total_entries"
           ],
           "type": "object"
         }
@@ -14771,10 +14756,6 @@ expression: signatures
               ],
               "description": "Needs-evidence spike parking state. `None` when not parked."
             },
-            "pending_checkpoint": {
-              "description": "Whether there are pending checkpoint revisions awaiting decision.",
-              "type": "boolean"
-            },
             "ready": {
               "description": "Whether the composed gate passes (DoR ready + tribunal conditions met).",
               "type": "boolean"
@@ -14800,7 +14781,6 @@ expression: signatures
             "adversary_dry_count",
             "unresolved_blocking_count",
             "unresolved_blocking_ids",
-            "pending_checkpoint",
             "human_override_active",
             "blocked_explanations"
           ],
@@ -14990,17 +14970,12 @@ expression: signatures
               "description": "Total debate-trail entries produced so far.",
               "format": "int32",
               "type": "integer"
-            },
-            "update_authority": {
-              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
-              "type": "string"
             }
           },
           "required": [
             "active",
             "dry_rounds",
-            "total_entries",
-            "update_authority"
+            "total_entries"
           ],
           "type": "object"
         },

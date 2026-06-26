@@ -85,11 +85,6 @@ export interface ProposalRefinementStatus {
   /** Total debate-trail entries produced so far. */
   total_entries: number;
   /**
-   * Update authority mode: `checkpoint` (advocate revisions require approval)
-   * or `auto_accept` (revisions applied automatically).
-   */
-  update_authority?: "checkpoint" | "auto_accept" | string;
-  /**
    * When set, refinement has stopped.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
    * `agent_failure`. null while still running or not started.
@@ -156,8 +151,6 @@ export interface ProposalGateStatus {
   unresolved_blocking_ids: string[];
   /** Needs-evidence spike parking state. null when not parked. */
   needs_evidence?: NeedsEvidenceStatus | null;
-  /** Whether there are pending checkpoint revisions awaiting decision. */
-  pending_checkpoint: boolean;
   /** Whether a current human override exists for this revision. */
   human_override_active: boolean;
   /** Human-readable explanations of all gate failures. Empty when ready is true. */

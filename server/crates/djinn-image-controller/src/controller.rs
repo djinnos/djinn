@@ -399,7 +399,8 @@ impl ImageController {
             .await;
 
         let agent_worker_ref = self.config.agent_worker_image.clone();
-        let new_hash = compute_environment_hash(&cfg, &agent_worker_ref);
+        let new_hash =
+            compute_environment_hash(&cfg, &agent_worker_ref, &self.config.build_version);
 
         if image.config_hash.as_deref() == Some(new_hash.as_str())
             && image.status == ImageStatus::READY

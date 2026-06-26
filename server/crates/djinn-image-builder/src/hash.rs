@@ -44,7 +44,11 @@ fn compute_bundle_sha(scripts: &[ScriptFile]) -> String {
 /// responsible for threading in a reference that represents the actual
 /// worker binary that will ship in the image (e.g. the SHA-pinned tag
 /// Tilt publishes to the cluster-local registry).
-pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &str) -> String {
+pub fn compute_environment_hash(
+    config: &EnvironmentConfig,
+    agent_worker_ref: &str,
+    build_version: &str,
+) -> String {
     let script_sha = compute_script_bundle_sha();
     let config_json = canonical_json(config);
 
@@ -105,12 +109,22 @@ pub fn compute_environment_hash(config: &EnvironmentConfig, agent_worker_ref: &s
     // /usr/local/cargo/bin (expanded at build time) while CARGO_HOME stays
     // runtime-overridable for the cache. Script edit moves script_sha; bump the
     // salt to document + guarantee the rebuild.
-    hasher.update(b"env-config/v9\0");
+    //
+    // v9→v10: fold the djinn release `build_version` into the hash. The agent
+    // worker binary (prompts via `djinn-roles` + tool schemas via
+    // `djinn-mcp-extension`) is `COPY --from`'d into the catalog image, so a
+    // change to a prompt or tool must rebuild every project image. Keying only
+    // on `agent_worker_ref` missed this whenever that ref was an unversioned
+    // tag (`:latest`) or a reused tag — leaving task-run pods on stale agent
+    // code after a deploy. Mixing in the version guarantees a rebuild on bump.
+    hasher.update(b"env-config/v10\0");
     hasher.update(config_json.as_bytes());
     hasher.update([0u8]);
     hasher.update(script_sha.as_bytes());
     hasher.update([0u8]);
     hasher.update(agent_worker_ref.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(build_version.as_bytes());
     hex_lower(&hasher.finalize())
 }
 
@@ -148,8 +162,8 @@ mod tests {
     #[test]
     fn hash_is_deterministic_for_same_inputs() {
         let c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc");
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc");
+        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
+        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
         assert_eq!(a, b);
         assert_eq!(a.len(), 64);
     }
@@ -157,17 +171,28 @@ mod tests {
     #[test]
     fn hash_changes_when_config_changes() {
         let mut c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc");
+        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
         c.env.insert("RUST_LOG".into(), "info".into());
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc");
+        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
         assert_ne!(a, b);
     }
 
     #[test]
     fn hash_changes_when_worker_ref_changes() {
         let c = cfg();
-        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc");
-        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-def");
+        let a = compute_environment_hash(&c, "djinn/agent-worker:sha-abc", "0.6.57");
+        let b = compute_environment_hash(&c, "djinn/agent-worker:sha-def", "0.6.57");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hash_changes_when_build_version_changes() {
+        // A version bump must invalidate every catalog image so new agent
+        // prompts/tools propagate — even when the worker-image tag is unchanged
+        // (e.g. `:latest`).
+        let c = cfg();
+        let a = compute_environment_hash(&c, "djinn/agent-runtime:latest", "0.6.56");
+        let b = compute_environment_hash(&c, "djinn/agent-runtime:latest", "0.6.57");
         assert_ne!(a, b);
     }
 

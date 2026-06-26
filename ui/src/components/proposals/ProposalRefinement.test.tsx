@@ -50,7 +50,6 @@ describe("ProposalRefinement", () => {
       current_round: 3,
       dry_rounds: 1,
       total_entries: 7,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: false,
     };
@@ -78,7 +77,6 @@ describe("ProposalRefinement", () => {
       current_round: 5,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "checkpoint",
       stop_reason: "adversary_dry",
     };
     render(
@@ -101,7 +99,6 @@ describe("ProposalRefinement", () => {
       current_round: 1,
       dry_rounds: 0,
       total_entries: 0,
-      update_authority: "checkpoint",
       stop_reason: "interrupted",
     };
     render(
@@ -123,7 +120,6 @@ describe("ProposalRefinement", () => {
       current_round: 1,
       dry_rounds: 0,
       total_entries: 0,
-      update_authority: "checkpoint",
       stop_reason: null,
     };
     render(
@@ -164,7 +160,6 @@ describe("ProposalRefinement", () => {
       current_round: 5,
       dry_rounds: 0,
       total_entries: 15,
-      update_authority: "checkpoint",
       stop_reason: "round_cap",
     };
     render(
@@ -185,7 +180,6 @@ describe("ProposalRefinement", () => {
       current_round: 3,
       dry_rounds: 0,
       total_entries: 8,
-      update_authority: "checkpoint",
       stop_reason: "spawn_cap",
     };
     render(
@@ -206,7 +200,6 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 0,
       total_entries: 10,
-      update_authority: "checkpoint",
       stop_reason: "repeated_objection",
     };
     render(
@@ -227,7 +220,6 @@ describe("ProposalRefinement", () => {
       current_round: 2,
       dry_rounds: 0,
       total_entries: 3,
-      update_authority: "checkpoint",
       stop_reason: "agent_failure",
     };
     render(
@@ -248,7 +240,6 @@ describe("ProposalRefinement", () => {
       current_round: 1,
       dry_rounds: 0,
       total_entries: 1,
-      update_authority: "checkpoint",
       stop_reason: "some_future_reason",
     };
     render(
@@ -268,7 +259,7 @@ describe("ProposalRefinement", () => {
   it("calls onChanged after successful start refinement", async () => {
     vi.mocked(callMcpTool).mockResolvedValueOnce({
       proposal_id: proposalId,
-      refinement: { active: true, update_authority: "checkpoint" },
+      refinement: { active: true },
     } as never);
 
     const onChanged = vi.fn();
@@ -324,7 +315,6 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: true,
       judge_summary: "The spec was tightened and ambiguities resolved.",
@@ -361,7 +351,6 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: true,
       judge_summary: "",
@@ -387,7 +376,6 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: true,
       judge_summary: "Converged.",
@@ -422,7 +410,6 @@ describe("ProposalRefinement", () => {
       current_round: 4,
       dry_rounds: 2,
       total_entries: 12,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: true,
       judge_summary: "Converged.",
@@ -455,7 +442,6 @@ describe("ProposalRefinement", () => {
       current_round: 2,
       dry_rounds: 0,
       total_entries: 4,
-      update_authority: "checkpoint",
       stop_reason: null,
       awaiting_review: false,
     };
@@ -481,7 +467,6 @@ describe("ProposalRefinement", () => {
       current_round: 1,
       dry_rounds: 0,
       total_entries: 2,
-      update_authority: "checkpoint",
       stop_reason: null,
     };
     render(
@@ -503,7 +488,6 @@ describe("ProposalRefinement", () => {
       current_round: 1,
       dry_rounds: null as unknown as number,
       total_entries: 0,
-      update_authority: "checkpoint",
       stop_reason: null,
     };
     render(
@@ -530,7 +514,6 @@ describe("ProposalRefinement", () => {
       current_round: 3,
       dry_rounds: 1,
       total_entries: 7,
-      update_authority: "checkpoint",
       stop_reason: null,
     };
     render(
@@ -557,7 +540,6 @@ describe("ProposalRefinement", () => {
       current_round: 3,
       dry_rounds: 1,
       total_entries: 8,
-      update_authority: "checkpoint",
       stop_reason: "adversary_dry",
     };
     render(
