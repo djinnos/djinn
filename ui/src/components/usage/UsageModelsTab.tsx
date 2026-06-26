@@ -82,8 +82,8 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               Compares models using worker sessions/results only. Completed
               tasks are attributed to every model that ran a worker session on
               them, so task counts use shared credit rather than exclusive
-              ownership. Actual API spend and projected subscription cost are
-              shown separately.
+              ownership. Actual API spend and projected subscription-equivalent
+              cost are shown separately.
             </p>
           </div>
           <Badge variant="outline" className="text-muted-foreground">
@@ -106,7 +106,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               <th className="px-4 py-3 font-medium">Sessions</th>
               <th className="px-4 py-3 font-medium">Tokens</th>
               <th className="px-4 py-3 font-medium">Actual API spend</th>
-              <th className="px-4 py-3 font-medium">Projected cost</th>
+              <th className="px-4 py-3 font-medium">Projected subscription-equivalent cost</th>
               <th className="px-4 py-3 font-medium">Unpriced</th>
             </tr>
           </thead>

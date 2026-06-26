@@ -143,8 +143,8 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
         <h2 className="text-sm font-medium text-foreground">{config.label}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Sort by any metric. Expand rows with detail to inspect per-model split
-          and time-series buckets. Actual API spend and projected subscription
-          cost are shown separately.
+          and time-series buckets. Actual API spend and projected
+          subscription-equivalent cost are shown separately.
         </p>
       </div>
       <div className="overflow-x-auto">
@@ -176,7 +176,7 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
                 onSort={toggleSort}
               />
               <SortableHeader
-                label="Projected cost"
+                label="Projected subscription-equivalent cost"
                 sortKey="projected_cost"
                 activeKey={sortKey}
                 direction={sortDirection}
@@ -437,7 +437,7 @@ function ModelSplitTable({ rows }: { rows: UsageModelSplit[] }) {
           <tr>
             <th className="py-2 pr-3 font-medium">Model</th>
             <th className="py-2 pr-3 font-medium">Actual spend</th>
-            <th className="py-2 pr-3 font-medium">Projected cost</th>
+            <th className="py-2 pr-3 font-medium">Projected subscription-equivalent cost</th>
             <th className="py-2 pr-3 font-medium">Unpriced</th>
             <th className="py-2 pr-3 font-medium">Success</th>
             <th className="py-2 pr-3 font-medium">Tasks</th>
@@ -490,7 +490,7 @@ function TimeSeriesTable({ rows }: { rows: UsageTimeSeriesPoint[] }) {
           <tr>
             <th className="py-2 pr-3 font-medium">Bucket</th>
             <th className="py-2 pr-3 font-medium">Actual spend</th>
-            <th className="py-2 pr-3 font-medium">Projected cost</th>
+            <th className="py-2 pr-3 font-medium">Projected subscription-equivalent cost</th>
             <th className="py-2 pr-3 font-medium">Unpriced</th>
             <th className="py-2 pr-3 font-medium">Tasks</th>
             <th className="py-2 pr-3 font-medium">Tokens</th>
