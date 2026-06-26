@@ -8,6 +8,23 @@ fn record_task_parked_metric() {
     djinn_telemetry::task::increment_parked();
 }
 
+/// Which kind of remediation task to create for a stuck source task.
+///
+/// Both kinds create a `Planner remediation [<short_id>]: <title>` review task
+/// and block the source on it. They differ in WHO is expected to resolve it:
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemediationKind {
+    /// A Planner is dispatched to auto-remediate (reshape / dedupe / spike). When
+    /// it closes, `emit_unblocked_tasks` revives the source automatically.
+    Planner,
+    /// Repeated automated remediation already failed — this requires a HUMAN.
+    /// No Planner (or any agent) is dispatched, so the remediation never
+    /// auto-resolves; the source stays held (open + blocked) until a human
+    /// closes the remediation task. Idempotent: skipped when the source is
+    /// already held by an unresolved blocker.
+    HumanReview,
+}
+
 impl CoordinatorActor {
     fn session_taxonomy_has_durable_artifacts(taxonomy: &serde_json::Value) -> bool {
         taxonomy
@@ -458,25 +475,30 @@ impl CoordinatorActor {
         reason: &str,
         ci_failure_sections: Option<&str>,
     ) -> bool {
-        // Second strike (terminal): the Planner has ALREADY intervened on this
-        // task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
+        // Second strike (terminal hold): the Planner has ALREADY intervened on
+        // this task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
         // churned back up to the reopen threshold. The reshape/rescope did not
         // unstick it. Escalating again just calls `reset_intervention_counters`
         // (reopen_count→0, intervention_count++) and the worker loops anew,
         // monopolizing the (often single) dispatch slot indefinitely — the txr4
         // query_subgraph case burned 37 sessions / ~11h / 10 total reopens behind
-        // one gpt-5.5 slot, starving every other ready task. Park it terminally so
-        // the queue drains. The work and its branch persist; the close reason is
-        // recoverable (reopen with sharper scope or a different approach).
+        // one gpt-5.5 slot, starving every other ready task. Hold it indefinitely
+        // on a HUMAN instead of force-closing: a human-review remediation task
+        // blocks the source, which is parked back to `open` so it consumes no
+        // dispatch slot (`list_ready` skips blocked-open tasks) yet stays
+        // revivable — `emit_unblocked_tasks` resurfaces it the moment a human
+        // resolves the remediation. The work and its branch persist; nothing is
+        // auto-closed.
         if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
             let reason = format!(
-                "Auto-parked: {} planner intervention(s) failed to break the rework loop \
-                 (intervention_count={}, total_reopen_count={}). The same acceptance criteria kept \
-                 failing across repeated rounds even after the planner reshaped the scope, so \
-                 re-dispatching would only loop again and hold the dispatch slot. Closed to free \
-                 capacity for other ready tasks; the branch and prior work are preserved. Reopen \
-                 with a sharpened scope, a decomposed subtask for the specific unmet criterion, or \
-                 a different model/approach if this work is still wanted.",
+                "Auto-parked for human review: {} planner intervention(s) failed to break the \
+                 rework loop (intervention_count={}, total_reopen_count={}). The same acceptance \
+                 criteria kept failing across repeated rounds even after the planner reshaped the \
+                 scope, so re-dispatching would only loop again and hold the dispatch slot. The \
+                 task is held (open + blocked on a human-review remediation task) so it frees the \
+                 dispatch slot for other ready tasks while its branch and prior work are \
+                 preserved. A human must resolve the remediation task to release it, or close \
+                 this task if the work is no longer wanted.",
                 task.intervention_count, task.intervention_count, task.total_reopen_count,
             );
             tracing::warn!(
@@ -484,10 +506,10 @@ impl CoordinatorActor {
                 intervention_count = task.intervention_count,
                 total_reopen_count = task.total_reopen_count,
                 reopen_count = task.reopen_count,
-                "CoordinatorActor: second-strike — parking unconvergeable task after repeated planner interventions"
+                "CoordinatorActor: second-strike — holding unconvergeable task on human review after repeated planner interventions"
             );
-            // Clear streak/cooldown so the close isn't shadowed by stale backoff
-            // state, then terminally close (ForceClose) with the recoverable reason.
+            // Clear streak/cooldown so the hold isn't shadowed by stale backoff
+            // state.
             self.dispatch_failure_streak.remove(&task.id);
             self.dispatch_cooldowns.remove(&task.id);
             self.last_dispatched.remove(&task.id);
@@ -495,23 +517,35 @@ impl CoordinatorActor {
             self.clear_durable_dispatch_backoff_state(
                 &task.id,
                 Some(&task.short_id),
-                "planner_second_strike_terminal_close_clear",
+                "planner_second_strike_human_hold_clear",
             )
             .await;
-            if self.terminally_fail_task(task, role, &reason).await {
-                record_task_parked_metric();
-            }
-            if let Err(e) = self
-                .task_repo()
-                .set_status_with_reason(&task.id, "closed", Some(&reason))
-                .await
-            {
+            // Interrupt any running session for this task so parking it actually
+            // frees the dispatch slot (a parked task must not keep burning one).
+            let session_repo = djinn_db::SessionRepository::new(
+                self.db.clone(),
+                crate::events::event_bus_for(&self.events_tx),
+            );
+            if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
-                    "CoordinatorActor: failed to preserve planner second-strike close reason"
+                    "CoordinatorActor: failed to interrupt running sessions while parking second-strike task"
                 );
             }
+            // Ensure a HUMAN-review remediation task blocks the source (creating
+            // one only if it isn't already held), THEN park the source to `open`.
+            // The blocker is added before the park, so the open task is never
+            // dispatchable without its blocker in place.
+            self.create_remediation_task(
+                &task.id,
+                &reason,
+                &task.project_id,
+                RemediationKind::HumanReview,
+            )
+            .await;
+            self.park_source_open(&task.id, &reason).await;
+            record_task_parked_metric();
             return true;
         }
 
@@ -656,6 +690,30 @@ impl CoordinatorActor {
         reason: &str,
         project_id: &str,
     ) {
+        self.create_remediation_task(source_task_id, reason, project_id, RemediationKind::Planner)
+            .await;
+    }
+
+    /// Create a remediation review task that blocks the stuck `source_task_id`,
+    /// add a linking comment, and (for [`RemediationKind::Planner`]) dispatch the
+    /// Planner to it.
+    ///
+    /// Called when Lead calls `request_planner`, when auto-escalation fires on the
+    /// 2nd `request_lead` for the same task, and on the CI-loop / second-strike
+    /// park paths. Per ADR-051 §8 the Planner is the escalation ceiling above Lead
+    /// — it owns the board and decides whether to reshape, dedupe, or (if the issue
+    /// requires deeper code-structural reasoning) dispatch an Architect spike.
+    ///
+    /// For [`RemediationKind::HumanReview`] no agent is dispatched (a human must
+    /// resolve it) and creation is skipped when the source is already held by an
+    /// unresolved blocker.
+    pub(crate) async fn create_remediation_task(
+        &mut self,
+        source_task_id: &str,
+        reason: &str,
+        project_id: &str,
+        kind: RemediationKind,
+    ) {
         let task_repo = TaskRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
@@ -671,61 +729,89 @@ impl CoordinatorActor {
         let source_creator = source_task
             .as_ref()
             .and_then(|t| t.created_by_user_id.clone());
-        let model_ids = self
-            .resolve_dispatch_models_for_role("planner", source_creator.as_deref())
-            .await;
-        if model_ids.is_empty() {
-            tracing::warn!(
-                source_task_id = %source_task_id,
-                "CoordinatorActor: planner escalation — no model configured for planner role"
-            );
-            return;
+
+        // Human-review remediation is idempotent: if the source is already held
+        // by an unresolved blocker, a remediation task already exists — don't
+        // stack a fresh one on every park tick.
+        if kind == RemediationKind::HumanReview
+            && let Some(src) = source_task.as_ref()
+        {
+            match task_repo.list_blockers(&src.id).await {
+                Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
+                    tracing::info!(
+                        source_task_id = %src.short_id,
+                        "CoordinatorActor: human-review remediation skipped — source already held by an unresolved blocker"
+                    );
+                    return;
+                }
+                _ => {}
+            }
         }
 
-        // Per-user, per-model concurrency cap: the planner escalation must
-        // consume the SAME shared per-(creator, model) budget as every other
-        // dispatch path (worker, reviewer, lead, architect). Without this a
-        // planner dispatch admitted in the same tick as worker dispatches can
-        // overshoot max_sessions (observed: 2 worker + 1 reviewer = 3 > cap 2).
-        // Filter to only models where the creator is under their cap, using a
-        // fresh DB + inflight-ledger snapshot so a just-recorded admission in
-        // this same tick is visible.
-        let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
-            let running = self.effective_running_by_user_model().await;
-            let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
-                .get(creator)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|s| s.max_sessions)
-                .unwrap_or_default();
-            let mut filtered: Vec<String> = Vec::new();
-            for m in &model_ids {
-                let cap = caps.get(m).copied().unwrap_or(1);
-                if model_under_user_cap(&running, creator, m, cap) {
-                    filtered.push(m.clone());
+        // Models + project path are only needed to DISPATCH the Planner. A
+        // human-review remediation is never dispatched, so it needs neither —
+        // and must not bail out when no planner model is configured.
+        let (model_ids, project_path): (Vec<String>, Option<String>) = match kind {
+            RemediationKind::Planner => {
+                let model_ids = self
+                    .resolve_dispatch_models_for_role("planner", source_creator.as_deref())
+                    .await;
+                if model_ids.is_empty() {
+                    tracing::warn!(
+                        source_task_id = %source_task_id,
+                        "CoordinatorActor: planner escalation — no model configured for planner role"
+                    );
+                    return;
                 }
-            }
-            if filtered.is_empty() {
-                tracing::debug!(
-                    source_task_id = %source_task_id,
-                    creator,
-                    "CoordinatorActor: planner escalation deferred — creator at per-model concurrency cap"
-                );
-                return;
-            }
-            filtered
-        } else {
-            model_ids
-        };
 
-        let Some(project_path) = self.project_path_for_id(project_id).await else {
-            tracing::warn!(
-                project_id = %project_id,
-                source_task_id = %source_task_id,
-                "CoordinatorActor: planner escalation — project path not found"
-            );
-            return;
+                // Per-user, per-model concurrency cap: the planner escalation must
+                // consume the SAME shared per-(creator, model) budget as every other
+                // dispatch path (worker, reviewer, lead, architect). Without this a
+                // planner dispatch admitted in the same tick as worker dispatches can
+                // overshoot max_sessions (observed: 2 worker + 1 reviewer = 3 > cap 2).
+                // Filter to only models where the creator is under their cap, using a
+                // fresh DB + inflight-ledger snapshot so a just-recorded admission in
+                // this same tick is visible.
+                let model_ids: Vec<String> = if let Some(creator) = source_creator.as_deref() {
+                    let running = self.effective_running_by_user_model().await;
+                    let caps = djinn_db::UserSettingsRepository::new(self.db.clone())
+                        .get(creator)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.max_sessions)
+                        .unwrap_or_default();
+                    let mut filtered: Vec<String> = Vec::new();
+                    for m in &model_ids {
+                        let cap = caps.get(m).copied().unwrap_or(1);
+                        if model_under_user_cap(&running, creator, m, cap) {
+                            filtered.push(m.clone());
+                        }
+                    }
+                    if filtered.is_empty() {
+                        tracing::debug!(
+                            source_task_id = %source_task_id,
+                            creator,
+                            "CoordinatorActor: planner escalation deferred — creator at per-model concurrency cap"
+                        );
+                        return;
+                    }
+                    filtered
+                } else {
+                    model_ids
+                };
+
+                let Some(project_path) = self.project_path_for_id(project_id).await else {
+                    tracing::warn!(
+                        project_id = %project_id,
+                        source_task_id = %source_task_id,
+                        "CoordinatorActor: planner escalation — project path not found"
+                    );
+                    return;
+                };
+                (model_ids, Some(project_path))
+            }
+            RemediationKind::HumanReview => (Vec::new(), None),
         };
 
         // Name the review task after the work it is solving, not just a
@@ -745,9 +831,20 @@ impl CoordinatorActor {
             .as_ref()
             .map(|t| format!("{} ({})", t.title, t.short_id))
             .unwrap_or_else(|| source_task_id.to_string());
-        let description = format!(
-            "Escalated from task {source_label}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
-        );
+        let (description, instructions) = match kind {
+            RemediationKind::Planner => (
+                format!(
+                    "Escalated from task {source_label}. Lead could not resolve — Planner review required.\n\nReason: {reason}"
+                ),
+                "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
+            ),
+            RemediationKind::HumanReview => (
+                format!(
+                    "Escalated from task {source_label}. Repeated automated remediation FAILED — this requires HUMAN review.\n\nDo NOT auto-resolve: a human must close THIS task to release the blocked source task.\n\nReason: {reason}"
+                ),
+                "Repeated automated remediation failed. Requires human review — do not auto-resolve; a human must close this task to release the blocked source task.",
+            ),
+        };
         let review_task = match djinn_core::auth_context::SESSION_USER_ID
             .scope(
                 source_creator,
@@ -756,7 +853,7 @@ impl CoordinatorActor {
                     None,
                     &title,
                     &description,
-                    "Review the escalated task and either resolve it, reshape the work, or leave a 'Requires human review' comment.",
+                    instructions,
                     "review",
                     0,
                     "system",
@@ -795,14 +892,48 @@ impl CoordinatorActor {
             );
         }
 
-        // Log a comment on the source task linking to the planner review task.
-        let comment_payload = serde_json::json!({
-            "body": format!(
+        // Tag the human-review remediation task with `human-review-hold` so the
+        // UI can surface a "needs your review" indicator on it (the actual item
+        // a human must act on; closing it revives the held source task). Reuse
+        // the existing `update` writer (no new compile-time-checked query) —
+        // re-pass the freshly-created task's own fields and override only
+        // `labels`. Non-fatal: a failed label write still leaves the hold in
+        // place via the blocker + comment.
+        if kind == RemediationKind::HumanReview
+            && let Err(e) = task_repo
+                .update(
+                    &review_task.id,
+                    &review_task.title,
+                    &review_task.description,
+                    &review_task.design,
+                    review_task.priority,
+                    &review_task.owner,
+                    "[\"human-review-hold\"]",
+                    &review_task.acceptance_criteria,
+                )
+                .await
+        {
+            tracing::warn!(
+                error = %e,
+                review_task_id = %review_task.short_id,
+                "CoordinatorActor: human-review remediation — failed to set human-review-hold label"
+            );
+        }
+
+        // Log a comment on the source task linking to the remediation review task.
+        let comment_body = match kind {
+            RemediationKind::Planner => format!(
                 "[PLANNER_ESCALATION] Escalated to Planner review task {}. Reason: {}",
                 review_task.short_id, reason
-            )
-        })
-        .to_string();
+            ),
+            RemediationKind::HumanReview => format!(
+                "[HUMAN_REVIEW_HOLD] Held on human-review remediation task {} after repeated \
+                 automated remediation failed. This task stays open + blocked until a human \
+                 resolves it. Reason: {}",
+                review_task.short_id, reason
+            ),
+        };
+        let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
         let _ = task_repo
             .log_activity(
                 Some(source_task_id),
@@ -813,6 +944,19 @@ impl CoordinatorActor {
             )
             .await;
 
+        // Human-review remediation is intentionally NOT dispatched to any agent —
+        // a human must resolve it, so the source stays held until they do.
+        if kind == RemediationKind::HumanReview {
+            tracing::info!(
+                review_task_id = %review_task.short_id,
+                source_task_id = %source_task_id,
+                project_id = %project_id,
+                "CoordinatorActor: human-review remediation created; awaiting human resolution (no agent dispatched)"
+            );
+            return;
+        }
+
+        let project_path = project_path.expect("planner remediation resolves a project path");
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self

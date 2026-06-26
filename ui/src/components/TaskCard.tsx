@@ -87,10 +87,16 @@ function formatCompactDuration(totalSeconds: number): string {
 
 // --- Status badge for in-flight cards ---
 
+// Label set by the coordinator on the human-review remediation task when
+// repeated automated remediation fails. Closing that task revives the held
+// source task — so it's the one item a human must act on.
+const HUMAN_REVIEW_HOLD_LABEL = "human-review-hold";
+
+function hasHumanReviewHold(task: Task): boolean {
+  return task.labels?.includes(HUMAN_REVIEW_HOLD_LABEL) ?? false;
+}
+
 function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean): { label: string; className: string } | null {
-  if (status === "needs_lead_intervention" && !hasSession) {
-    return { label: "agent stuck", className: "text-red-400" };
-  }
   if ((status === "needs_task_review" || status === "in_task_review") && !hasSession && allAcMet) {
     return { label: "merging", className: "text-green-400 animate-pulse" };
   }
@@ -113,11 +119,10 @@ function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSess
 // --- Card tint based on status ---
 
 function getCardTint(task: Task): { ring: string; bg: string; hover: string; actionsBg: string } | null {
-  if (task.status === "needs_lead_intervention" && !task.active_session) {
-    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
-  }
-  if ((task.status === "needs_lead_intervention" && task.active_session) || task.status === "in_lead_intervention") {
-    return { ring: "ring-red-500/40", bg: "bg-red-500/5", hover: "hover:bg-red-500/10 hover:ring-red-500/60", actionsBg: "bg-red-500/10 text-white" };
+  // Human-review remediation hold: the one item a human must act on. Subtle
+  // amber tint so it stands out without the alarm of the old red "stuck" tint.
+  if (hasHumanReviewHold(task)) {
+    return { ring: "ring-amber-500/40", bg: "bg-amber-500/5", hover: "hover:bg-amber-500/10 hover:ring-amber-500/60", actionsBg: "bg-amber-500/10 text-white" };
   }
   return null;
 }
@@ -189,6 +194,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const acTotal = ac.length;
   const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
+  const needsReview = hasHumanReviewHold(task);
   const isSettingUp = task.status === "in_progress" && !task.active_session;
 
   return (
@@ -273,6 +279,17 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {isInFlight && (
             <span className="inline-flex items-center gap-1" data-testid="taskcard-status-badge">
               <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />
+            </span>
+          )}
+
+          {/* Human-review remediation hold — not in-flight (status `open`), so
+              render its own status text outside the isInFlight gate. */}
+          {needsReview && (
+            <span
+              className="inline-flex items-center gap-1"
+              data-testid="taskcard-needs-review-badge"
+            >
+              <span className="text-[10px] font-medium text-amber-400">needs your review</span>
             </span>
           )}
 

@@ -304,6 +304,12 @@ pub enum TransitionAction {
     PrMerge,
     /// GitHub App signals changes requested on PR — transitions pr_review → open.
     PrChangesRequested,
+    /// CI-loop remediation park: hold the source task by moving it back to
+    /// `open` so its already-added remediation blocker keeps it out of dispatch
+    /// (`list_ready` filters blocked-open tasks) until the remediation closes
+    /// and `emit_unblocked_tasks` revives it. Unlike `PrCiFailed` / `Reopen`
+    /// this is a HOLD, not a rework, so it does NOT increment `reopen_count`.
+    ParkForRemediation,
     /// Non-worker role (planner/architect) completed with file changes —
     /// route through the approved → PR pipeline instead of closing directly.
     SubmitForMerge,
@@ -356,6 +362,7 @@ impl TransitionAction {
             "pr_conflict" => Ok(Self::PrConflict),
             "pr_merge" => Ok(Self::PrMerge),
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
+            "park_for_remediation" => Ok(Self::ParkForRemediation),
             "submit_for_merge" => Ok(Self::SubmitForMerge),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
@@ -727,6 +734,29 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Approved)
         }
+
+        TransitionAction::ParkForRemediation => {
+            // Park (hold) the source on its remediation blocker by landing it at
+            // `open`. Legal from every pre-terminal in-flight state a CI-loop
+            // park can observe; a no-op when the task is already `open`. Unlike
+            // `PrCiFailed` / `Reopen` it does NOT bump `reopen_count` — this is a
+            // hold pending remediation, not another rework round.
+            if !matches!(
+                from,
+                TaskStatus::PrDraft
+                    | TaskStatus::PrReview
+                    | TaskStatus::InProgress
+                    | TaskStatus::Open
+                    | TaskStatus::NeedsTaskReview
+                    | TaskStatus::InTaskReview
+                    | TaskStatus::Approved
+            ) {
+                return bad(
+                    "park_for_remediation is only valid from pr_draft, pr_review, in_progress, open, needs_task_review, in_task_review, or approved",
+                );
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
     })
 }
 
@@ -772,6 +802,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::PrConflict
                 | TransitionAction::PrMerge
                 | TransitionAction::PrChangesRequested
+                | TransitionAction::ParkForRemediation
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -800,7 +831,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 26] = [
+    const ACTIONS: [TransitionAction; 27] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -827,6 +858,7 @@ mod tests {
         TransitionAction::PrConflict,
         TransitionAction::PrMerge,
         TransitionAction::PrChangesRequested,
+        TransitionAction::ParkForRemediation,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -894,6 +926,16 @@ mod tests {
                 Some(TaskStatus::Closed)
             }
             (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
+            (
+                TransitionAction::ParkForRemediation,
+                TaskStatus::PrDraft
+                | TaskStatus::PrReview
+                | TaskStatus::InProgress
+                | TaskStatus::Open
+                | TaskStatus::NeedsTaskReview
+                | TaskStatus::InTaskReview
+                | TaskStatus::Approved,
+            ) => Some(TaskStatus::Open),
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }

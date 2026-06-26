@@ -720,9 +720,20 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         "second strike is handled terminally instead of redispatching"
     );
     assert_eq!(parked.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
-    harness
-        .assert_task_status("closed", Some("planner intervention"))
-        .await;
+    // Second strike now HOLDS the task on a human rather than force-closing it:
+    // it stays `open` and blocked (the first-strike planner review is still an
+    // unresolved blocker, so no fresh remediation is stacked) so it consumes no
+    // dispatch slot yet is revivable when a human resolves the remediation.
+    harness.assert_task_status("open", None).await;
+    assert!(
+        !harness
+            .repo
+            .list_blockers(&harness.task_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "parked source must remain held by an unresolved remediation blocker"
+    );
     harness.assert_dispatch_backoff_cleared().await;
     harness.assert_capacity_released().await;
     harness
@@ -738,7 +749,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         terminal_recheck_handled,
         "terminal second-strike recheck is consumed rather than redispatched"
     );
-    assert_eq!(terminal_recheck.status, "closed");
+    assert_eq!(terminal_recheck.status, "open");
     assert_eq!(
         harness.planner_intervention_markers().await.len(),
         marker_count_after_park,
@@ -954,6 +965,35 @@ async fn loop_guard_routes_to_planner_without_dispatch_failure_streak() {
     );
 }
 
+/// Drain the already-buffered broadcast events (the transition + any
+/// `emit_unblocked_tasks` follow-ups are emitted synchronously before the
+/// awaited transition returns) and report whether a `task_updated` for
+/// `task_id` was observed.
+async fn wait_for_task_updated(
+    events: &mut broadcast::Receiver<DjinnEventEnvelope>,
+    task_id: &str,
+) -> bool {
+    loop {
+        match events.try_recv() {
+            Ok(env) => {
+                if env.entity_type == "task"
+                    && env.action == "updated"
+                    && env
+                        .payload
+                        .get("task")
+                        .and_then(|t| t.get("id"))
+                        .and_then(|v| v.as_str())
+                        == Some(task_id)
+                {
+                    return true;
+                }
+            }
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loop_guard_second_strike_parks_task() {
     let db = test_helpers::create_test_db();
@@ -976,21 +1016,120 @@ async fn loop_guard_second_strike_parks_task() {
 
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "closed",
-        "second-strike guard trip force-closes the task"
+        parked.status, "open",
+        "second-strike guard trip HOLDS the task (open + blocked) instead of force-closing it"
     );
     assert!(
-        parked
-            .close_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("planner intervention")),
-        "second-strike close reason should preserve the recoverable planner-intervention park message"
+        parked.close_reason.is_none(),
+        "a held (parked) task must not carry a close_reason; got {:?}",
+        parked.close_reason
     );
+
+    // The hold creates a HUMAN-review remediation task and blocks the source on
+    // it, so the source is held until a human resolves the remediation.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "second strike must block the source on a single human-review remediation task"
+    );
+    let remediation_id = blockers[0].task_id.clone();
+    let remediation = repo.get(&remediation_id).await.unwrap().unwrap();
+    assert_eq!(remediation.issue_type, "review");
+    assert!(
+        remediation.title.starts_with("Planner remediation ["),
+        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
+        remediation.title
+    );
+
     assert!(
         planner_intervention_markers(&repo, &task.id)
             .await
             .is_empty(),
         "second strike parks without writing a fresh marker"
+    );
+
+    // Closing the remediation revives the held source via emit_unblocked_tasks.
+    let mut events = tx.subscribe();
+    repo.transition(
+        &remediation_id,
+        djinn_core::models::TransitionAction::Close,
+        "human",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let revived = wait_for_task_updated(&mut events, &task.id).await;
+    assert!(
+        revived,
+        "closing the human-review remediation must emit a TaskUpdated reviving the held source"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ci_loop_park_holds_source_open_and_revives_on_remediation_close() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Simulate a task whose draft PR has red, non-converging required CI.
+    repo.set_status(&task.id, "pr_draft").await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.status, "pr_draft");
+
+    actor
+        .escalate_ci_failure_and_park(
+            &task,
+            "https://github.com/acme/repo/pull/7",
+            "Required CI keeps failing on the same fingerprint; the worker is not converging.",
+            &["**Failed job:** server-clippy (failure)".to_string()],
+        )
+        .await;
+
+    // The source is PARKED: `open` (NOT closed, NOT pr_draft) and held by a
+    // remediation blocker, so `list_ready` filters it out — no slot consumed.
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status, "open",
+        "CI-loop park leaves the source open, not closed/pr_draft"
+    );
+    assert_eq!(
+        parked.close_reason, None,
+        "a parked (held) source must not carry a close_reason"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "CI-loop park must hold the source on a single remediation blocker"
+    );
+    let remediation_id = blockers[0].task_id.clone();
+    let remediation = repo.get(&remediation_id).await.unwrap().unwrap();
+    assert!(
+        remediation.title.starts_with("Planner remediation ["),
+        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
+        remediation.title
+    );
+
+    // Closing the remediation revives the held source via emit_unblocked_tasks.
+    let mut events = tx.subscribe();
+    repo.transition(
+        &remediation_id,
+        djinn_core::models::TransitionAction::Close,
+        "human",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        wait_for_task_updated(&mut events, &task.id).await,
+        "closing the CI-loop remediation must emit a TaskUpdated reviving the parked source"
     );
 }
 
@@ -1259,10 +1398,12 @@ async fn intervention_is_idempotent_per_reopen_count() {
 
 /// Second strike: once the Planner has already intervened
 /// (`intervention_count >= MAX_PLANNER_INTERVENTIONS`) and the task has
-/// STILL climbed back to the reopen threshold, the coordinator parks it
-/// terminally instead of escalating to the Planner again — no new marker,
-/// no new review task, and the task ends up `closed`. This is the loop
-/// breaker for the txr4 case (rescope didn't help → stop hogging the slot).
+/// STILL climbed back to the reopen threshold, the coordinator HOLDS it on a
+/// human instead of escalating to the Planner again — it stays `open` (never
+/// auto-closed), blocked on a freshly created human-review remediation task,
+/// and writes no new intervention marker. This is the loop breaker for the
+/// txr4 case (rescope didn't help → stop hogging the slot), now revivable when
+/// a human resolves the remediation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_strike_parks_task_after_prior_intervention() {
     let db = test_helpers::create_test_db();
@@ -1289,15 +1430,20 @@ async fn second_strike_parks_task_after_prior_intervention() {
         "second strike must handle the task (caller skips worker dispatch)"
     );
 
-    // Parked terminally — task is closed.
+    // Held on a human — task stays open, never auto-closed.
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "closed",
-        "second strike force-closes the task"
+        parked.status, "open",
+        "second strike HOLDS the task open (blocked) instead of force-closing it"
+    );
+    assert_eq!(
+        parked.close_reason, None,
+        "a held (parked) task must not carry a close_reason"
     );
 
-    // No planner intervention marker for this reopen count, and no new
-    // planner review task — the loop is broken, not re-escalated.
+    // No planner intervention marker for this reopen count — the rework loop is
+    // broken (not re-escalated to the planner). The hold instead creates a
+    // single HUMAN-review remediation task that blocks the source.
     assert!(
         !planner_intervention_markers(&repo, &task.id)
             .await
@@ -1305,12 +1451,18 @@ async fn second_strike_parks_task_after_prior_intervention() {
             .any(|m| m["reopen_count"] == REOPEN_INTERVENTION_THRESHOLD),
         "second strike must not write a new planner intervention marker"
     );
-    let reviews = repo.list_by_status("open").await.unwrap();
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "second strike holds the source on exactly one human-review remediation blocker"
+    );
+    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert_eq!(remediation.issue_type, "review");
     assert!(
-        !reviews
-            .iter()
-            .any(|t| t.issue_type == "review" && t.project_id == parked.project_id),
-        "second strike must not create another planner review task"
+        remediation.title.starts_with("Planner remediation ["),
+        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
+        remediation.title
     );
 }
 
@@ -1319,7 +1471,7 @@ async fn second_strike_parks_task_after_prior_intervention() {
 // These tests verify that CI failure sections are properly threaded through
 // escalation paths — the core wiring added by epic nnij.
 
-/// `escalate_ci_failure_and_close` includes CI failure sections in both the
+/// `escalate_ci_failure_and_park` includes CI failure sections in both the
 /// visibility comment and the escalation reason passed to
 /// `dispatch_planner_escalation`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1340,7 +1492,7 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     let pr_url = "https://github.com/owner/repo/pull/42";
 
     actor
-        .escalate_ci_failure_and_close(&task, pr_url, reason, &sections)
+        .escalate_ci_failure_and_park(&task, pr_url, reason, &sections)
         .await;
 
     // The visibility comment must contain "**CI Failure Details:**" and each
@@ -1362,7 +1514,7 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     let escalation_comment = comments
         .iter()
         .find(|c| c.payload.contains("**PR CI Escalation**"))
-        .expect("escalate_ci_failure_and_close must log a PR CI Escalation comment");
+        .expect("escalate_ci_failure_and_park must log a PR CI Escalation comment");
     assert!(
         escalation_comment
             .payload
@@ -1414,7 +1566,7 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     );
 }
 
-/// `escalate_ci_failure_and_close` with empty sections omits the CI Failure
+/// `escalate_ci_failure_and_park` with empty sections omits the CI Failure
 /// Details block from both the visibility comment and the escalation reason.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalate_ci_failure_with_empty_sections_omits_details() {
@@ -1429,7 +1581,7 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
     let pr_url = "https://github.com/owner/repo/pull/42";
 
     actor
-        .escalate_ci_failure_and_close(&task, pr_url, reason, &sections)
+        .escalate_ci_failure_and_park(&task, pr_url, reason, &sections)
         .await;
 
     let comments = repo

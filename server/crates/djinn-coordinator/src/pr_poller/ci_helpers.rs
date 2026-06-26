@@ -69,16 +69,18 @@ impl CoordinatorActor {
     /// 4. **Diff-empty short-circuit.** If the PR head has no commits ahead of
     ///    base on GitHub (`ahead_by == 0`), the previous worker iteration
     ///    produced no new diff — re-dispatching cannot change anything. We
-    ///    escalate to the Planner and force-close instead of looping.
+    ///    escalate to the Planner and PARK (hold the source on the remediation
+    ///    blocker) instead of looping.
     ///
     /// 5. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
-    ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and
-    ///    force-close rather than redispatch. Escalation is terminal — the
-    ///    counter is never reset on the reopen that re-arms the loop.
+    ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and PARK
+    ///    rather than redispatch. Escalation is terminal — the counter is never
+    ///    reset on the reopen that re-arms the loop.
     ///
     /// Returns `true` when the event was *consumed* (the task was transitioned
-    /// — either reworked or force-closed) and the caller should run its
-    /// post-transition cache cleanup and `continue`. Returns `false` when the
+    /// — either reworked or parked on a remediation blocker) and the caller
+    /// should run its post-transition cache cleanup and `continue`. Returns
+    /// `false` when the
     /// failures were all non-blocking and the caller should fall through to its
     /// normal (CI-passed) handling.
     #[allow(clippy::too_many_arguments)]
@@ -211,6 +213,11 @@ impl CoordinatorActor {
             let sections_text = ci_failure_sections.join("\n");
             self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
                 .await;
+            // The intervention escalated + blocked the source; park it to `open`
+            // so it is genuinely HELD (not left in pr_draft/pr_review where the
+            // poller keeps re-polling the red PR) and revivable when the
+            // remediation closes.
+            self.park_source_open(task_id, &reason).await;
             return true;
         }
 
@@ -269,6 +276,10 @@ impl CoordinatorActor {
             let sections_text = ci_failure_sections.join("\n");
             self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
                 .await;
+            // Park the source to `open` so it is held by the blocker the
+            // intervention added (not left in pr_draft/pr_review) and revivable
+            // when the remediation closes.
+            self.park_source_open(task_id, &reason).await;
             return true;
         }
         // If Some(false): normal worker bug, fall through to existing retry path.
@@ -296,9 +307,9 @@ impl CoordinatorActor {
                     task_id = %task_short_id,
                     pr = pull_number,
                     sha = %current_sha,
-                    "PR poller: CI failed but branch is diff-empty vs base — escalating + force-closing"
+                    "PR poller: CI failed but branch is diff-empty vs base — escalating + parking (held on remediation blocker)"
                 );
-                self.escalate_ci_failure_and_close(task, pr_url, &reason, &ci_failure_sections)
+                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
                     .await;
                 return true;
             }
@@ -355,9 +366,9 @@ impl CoordinatorActor {
                 pr = pull_number,
                 round,
                 threshold = PR_CI_FAILURE_THRESHOLD,
-                "PR poller: CI-failure rework threshold exceeded — escalating + force-closing"
+                "PR poller: CI-failure rework threshold exceeded — escalating + parking (held on remediation blocker)"
             );
-            self.escalate_ci_failure_and_close(task, pr_url, &reason, &ci_failure_sections)
+            self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
                 .await;
             return true;
         }
@@ -422,11 +433,14 @@ impl CoordinatorActor {
         true
     }
 
-    /// Terminal escalation for a CI-failure loop the worker can't resolve
-    /// (diff-empty re-emit, or cycle cap exceeded). Logs a visibility comment,
-    /// dispatches a Planner escalation, then `ForceClose`s the task so it
-    /// leaves the rework loop. Never resets the CI-cycle counter.
-    pub(crate) async fn escalate_ci_failure_and_close(
+    /// Park (HOLD) a CI-failure loop the worker can't resolve (diff-empty
+    /// re-emit, or cycle cap exceeded). Logs a visibility comment, dispatches a
+    /// Planner remediation (which creates a remediation task and BLOCKS the
+    /// source on it), then parks the source back to `open` so it is held by that
+    /// blocker — NOT force-closed. `list_ready` filters the blocked-open task out
+    /// of dispatch (no slot consumed) and `emit_unblocked_tasks` revives it the
+    /// moment the remediation closes. Never resets the CI-cycle counter.
+    pub(crate) async fn escalate_ci_failure_and_park(
         &mut self,
         task: &djinn_core::models::Task,
         pr_url: &str,
@@ -462,8 +476,9 @@ impl CoordinatorActor {
             );
         }
 
-        // Escalate to the Planner (ADR-051 §8 escalation ceiling) before
-        // force-closing, so a human / Planner sees why the task gave up.
+        // Escalate to the Planner (ADR-051 §8 escalation ceiling), which creates
+        // a remediation task and BLOCKS the source on it, so a human / Planner
+        // sees why the task gave up and can drive it forward.
         let enriched_reason = if ci_failure_sections.is_empty() {
             reason.to_string()
         } else {
@@ -475,14 +490,30 @@ impl CoordinatorActor {
         self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
             .await;
 
-        self.apply_pr_transition(&task.id, TransitionAction::ForceClose, Some(reason))
-            .await;
+        // Park (hold) the source on the blocker just added — NOT force-close.
+        // The blocker was added by `dispatch_planner_escalation` BEFORE this
+        // park, so the open task is never dispatchable without its blocker.
+        self.park_source_open(&task.id, reason).await;
         self.pr_status_cache.remove(&task.id);
         self.pr_draft_first_seen.remove(&task.id);
         self.review_stuck_sha_first_seen.remove(&task.id);
         self.merge_fail_count.remove(&task.id);
         self.delegated_to_github.remove(&task.id);
         self.conversations_resolved.remove(&task.id);
+    }
+
+    /// Park a stuck source task: move it to `open` so it is HELD by the
+    /// remediation blocker that the escalation path already added — never
+    /// closed, never left in `pr_draft`/`pr_review` (where the PR poller would
+    /// keep re-polling its red PR). A no-op when the task is already `open`.
+    ///
+    /// Ordering contract: callers MUST add the remediation blocker BEFORE
+    /// calling this, so there is no window where the open task is dispatchable
+    /// without its blocker. Once parked, `list_ready` filters it out (blocked)
+    /// and `emit_unblocked_tasks` revives it when the remediation closes.
+    pub(crate) async fn park_source_open(&self, task_id: &str, reason: &str) {
+        self.apply_pr_transition(task_id, TransitionAction::ParkForRemediation, Some(reason))
+            .await;
     }
 }
 pub(crate) fn is_merge_queue_405(
