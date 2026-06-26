@@ -884,14 +884,23 @@ pub(crate) async fn execute_stage(
                             provider_failure: None,
                         },
                     },
-                    // Refinement tribunal roles (advocate, adversary, judge)
-                    // use `submit_work` to signal completion. The coordinator
-                    // reads the DB (proposal revisions, debate trail) after
-                    // the session ends to advance the refinement state machine.
+                    // Refinement tribunal roles each finalize via their own
+                    // configured tool: the Advocate `submit_work`, the Adversary
+                    // `submit_review`, the Judge `submit_decision`. The finalize
+                    // tool is only a session terminator — the coordinator reads
+                    // the DB (proposal revisions + debate trail) after the
+                    // session ends to advance the state machine, so any of the
+                    // three counts as a clean completion. (The real output is
+                    // written via `proposal_debate_append` / `proposal_update`
+                    // during the session, not carried in the finalize call.)
                     RoleKind::Refinement => match finalize_name {
-                        "submit_work" => StageOutcome::WorkerDone,
+                        "submit_work" | "submit_review" | "submit_decision" => {
+                            StageOutcome::WorkerDone
+                        }
                         "" => StageOutcome::Failed {
-                            reason: "refinement session ended without calling submit_work".into(),
+                            reason: "refinement session ended without calling a finalize tool \
+                                     (submit_work / submit_review / submit_decision)"
+                                .into(),
                             provider_failure: None,
                         },
                         other => StageOutcome::Failed {
