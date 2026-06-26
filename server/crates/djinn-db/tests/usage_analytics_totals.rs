@@ -81,7 +81,7 @@ async fn seed_task(
     .expect("insert task");
 }
 
-/// Seed a worker session linked to a task with a given cost (or NULL).
+/// Seed a worker session linked to a task with a given cost (or NULL) and cost basis.
 #[allow(clippy::too_many_arguments)]
 async fn seed_worker_session(
     db: &Database,
@@ -93,14 +93,15 @@ async fn seed_worker_session(
     tokens_in: i64,
     tokens_out: i64,
     started_at: &str,
+    cost_basis: &str,
 ) {
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, 'worker', 'completed', \
-                 $5, $6, $7, 0, 0, $8)",
+                 $5, $6, $7, 0, 0, $8, $9)",
     )
     .bind(session_id)
     .bind(project_id)
@@ -110,6 +111,7 @@ async fn seed_worker_session(
     .bind(tokens_in)
     .bind(tokens_out)
     .bind(cost_usd)
+    .bind(cost_basis)
     .execute(db.pool())
     .await
     .expect("insert worker session");
@@ -148,8 +150,8 @@ async fn seed_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'actual')",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -189,8 +191,8 @@ async fn seed_unpriced_session(db: &Database) {
         "INSERT INTO sessions \
          (id, project_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, \
-          cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+          cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'unpriced')",
     )
     .bind(&session_id)
     .bind(&project_id)
@@ -233,8 +235,8 @@ async fn usage_totals_decodes_i64_from_sum() {
     assert_eq!(totals.tokens_out, 5678);
     assert_eq!(totals.cache_read_tokens, 100);
     assert_eq!(totals.cache_write_tokens, 200);
-    // total_cost_usd should be Some(0.042) — the only session is priced.
-    let cost = totals.total_cost_usd.expect("cost should be Some");
+    // actual_spend_usd should be Some(0.042) — the only session is priced.
+    let cost = totals.actual_spend_usd.expect("cost should be Some");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
     assert_eq!(totals.unpriced_session_count, 0);
 
@@ -280,7 +282,7 @@ async fn usage_totals_reports_priced_subtotal_and_unpriced_count() {
     // Spend is the priced subtotal (only the 0.042 session is priced); the
     // unpriced session is excluded from the sum but counted.
     let cost = totals
-        .total_cost_usd
+        .actual_spend_usd
         .expect("priced subtotal should be Some when at least one session is priced");
     assert!((cost - 0.042_f64).abs() < 1e-9, "cost mismatch: {cost}");
     assert_eq!(
@@ -311,9 +313,9 @@ async fn usage_totals_all_unpriced_yields_none_subtotal() {
 
     assert_eq!(totals.session_count, 1);
     assert!(
-        totals.total_cost_usd.is_none(),
+        totals.actual_spend_usd.is_none(),
         "expected NULL subtotal when no session is priced, got {:?}",
-        totals.total_cost_usd,
+        totals.actual_spend_usd,
     );
     assert_eq!(totals.unpriced_session_count, 1);
 }
@@ -384,6 +386,7 @@ async fn effectiveness_shared_credit_attribution() {
         100,
         200,
         "2025-06-10T10:00:00.000Z",
+        "actual",
     )
     .await;
     seed_worker_session(
@@ -396,6 +399,7 @@ async fn effectiveness_shared_credit_attribution() {
         150,
         250,
         "2025-06-11T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -410,6 +414,7 @@ async fn effectiveness_shared_credit_attribution() {
         200,
         300,
         "2025-06-10T11:00:00.000Z",
+        "actual",
     )
     .await;
     seed_worker_session(
@@ -422,6 +427,7 @@ async fn effectiveness_shared_credit_attribution() {
         80,
         120,
         "2025-06-12T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -446,7 +452,7 @@ async fn effectiveness_shared_credit_attribution() {
         "model-a success_rate should be 1.0, got {sr_a}"
     );
     // Spend = 0.05 + 0.03
-    let spend_a = a.spend_usd.expect("model-a spend should be Some");
+    let spend_a = a.actual_spend_usd.expect("model-a spend should be Some");
     assert!(
         (spend_a - 0.08_f64).abs() < 1e-9,
         "model-a spend mismatch: {spend_a}"
@@ -467,7 +473,7 @@ async fn effectiveness_shared_credit_attribution() {
         "model-b success_rate should be 0.5, got {sr_b}"
     );
     // Spend = 0.08 + 0.01
-    let spend_b = b.spend_usd.expect("model-b spend should be Some");
+    let spend_b = b.actual_spend_usd.expect("model-b spend should be Some");
     assert!(
         (spend_b - 0.09_f64).abs() < 1e-9,
         "model-b spend mismatch: {spend_b}"
@@ -500,6 +506,7 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
             100 * (i as i64 + 1),
             200 * (i as i64 + 1),
             &format!("2025-06-1{:?}T10:00:00.000Z", i),
+            "actual",
         )
         .await;
     }
@@ -539,14 +546,14 @@ async fn effectiveness_no_inflation_from_duplicate_sessions() {
         "avg_reopens should be 2.0, got {avg}"
     );
 
-    // cost_per_completed_task = total_spend / 1 task.
+    // actual_cost_per_completed_task = total_spend / 1 task.
     let total_spend = 0.01 + 0.02 + 0.03; // 0.06
     let cpt = x
-        .cost_per_completed_task
-        .expect("cost_per_completed_task should be Some");
+        .actual_cost_per_completed_task
+        .expect("actual_cost_per_completed_task should be Some");
     assert!(
         (cpt - total_spend).abs() < 1e-9,
-        "cost_per_completed_task should be {total_spend}, got {cpt}"
+        "actual_cost_per_completed_task should be {total_spend}, got {cpt}"
     );
 }
 
@@ -574,6 +581,7 @@ async fn effectiveness_null_cost_spend_remains_none() {
         100,
         200,
         "2025-06-15T10:00:00.000Z",
+        "actual",
     )
     .await;
 
@@ -588,6 +596,7 @@ async fn effectiveness_null_cost_spend_remains_none() {
         500,
         600,
         "2025-06-15T11:00:00.000Z",
+        "unpriced",
     )
     .await;
 
@@ -599,7 +608,9 @@ async fn effectiveness_null_cost_spend_remains_none() {
 
     // ── model-priced: spend_usd = Some(0.05) ──
     let priced = find_model(&effectiveness, "model-priced");
-    let spend_priced = priced.spend_usd.expect("priced model spend should be Some");
+    let spend_priced = priced
+        .actual_spend_usd
+        .expect("priced model spend should be Some");
     assert!(
         (spend_priced - 0.05_f64).abs() < 1e-9,
         "priced spend mismatch: {spend_priced}"
@@ -610,12 +621,180 @@ async fn effectiveness_null_cost_spend_remains_none() {
     // ── model-unpriced: spend_usd must be None (not 0.0) ──
     let unpriced = find_model(&effectiveness, "model-unpriced");
     assert!(
-        unpriced.spend_usd.is_none(),
+        unpriced.actual_spend_usd.is_none(),
         "model-unpriced spend_usd must be None (NULL cost), got {:?}",
-        unpriced.spend_usd,
+        unpriced.actual_spend_usd,
     );
     // Tokens are still counted despite NULL cost.
     assert_eq!(unpriced.tokens_in, 500, "tokens_in should be counted");
     assert_eq!(unpriced.tokens_out, 600, "tokens_out should be counted");
     assert_eq!(unpriced.sessions, 1, "should have 1 session");
+}
+
+/// Mixed cost-basis split at the totals, row, and matrix grains:
+/// seed one `actual`, one `projected`, and one `unpriced` session in the same
+/// project/model scope, then verify:
+///   - `actual_spend_usd` sums only actual-basis sessions.
+///   - `projected_usd` sums only projected-basis sessions.
+///   - `unpriced_session_count` counts the unpriced session.
+///   - The unpriced session's cost is excluded from BOTH dollar figures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn totals_split_actual_projected_and_unpriced() {
+    let db = create_test_db();
+    db.ensure_initialized().await.expect("ensure_initialized");
+
+    let proj = seed_project(&db, "split-basis-proj").await;
+
+    // Task for effectiveness attribution.
+    seed_task(&db, "task-split-1", &proj, "closed", Some("completed"), 0).await;
+
+    // actual-basis session: $0.10
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-split",
+        Some(0.10),
+        100,
+        200,
+        "2025-06-10T10:00:00.000Z",
+        "actual",
+    )
+    .await;
+
+    // projected-basis session: $0.25
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-split",
+        Some(0.25),
+        150,
+        250,
+        "2025-06-11T10:00:00.000Z",
+        "projected",
+    )
+    .await;
+
+    // unpriced-basis session: NULL cost — excluded from both sums.
+    seed_worker_session(
+        &db,
+        &uuid::Uuid::now_v7().to_string(),
+        &proj,
+        "task-split-1",
+        "model-split",
+        None,
+        50,
+        75,
+        "2025-06-12T10:00:00.000Z",
+        "unpriced",
+    )
+    .await;
+
+    let repo = UsageAnalyticsRepository::new(db);
+    let params = UsageAnalyticsQuery {
+        from: "2025-01-01".into(),
+        to: "2025-12-31".into(),
+        group_by: GroupDimension::Model,
+        project_id: None,
+        model_id: None,
+        agent_type: None,
+        user_id: None,
+    };
+
+    // ── Totals grain ──
+    let totals = repo.totals(&params).await.expect("totals should succeed");
+    assert_eq!(totals.session_count, 3, "three sessions total");
+    assert_eq!(totals.tokens_in, 100 + 150 + 50);
+    assert_eq!(totals.tokens_out, 200 + 250 + 75);
+    // actual_spend_usd = 0.10 (only actual-basis).
+    let actual = totals
+        .actual_spend_usd
+        .expect("actual_spend_usd should be Some");
+    assert!(
+        (actual - 0.10_f64).abs() < 1e-9,
+        "actual spend should be 0.10, got {actual}"
+    );
+    // projected_usd = 0.25 (only projected-basis).
+    let projected = totals.projected_usd.expect("projected_usd should be Some");
+    assert!(
+        (projected - 0.25_f64).abs() < 1e-9,
+        "projected should be 0.25, got {projected}"
+    );
+    assert_eq!(
+        totals.unpriced_session_count, 1,
+        "exactly one unpriced session"
+    );
+
+    // ── Effectiveness / model-effectiveness grain ──
+    let (effectiveness, matrix) = repo
+        .query_effectiveness(&params)
+        .await
+        .expect("query_effectiveness should succeed");
+
+    let model_row = find_model(&effectiveness, "model-split");
+    assert_eq!(model_row.sessions, 3, "model-split has 3 sessions");
+    let me_actual = model_row
+        .actual_spend_usd
+        .expect("model actual_spend_usd should be Some");
+    assert!(
+        (me_actual - 0.10_f64).abs() < 1e-9,
+        "model actual should be 0.10, got {me_actual}"
+    );
+    let me_proj = model_row
+        .projected_usd
+        .expect("model projected_usd should be Some");
+    assert!(
+        (me_proj - 0.25_f64).abs() < 1e-9,
+        "model projected should be 0.25, got {me_proj}"
+    );
+    assert_eq!(model_row.unpriced_session_count, 1, "model unpriced count");
+
+    // ── Project × model matrix grain ──
+    let cell = matrix
+        .iter()
+        .find(|c| c.project_id == proj && c.model_id == "model-split")
+        .expect("matrix cell for split-basis-proj / model-split");
+    let cell_actual = cell
+        .actual_spend_usd
+        .expect("cell actual_spend_usd should be Some");
+    assert!(
+        (cell_actual - 0.10_f64).abs() < 1e-9,
+        "cell actual should be 0.10, got {cell_actual}"
+    );
+    let cell_proj = cell
+        .projected_usd
+        .expect("cell projected_usd should be Some");
+    assert!(
+        (cell_proj - 0.25_f64).abs() < 1e-9,
+        "cell projected should be 0.25, got {cell_proj}"
+    );
+    assert_eq!(cell.unpriced_session_count, 1, "cell unpriced count");
+
+    // ── Entity breakdown grain (by_project) ──
+    let breakdown = repo
+        .entity_breakdown(&params, GroupDimension::Project)
+        .await
+        .expect("entity_breakdown should succeed");
+    let proj_row = breakdown
+        .iter()
+        .find(|r| r.id == proj)
+        .expect("breakdown row for split-basis-proj");
+    let bd_actual = proj_row
+        .actual_spend_usd
+        .expect("breakdown actual_spend_usd should be Some");
+    assert!(
+        (bd_actual - 0.10_f64).abs() < 1e-9,
+        "breakdown actual should be 0.10, got {bd_actual}"
+    );
+    let bd_proj = proj_row
+        .projected_usd
+        .expect("breakdown projected_usd should be Some");
+    assert!(
+        (bd_proj - 0.25_f64).abs() < 1e-9,
+        "breakdown projected should be 0.25, got {bd_proj}"
+    );
+    assert_eq!(proj_row.unpriced_session_count, 1, "breakdown unpriced");
 }

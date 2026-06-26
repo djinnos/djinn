@@ -273,8 +273,10 @@ struct UsageKpiPartDto {
 #[derive(Serialize)]
 struct SeriesPointDto {
     date: String,
-    /// Spend in USD; `null` when any session in the bucket was unpriced.
-    cost: Option<f64>,
+    /// Actual API spend in USD for this bucket; `null` when no actual sessions.
+    actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost; `null` when no projected sessions.
+    projected_usd: Option<f64>,
     tokens_in: i64,
     tokens_out: i64,
     /// Cache-read (cached input) tokens — priced separately from fresh input.
@@ -284,6 +286,8 @@ struct SeriesPointDto {
     project_id: String,
     project_name: String,
     agent_type: String,
+    /// Count of unpriced sessions in this bucket.
+    unpriced_session_count: i64,
 }
 
 /// A breakdown row for one entity (user / project / proposal / task).
@@ -291,7 +295,9 @@ struct SeriesPointDto {
 struct BreakdownRowDto {
     id: String,
     name: String,
-    cost: Option<f64>,
+    actual_spend_usd: Option<f64>,
+    projected_usd: Option<f64>,
+    unpriced_session_count: i64,
     tokens_in: i64,
     tokens_out: i64,
     /// Cache-read (cached input) tokens — priced separately from fresh input.
@@ -299,7 +305,8 @@ struct BreakdownRowDto {
     task_count: i64,
     success_rate: Option<f64>,
     avg_reopens: Option<f64>,
-    cost_per_task: Option<f64>,
+    /// Actual API spend per task. `None` when no actual-basis sessions.
+    actual_cost_per_task: Option<f64>,
     /// Present only for the by_task breakdown; lets the UI build a task link.
     #[serde(skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
@@ -323,8 +330,14 @@ struct ModelEffectivenessDto {
     task_count: i64,
     success_rate: Option<f64>,
     avg_reopens: Option<f64>,
-    cost_per_task: Option<f64>,
-    total_cost: Option<f64>,
+    /// Actual API spend per completed task.
+    actual_cost_per_task: Option<f64>,
+    /// Actual API spend total.
+    actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost total.
+    projected_usd: Option<f64>,
+    /// Sessions excluded from both dollar figures.
+    unpriced_session_count: i64,
     total_tokens: i64,
     tokens_in: i64,
     tokens_out: i64,
@@ -343,8 +356,10 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
             task_count: r.shared_credit_completed_task_count,
             success_rate: r.success_rate,
             avg_reopens: r.avg_reopens,
-            cost_per_task: r.cost_per_completed_task,
-            total_cost: r.spend_usd,
+            actual_cost_per_task: r.actual_cost_per_completed_task,
+            actual_spend_usd: r.actual_spend_usd,
+            projected_usd: r.projected_usd,
+            unpriced_session_count: r.unpriced_session_count,
             total_tokens: r.tokens_in + r.tokens_out,
             tokens_in: r.tokens_in,
             tokens_out: r.tokens_out,
@@ -361,10 +376,16 @@ struct ProjectModelCellDto {
     project_id: String,
     project_name: String,
     model: String,
-    cost_per_task: Option<f64>,
+    /// Actual API spend per task.
+    actual_cost_per_task: Option<f64>,
     success_rate: Option<f64>,
     avg_reopens: Option<f64>,
-    total_cost: Option<f64>,
+    /// Actual API spend total.
+    actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost total.
+    projected_usd: Option<f64>,
+    /// Sessions excluded from both dollar figures.
+    unpriced_session_count: i64,
     total_tokens: i64,
     /// Cache-read (cached input) tokens — priced separately from fresh input.
     tokens_cached: i64,
@@ -372,7 +393,8 @@ struct ProjectModelCellDto {
 
 impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
     fn from(r: ProjectModelMatrixRow) -> Self {
-        let cost_per_task = match (r.spend_usd, r.task_count) {
+        // Use actual spend for cost-per-task to reflect real API spend.
+        let actual_cost_per_task = match (r.actual_spend_usd, r.task_count) {
             (Some(cost), n) if n > 0 => Some(cost / n as f64),
             _ => None,
         };
@@ -380,10 +402,12 @@ impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
             project_id: r.project_id,
             project_name: r.project_name,
             model: r.model_id,
-            cost_per_task,
+            actual_cost_per_task,
             success_rate: r.success_rate,
             avg_reopens: r.avg_reopens,
-            total_cost: r.spend_usd,
+            actual_spend_usd: r.actual_spend_usd,
+            projected_usd: r.projected_usd,
+            unpriced_session_count: r.unpriced_session_count,
             total_tokens: r.tokens_in + r.tokens_out,
             tokens_cached: r.cache_read_tokens,
         }
@@ -423,7 +447,12 @@ fn pct_delta(current: f64, previous: f64) -> Option<f64> {
 
 /// Build the KPI cards from current and previous window totals.
 fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> {
-    let spend_delta = match (totals.total_cost_usd, previous.total_cost_usd) {
+    let actual_delta = match (totals.actual_spend_usd, previous.actual_spend_usd) {
+        (Some(cur), Some(prev)) => pct_delta(cur, prev),
+        _ => None,
+    };
+
+    let projected_delta = match (totals.projected_usd, previous.projected_usd) {
         (Some(cur), Some(prev)) => pct_delta(cur, prev),
         _ => None,
     };
@@ -433,14 +462,28 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
 
     vec![
         UsageKpiDto {
-            label: "Spend".to_string(),
-            value: totals.total_cost_usd,
-            delta_pct: spend_delta,
+            label: "Actual API Spend".to_string(),
+            value: totals.actual_spend_usd,
+            delta_pct: actual_delta,
             formatted: totals
-                .total_cost_usd
+                .actual_spend_usd
                 .map(format_currency)
                 .unwrap_or_default(),
-            caption: Some(spend_caption(totals.unpriced_session_count)),
+            caption: Some(cost_caption(
+                totals.unpriced_session_count,
+                "Real API-key spend at list rates",
+            )),
+            breakdown: None,
+        },
+        UsageKpiDto {
+            label: "Projected Cost".to_string(),
+            value: totals.projected_usd,
+            delta_pct: projected_delta,
+            formatted: totals
+                .projected_usd
+                .map(format_currency)
+                .unwrap_or_default(),
+            caption: Some("Subscription / coding-plan list-rate equivalent".to_string()),
             breakdown: None,
         },
         UsageKpiDto {
@@ -490,11 +533,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
     ]
 }
 
-/// Caption for the Spend card. Spend is a notional figure at public API rates
-/// (usage on subscription / coding plans is billed separately), and unpriced
-/// sessions are excluded from the sum rather than counted as $0.
-fn spend_caption(unpriced_session_count: i64) -> String {
-    let mut caption = "Est. at public API rates".to_string();
+/// Caption for cost KPI cards that notes unpriced session exclusion.
+fn cost_caption(unpriced_session_count: i64, base: &str) -> String {
+    let mut caption = base.to_string();
     if unpriced_session_count > 0 {
         caption.push_str(&format!(
             " · {unpriced_session_count} unpriced session{} excluded",
@@ -538,32 +579,17 @@ fn period_start(day: &str, granularity: Granularity) -> Result<String, (StatusCo
     Ok(format_date(start))
 }
 
-/// Accumulates spend (preserving NULL-unpriced semantics) and token/task
-/// counters for a rolled-up series bucket.
+/// Accumulates actual spend, projected cost, and unpriced counts for a
+/// rolled-up series bucket.
+#[derive(Default)]
 struct SeriesAccumulator {
     tokens_in: i64,
     tokens_out: i64,
     tokens_cached: i64,
     task_count: i64,
-    cost_sum: f64,
-    cost_known: bool,
-    any_usage: bool,
-}
-
-impl Default for SeriesAccumulator {
-    fn default() -> Self {
-        // `cost_known` starts true and flips to false the first time an
-        // unpriced (NULL cost) row with usage is folded in.
-        Self {
-            tokens_in: 0,
-            tokens_out: 0,
-            tokens_cached: 0,
-            task_count: 0,
-            cost_sum: 0.0,
-            cost_known: true,
-            any_usage: false,
-        }
-    }
+    actual_spend_sum: Option<f64>,
+    projected_sum: Option<f64>,
+    unpriced_session_count: i64,
 }
 
 impl SeriesAccumulator {
@@ -572,19 +598,13 @@ impl SeriesAccumulator {
         self.tokens_out += row.tokens_out;
         self.tokens_cached += row.cache_read_tokens;
         self.task_count += row.task_count;
-        self.any_usage = true;
-        match row.cost {
-            Some(cost) if self.cost_known => self.cost_sum += cost,
-            Some(_) => {}
-            None => self.cost_known = false,
-        }
-    }
+        self.unpriced_session_count += row.unpriced_session_count;
 
-    fn cost(&self) -> Option<f64> {
-        if self.cost_known && self.any_usage {
-            Some(self.cost_sum)
-        } else {
-            None
+        if let Some(actual) = row.actual_spend_usd {
+            *self.actual_spend_sum.get_or_insert(0.0) += actual;
+        }
+        if let Some(proj) = row.projected_usd {
+            *self.projected_sum.get_or_insert(0.0) += proj;
         }
     }
 }
@@ -618,7 +638,8 @@ fn rollup_series(
         .map(
             |((date, model, project_id, project_name, agent_type), acc)| SeriesPointDto {
                 date,
-                cost: acc.cost(),
+                actual_spend_usd: acc.actual_spend_sum,
+                projected_usd: acc.projected_sum,
                 tokens_in: acc.tokens_in,
                 tokens_out: acc.tokens_out,
                 tokens_cached: acc.tokens_cached,
@@ -627,6 +648,7 @@ fn rollup_series(
                 project_id,
                 project_name,
                 agent_type,
+                unpriced_session_count: acc.unpriced_session_count,
             },
         )
         .collect())
@@ -635,7 +657,8 @@ fn rollup_series(
 /// Map a repository breakdown row to the response DTO, deriving cost-per-task
 /// and attaching the entity-specific link id.
 fn breakdown_row(row: EntityBreakdownRow, dimension: GroupDimension) -> BreakdownRowDto {
-    let cost_per_task = match (row.cost, row.task_count) {
+    // Use actual spend for cost-per-task to reflect real API spend.
+    let actual_cost_per_task = match (row.actual_spend_usd, row.task_count) {
         (Some(cost), n) if n > 0 => Some(cost / n as f64),
         _ => None,
     };
@@ -647,14 +670,16 @@ fn breakdown_row(row: EntityBreakdownRow, dimension: GroupDimension) -> Breakdow
     BreakdownRowDto {
         id: row.id,
         name: row.name,
-        cost: row.cost,
+        actual_spend_usd: row.actual_spend_usd,
+        projected_usd: row.projected_usd,
+        unpriced_session_count: row.unpriced_session_count,
         tokens_in: row.tokens_in,
         tokens_out: row.tokens_out,
         tokens_cached: row.cache_read_tokens,
         task_count: row.task_count,
         success_rate: row.success_rate,
         avg_reopens: row.avg_reopens,
-        cost_per_task,
+        actual_cost_per_task,
         task_id,
         proposal_id,
     }
@@ -866,14 +891,15 @@ mod tests {
     }
 
     #[test]
-    fn build_kpis_emits_four_cards_with_deltas() {
+    fn build_kpis_emits_five_cards_with_deltas() {
         let totals = UsageTotals {
             session_count: 10,
             tokens_in: 100,
             tokens_out: 100,
             cache_read_tokens: 50,
             cache_write_tokens: 5,
-            total_cost_usd: Some(20.0),
+            actual_spend_usd: Some(12.0),
+            projected_usd: Some(8.0),
             unpriced_session_count: 0,
         };
         let previous = UsageTotals {
@@ -882,71 +908,86 @@ mod tests {
             tokens_out: 50,
             cache_read_tokens: 25,
             cache_write_tokens: 0,
-            total_cost_usd: Some(10.0),
+            actual_spend_usd: Some(6.0),
+            projected_usd: Some(4.0),
             unpriced_session_count: 0,
         };
         let kpis = build_kpis(&totals, &previous);
-        assert_eq!(kpis.len(), 4);
+        assert_eq!(kpis.len(), 5);
 
-        let spend = &kpis[0];
-        assert_eq!(spend.label, "Spend");
-        assert_eq!(spend.value, Some(20.0));
+        let actual_kpi = &kpis[0];
+        assert_eq!(actual_kpi.label, "Actual API Spend");
+        assert_eq!(actual_kpi.value, Some(12.0));
         assert!(
-            (spend.delta_pct.unwrap() - 1.0).abs() < 1e-9,
-            "doubled spend = +100%"
+            (actual_kpi.delta_pct.unwrap() - 1.0).abs() < 1e-9,
+            "doubled actual spend = +100%"
         );
-        assert!(spend.formatted.starts_with('$'));
-        // No unpriced sessions → caption is the bare estimate qualifier.
-        assert_eq!(spend.caption.as_deref(), Some("Est. at public API rates"));
+        assert!(actual_kpi.formatted.starts_with('$'));
 
-        let tokens = &kpis[1];
+        let projected_kpi = &kpis[1];
+        assert_eq!(projected_kpi.label, "Projected Cost");
+        assert_eq!(projected_kpi.value, Some(8.0));
+        assert!(
+            (projected_kpi.delta_pct.unwrap() - 1.0).abs() < 1e-9,
+            "doubled projected = +100%"
+        );
+
+        let tokens = &kpis[2];
         assert_eq!(tokens.value, Some(200.0));
         assert!(tokens.formatted.is_empty());
     }
 
     #[test]
     fn build_kpis_null_spend_yields_null_value_and_delta() {
-        let totals = UsageTotals {
-            total_cost_usd: None,
-            ..UsageTotals::default()
-        };
+        let totals = UsageTotals::default();
         let kpis = build_kpis(&totals, &UsageTotals::default());
-        assert_eq!(kpis[0].label, "Spend");
+        assert_eq!(kpis[0].label, "Actual API Spend");
         assert!(kpis[0].value.is_none());
         assert!(kpis[0].delta_pct.is_none());
         assert!(kpis[0].formatted.is_empty());
+        assert_eq!(kpis[1].label, "Projected Cost");
+        assert!(kpis[1].value.is_none());
         // Previous window empty → token delta is null, not a divide-by-zero.
-        assert!(kpis[1].delta_pct.is_none());
+        assert!(kpis[2].delta_pct.is_none());
     }
 
     #[test]
-    fn spend_caption_notes_excluded_unpriced_sessions() {
-        assert_eq!(spend_caption(0), "Est. at public API rates");
+    fn cost_caption_notes_excluded_unpriced_sessions() {
+        assert_eq!(cost_caption(0, "Test"), "Test");
         assert_eq!(
-            spend_caption(1),
-            "Est. at public API rates · 1 unpriced session excluded"
+            cost_caption(1, "Real API-key spend at list rates"),
+            "Real API-key spend at list rates · 1 unpriced session excluded"
         );
         assert_eq!(
-            spend_caption(5),
-            "Est. at public API rates · 5 unpriced sessions excluded"
+            cost_caption(5, "Real API-key spend at list rates"),
+            "Real API-key spend at list rates · 5 unpriced sessions excluded"
         );
     }
 
     #[test]
-    fn build_kpis_spend_caption_reports_unpriced_count() {
+    fn build_kpis_cost_caption_reports_unpriced_count() {
         let totals = UsageTotals {
-            total_cost_usd: Some(12.5),
+            actual_spend_usd: Some(12.5),
             unpriced_session_count: 3,
             ..UsageTotals::default()
         };
         let kpis = build_kpis(&totals, &UsageTotals::default());
-        assert_eq!(
-            kpis[0].caption.as_deref(),
-            Some("Est. at public API rates · 3 unpriced sessions excluded")
+        assert!(
+            kpis[0]
+                .caption
+                .as_deref()
+                .unwrap()
+                .contains("3 unpriced sessions excluded")
         );
     }
 
-    fn series_row(day: &str, model: &str, cost: Option<f64>) -> SeriesDetailRow {
+    fn series_row(
+        day: &str,
+        model: &str,
+        actual: Option<f64>,
+        projected: Option<f64>,
+        unpriced: i64,
+    ) -> SeriesDetailRow {
         SeriesDetailRow {
             day: day.into(),
             model: model.into(),
@@ -958,15 +999,17 @@ mod tests {
             tokens_out: 5,
             cache_read_tokens: 3,
             task_count: 1,
-            cost,
+            actual_spend_usd: actual,
+            projected_usd: projected,
+            unpriced_session_count: unpriced,
         }
     }
 
     #[test]
     fn rollup_series_day_is_identity_per_dimension() {
         let rows = vec![
-            series_row("2025-03-10", "a", Some(1.0)),
-            series_row("2025-03-10", "b", Some(2.0)),
+            series_row("2025-03-10", "a", Some(1.0), None, 0),
+            series_row("2025-03-10", "b", None, Some(2.0), 0),
         ];
         let points = rollup_series(rows, Granularity::Day).unwrap();
         assert_eq!(points.len(), 2);
@@ -974,21 +1017,23 @@ mod tests {
     }
 
     #[test]
-    fn rollup_series_week_groups_same_dimension_and_preserves_null_cost() {
+    fn rollup_series_week_groups_same_dimension_and_splits_costs() {
         let rows = vec![
-            series_row("2025-03-03", "a", Some(1.0)),
-            series_row("2025-03-05", "a", None),
-            series_row("2025-03-04", "b", Some(3.0)),
+            series_row("2025-03-03", "a", Some(1.0), None, 0),
+            series_row("2025-03-05", "a", None, None, 1), // unpriced
+            series_row("2025-03-04", "b", None, Some(3.0), 0),
         ];
         let points = rollup_series(rows, Granularity::Week).unwrap();
-        // model a (two rows, one unpriced) collapses to one bucket with null
-        // cost; model b stays separate.
         let a = points.iter().find(|p| p.model == "a").unwrap();
         assert_eq!(a.date, "2025-03-03");
         assert_eq!(a.tokens_in, 20);
-        assert!(a.cost.is_none(), "any unpriced row makes the bucket null");
+        assert_eq!(a.actual_spend_usd, Some(1.0));
+        assert!(a.projected_usd.is_none());
+        assert_eq!(a.unpriced_session_count, 1);
         let b = points.iter().find(|p| p.model == "b").unwrap();
-        assert_eq!(b.cost, Some(3.0));
+        assert_eq!(b.actual_spend_usd, None);
+        assert_eq!(b.projected_usd, Some(3.0));
+        assert_eq!(b.unpriced_session_count, 0);
     }
 
     #[test]
@@ -996,7 +1041,9 @@ mod tests {
         let row = EntityBreakdownRow {
             id: "task-1".into(),
             name: "A task".into(),
-            cost: Some(4.0),
+            actual_spend_usd: Some(3.0),
+            projected_usd: Some(1.0),
+            unpriced_session_count: 0,
             tokens_in: 10,
             tokens_out: 10,
             cache_read_tokens: 4,
@@ -1007,7 +1054,7 @@ mod tests {
         let task = breakdown_row(row.clone(), GroupDimension::Task);
         assert_eq!(task.task_id.as_deref(), Some("task-1"));
         assert!(task.proposal_id.is_none());
-        assert_eq!(task.cost_per_task, Some(2.0));
+        assert_eq!(task.actual_cost_per_task, Some(1.5)); // 3.0 / 2
 
         let proposal = breakdown_row(row.clone(), GroupDimension::Proposal);
         assert_eq!(proposal.proposal_id.as_deref(), Some("task-1"));
@@ -1022,7 +1069,9 @@ mod tests {
         let row = EntityBreakdownRow {
             id: "u1".into(),
             name: "user".into(),
-            cost: Some(3.0),
+            actual_spend_usd: Some(3.0),
+            projected_usd: None,
+            unpriced_session_count: 0,
             tokens_in: 1,
             tokens_out: 1,
             cache_read_tokens: 0,
@@ -1031,7 +1080,7 @@ mod tests {
             avg_reopens: None,
         };
         let dto = breakdown_row(row, GroupDimension::User);
-        assert!(dto.cost_per_task.is_none());
+        assert!(dto.actual_cost_per_task.is_none());
     }
 
     #[test]
@@ -1039,14 +1088,16 @@ mod tests {
         let row = ModelEffectivenessRow {
             model_id: "gpt".into(),
             sessions: 4,
-            spend_usd: Some(2.0),
+            actual_spend_usd: Some(1.5),
+            projected_usd: Some(0.5),
+            unpriced_session_count: 0,
             tokens_in: 100,
             tokens_out: 50,
             cache_read_tokens: 40,
             shared_credit_completed_task_count: 3,
             success_rate: Some(0.75),
             avg_reopens: Some(0.2),
-            cost_per_completed_task: Some(0.66),
+            actual_cost_per_completed_task: Some(0.5),
             tokens_per_task: Some(50.0),
         };
         let dto: ModelEffectivenessDto = row.into();
@@ -1059,8 +1110,9 @@ mod tests {
         );
         assert_eq!(json.get("session_count").unwrap().as_i64().unwrap(), 4);
         assert_eq!(json.get("total_tokens").unwrap().as_i64().unwrap(), 150);
-        assert!((json.get("total_cost").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
-        assert!((json.get("cost_per_task").unwrap().as_f64().unwrap() - 0.66).abs() < 1e-9);
+        assert!((json.get("actual_spend_usd").unwrap().as_f64().unwrap() - 1.5).abs() < 1e-9);
+        assert!((json.get("projected_usd").unwrap().as_f64().unwrap() - 0.5).abs() < 1e-9);
+        assert!((json.get("actual_cost_per_task").unwrap().as_f64().unwrap() - 0.5).abs() < 1e-9);
         // Repository-only names must not leak.
         assert!(json.get("model_id").is_none());
         assert!(json.get("spend_usd").is_none());
@@ -1073,7 +1125,9 @@ mod tests {
             project_name: "Proj".into(),
             model_id: "m1".into(),
             sessions: 2,
-            spend_usd: Some(6.0),
+            actual_spend_usd: Some(4.0),
+            projected_usd: Some(2.0),
+            unpriced_session_count: 0,
             tokens_in: 30,
             tokens_out: 20,
             cache_read_tokens: 12,
@@ -1086,8 +1140,12 @@ mod tests {
         assert_eq!(json.get("model").unwrap().as_str().unwrap(), "m1");
         assert_eq!(json.get("project_name").unwrap().as_str().unwrap(), "Proj");
         assert_eq!(json.get("total_tokens").unwrap().as_i64().unwrap(), 50);
-        assert!((json.get("cost_per_task").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
-        assert!((json.get("total_cost").unwrap().as_f64().unwrap() - 6.0).abs() < 1e-9);
+        assert!(
+            (json.get("actual_cost_per_task").unwrap().as_f64().unwrap() - (4.0 / 3.0)).abs()
+                < 1e-9
+        );
+        assert!((json.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+        assert!((json.get("projected_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9);
     }
 
     #[test]
