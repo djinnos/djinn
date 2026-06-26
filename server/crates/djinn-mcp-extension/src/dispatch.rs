@@ -252,6 +252,7 @@ async fn dispatch_proposal_tools(
         "proposal_show" => Some(task_epic::call_proposal_show(ctx, args).await),
         "proposal_debate_append" => Some(task_epic::call_proposal_debate_append(ctx, args).await),
         "proposal_debate_list" => Some(task_epic::call_proposal_debate_list(ctx, args).await),
+        "proposal_debate_resolve" => Some(task_epic::call_proposal_debate_resolve(ctx, args).await),
         "proposal_complete" => Some(task_epic::call_proposal_complete(ctx, args).await),
         "proposal_ac_set" => Some(task_epic::call_proposal_ac_set(ctx, args).await),
         "proposal_ac_amend" => Some(task_epic::call_proposal_ac_amend(ctx, args).await),

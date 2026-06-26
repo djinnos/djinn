@@ -756,6 +756,18 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         shared_schemas::tool_proposal_debate_list(),
         read_only(),
     ));
+    // Respond to objections in the trail: file a rebuttal explaining how the
+    // revision addresses each one, then resolve it so it clears the readiness
+    // gate's unresolved-blocking set. Without these the objection→resolution
+    // cycle never closes and the tribunal cannot converge.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_resolve(),
+        idempotent_mutation(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_update(),
         mutation(),

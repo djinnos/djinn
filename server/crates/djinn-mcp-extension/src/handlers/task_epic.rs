@@ -601,6 +601,24 @@ pub(crate) async fn call_proposal_debate_list(
     }))
 }
 
+pub(crate) async fn call_proposal_debate_resolve(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalDebateResolveParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let entry = proposal_repo
+        .resolve_debate_trail_entry(&p.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": entry.id,
+        "kind": entry.kind,
+        "resolved": entry.resolved_at.is_some(),
+    }))
+}
+
 pub(crate) async fn call_proposal_complete(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
