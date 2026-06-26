@@ -160,6 +160,11 @@ pub struct ProposalDebateListParams {
 }
 
 #[derive(Deserialize)]
+pub struct ProposalDebateResolveParams {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
 pub struct ProposalAcSetParams {
     pub id: String,
     /// Full acceptance-criteria list in order; entries may be bare

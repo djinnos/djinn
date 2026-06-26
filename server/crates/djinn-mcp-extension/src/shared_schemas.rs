@@ -299,6 +299,20 @@ pub fn tool_proposal_debate_list() -> RmcpTool {
     )
 }
 
+pub fn tool_proposal_debate_resolve() -> RmcpTool {
+    RmcpTool::new(
+        "proposal_debate_resolve".to_string(),
+        "Mark a debate-trail objection as resolved, by its entry `id` (from `proposal_debate_list`). The Advocate calls this for each blocking objection it has addressed in its revision — this is what clears the objection from the readiness gate's `unresolved_blocking` set. Resolving WITHOUT actually fixing the spec leaves the gate technically green but the work undone, so only resolve objections your revision genuinely satisfies; pair it with a `proposal_debate_append` rebuttal (`kind=\"rebuttal\"`) that explains how.".to_string(),
+        object!({
+            "type": "object",
+            "required": ["id"],
+            "properties": {
+                "id": {"type": "string", "description": "The debate-trail entry id to resolve (from proposal_debate_list)"}
+            }
+        }),
+    )
+}
+
 pub fn tool_proposal_complete() -> RmcpTool {
     RmcpTool::new(
         "proposal_complete".to_string(),

@@ -83,9 +83,8 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "agent_metrics"
         | "pr_review_context" => Some(read_only),
         "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
-        "task_update" | "epic_update" | "epic_close" | "proposal_ac_set" => {
-            Some(idempotent_mutation)
-        }
+        "task_update" | "epic_update" | "epic_close" | "proposal_ac_set"
+        | "proposal_debate_resolve" => Some(idempotent_mutation),
         "task_create"
         | "epic_create"
         | "task_transition"
@@ -244,6 +243,15 @@ fn tool_schemas_include_role_specific_tools() {
     assert!(
         advocate.iter().any(|n| n == "proposal_update"),
         "advocate should have proposal_update"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_debate_resolve"),
+        "advocate MUST have proposal_debate_resolve — without it objections \
+         never clear the readiness gate and the tribunal can't converge"
+    );
+    assert!(
+        advocate.iter().any(|n| n == "proposal_debate_append"),
+        "advocate should have proposal_debate_append to file rebuttals"
     );
     assert!(
         advocate.iter().any(|n| n == "proposal_block_patch"),
