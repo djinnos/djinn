@@ -32,7 +32,6 @@ import { ProposalKickoff } from "@/components/proposals/ProposalKickoff";
 import { ProposalRefinement } from "@/components/proposals/ProposalRefinement";
 import { ReadinessPanel } from "@/components/proposals/ReadinessPanel";
 import { ProposalHistory } from "@/components/proposals/ProposalHistory";
-import { DebateTrail } from "@/components/proposals/DebateTrail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -621,15 +620,10 @@ function ProposalDetailView({
 
         <Separator />
 
-        {/* Tribunal debate trail (objections/rebuttals/verdicts) — kept
-            separate from human feedback below. */}
-        <DebateTrail
-          debateTrail={detail.debate_trail}
-          canEdit={canDirectEdit}
-          onChanged={onChanged}
-        />
-
-        {/* Human feedback thread — separate from tribunal debate trail. */}
+        {/* Human feedback thread. The tribunal debate trail (objections /
+            rebuttals / verdicts) is intentionally NOT rendered here — the
+            judge's verdict in the refinement panel above is the human-facing
+            summary; the raw trail is audit data available via the API. */}
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}

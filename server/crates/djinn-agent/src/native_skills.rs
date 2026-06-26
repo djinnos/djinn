@@ -89,7 +89,10 @@ const NATIVE_SKILLS: &[NativeSkill] = &[NativeSkill {
                   markdown-to-MDX enrichment, block quality, bare-angle \
                   backtick constraint, and memory as the learned layer.",
     trust_level: "platform",
-    recommended_for_roles: &["planner"],
+    // `planner` authors proposals during decomposition; `advocate` authors and
+    // revises the proposal spec during tribunal refinement. Both produce
+    // proposal MDX and need the visual-spec authoring conventions.
+    recommended_for_roles: &["planner", "advocate"],
     content: VISUAL_SPEC_CONTENT,
 }];
 
@@ -194,6 +197,18 @@ mod tests {
     }
 
     #[test]
+    fn visual_spec_recommended_for_advocate() {
+        // The tribunal Advocate authors/revises the proposal spec and must
+        // receive the visual-spec authoring skill so refined specs are rich MDX.
+        let names = native_skill_names_for_role("advocate");
+        assert!(
+            names.contains(&"visual-spec"),
+            "expected visual-spec recommended for advocate, got: {:?}",
+            names,
+        );
+    }
+
+    #[test]
     fn visual_spec_not_recommended_for_worker() {
         let names = native_skill_names_for_role("worker");
         assert!(
@@ -216,7 +231,7 @@ mod tests {
         assert_eq!(resolved.name, "visual-spec");
         assert_eq!(resolved.trust_level, "platform");
         assert!(resolved.required);
-        assert_eq!(resolved.recommended_for_roles, vec!["planner"]);
+        assert_eq!(resolved.recommended_for_roles, vec!["planner", "advocate"]);
         assert!(resolved.tags.is_empty());
         assert!(!resolved.description.is_empty());
         assert!(!resolved.content.is_empty());
