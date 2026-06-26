@@ -510,6 +510,99 @@ pub struct ProposalBlockPatchParams {
     pub note: Option<String>,
 }
 
+/// Pure outcome of applying a block patch to a proposal body — the new body,
+/// its (possibly upgraded) `body_format`, and the revision `event_metadata`.
+pub struct BlockPatchOutcome {
+    pub new_body: String,
+    pub new_body_format: &'static str,
+    pub event_metadata: serde_json::Value,
+}
+
+/// Apply a single targeted MDX block patch to `existing_body`, returning the
+/// new body, its body_format, and the revision metadata.
+///
+/// This is the pure transformation shared by the server-side
+/// `proposal_block_patch` tool and the in-pod agent dispatch
+/// (`djinn-mcp-extension`), so both paths validate selectors and resulting MDX
+/// identically and produce byte-identical revisions. It does NOT resolve the
+/// proposal, enforce the author edit-gate, guard stale revisions, or persist —
+/// callers own those steps.
+pub fn apply_block_patch(
+    existing_body: &str,
+    existing_body_format: &str,
+    p: &ProposalBlockPatchParams,
+) -> Result<BlockPatchOutcome, String> {
+    if !matches!(p.operation.as_str(), "replace" | "wrap") {
+        return Err(format!(
+            "invalid operation: {:?} (expected replace or wrap)",
+            p.operation
+        ));
+    }
+    if p.block_mdx.is_empty() {
+        return Err("block_mdx must not be empty".to_string());
+    }
+
+    let range =
+        resolve_selector(existing_body, &p.selector).map_err(|e| format!("selector error: {e}"))?;
+
+    let new_body = match p.operation.as_str() {
+        "replace" => {
+            let mut body = String::with_capacity(
+                existing_body.len() - (range.end - range.start) + p.block_mdx.len(),
+            );
+            body.push_str(&existing_body[..range.start]);
+            body.push_str(&p.block_mdx);
+            body.push_str(&existing_body[range.end..]);
+            body
+        }
+        "wrap" => {
+            let selected = &existing_body[range.start..range.end];
+            let mut body = String::with_capacity(
+                existing_body.len() - (range.end - range.start) + p.block_mdx.len() + selected.len(),
+            );
+            body.push_str(&existing_body[..range.start]);
+            body.push_str(&p.block_mdx);
+            body.push_str(selected);
+            body.push_str(&existing_body[range.end..]);
+            body
+        }
+        _ => unreachable!(),
+    };
+
+    // Determine body_format: if the proposal is markdown and the patch
+    // introduces MDX block tags, upgrade to mdx.
+    let has_mdx_blocks = !extract_custom_block_tags(&new_body).is_empty();
+    let new_body_format = if existing_body_format == "mdx" || has_mdx_blocks {
+        "mdx"
+    } else {
+        "markdown"
+    };
+
+    if new_body_format == "mdx" {
+        validate_mdx_blocks(&new_body).map_err(|e| format!("resulting MDX is invalid: {e}"))?;
+        parse_mdx_blocks(&new_body).map_err(|e| format!("resulting MDX parse error: {e}"))?;
+    }
+    validate_design(&new_body)?;
+
+    let mut event_metadata = serde_json::json!({
+        "change_kind": "targeted_block_patch",
+        "selector": range.selector_description,
+        "range_start_byte": range.start,
+        "range_end_byte": range.end,
+        "native_skill_name": p.native_skill_name.as_deref().unwrap_or(""),
+        "native_skill_version": p.native_skill_version.as_deref().unwrap_or(""),
+    });
+    if let Some(ref note) = p.note {
+        event_metadata["note"] = serde_json::Value::String(note.clone());
+    }
+
+    Ok(BlockPatchOutcome {
+        new_body,
+        new_body_format,
+        event_metadata,
+    })
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalDeleteParams {
     /// Proposal UUID or short_id.
@@ -1540,26 +1633,13 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ProposalBlockPatchParams>,
     ) -> Json<ProposalSingleResponse> {
-        // 1. Validate operation.
-        if !matches!(p.operation.as_str(), "replace" | "wrap") {
-            return Json(err_single(format!(
-                "invalid operation: {:?} (expected replace or wrap)",
-                p.operation
-            )));
-        }
-
-        // 2. Validate block_mdx is non-empty.
-        if p.block_mdx.is_empty() {
-            return Json(err_single("block_mdx must not be empty".to_string()));
-        }
-
-        // 3. Resolve proposal.
+        // 1. Resolve proposal.
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
         };
 
-        // 4. Edit gate.
+        // 2. Edit gate.
         if let Err(e) = self
             .gate_proposal_edit(existing.author_user_id.as_deref())
             .await
@@ -1567,7 +1647,7 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
 
-        // 5. Stale revision guard.
+        // 3. Stale revision guard.
         if let Some(expected_seq) = p.expected_latest_revision_seq
             && existing.latest_revision_seq != expected_seq
         {
@@ -1577,88 +1657,26 @@ impl DjinnMcpServer {
             )));
         }
 
-        // 6. Resolve selector to a byte range in the body.
-        let range = match resolve_selector(&existing.body, &p.selector) {
-            Ok(r) => r,
-            Err(e) => return Json(err_single(format!("selector error: {e}"))),
+        // 4. Apply the patch (selector resolution, body build, MDX validation,
+        //    and metadata) via the shared pure transformation.
+        let outcome = match apply_block_patch(&existing.body, &existing.body_format, &p) {
+            Ok(o) => o,
+            Err(e) => return Json(err_single(e)),
         };
 
-        // 7. Build the new body.
-        let new_body = match p.operation.as_str() {
-            "replace" => {
-                let mut body = String::with_capacity(
-                    existing.body.len() - (range.end - range.start) + p.block_mdx.len(),
-                );
-                body.push_str(&existing.body[..range.start]);
-                body.push_str(&p.block_mdx);
-                body.push_str(&existing.body[range.end..]);
-                body
-            }
-            "wrap" => {
-                let selected = &existing.body[range.start..range.end];
-                let mut body = String::with_capacity(
-                    existing.body.len() - (range.end - range.start)
-                        + p.block_mdx.len()
-                        + selected.len(),
-                );
-                body.push_str(&existing.body[..range.start]);
-                // Insert the block_mdx before the selected content.
-                body.push_str(&p.block_mdx);
-                body.push_str(selected);
-                body.push_str(&existing.body[range.end..]);
-                body
-            }
-            _ => unreachable!(),
-        };
-
-        // 8. Validate the resulting MDX body.
-        // Determine body_format: if the proposal is markdown and the patch
-        // introduces MDX block tags, upgrade to mdx.
-        let has_mdx_blocks = !extract_custom_block_tags(&new_body).is_empty();
-        let new_body_format = if existing.body_format == "mdx" || has_mdx_blocks {
-            "mdx"
-        } else {
-            "markdown"
-        };
-
-        if new_body_format == "mdx" {
-            if let Err(e) = validate_mdx_blocks(&new_body) {
-                return Json(err_single(format!("resulting MDX is invalid: {e}")));
-            }
-            if let Err(e) = parse_mdx_blocks(&new_body) {
-                return Json(err_single(format!("resulting MDX parse error: {e}")));
-            }
-        }
-        if let Err(e) = validate_design(&new_body) {
-            return Json(err_single(e));
-        }
-
-        // 9. Build event_metadata for the targeted block-patch revision.
-        let mut metadata = serde_json::json!({
-            "change_kind": "targeted_block_patch",
-            "selector": range.selector_description,
-            "range_start_byte": range.start,
-            "range_end_byte": range.end,
-            "native_skill_name": p.native_skill_name.as_deref().unwrap_or(""),
-            "native_skill_version": p.native_skill_version.as_deref().unwrap_or(""),
-        });
-        if let Some(ref note) = p.note {
-            metadata["note"] = serde_json::Value::String(note.clone());
-        }
-
-        // 10. Persist through the revisioning path.
+        // 5. Persist through the revisioning path.
         let ac_json = existing.acceptance_criteria.clone();
         match repo
             .update(
                 &existing.id,
                 djinn_db::ProposalUpdateInput {
                     title: &existing.title,
-                    body: &new_body,
+                    body: &outcome.new_body,
                     acceptance_criteria: &ac_json,
                     status: &existing.status,
                     superseded_by: existing.superseded_by.as_deref(),
-                    body_format: Some(new_body_format),
-                    event_metadata: Some(&metadata),
+                    body_format: Some(outcome.new_body_format),
+                    event_metadata: Some(&outcome.event_metadata),
                 },
             )
             .await

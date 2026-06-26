@@ -8,6 +8,12 @@ use std::collections::HashSet;
 use djinn_control_plane::tools::epic_ops::{
     EpicShowRequest, EpicTasksRequest, EpicUpdateDeltaRequest,
 };
+use djinn_control_plane::tools::proposal_tools::{
+    ProposalBlockPatchParams, ProposalUpdateParams, apply_block_patch,
+};
+use djinn_control_plane::tools::validation::{
+    validate_ac_count, validate_design, validate_mdx_body, validate_proposal_status, validate_title,
+};
 use djinn_control_plane::tools::task_tools::{
     CommentTaskRequest as SharedCommentTaskRequest, CreateTaskRequest as SharedCreateTaskRequest,
     UpdateTaskRequest as SharedUpdateTaskRequest, add_task_comment as shared_add_task_comment,
@@ -704,6 +710,140 @@ pub(crate) async fn call_proposal_ac_set(
         "short_id": updated.short_id,
         "met": met,
         "total": parsed.len(),
+    }))
+}
+
+/// Revise a proposal's body / title / acceptance-criteria (in-pod agent path).
+///
+/// Mirrors the server-side `proposal_update` tool but reuses the shared
+/// validators and reaches the DB through [`ProposalRepository`] like the other
+/// agent-side proposal handlers. This is the Advocate's PRIMARY refinement
+/// action: most adversary objections demand body content (Problem / Scope /
+/// Objectives / grounding), and `proposal_update(body=…)` is the only way to add
+/// it. The in-pod dispatch never wired this tool before, so the Advocate's
+/// `proposal_update` calls failed with "unknown djinn frontend tool" and the
+/// tribunal could never converge.
+///
+/// The `in_review` composed DoR gate is intentionally NOT applied here: the
+/// refinement loop owns graduation; the Advocate only revises the spec. The
+/// authoring-attribution `event_metadata` is left `None` — the coordinator's
+/// refinement dispatch tags the resulting revision(s) with
+/// `source = "refinement_loop"` after the session.
+pub(crate) async fn call_proposal_update(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalUpdateParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let Some(existing) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+
+    let title = match &p.title {
+        Some(t) => validate_title(t)?,
+        None => existing.title.clone(),
+    };
+    let body = p.body.as_deref().unwrap_or(&existing.body);
+    validate_design(body)?;
+    let body_format = p
+        .body_format
+        .as_deref()
+        .unwrap_or(existing.body_format.as_str());
+    validate_mdx_body(body, Some(body_format))?;
+
+    let ac_json = if let Some(ac) = &p.acceptance_criteria {
+        validate_ac_count(ac.len())?;
+        serde_json::to_string(ac).unwrap_or_else(|_| "[]".to_string())
+    } else {
+        existing.acceptance_criteria.clone()
+    };
+
+    let status = p.status.as_deref().unwrap_or(&existing.status);
+    validate_proposal_status(status)?;
+
+    let superseded_by = if let Some(s) = &p.superseded_by {
+        match proposal_repo.resolve(s).await.ok().flatten() {
+            Some(target) => Some(target.id),
+            None => return Err(format!("superseded_by proposal not found: {s}")),
+        }
+    } else {
+        existing.superseded_by.clone()
+    };
+
+    let updated = proposal_repo
+        .update(
+            &existing.id,
+            djinn_db::ProposalUpdateInput {
+                title: &title,
+                body,
+                acceptance_criteria: &ac_json,
+                status,
+                superseded_by: superseded_by.as_deref(),
+                body_format: p.body_format.as_deref(),
+                event_metadata: None,
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "status": updated.status,
+        "latest_revision_seq": updated.latest_revision_seq,
+    }))
+}
+
+/// Apply a targeted MDX block patch to a proposal body (in-pod agent path).
+///
+/// Mirrors the server-side `proposal_block_patch` tool, reusing the shared
+/// [`apply_block_patch`] transformation so selector resolution and MDX
+/// validation are byte-identical across both paths. Wired into the agent
+/// dispatch alongside [`call_proposal_update`] so the Advocate's optional
+/// progressive-enrichment patches succeed instead of erroring as unknown tools.
+pub(crate) async fn call_proposal_block_patch(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalBlockPatchParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let Some(existing) = proposal_repo.resolve(&p.id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.id));
+    };
+
+    if let Some(expected_seq) = p.expected_latest_revision_seq
+        && existing.latest_revision_seq != expected_seq
+    {
+        return Err(format!(
+            "stale revision: expected latest_revision_seq={}, but proposal has {}",
+            expected_seq, existing.latest_revision_seq
+        ));
+    }
+
+    let outcome = apply_block_patch(&existing.body, &existing.body_format, &p)?;
+
+    let updated = proposal_repo
+        .update(
+            &existing.id,
+            djinn_db::ProposalUpdateInput {
+                title: &existing.title,
+                body: &outcome.new_body,
+                acceptance_criteria: &existing.acceptance_criteria,
+                status: &existing.status,
+                superseded_by: existing.superseded_by.as_deref(),
+                body_format: Some(outcome.new_body_format),
+                event_metadata: Some(&outcome.event_metadata),
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": updated.id,
+        "short_id": updated.short_id,
+        "latest_revision_seq": updated.latest_revision_seq,
     }))
 }
 
