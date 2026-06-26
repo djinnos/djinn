@@ -275,11 +275,13 @@ async fn call_skill_read(
             String::new()
         };
 
-        let trigger = if role == "planner" && task_issue_type == "epic_breakdown" {
-            Some(crate::actors::slot::lifecycle::task_classifier::NativeSkillTrigger::ProposalAuthoring)
-        } else {
-            None
-        };
+        // Route through the SAME classifier session construction uses, so this
+        // gate never drifts from the set of roles that actually get the skill
+        // assigned. (It used to hardcode planner-only and rejected the Advocate.)
+        let trigger = crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger_by_type(
+            role,
+            &task_issue_type,
+        );
 
         if trigger.is_none() {
             return Err(format!(

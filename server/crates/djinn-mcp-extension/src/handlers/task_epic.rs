@@ -847,6 +847,28 @@ pub(crate) async fn call_proposal_block_patch(
     }))
 }
 
+/// Return the lean proposal MDX block vocabulary (type, tag pairs) for the
+/// in-pod agent. Static data — no DB. Wired into the agent dispatch so the
+/// Advocate can discover the block catalog when authoring visual MDX; without
+/// it `get_block_catalog` failed with "unknown djinn frontend tool".
+pub(crate) async fn call_get_block_catalog(
+    _ctx: &dyn ExtensionContext,
+    _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let blocks = djinn_control_plane::tools::proposal_blocks::proposal_block_catalog();
+    Ok(serde_json::json!({ "blocks": blocks }))
+}
+
+/// Return the full v1 proposal MDX block registry (types, tags, field schemas)
+/// for the in-pod agent. Static data — no DB.
+pub(crate) async fn call_proposal_blocks(
+    _ctx: &dyn ExtensionContext,
+    _arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let blocks = djinn_control_plane::tools::proposal_blocks::proposal_block_registry();
+    Ok(serde_json::json!({ "blocks": blocks }))
+}
+
 pub(crate) async fn call_proposal_ac_amend(
     ctx: &dyn ExtensionContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

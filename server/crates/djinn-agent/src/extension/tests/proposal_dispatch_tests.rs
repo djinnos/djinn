@@ -118,3 +118,36 @@ async fn call_tool_dispatches_proposal_block_patch_in_pod() {
         "block patch must land in the body"
     );
 }
+
+/// The Advocate discovers the MDX block vocabulary via `get_block_catalog`,
+/// which must Handle in-pod (it failed with "unknown djinn frontend tool").
+#[tokio::test]
+async fn call_tool_dispatches_get_block_catalog_in_pod() {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let project_path = crate::extension::tests::project_fs_path(&project)
+        .to_string_lossy()
+        .into_owned();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+
+    let response = call_tool(
+        &state,
+        &crate::test_helpers::test_services(),
+        "get_block_catalog",
+        Some(serde_json::Map::new()),
+        Path::new(&project_path),
+        None,
+        Some("advocate"),
+        None,
+    )
+    .await
+    .expect("get_block_catalog dispatch should succeed (was 'unknown djinn frontend tool')");
+
+    assert!(
+        response
+            .get("blocks")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty()),
+        "catalog must return a non-empty block vocabulary"
+    );
+}

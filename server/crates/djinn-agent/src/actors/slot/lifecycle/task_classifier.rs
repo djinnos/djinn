@@ -51,15 +51,18 @@ pub(crate) enum NativeSkillTrigger {
 /// The classifier is purely synchronous, needs no DB or filesystem access,
 /// and is safe to call from unit tests with minimal `Task` stubs.
 ///
-/// Production callers that only have `issue_type` as a string (e.g.
-/// `mcp_resolve::classify_authoring_trigger` and the `skill_read` handler)
-/// inline the matching logic directly.  This function is the canonical
-/// `Task`-based API and is exercised by the unit tests below.
-pub(crate) fn classify_native_skill_trigger(
+/// Canonical (role, issue_type) → trigger mapping. **This is the single source
+/// of truth.** Every caller — session construction (`stage.rs` /
+/// `mcp_resolve.rs`) AND the `skill_read` handler — must route through here (or
+/// the `Task` wrapper below). They previously each inlined this match, which
+/// drifted: the `skill_read` copy stayed planner-only and rejected the Advocate
+/// ("not an assigned skill") even after session construction had assigned the
+/// skill, so the Advocate could never load `visual-spec`.
+pub(crate) fn classify_native_skill_trigger_by_type(
     role_name: &str,
-    task: &Task,
+    issue_type: &str,
 ) -> Option<NativeSkillTrigger> {
-    match (role_name, task.issue_type.as_str()) {
+    match (role_name, issue_type) {
         // `epic_breakdown` is the proposal-decomposition / AC-reconciliation
         // planner mode (Workflow D / Workflow E).  These are always
         // proposal-authoring sessions.
@@ -75,6 +78,15 @@ pub(crate) fn classify_native_skill_trigger(
         // All other (role, issue_type) pairs are non-authoring.
         _ => None,
     }
+}
+
+/// `Task`-based wrapper over [`classify_native_skill_trigger_by_type`] used by
+/// session construction, which has the full `Task`.
+pub(crate) fn classify_native_skill_trigger(
+    role_name: &str,
+    task: &Task,
+) -> Option<NativeSkillTrigger> {
+    classify_native_skill_trigger_by_type(role_name, task.issue_type.as_str())
 }
 
 #[cfg(test)]
