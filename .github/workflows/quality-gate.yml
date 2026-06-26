@@ -347,6 +347,35 @@ jobs:
                || '' }}
         run: ./scripts/check-migrations-immutable.sh
 
+  # Pure-shell PR-time guard: raw sqlx query usage is confined to djinn-db.
+  # Enforces the boundary that all direct sqlx::query / sqlx::query! calls
+  # must live inside `server/crates/djinn-db/` and not leak into other crates.
+  # Wired into the Quality Gate below so it is a hard blocker.
+  server-raw-sql-boundary:
+    name: Server Raw-SQL Boundary
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is required so `git diff` can resolve the merge base
+      # against the PR / merge-queue base SHA.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check raw-SQL boundary
+        env:
+          # Pick a base SHA appropriate for the current event:
+          #   pull_request: the PR's base ref HEAD
+          #   merge_group:  the merge-queue base ref HEAD
+          #   workflow_dispatch / other: empty → the script falls back to
+          #   origin/main.
+          BASE_SHA: >-
+            ${{ github.event.pull_request.base.sha
+               || github.event.merge_group.base_sha
+               || '' }}
+        run: ./scripts/check-raw-sql-boundary.sh
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║
   # ║                                                                  ║
@@ -585,6 +614,7 @@ jobs:
       - server-clippy
       - server-size-guard
       - server-migrations-guard
+      - server-raw-sql-boundary
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -596,6 +626,7 @@ jobs:
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
+            "${{ needs.server-raw-sql-boundary.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
