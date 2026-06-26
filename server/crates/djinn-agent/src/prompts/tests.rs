@@ -816,6 +816,33 @@ fn adversary_judge_do_not_include_block_catalog_tools() {
     );
 }
 
+/// Regression guard for the tribunal debate-trail wiring bug: the refinement
+/// loop detects an Adversary's objections and a Judge's verdict by reading
+/// `proposal_debate_append` entries from the debate trail. If those roles are
+/// not given `proposal_debate_append`, their structured output (filed via
+/// `submit_review`/`submit_decision`) is dropped, the round looks "dry", and
+/// the tribunal hollow-converges. Both roles MUST carry the tool the loop reads.
+#[test]
+fn adversary_and_judge_can_file_debate_trail_entries() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        adversary_prompt.contains("`proposal_debate_append("),
+        "adversary MUST have proposal_debate_append — it is the only channel the \
+         refinement loop reads for objections"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("`proposal_debate_append("),
+        "judge MUST have proposal_debate_append — it is the only channel the \
+         refinement loop reads for the verdict"
+    );
+}
+
 mod visual_spec;
 
 // ── Proposal-address prompt regressions (y4td) ───────────────────────────

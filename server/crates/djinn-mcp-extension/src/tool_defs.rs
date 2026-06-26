@@ -750,6 +750,12 @@ pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
         shared_schemas::tool_proposal_show(),
         read_only(),
     ));
+    // Read the debate trail to see exactly which adversary objections this
+    // revision must address.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_update(),
         mutation(),
@@ -800,6 +806,17 @@ pub fn tool_schemas_adversary() -> Vec<serde_json::Value> {
         shared_schemas::tool_proposal_show(),
         read_only(),
     ));
+    // Read the debate trail to avoid re-raising objections from prior rounds.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    // The Adversary files each objection here — the ONLY channel the refinement
+    // loop reads. Objections placed in `submit_review` are NOT read by the loop.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),
         mutation(),
@@ -812,10 +829,11 @@ pub fn tool_schemas_adversary() -> Vec<serde_json::Value> {
 }
 
 /// Tool schemas for Judge: base + memory + proposal read tools +
-/// task_comment_add + submit_decision finalize tool.
+/// proposal_debate_append (verdict) + task_comment_add + submit_decision.
 ///
 /// The Judge adjudicates proposal readiness after the Adversary is dry (k9zw).
-/// Read-only by design — it evaluates but does not modify proposals.
+/// It records its verdict via `proposal_debate_append` (the channel the loop
+/// reads) and does not otherwise modify proposals.
 pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
     let mut tool_values = base_tool_schemas();
     tool_values.push(serialize_tool(
@@ -825,6 +843,19 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_show(),
         read_only(),
+    ));
+    // Read the full debate trail to verify each blocking objection was
+    // resolved or rebutted before ruling.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    // The Judge records its readiness verdict here (kind="verdict") — the ONLY
+    // channel the refinement loop reads. A verdict in `submit_decision` text is
+    // NOT read by the loop.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),

@@ -143,6 +143,23 @@ pub struct ProposalCompleteParams {
 }
 
 #[derive(Deserialize)]
+pub struct ProposalDebateAppendParams {
+    pub proposal_id: String,
+    pub kind: String,
+    pub body: String,
+    #[serde(default)]
+    pub blocking: bool,
+    pub agent_role: String,
+    pub against_revision_seq: i32,
+    pub round: i32,
+}
+
+#[derive(Deserialize)]
+pub struct ProposalDebateListParams {
+    pub proposal_id: String,
+}
+
+#[derive(Deserialize)]
 pub struct ProposalAcSetParams {
     pub id: String,
     /// Full acceptance-criteria list in order; entries may be bare

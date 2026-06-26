@@ -548,9 +548,20 @@ impl CoordinatorActor {
                 blocking: entry.blocking,
             }
         } else {
+            // The judge completed but filed no `verdict` debate-trail entry.
+            // A missing verdict is a non-decision, not an approval — do NOT
+            // treat it as "ready". Mark it blocking so the loop runs another
+            // round (bounded by the round cap, which escalates to human
+            // review) rather than silently parking an un-adjudicated spec for
+            // human acceptance.
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge session completed without a verdict debate-trail entry; treating as not-ready"
+            );
             JudgeVerdictResult {
-                body: "Judge session completed without explicit verdict".into(),
-                blocking: false,
+                body: "Judge did not record an explicit verdict (treated as not-ready)".into(),
+                blocking: true,
             }
         };
 
