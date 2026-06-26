@@ -1599,6 +1599,24 @@ impl ProposalRepository {
     /// finished build. Completing is also a successful reconcile: stamp every
     /// graduated epic at the proposal head and clear proposal-level drift before
     /// moving to the terminal state.
+    /// Force a proposal's `status` directly, bypassing the revision/audit
+    /// path. Intended for tests and migrations that need to simulate a given
+    /// lifecycle state (e.g. legacy `approved` data) without going through the
+    /// full `update` contract.
+    pub async fn set_status(&self, proposal_id: &str, status: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            r#"UPDATE proposals SET status = $2,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
+        )
+        .bind(proposal_id)
+        .bind(status)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_done(&self, proposal_id: &str) -> Result<Proposal> {
         self.db.ensure_initialized().await?;
         let proposal = self.get_required(proposal_id).await?;

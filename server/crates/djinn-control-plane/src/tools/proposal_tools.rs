@@ -4847,9 +4847,8 @@ What happens if D fails?
 
         // Directly advance the status to `in_review` to simulate legacy
         // data that pre-dates the readiness gate.
-        sqlx::query("UPDATE proposals SET status = 'in_review' WHERE id = $1")
-            .bind(&proposal.id)
-            .execute(db.pool())
+        ProposalRepository::new(db.clone(), EventBus::noop())
+            .set_status(&proposal.id, "in_review")
             .await
             .unwrap();
 
@@ -4964,9 +4963,8 @@ What happens if D fails?
     /// Advance a proposal directly to `approved` via SQL, simulating
     /// legacy data or a proposal that pre-dates the readiness gate.
     async fn force_approved(db: &Database, proposal_id: &str) {
-        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
-            .bind(proposal_id)
-            .execute(db.pool())
+        ProposalRepository::new(db.clone(), EventBus::noop())
+            .set_status(proposal_id, "approved")
             .await
             .unwrap();
     }
@@ -5504,9 +5502,8 @@ What happens if D fails?
     }
 
     async fn force_approved(db: &Database, proposal_id: &str) {
-        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
-            .bind(proposal_id)
-            .execute(db.pool())
+        ProposalRepository::new(db.clone(), EventBus::noop())
+            .set_status(proposal_id, "approved")
             .await
             .unwrap();
     }
@@ -5993,9 +5990,8 @@ What happens if D fails?
     }
 
     async fn force_approved(db: &Database, proposal_id: &str) {
-        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
-            .bind(proposal_id)
-            .execute(db.pool())
+        ProposalRepository::new(db.clone(), EventBus::noop())
+            .set_status(proposal_id, "approved")
             .await
             .unwrap();
     }
@@ -6181,9 +6177,8 @@ What happens if D fails?
         );
 
         // Close the spike.
-        sqlx::query("UPDATE tasks SET status = 'done' WHERE id = $1")
-            .bind(&spike.id)
-            .execute(db.pool())
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .set_status(&spike.id, "done")
             .await
             .unwrap();
 
@@ -6391,9 +6386,8 @@ What happens if D fails?
             .await
             .unwrap();
 
-        sqlx::query("UPDATE tasks SET status = 'done' WHERE id = $1")
-            .bind(&spike.id)
-            .execute(db.pool())
+        TaskRepository::new(db.clone(), EventBus::noop())
+            .set_status(&spike.id, "done")
             .await
             .unwrap();
 
