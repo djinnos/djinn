@@ -139,7 +139,11 @@ export function ProposalRefinement({
             Refinement
           </Label>
           <div className="flex items-center gap-2">
-            {status.active ? (
+            {status.active && status.awaiting_review ? (
+              <Badge variant="secondary" className="text-xs">
+                Awaiting review
+              </Badge>
+            ) : status.active ? (
               <Badge variant="default" className="text-xs">
                 Active
               </Badge>

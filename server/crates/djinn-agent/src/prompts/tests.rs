@@ -732,6 +732,13 @@ fn advocate_prompt_contains_enrichment_guidance() {
         prompt.contains("proposal_block_patch"),
         "advocate.md must mention proposal_block_patch for MDX enrichment"
     );
+    // Must point the Advocate at the visual-spec native skill so the refined
+    // spec is rich MDX rather than shallow prose (the skill is now injected
+    // for the advocate role).
+    assert!(
+        prompt.contains("visual-spec") && prompt.contains("skill_read"),
+        "advocate.md must instruct loading the visual-spec skill via skill_read"
+    );
     // Must instruct get_block_catalog pull on demand.
     assert!(
         prompt.contains("get_block_catalog"),

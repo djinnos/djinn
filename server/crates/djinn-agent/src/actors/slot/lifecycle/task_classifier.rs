@@ -59,17 +59,20 @@ pub(crate) fn classify_native_skill_trigger(
     role_name: &str,
     task: &Task,
 ) -> Option<NativeSkillTrigger> {
-    if role_name != "planner" {
-        return None;
-    }
-
-    match task.issue_type.as_str() {
+    match (role_name, task.issue_type.as_str()) {
         // `epic_breakdown` is the proposal-decomposition / AC-reconciliation
         // planner mode (Workflow D / Workflow E).  These are always
         // proposal-authoring sessions.
-        "epic_breakdown" => Some(NativeSkillTrigger::ProposalAuthoring),
+        ("planner", "epic_breakdown") => Some(NativeSkillTrigger::ProposalAuthoring),
+        // The tribunal **Advocate** authors and revises the proposal spec
+        // during refinement — exactly the proposal-authoring work the planner
+        // does in `epic_breakdown`. It therefore needs the same authoring
+        // native skills (e.g. `visual-spec`) so the refined spec is rich,
+        // visual MDX rather than shallow prose. Without this the Advocate runs
+        // with no native skill and produces plain markdown.
+        ("advocate", "refinement") => Some(NativeSkillTrigger::ProposalAuthoring),
         // `planning` / `decomposition` are ordinary wave-planning (Workflow B).
-        // All other issue types are non-authoring.
+        // All other (role, issue_type) pairs are non-authoring.
         _ => None,
     }
 }
@@ -148,6 +151,27 @@ mod tests {
             Some(NativeSkillTrigger::ProposalAuthoring),
             "epic_breakdown proposal-decompose task should trigger proposal authoring"
         );
+    }
+
+    #[test]
+    fn advocate_refinement_returns_proposal_authoring() {
+        // The tribunal Advocate authors/revises the proposal spec during
+        // refinement and must receive the proposal-authoring native skills.
+        let task = make_task("refinement");
+        assert_eq!(
+            classify_native_skill_trigger("advocate", &task),
+            Some(NativeSkillTrigger::ProposalAuthoring),
+            "advocate refinement task should trigger proposal authoring"
+        );
+    }
+
+    #[test]
+    fn adversary_and_judge_refinement_return_none() {
+        // Only the Advocate authors; the Adversary objects and the Judge
+        // adjudicates — neither needs the authoring native skill.
+        let task = make_task("refinement");
+        assert_eq!(classify_native_skill_trigger("adversary", &task), None);
+        assert_eq!(classify_native_skill_trigger("judge", &task), None);
     }
 
     // ── Non-authoring planner tasks ──────────────────────────────────────

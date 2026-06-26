@@ -206,8 +206,11 @@ export function ReadinessPanel({
         </div>
       )}
 
-      {/* Active-refinement note */}
-      {refinement?.active && (
+      {/* Active-refinement note — only while the tribunal is still running.
+          Once it converges (awaiting_review) the refinement panel above shows
+          the verdict + accept/reject, so this "in progress" line would be
+          stale/contradictory. */}
+      {refinement?.active && !refinement?.awaiting_review && (
         <p className="text-xs text-muted-foreground">
           Autonomous tribunal in progress: Adversary, Advocate, and Judge refine
           the spec automatically. You will be asked to accept or reject the
