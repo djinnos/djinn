@@ -13828,200 +13828,6 @@ expression: signatures
     }
   },
   {
-    "name": "proposal_refinement_checkpoint_approve",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "proposal_id": {
-          "description": "Proposal UUID or short_id.",
-          "type": "string"
-        },
-        "revision_seq": {
-          "description": "Revision sequence number to approve.",
-          "format": "int32",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "proposal_id",
-        "revision_seq"
-      ],
-      "title": "CheckpointApproveParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Response for `proposal_refinement_checkpoint_approve`.",
-      "properties": {
-        "approved": {
-          "description": "True when the pending revision was found and applied.",
-          "type": "boolean"
-        },
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "proposal_id": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "required": [
-        "approved"
-      ],
-      "title": "CheckpointApproveResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "proposal_refinement_checkpoint_list",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "proposal_id": {
-          "description": "Proposal UUID or short_id.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "proposal_id"
-      ],
-      "title": "CheckpointListParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$defs": {
-        "CheckpointRevisionModel": {
-          "description": "A pending checkpoint revision visible in the UI for approval or rejection.\nDerived from a `proposal_revisions` row whose `event_metadata` marks it as\n`checkpoint_status: \"pending\"`.",
-          "properties": {
-            "author_model": {
-              "description": "Model that authored this revision.",
-              "nullable": true,
-              "type": "string"
-            },
-            "body_preview": {
-              "description": "Short preview of the proposed body (first 300 chars).",
-              "type": "string"
-            },
-            "created_at": {
-              "description": "When the revision was created.",
-              "type": "string"
-            },
-            "role": {
-              "description": "Advocate role attribution from event_metadata.",
-              "nullable": true,
-              "type": "string"
-            },
-            "round": {
-              "description": "Refinement round that produced this revision.",
-              "format": "int32",
-              "nullable": true,
-              "type": "integer"
-            },
-            "seq": {
-              "description": "The `proposal_revisions.seq` this pending revision targets.",
-              "format": "int32",
-              "type": "integer"
-            },
-            "title": {
-              "description": "Title of the pending revision.",
-              "type": "string"
-            }
-          },
-          "required": [
-            "seq",
-            "body_preview",
-            "title",
-            "created_at"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Response for `proposal_refinement_checkpoint_list`.",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "pending": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/CheckpointRevisionModel"
-          },
-          "type": "array"
-        },
-        "proposal_id": {
-          "nullable": true,
-          "type": "string"
-        }
-      },
-      "title": "CheckpointListResponse",
-      "type": "object"
-    }
-  },
-  {
-    "name": "proposal_refinement_checkpoint_reject",
-    "read_only": false,
-    "destructive": true,
-    "idempotent": false,
-    "open_world": false,
-    "concurrent_safe": false,
-    "input_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "proposal_id": {
-          "description": "Proposal UUID or short_id.",
-          "type": "string"
-        },
-        "revision_seq": {
-          "description": "Revision sequence number to reject.",
-          "format": "int32",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "proposal_id",
-        "revision_seq"
-      ],
-      "title": "CheckpointRejectParams",
-      "type": "object"
-    },
-    "output_schema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Response for `proposal_refinement_checkpoint_reject`.",
-      "properties": {
-        "error": {
-          "nullable": true,
-          "type": "string"
-        },
-        "proposal_id": {
-          "nullable": true,
-          "type": "string"
-        },
-        "rejected": {
-          "description": "True when the pending revision was found and rejected.",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "rejected"
-      ],
-      "title": "CheckpointRejectResponse",
-      "type": "object"
-    }
-  },
-  {
     "name": "proposal_refinement_demand_round",
     "read_only": false,
     "destructive": true,
@@ -14084,6 +13890,11 @@ expression: signatures
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "format": "int32",
@@ -14094,6 +13905,11 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
             },
             "needs_evidence": {
               "anyOf": [
@@ -14107,10 +13923,10 @@ expression: signatures
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
-            "pending_checkpoint_count": {
-              "default": 0,
-              "description": "Count of pending checkpoint revisions awaiting approval.\nAlways 0 in auto-accept mode.",
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
               "format": "int32",
+              "nullable": true,
               "type": "integer"
             },
             "stop_reason": {
@@ -14169,6 +13985,62 @@ expression: signatures
         "accepted"
       ],
       "title": "DemandRoundResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_resolve",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "decision": {
+          "description": "The human's decision: `accept` (keep the refined spec) or `reject`\n(revert the live spec to the pre-refinement snapshot).",
+          "type": "string"
+        },
+        "feedback": {
+          "default": null,
+          "description": "Optional reviewer note — why accepted/rejected. Recorded for the audit\ntrail.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "decision"
+      ],
+      "title": "ProposalRefinementResolveParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_resolve`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "resolved": {
+          "description": "True when the human's accept/reject was applied.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "resolved"
+      ],
+      "title": "ResolveReviewResponse",
       "type": "object"
     }
   },
@@ -14236,6 +14108,11 @@ expression: signatures
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "format": "int32",
@@ -14246,6 +14123,11 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
             },
             "needs_evidence": {
               "anyOf": [
@@ -14259,10 +14141,10 @@ expression: signatures
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
-            "pending_checkpoint_count": {
-              "default": 0,
-              "description": "Count of pending checkpoint revisions awaiting approval.\nAlways 0 in auto-accept mode.",
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
               "format": "int32",
+              "nullable": true,
               "type": "integer"
             },
             "stop_reason": {
@@ -14375,6 +14257,11 @@ expression: signatures
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "format": "int32",
@@ -14385,6 +14272,11 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
             },
             "needs_evidence": {
               "anyOf": [
@@ -14398,10 +14290,10 @@ expression: signatures
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
-            "pending_checkpoint_count": {
-              "default": 0,
-              "description": "Count of pending checkpoint revisions awaiting approval.\nAlways 0 in auto-accept mode.",
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
               "format": "int32",
+              "nullable": true,
               "type": "integer"
             },
             "stop_reason": {
@@ -15050,6 +14942,11 @@ expression: signatures
               "description": "Whether refinement has been started for this proposal.",
               "type": "boolean"
             },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
             "current_round": {
               "description": "Current debate round (1-based). `None` when refinement has not started.",
               "format": "int32",
@@ -15060,6 +14957,11 @@ expression: signatures
               "description": "How many consecutive adversary dry rounds have been observed.",
               "format": "int32",
               "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
             },
             "needs_evidence": {
               "anyOf": [
@@ -15073,10 +14975,10 @@ expression: signatures
               ],
               "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
             },
-            "pending_checkpoint_count": {
-              "default": 0,
-              "description": "Count of pending checkpoint revisions awaiting approval.\nAlways 0 in auto-accept mode.",
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
               "format": "int32",
+              "nullable": true,
               "type": "integer"
             },
             "stop_reason": {

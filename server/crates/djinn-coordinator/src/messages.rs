@@ -81,4 +81,13 @@ pub(super) enum CoordinatorMessage {
         current_revision_seq: i32,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    /// Resolve the human's single accept/reject review of a converged
+    /// refinement. `accept` keeps the refined spec; reject reverts to the
+    /// pre-refinement snapshot. `feedback` is recorded for the audit trail.
+    ResolveRefinementReview {
+        proposal_id: String,
+        accept: bool,
+        feedback: Option<String>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }

@@ -611,13 +611,10 @@ function ProposalDetailView({
         />
 
         {/* Readiness panel: DoR status, tribunal metrics, blocked explanations,
-            needs-evidence spike parking, checkpoint diff/approve/reject. */}
+            and needs-evidence spike parking. */}
         <ReadinessPanel
           gateStatus={detail.gate_status}
           refinement={detail.refinement}
-          proposalId={proposal.id}
-          pendingRevisions={[]}
-          onChanged={onChanged}
         />
 
         <ProposalKickoff detail={detail} onChanged={onChanged} />

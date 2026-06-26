@@ -56,6 +56,10 @@ pub enum StopReason {
     },
     /// An agent session failed (crashed, timeout, empty response, etc.).
     AgentFailure { role: String, error: String },
+    /// The human accepted the refined spec at the final review.
+    HumanAccepted,
+    /// The human rejected the refined spec at the final review (no re-loop).
+    HumanRejected,
 }
 
 impl StopReason {
@@ -67,19 +71,30 @@ impl StopReason {
             StopReason::SpawnCap => "spawn_cap",
             StopReason::RepeatedObjection { .. } => "repeated_objection",
             StopReason::AgentFailure { .. } => "agent_failure",
+            StopReason::HumanAccepted => "human_accepted",
+            StopReason::HumanRejected => "human_rejected",
         }
     }
 }
 
 /// The current phase of the refinement loop.
+///
+/// v2 tribunal order: each round runs `Adversary → Advocate → Judge`. The
+/// Adversary opens (red-teams the current spec), the Advocate responds
+/// (revises to address objections), and the Judge rules whether to loop again
+/// or surface the result to the human. The human is NOT in the loop — they
+/// only review the converged result once, via `AwaitingHumanReview`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefinementPhase {
-    /// Waiting for the Advocate to produce a revision.
-    AdvocateRevision,
-    /// Waiting for the Adversary to attack the current revision.
+    /// Waiting for the Adversary to red-team the current spec. (Round opener.)
     AdversaryAttack,
-    /// Adversary is dry; waiting for the Judge to adjudicate.
+    /// Waiting for the Advocate to revise in response to the objections.
+    AdvocateRevision,
+    /// Waiting for the Judge to rule: continue, ready, or escalate.
     JudgeAdjudication,
+    /// The tribunal converged (or hit caps). The refined spec is parked for a
+    /// single human accept/reject; the autonomous loop is idle until resolved.
+    AwaitingHumanReview,
     /// Refinement loop is complete.
     Complete,
 }
@@ -175,6 +190,10 @@ pub struct RefinementLoopState {
     /// The proposal revision seq the adversary should attack.
     /// Updated after each advocate revision.
     pub current_revision_seq: i32,
+    /// The proposal's revision seq at the moment refinement started — the
+    /// pre-refinement snapshot. If the human rejects the refined result, the
+    /// live spec is reset back to this revision.
+    pub snapshot_revision_seq: i32,
     /// The user this refinement run is attributed to: owner of the spawned
     /// refinement tasks (`created_by_user_id`) AND the scope used to resolve
     /// per-user role models for the tribunal agents. `None` means "fall back
@@ -207,11 +226,12 @@ impl RefinementLoopState {
         Self {
             proposal_id: proposal_id.into(),
             config,
-            phase: RefinementPhase::AdvocateRevision,
+            phase: RefinementPhase::AdversaryAttack,
             current_round: 1,
             consecutive_dry_rounds: 0,
             total_spawns: 0,
             current_revision_seq,
+            snapshot_revision_seq: current_revision_seq,
             attributed_user_id: None,
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
@@ -232,10 +252,10 @@ impl RefinementLoopState {
         self.phase == RefinementPhase::Complete
     }
 
-    /// Whether the Judge should be invoked. True when the adversary has been
-    /// dry for `config.dry_rounds_required` consecutive rounds.
-    pub fn should_invoke_judge(&self) -> bool {
-        self.consecutive_dry_rounds >= self.config.dry_rounds_required
+    /// Whether the loop is parked awaiting the human's accept/reject review.
+    /// While true, the coordinator dispatches no further tribunal phases.
+    pub fn is_awaiting_human_review(&self) -> bool {
+        self.phase == RefinementPhase::AwaitingHumanReview
     }
 
     /// Record that an agent session was spawned. Returns `Err` if the spawn
@@ -251,72 +271,98 @@ impl RefinementLoopState {
         }
     }
 
-    /// Record an advocate revision result. Advances the revision seq and
-    /// transitions to the AdversaryAttack phase.
+    /// Record an advocate revision. Advances the working revision seq and
+    /// hands the round to the Judge to rule.
     pub fn record_advocate_revision(&mut self, new_revision_seq: i32) {
         self.current_revision_seq = new_revision_seq;
-        self.phase = RefinementPhase::AdversaryAttack;
+        self.phase = RefinementPhase::JudgeAdjudication;
     }
 
-    /// Process an adversary attack pass. Returns the repeat-signature
-    /// objection if one was detected (which may trigger escalation), and
-    /// the updated dry-round status.
+    /// Process an adversary attack pass — the round opener. Records objections
+    /// for repeat-signature detection, then routes:
+    /// - blocking objections found → the Advocate revises to address them;
+    /// - no blocking objections (dry) → skip the Advocate (nothing to fix) and
+    ///   let the Judge rule directly;
+    /// - the same blocking objection repeating across rounds → the loop is
+    ///   stuck, so escalate to the human reviewer.
     ///
-    /// This is pure state-machine logic — the caller is responsible for
-    /// persisting objections through P2 debate-trail primitives.
+    /// Pure state-machine logic — the caller persists objections through the
+    /// debate-trail primitives.
     pub fn process_adversary_pass(&mut self, result: &AdversaryPassResult) -> AdversaryPassOutcome {
         let blocking: Vec<_> = result.objections.iter().filter(|o| o.blocking).collect();
         let blocking_count = blocking.len();
 
-        // Record per-round blocking count.
         self.round_blocking_objections
             .push((self.current_round, blocking_count));
-
-        // Update objection-signature tracking for repeat detection.
         for obj in &blocking {
             let sig = normalize_objection_signature(&obj.body);
             *self.objection_signatures.entry(sig).or_insert(0) += 1;
         }
 
-        // Check for repeated signatures.
+        // Same objection going in circles → the tribunal is stuck; surface it.
         if let Some((sig, count)) = self.detect_repeated_signature() {
             let reason = StopReason::RepeatedObjection {
                 signature: sig,
                 occurrences: count,
             };
-            self.terminate(reason.clone());
+            self.escalate(reason.clone());
             return AdversaryPassOutcome::Escalated(reason);
         }
 
         if blocking_count == 0 || result.explicit_dry {
             self.consecutive_dry_rounds += 1;
-        } else {
-            self.consecutive_dry_rounds = 0;
-        }
-
-        // Check dry condition: enough consecutive dry rounds → invoke judge.
-        if self.should_invoke_judge() {
+            // Nothing for the advocate to fix — straight to the judge.
             self.phase = RefinementPhase::JudgeAdjudication;
             return AdversaryPassOutcome::Dry;
         }
 
-        // Check round cap.
-        if self.current_round >= self.config.max_rounds {
-            let reason = StopReason::RoundCap;
-            self.terminate(reason.clone());
-            return AdversaryPassOutcome::Escalated(reason);
-        }
-
-        // Advance to next round.
-        self.current_round += 1;
+        self.consecutive_dry_rounds = 0;
         self.phase = RefinementPhase::AdvocateRevision;
         AdversaryPassOutcome::Continue
     }
 
-    /// Record a judge verdict. Transitions to Complete.
-    pub fn record_judge_verdict(&mut self, _result: &JudgeVerdictResult) {
-        let reason = StopReason::AdversaryDry;
-        self.terminate(reason);
+    /// Record a judge verdict — the round's arbiter.
+    /// - non-blocking ("ready") → the spec converged; park it for the human's
+    ///   single accept/reject review;
+    /// - blocking ("not ready") → run another round (Adversary first), unless
+    ///   the round cap is hit, in which case escalate to the human.
+    pub fn record_judge_verdict(&mut self, result: &JudgeVerdictResult) {
+        if !result.blocking {
+            self.phase = RefinementPhase::AwaitingHumanReview;
+            return;
+        }
+        if self.current_round >= self.config.max_rounds {
+            self.escalate(StopReason::RoundCap);
+            return;
+        }
+        self.current_round += 1;
+        self.phase = RefinementPhase::AdversaryAttack;
+    }
+
+    /// Park the loop for human review (converged or escalated). Records the
+    /// reason for display but does NOT complete — the human still acts.
+    pub fn escalate(&mut self, reason: StopReason) {
+        self.stop_reason = Some(reason);
+        self.phase = RefinementPhase::AwaitingHumanReview;
+    }
+
+    /// Apply the human's decision on the parked review.
+    /// - `accept` → loop Complete; the refined spec is kept.
+    /// - `reject` WITH feedback → re-open the tribunal with the feedback as a
+    ///   fresh top-priority objection (new round, Adversary first).
+    /// - `reject` WITHOUT feedback → loop Complete; the caller reverts the live
+    ///   spec to the pre-refinement snapshot.
+    pub fn resolve_human_review(&mut self, accept: bool, has_feedback: bool) {
+        if accept {
+            self.terminate(StopReason::HumanAccepted);
+        } else if has_feedback {
+            self.stop_reason = None;
+            self.consecutive_dry_rounds = 0;
+            self.current_round += 1;
+            self.phase = RefinementPhase::AdversaryAttack;
+        } else {
+            self.terminate(StopReason::HumanRejected);
+        }
     }
 
     /// Terminate the loop with the given stop reason.
@@ -482,185 +528,198 @@ mod tests {
         }
     }
 
-    // ── Dry-round detection and judge invocation ─────────────────────────
+    fn blocking_objection(body: &str) -> ObjectionRecord {
+        ObjectionRecord {
+            body: body.into(),
+            blocking: true,
+            author_model: None,
+            entry_id: None,
+        }
+    }
+
+    // ── Start state ──────────────────────────────────────────────────────
 
     #[test]
-    fn stops_after_two_dry_adversary_rounds_and_invokes_judge() {
-        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
-
-        // Round 1: advocate revises.
-        state.record_advocate_revision(1);
+    fn starts_in_adversary_attack_phase() {
+        let state = RefinementLoopState::new("p1", 7);
         assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.current_round, 1);
+        assert_eq!(state.current_revision_seq, 7);
+        // The pre-refinement snapshot baseline equals the starting revision.
+        assert_eq!(state.snapshot_revision_seq, 7);
+        assert!(!state.is_complete());
+        assert!(!state.is_awaiting_human_review());
+    }
 
-        // Round 1: adversary finds blocking objections.
+    // ── Adversary routing ────────────────────────────────────────────────
+
+    #[test]
+    fn adversary_blocking_objections_route_to_advocate_revision() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "Missing problem section".into(),
-                blocking: true,
-                author_model: None,
-                entry_id: None,
-            }],
+            objections: vec![blocking_objection("Missing problem section")],
             explicit_dry: false,
         });
         assert_eq!(outcome, AdversaryPassOutcome::Continue);
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
         assert_eq!(state.consecutive_dry_rounds, 0);
-        assert_eq!(state.current_round, 2);
+        // The adversary opener does not advance the round; the judge does.
+        assert_eq!(state.current_round, 1);
+    }
 
-        // Round 2: advocate revises.
-        state.record_advocate_revision(2);
-
-        // Round 2: adversary finds no blocking objections (dry).
-        let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![],
-            explicit_dry: true,
-        });
-        assert_eq!(outcome, AdversaryPassOutcome::Continue);
-        assert_eq!(state.consecutive_dry_rounds, 1);
-
-        // Round 3: advocate revises.
-        state.record_advocate_revision(3);
-
-        // Round 3: adversary is dry again → should invoke judge.
+    #[test]
+    fn adversary_dry_routes_straight_to_judge() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![],
             explicit_dry: true,
         });
         assert_eq!(outcome, AdversaryPassOutcome::Dry);
         assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
-        assert!(state.should_invoke_judge());
-
-        // Judge adjudicates.
-        state.record_judge_verdict(&JudgeVerdictResult {
-            body: "Proposal is ready.".into(),
-            blocking: false,
-        });
-        assert!(state.is_complete());
-        assert_eq!(state.stop_reason, Some(StopReason::AdversaryDry));
+        assert_eq!(state.consecutive_dry_rounds, 1);
     }
 
     #[test]
-    fn dry_rounds_reset_on_blocking_objection() {
+    fn adversary_no_blocking_objections_is_dry() {
         let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Only non-blocking objections — nothing for the advocate to fix.
+        let outcome = state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![ObjectionRecord {
+                body: "Minor style nit".into(),
+                blocking: false,
+                author_model: None,
+                entry_id: None,
+            }],
+            explicit_dry: false,
+        });
+        assert_eq!(outcome, AdversaryPassOutcome::Dry);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+    }
 
-        // Round 1: dry.
-        state.record_advocate_revision(1);
+    // ── Advocate routing ─────────────────────────────────────────────────
+
+    #[test]
+    fn advocate_revision_routes_to_judge() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Adversary raised a blocking objection → advocate revises.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Missing scope")],
+            explicit_dry: false,
+        });
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+
+        state.record_advocate_revision(3);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+        assert_eq!(state.current_revision_seq, 3);
+        // Advocate revision does not advance the round.
+        assert_eq!(state.current_round, 1);
+    }
+
+    // ── Judge routing ────────────────────────────────────────────────────
+
+    #[test]
+    fn judge_non_blocking_parks_for_human_review() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
         state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![],
             explicit_dry: true,
         });
-        assert_eq!(state.consecutive_dry_rounds, 1);
-
-        // Round 2: blocking objection → resets dry counter.
-        state.record_advocate_revision(2);
-        state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "New blocking issue".into(),
-                blocking: true,
-                author_model: None,
-                entry_id: None,
-            }],
-            explicit_dry: false,
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Proposal is ready.".into(),
+            blocking: false,
         });
-        assert_eq!(state.consecutive_dry_rounds, 0);
+        assert_eq!(state.phase, RefinementPhase::AwaitingHumanReview);
+        assert!(state.is_awaiting_human_review());
+        assert!(!state.is_complete());
     }
 
-    // ── Hard round cap ───────────────────────────────────────────────────
+    #[test]
+    fn judge_blocking_starts_next_adversary_round() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue A")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        // Judge still finds the spec lacking → next round, adversary first.
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Still needs work.".into(),
+            blocking: true,
+        });
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.current_round, 2);
+        assert!(!state.is_complete());
+    }
 
     #[test]
-    fn enforces_hard_round_cap() {
+    fn judge_blocking_at_round_cap_escalates_to_human_review() {
         let config = RefinementConfig {
-            max_rounds: 3,
+            max_rounds: 2,
             ..test_config()
         };
         let mut state = RefinementLoopState::with_config("p1", 0, config);
 
-        // Rounds 1-3: adversary keeps finding blocking objections.
-        for round in 1..=3 {
-            state.record_advocate_revision(round);
-            let outcome = state.process_adversary_pass(&AdversaryPassResult {
-                objections: vec![ObjectionRecord {
-                    body: format!("Blocking issue in round {round}"),
-                    blocking: true,
-                    author_model: None,
-                    entry_id: None,
-                }],
-                explicit_dry: false,
-            });
-            if round < 3 {
-                assert_eq!(outcome, AdversaryPassOutcome::Continue);
-            } else {
-                assert!(matches!(
-                    outcome,
-                    AdversaryPassOutcome::Escalated(StopReason::RoundCap)
-                ));
-            }
-        }
+        // Round 1: adversary blocking → advocate → judge blocking → round 2.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue A")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Needs work.".into(),
+            blocking: true,
+        });
+        assert_eq!(state.current_round, 2);
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
 
-        assert!(state.is_complete());
+        // Round 2 (== cap): adversary blocking → advocate → judge blocking →
+        // escalate to human review (round cap reached).
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue B")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(2);
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Still needs work.".into(),
+            blocking: true,
+        });
+        assert!(state.is_awaiting_human_review());
+        assert!(!state.is_complete());
         assert_eq!(state.stop_reason, Some(StopReason::RoundCap));
     }
 
-    // ── Total spawn cap ──────────────────────────────────────────────────
+    // ── Repeated objection escalation ────────────────────────────────────
 
     #[test]
-    fn enforces_total_spawn_cap() {
-        let config = RefinementConfig {
-            max_total_spawns: 3,
-            ..test_config()
-        };
-        let mut state = RefinementLoopState::with_config("p1", 0, config);
+    fn repeated_blocking_objection_escalates_to_human_review() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
-        // Spawn 3 agents successfully.
-        assert!(state.record_spawn().is_ok());
-        assert!(state.record_spawn().is_ok());
-        assert!(state.record_spawn().is_ok());
-
-        // Fourth spawn exceeds the cap.
-        let err = state.record_spawn().unwrap_err();
-        assert_eq!(err, StopReason::SpawnCap);
-        assert!(state.is_complete());
-        assert_eq!(state.stop_reason, Some(StopReason::SpawnCap));
-    }
-
-    // ── Repeated objection-signature detection ───────────────────────────
-
-    #[test]
-    fn detects_repeated_blocking_objection_signatures() {
-        let config = RefinementConfig {
-            repeat_objection_threshold: 2,
-            ..test_config()
-        };
-        let mut state = RefinementLoopState::with_config("p1", 0, config);
-
-        // Round 1: adversary raises a blocking objection.
-        state.record_advocate_revision(1);
+        // Round 1: blocking objection → advocate revision.
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "Missing Problem Statement".into(),
-                blocking: true,
-                author_model: None,
-                entry_id: None,
-            }],
+            objections: vec![blocking_objection("Missing Problem Statement")],
             explicit_dry: false,
         });
         assert_eq!(outcome, AdversaryPassOutcome::Continue);
+        state.record_advocate_revision(1);
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Not ready.".into(),
+            blocking: true,
+        });
+        assert_eq!(state.current_round, 2);
 
-        // Round 2: adversary raises the same objection (different casing/whitespace).
-        state.record_advocate_revision(2);
+        // Round 2: the same objection (different casing/whitespace) repeats →
+        // the tribunal is stuck, escalate to the human.
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "missing  problem  statement".into(),
-                blocking: true,
-                author_model: None,
-                entry_id: None,
-            }],
+            objections: vec![blocking_objection("missing  problem  statement")],
             explicit_dry: false,
         });
         assert!(matches!(
             outcome,
             AdversaryPassOutcome::Escalated(StopReason::RepeatedObjection { .. })
         ));
-        assert!(state.is_complete());
+        // Escalation parks for human review — it does NOT complete the loop.
+        assert!(state.is_awaiting_human_review());
+        assert!(!state.is_complete());
 
         if let Some(StopReason::RepeatedObjection {
             signature,
@@ -676,28 +735,10 @@ mod tests {
 
     #[test]
     fn non_blocking_objections_do_not_trigger_repeat_escalation() {
-        // Use dry_rounds_required=3 so the loop doesn't terminate on round 2.
-        let config = RefinementConfig {
-            repeat_objection_threshold: 2,
-            dry_rounds_required: 3,
-            ..test_config()
-        };
-        let mut state = RefinementLoopState::with_config("p1", 0, config);
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
-        // Round 1: non-blocking objection.
-        state.record_advocate_revision(1);
-        state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "Minor style concern".into(),
-                blocking: false,
-                author_model: None,
-                entry_id: None,
-            }],
-            explicit_dry: false,
-        });
-
-        // Round 2: same non-blocking objection → no escalation (not blocking).
-        state.record_advocate_revision(2);
+        // Two non-blocking objections with identical bodies across rounds —
+        // non-blocking objections never count toward repeat detection.
         let outcome = state.process_adversary_pass(&AdversaryPassResult {
             objections: vec![ObjectionRecord {
                 body: "Minor style concern".into(),
@@ -707,14 +748,125 @@ mod tests {
             }],
             explicit_dry: false,
         });
-        // Non-blocking objections don't count for repeat detection, so this
-        // should be treated as a dry round (no new blocking objections).
-        assert_eq!(outcome, AdversaryPassOutcome::Continue);
+        // No blocking objections → dry round, straight to the judge.
+        assert_eq!(outcome, AdversaryPassOutcome::Dry);
+        assert!(!state.is_awaiting_human_review());
         assert!(!state.is_complete());
-        assert_eq!(state.consecutive_dry_rounds, 2);
     }
 
-    // ── Diverse-refinement model selection ────────────────────────────────
+    // ── Human review resolution ──────────────────────────────────────────
+
+    #[test]
+    fn human_accept_completes_loop() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        state.escalate(StopReason::RoundCap);
+        assert!(state.is_awaiting_human_review());
+
+        state.resolve_human_review(true, true);
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::HumanAccepted));
+    }
+
+    #[test]
+    fn human_reject_with_feedback_starts_new_round() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Converge first: judge parks for review at round 1.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Ready.".into(),
+            blocking: false,
+        });
+        assert!(state.is_awaiting_human_review());
+
+        // Reject WITH feedback → re-open the tribunal, adversary first.
+        state.resolve_human_review(false, true);
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+        assert_eq!(state.current_round, 2);
+        assert!(state.stop_reason.is_none());
+        assert!(!state.is_complete());
+        assert!(!state.is_awaiting_human_review());
+    }
+
+    #[test]
+    fn human_reject_without_feedback_completes_loop() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        state.escalate(StopReason::AdversaryDry);
+        assert!(state.is_awaiting_human_review());
+
+        // Reject WITHOUT feedback → terminate; caller reverts to snapshot.
+        state.resolve_human_review(false, false);
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::HumanRejected));
+    }
+
+    // ── End-to-end happy path ────────────────────────────────────────────
+
+    #[test]
+    fn full_round_converges_to_human_review() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
+
+        // Adversary blocking → advocate revises → judge approves → human review.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Missing acceptance criteria")],
+            explicit_dry: false,
+        });
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+
+        state.record_advocate_revision(1);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Looks good now.".into(),
+            blocking: false,
+        });
+        assert!(state.is_awaiting_human_review());
+
+        state.resolve_human_review(true, false);
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::HumanAccepted));
+    }
+
+    // ── Total spawn cap ──────────────────────────────────────────────────
+
+    #[test]
+    fn enforces_total_spawn_cap() {
+        let config = RefinementConfig {
+            max_total_spawns: 3,
+            ..test_config()
+        };
+        let mut state = RefinementLoopState::with_config("p1", 0, config);
+
+        assert!(state.record_spawn().is_ok());
+        assert!(state.record_spawn().is_ok());
+        assert!(state.record_spawn().is_ok());
+
+        let err = state.record_spawn().unwrap_err();
+        assert_eq!(err, StopReason::SpawnCap);
+        assert!(state.is_complete());
+        assert_eq!(state.stop_reason, Some(StopReason::SpawnCap));
+    }
+
+    // ── Agent failure termination ────────────────────────────────────────
+
+    #[test]
+    fn agent_failure_terminates_loop() {
+        let mut state = RefinementLoopState::new("p1", 0);
+        state.terminate(StopReason::AgentFailure {
+            role: "adversary".into(),
+            error: "session crashed".into(),
+        });
+        assert!(state.is_complete());
+        assert!(matches!(
+            state.stop_reason,
+            Some(StopReason::AgentFailure { .. })
+        ));
+    }
+
+    // ── Diverse-refinement model selection ───────────────────────────────
 
     #[test]
     fn diverse_refinement_selects_alternative_model() {
@@ -753,7 +905,7 @@ mod tests {
         assert!(!same_fallback);
     }
 
-    // ── Objection signature normalization ─────────────────────────────────
+    // ── Objection signature normalization ────────────────────────────────
 
     #[test]
     fn normalization_collapses_whitespace_and_lowercases() {
@@ -776,30 +928,6 @@ mod tests {
         let long_body = "a".repeat(500);
         let sig = normalize_objection_signature(&long_body);
         assert!(sig.len() <= 200);
-    }
-
-    // ── Phase transitions ────────────────────────────────────────────────
-
-    #[test]
-    fn phase_transitions_follow_expected_sequence() {
-        let mut state = RefinementLoopState::new("p1", 0);
-        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
-
-        state.record_advocate_revision(1);
-        assert_eq!(state.phase, RefinementPhase::AdversaryAttack);
-
-        // Non-blocking result → continue to next round.
-        state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "non-blocking".into(),
-                blocking: false,
-                author_model: None,
-                entry_id: None,
-            }],
-            explicit_dry: false,
-        });
-        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
-        assert_eq!(state.current_round, 2);
     }
 
     // ── StopReason tag ───────────────────────────────────────────────────
@@ -825,6 +953,8 @@ mod tests {
             .tag(),
             "agent_failure"
         );
+        assert_eq!(StopReason::HumanAccepted.tag(), "human_accepted");
+        assert_eq!(StopReason::HumanRejected.tag(), "human_rejected");
     }
 
     // ── Revision event metadata builder ──────────────────────────────────
@@ -839,56 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_metadata_checkpoint_mode() {
-        let meta = build_revision_event_metadata(1, None);
-        assert_eq!(meta["authority"], "checkpoint");
-        assert!(meta.get("author_model").is_none() || meta["author_model"].is_null());
-    }
-
-    // ── Edge case: explicit dry with blocking objections ──────────────────
-
-    #[test]
-    fn explicit_dry_signal_overrides_blocking_objections() {
-        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
-
-        state.record_advocate_revision(1);
-        // Adversary found blocking objections but explicitly signals dry
-        // (e.g. the objections are resolved inline).
-        let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![ObjectionRecord {
-                body: "Resolved inline".into(),
-                blocking: true,
-                author_model: None,
-                entry_id: None,
-            }],
-            explicit_dry: true,
-        });
-        assert_eq!(state.consecutive_dry_rounds, 1);
-        assert_eq!(outcome, AdversaryPassOutcome::Continue);
-    }
-
-    // ── Edge case: agent failure termination ──────────────────────────────
-
-    #[test]
-    fn agent_failure_terminates_loop() {
-        let mut state = RefinementLoopState::new("p1", 0);
-        state.terminate(StopReason::AgentFailure {
-            role: "adversary".into(),
-            error: "session crashed".into(),
-        });
-        assert!(state.is_complete());
-        assert!(matches!(
-            state.stop_reason,
-            Some(StopReason::AgentFailure { .. })
-        ));
-    }
-
-    // ── Revision attribution per round ──────────────────────────────────
-
-    #[test]
     fn revision_metadata_includes_round_and_role_attribution() {
-        // Each round's advocate revision should carry round number, role,
-        // authority mode, and model for attribution in proposal history.
         for round in 1..=5 {
             let meta =
                 build_revision_event_metadata(round, Some("anthropic/claude-sonnet-4-20250514"));
@@ -900,59 +981,5 @@ mod tests {
                 "model must be attributed"
             );
         }
-    }
-
-    #[test]
-    fn debate_trail_attribution_fields_are_consistent_with_state() {
-        // Verify that the objection record shape aligns with the debate-trail
-        // schema fields (round, against_revision_seq, agent_role, blocking).
-        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
-
-        // Round 1: advocate advances to revision 1.
-        state.record_advocate_revision(1);
-        assert_eq!(state.current_revision_seq, 1);
-        assert_eq!(state.current_round, 1);
-
-        // The debate-trail entry for the adversary's objection in this round
-        // should carry: round=1, against_revision_seq=1, agent_role="adversary".
-        // This test verifies the state machine tracks these correctly so the
-        // dispatch layer can persist them with the right values.
-        let objection = ObjectionRecord {
-            body: "Missing scope section".into(),
-            blocking: true,
-            author_model: Some("openai/gpt-4o".into()),
-            entry_id: None,
-        };
-        let outcome = state.process_adversary_pass(&AdversaryPassResult {
-            objections: vec![objection],
-            explicit_dry: false,
-        });
-        assert_eq!(outcome, AdversaryPassOutcome::Continue);
-        // After processing, round advances to 2, revision_seq stays 1.
-        assert_eq!(state.current_round, 2);
-        assert_eq!(state.current_revision_seq, 1);
-    }
-
-    // ── Checkpoint pending metadata ─────────────────────────────────────
-
-    #[test]
-    fn build_revision_event_metadata_checkpoint_includes_pending() {
-        let meta = build_revision_event_metadata(2, Some("model-x"));
-        assert_eq!(meta["authority"], "checkpoint");
-        assert_eq!(meta["role"], "advocate");
-        assert_eq!(meta["round"], 2);
-        assert_eq!(meta["author_model"], "model-x");
-        // The coordinator adds checkpoint_status: "pending" after calling this.
-        // Verify the base metadata doesn't include it (that's the coordinator's job).
-        assert!(meta.get("checkpoint_status").is_none());
-    }
-
-    #[test]
-    fn checkpoint_pending_status_field_can_be_added() {
-        let mut meta = build_revision_event_metadata(3, None);
-        meta["checkpoint_status"] = serde_json::json!("pending");
-        meta["previous_revision_seq"] = serde_json::json!(2);
-        assert_eq!(meta["checkpoint_status"], "pending");
-        assert_eq!(meta["previous_revision_seq"], 2);
     }
 }

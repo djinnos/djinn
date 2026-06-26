@@ -386,6 +386,14 @@ pub mod stubs {
         ) -> Result<(), String> {
             Err("coordinator not initialized".into())
         }
+        async fn resolve_refinement_review(
+            &self,
+            _: String,
+            _: bool,
+            _: Option<String>,
+        ) -> Result<(), String> {
+            Err("coordinator not initialized".into())
+        }
     }
 
     /// Test-only coordinator stub that accepts refinement starts (returns Ok)
@@ -409,6 +417,14 @@ pub mod stubs {
         async fn demand_proposal_refinement_round(
             &self,
             _: crate::bridge::ProposalRefinementStartRequest,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resolve_refinement_review(
+            &self,
+            _: String,
+            _: bool,
+            _: Option<String>,
         ) -> Result<(), String> {
             Ok(())
         }

@@ -323,6 +323,28 @@ impl CoordinatorHandle {
             .map_err(|_| CoordinatorError::NoResponse)?
             .map_err(CoordinatorError::Other)
     }
+
+    /// Resolve the human's accept/reject review of a converged refinement.
+    pub async fn resolve_refinement_review(
+        &self,
+        proposal_id: String,
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), CoordinatorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(CoordinatorMessage::ResolveRefinementReview {
+                proposal_id,
+                accept,
+                feedback,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| CoordinatorError::ActorDead)?;
+        rx.await
+            .map_err(|_| CoordinatorError::NoResponse)?
+            .map_err(CoordinatorError::Other)
+    }
 }
 
 // ─── CoordinatorTrigger impl ───────────────────────────────────────────────

@@ -24,6 +24,7 @@ You MUST NOT:
 - Produce objections or red-team challenges (the Adversary does this).
 - Adjudicate or dismiss objections (the Judge does this).
 - Make MDX/block enrichment a hard gate — prose-grounded proposals must still pass DoR.
+- Touch the database directly. NEVER run `psql`, raw SQL, or shell commands to read or write proposals or the `proposal_revisions` table. The ONLY way to revise the spec is the proposal tools above (`proposal_update`, `proposal_block_patch`, `proposal_ac_set`/`proposal_ac_amend`). If a tool call fails, fix your input and retry the tool — do not work around it with SQL.
 
 ## Workflow Contract
 

@@ -1,4 +1,3 @@
-import { useCallback, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -7,17 +6,12 @@ import {
   CancelCircleIcon,
   Shield01Icon,
 } from "@hugeicons/core-free-icons";
-import { callMcpTool } from "@/api/mcpClient";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { showToast } from "@/lib/toast";
-import { DiffView } from "@/components/proposals/DiffView";
 import type {
   ProposalGateStatus,
   ProposalRefinementStatus,
-  CheckpointRevision,
 } from "@/api/types";
 
 /**
@@ -42,79 +36,24 @@ function checkLabel(check: string): string {
  * Readiness panel for a proposal.
  *
  * Displays deterministic DoR status, latest Judge verdict, adversary dry count,
- * unresolved blocking debate rows, needs-evidence parked spike state, checkpoint
- * revision diff approval/edit/reject, and disabled/blocked gate explanations
- * naming exact failures.
+ * unresolved blocking debate rows, needs-evidence parked spike state, and
+ * disabled/blocked gate explanations naming exact failures.
  *
  * The component renders backend-provided status only — it does NOT recompute
- * readiness logic client-side.
+ * readiness logic client-side. The autonomous tribunal's converged result and
+ * the single human accept/reject review live in `ProposalRefinement`.
  */
 export function ReadinessPanel({
   gateStatus,
   refinement,
-  proposalId,
-  pendingRevisions,
-  onChanged,
 }: {
   gateStatus: ProposalGateStatus | null;
   refinement: ProposalRefinementStatus | null;
-  proposalId: string;
-  pendingRevisions: CheckpointRevision[];
-  onChanged: () => void;
 }) {
-  const [actionBusy, setActionBusy] = useState<number | null>(null);
-  const [diffOpen, setDiffOpen] = useState<number | null>(null);
-
-  const handleApprove = useCallback(
-    async (seq: number) => {
-      setActionBusy(seq);
-      try {
-        const res = await callMcpTool(
-          "proposal_refinement_checkpoint_approve" as any,
-          { proposal_id: proposalId, revision_seq: seq },
-        );
-        if (res.error) throw new Error(res.error);
-        showToast.success("Checkpoint revision approved");
-        onChanged();
-      } catch (e) {
-        showToast.error("Failed to approve revision", {
-          description: (e as Error).message,
-        });
-      } finally {
-        setActionBusy(null);
-      }
-    },
-    [proposalId, onChanged],
-  );
-
-  const handleReject = useCallback(
-    async (seq: number) => {
-      setActionBusy(seq);
-      try {
-        const res = await callMcpTool(
-          "proposal_refinement_checkpoint_reject" as any,
-          { proposal_id: proposalId, revision_seq: seq },
-        );
-        if (res.error) throw new Error(res.error);
-        showToast.success("Checkpoint revision rejected");
-        onChanged();
-      } catch (e) {
-        showToast.error("Failed to reject revision", {
-          description: (e as Error).message,
-        });
-      } finally {
-        setActionBusy(null);
-      }
-    },
-    [proposalId, onChanged],
-  );
-
   // If there's no gate status and no refinement, don't render anything.
   if (!gateStatus && !refinement) return null;
 
   const isReady = gateStatus?.ready ?? true;
-  const isCheckpoint =
-    refinement?.update_authority === "checkpoint";
   const hasBlockedReasons =
     gateStatus && gateStatus.blocked_explanations.length > 0;
 
@@ -272,92 +211,12 @@ export function ReadinessPanel({
         </div>
       )}
 
-      {/* Checkpoint mode: pending revisions with diff inspection */}
-      {isCheckpoint && pendingRevisions.length > 0 && (
-        <div className="space-y-2 border-t pt-2">
-          <Label className="text-xs uppercase text-muted-foreground">
-            Pending revisions ({pendingRevisions.length})
-          </Label>
-          {pendingRevisions.map((rev) => (
-            <div
-              key={rev.seq}
-              className="space-y-1 rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/30"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Badge variant="outline" className="text-xs">
-                    Round {rev.round ?? "?"}
-                  </Badge>
-                  {rev.author_model && (
-                    <span className="text-xs text-muted-foreground">
-                      {rev.author_model}
-                    </span>
-                  )}
-                  <span className="text-xs text-muted-foreground">
-                    #{rev.seq}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-6 text-xs"
-                    onClick={() =>
-                      setDiffOpen(diffOpen === rev.seq ? null : rev.seq)
-                    }
-                  >
-                    {diffOpen === rev.seq ? "Hide diff" : "Diff"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="default"
-                    className="h-6 text-xs"
-                    disabled={actionBusy === rev.seq}
-                    onClick={() => handleApprove(rev.seq)}
-                  >
-                    {actionBusy === rev.seq ? "…" : "Approve"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-6 text-xs"
-                    disabled={actionBusy === rev.seq}
-                    onClick={() => handleReject(rev.seq)}
-                  >
-                    {actionBusy === rev.seq ? "…" : "Reject"}
-                  </Button>
-                </div>
-              </div>
-              {rev.title && (
-                <p className="text-xs font-medium">{rev.title}</p>
-              )}
-              {rev.body_preview && (
-                <p className="line-clamp-2 text-xs text-muted-foreground">
-                  {rev.body_preview}
-                </p>
-              )}
-              {diffOpen === rev.seq && rev.body_preview && (
-                <div className="mt-1">
-                  <DiffView
-                    before=""
-                    after={rev.body_preview}
-                  />
-                  <p className="mt-1 text-[10px] text-muted-foreground">
-                    Preview of proposed revision — full diff available after
-                    approval.
-                  </p>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Mode explanation */}
+      {/* Active-refinement note */}
       {refinement?.active && (
         <p className="text-xs text-muted-foreground">
-          Checkpoint mode: advocate revisions require explicit approval before
-          they are applied.
+          Autonomous tribunal in progress: Adversary, Advocate, and Judge refine
+          the spec automatically. You will be asked to accept or reject the
+          converged result.
         </p>
       )}
     </div>

@@ -95,30 +95,15 @@ export interface ProposalRefinementStatus {
    * `agent_failure`. null while still running or not started.
    */
   stop_reason?: string | null;
-  /** Count of pending checkpoint revisions awaiting approval. Always 0 in auto-accept mode. */
-  pending_checkpoint_count?: number;
-}
-
-/**
- * A pending checkpoint revision visible for approval or rejection.
- * Produced by the Advocate in checkpoint mode; the live proposal body
- * is not mutated until the revision is approved.
- */
-export interface CheckpointRevision {
-  /** Revision sequence number. */
-  seq: number;
-  /** Advocate role attribution. */
-  role?: string | null;
-  /** Refinement round that produced this revision. */
-  round?: number | null;
-  /** Model that authored this revision. */
-  author_model?: string | null;
-  /** Short preview of the proposed body (first 300 chars). */
-  body_preview: string;
-  /** Title of the pending revision. */
-  title: string;
-  /** When the revision was created. */
-  created_at: string;
+  /**
+   * True when the autonomous tribunal has converged and parked for the
+   * single human accept/reject review of the full refined result.
+   */
+  awaiting_review?: boolean;
+  /** The judge's summary of the refined result, shown at review time. */
+  judge_summary?: string | null;
+  /** Pre-refinement baseline revision sequence (diff baseline). */
+  snapshot_revision_seq?: number | null;
 }
 
 /**

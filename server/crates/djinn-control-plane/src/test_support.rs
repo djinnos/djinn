@@ -86,6 +86,14 @@ impl CoordinatorOps for StubCoordinator {
     ) -> std::result::Result<(), String> {
         Err("stub: CoordinatorOps::demand_proposal_refinement_round not implemented".into())
     }
+    async fn resolve_refinement_review(
+        &self,
+        _proposal_id: String,
+        _accept: bool,
+        _feedback: Option<String>,
+    ) -> std::result::Result<(), String> {
+        Err("stub: CoordinatorOps::resolve_refinement_review not implemented".into())
+    }
 }
 
 /// SlotPoolOps stub. Queries return empties; mutations (kill_session) error.

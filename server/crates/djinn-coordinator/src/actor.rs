@@ -953,6 +953,17 @@ impl CoordinatorActor {
                     .await;
                 let _ = reply.send(result);
             }
+            CoordinatorMessage::ResolveRefinementReview {
+                proposal_id,
+                accept,
+                feedback,
+                reply,
+            } => {
+                let result = self
+                    .resolve_refinement_review(&proposal_id, accept, feedback)
+                    .await;
+                let _ = reply.send(result);
+            }
         }
     }
 
