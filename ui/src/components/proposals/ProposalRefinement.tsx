@@ -182,6 +182,21 @@ export function ProposalRefinement({
           </p>
         )}
 
+        {/* Stopped — let the user run a fresh tribunal from here. Without this
+            a stopped/interrupted refinement is a dead end (e.g. a run lost
+            across a deploy leaves nothing actionable in the UI). */}
+        {!status.active && (
+          <div className="space-y-1 border-t pt-2">
+            <Button size="sm" disabled={busy} onClick={handleStart}>
+              {busy ? "Starting…" : "Restart refinement"}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Runs a fresh Adversary → Advocate → Judge tribunal from the current
+              spec.
+            </p>
+          </div>
+        )}
+
         {/* Converged — single human review of the full refined result. */}
         {status.active && status.awaiting_review && (
           <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-3">
