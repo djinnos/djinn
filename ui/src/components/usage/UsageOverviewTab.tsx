@@ -267,9 +267,9 @@ function SplitKpiRow({ data }: { data: UsageAnalyticsResponse }) {
         value={hasSplitFields ? formatCurrency(totalActual) : EM_DASH}
         caption="Real API-key spend from billed sessions"
       />
-      {/* Projected subscription cost */}
+      {/* Projected subscription-equivalent cost */}
       <SimpleKpiCard
-        label="Projected subscription cost"
+        label="Projected subscription-equivalent cost"
         value={hasSplitFields ? formatCurrency(totalProjected) : EM_DASH}
         caption="List-price equivalent for flat-rate plan usage"
       />
@@ -388,7 +388,7 @@ function SplitChartSection({
         </div>
         <div>
           <p className="mb-2 text-xs font-medium text-muted-foreground">
-            Projected subscription cost
+            Projected subscription-equivalent cost
           </p>
           <div className="h-[280px]">{projectedChart}</div>
         </div>
@@ -461,7 +461,7 @@ function SplitBarChart({
         </div>
         <div>
           <p className="mb-2 text-xs font-medium text-muted-foreground">
-            Projected
+            Projected subscription-equivalent
           </p>
           {projectedChartData.hasPricedCost ? (
             <div className="h-[260px]">
@@ -490,7 +490,7 @@ function SplitBarChart({
           ) : (
             <ChartEmptyState
               title={rows.length > 0 ? "No projected cost" : "No rows"}
-              description="Projected subscription cost is unavailable for these rows."
+              description="Projected subscription-equivalent cost is unavailable for these rows."
               rows={rows.map((row) => ({
                 label: row.label,
                 value: EM_DASH,
@@ -609,12 +609,12 @@ function MethodologyDisclosure() {
         </p>
         <p>
           <span className="font-medium text-foreground">
-            Projected subscription cost
+            Projected subscription-equivalent cost
           </span>{" "}
           is a list-price equivalent estimate for sessions run through flat-rate
           subscription or coding-plan access. These sessions incur $0 in real
           API charges — the projected figure shows what the usage <em>would</em>{" "}
-          cost at catalog list rates.
+          cost at catalog list rates, and is not a spend figure.
         </p>
         <p>
           <span className="font-medium text-foreground">Unpriced sessions</span>{" "}

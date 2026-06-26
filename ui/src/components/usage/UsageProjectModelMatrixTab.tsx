@@ -59,7 +59,7 @@ const MATRIX_METRICS: MatrixMetricSpec[] = [
   },
   {
     key: "projected_usd",
-    label: "Projected cost",
+    label: "Projected subscription-equivalent cost",
     description:
       "List-price equivalent for flat-rate plan sessions. API-key sessions contribute $0 here.",
     format: formatCurrency,
@@ -85,7 +85,7 @@ const MATRIX_METRICS: MatrixMetricSpec[] = [
     key: "total_cost",
     label: "Legacy total cost",
     description:
-      "Combined cost field (legacy). For split view use Actual API spend or Projected cost.",
+      "Combined cost field (legacy). For split view use Actual API spend or Projected subscription-equivalent cost.",
     format: formatCurrency,
     emptyLabel: "No priced spend",
   },
@@ -153,8 +153,8 @@ export function UsageProjectModelMatrixTab({
               Heatmap of project/model worker usage. Blank patterned cells mean
               the pair never ran in the selected filters; unpriced cost metrics
               render as — rather than $0, while token counts remain visible.
-              Actual API spend and projected subscription cost are available as
-              separate metrics.
+              Actual API spend and projected subscription-equivalent cost are
+              available as separate metrics.
             </p>
           </div>
           <div className="flex items-center gap-2">

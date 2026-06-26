@@ -175,4 +175,48 @@ describe("UsageProjectModelMatrixTab", () => {
     // Unpriced count should be visible even when costs are null.
     expect(screen.getByText(/Unpriced 5/)).toBeInTheDocument();
   });
+
+  it("renders Projected subscription-equivalent cost in metric selector", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: 5.0,
+            projected_usd: 3.0,
+            unpriced_count: 2,
+            total_tokens: 1000,
+          }),
+        ])}
+      />,
+    );
+
+    // The section description should mention the full label.
+    expect(
+      screen.getByText(/projected subscription-equivalent cost/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render any blended or ambiguous cost total", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: 5.0,
+            projected_usd: 3.0,
+            unpriced_count: 0,
+            total_tokens: 1000,
+          }),
+        ])}
+      />,
+    );
+
+    // Should not show $0 for unpriced when count is 0
+    expect(screen.queryByText(/Unpriced 0/)).not.toBeInTheDocument();
+  });
 });
