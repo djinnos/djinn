@@ -194,7 +194,24 @@ jobs:
           tool: cargo-deny
 
       - name: cargo-deny check
-        run: cargo deny check
+        run: |
+          # Retry up to 3 times with backoff — crates.io downloads can
+          # fail transiently (Connection reset by peer, DNS hiccups).
+          for attempt in 1 2 3; do
+            echo "::group::cargo-deny check (attempt $attempt)"
+            if cargo deny check; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::cargo-deny check failed (attempt $attempt), retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+          echo "::error::cargo-deny check failed after 3 attempts"
+          exit 1
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Lint (PR + merge queue)                                  ║
@@ -436,7 +453,7 @@ jobs:
         run: cargo nextest run --workspace --all-targets --features qdrant --profile ci --partition count:${{ matrix.shard }}/4
 
   # ╔══════════════════════════════════════════════════════════════════╗
-  # ║  sqlx offline-cache freshness gate (merge queue only)            ║
+  # ║  sqlx offline-cache freshness gate (PR + merge queue)            ║
   # ║                                                                  ║
   # ║  The compile-checked `sqlx::query!` macros validate SQL against  ║
   # ║  a live schema. Their results are committed to `server/.sqlx/`   ║
@@ -450,7 +467,7 @@ jobs:
   server-sqlx-cache:
     name: Server sqlx Cache
     needs: [changes, server-clippy]
-    if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    if: needs.changes.outputs.server == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
       run:
