@@ -60,6 +60,7 @@ jobs:
               - '.djinn/skills/**'
               - 'server/Cargo.toml'
               - 'server/Cargo.lock'
+              - 'server/deny.toml'
               - 'server/rust-toolchain.toml'
               - 'server/.cargo/**'
               - 'server/.config/**'
@@ -166,6 +167,34 @@ jobs:
             --sort created_at --order asc --json id | \
             jq -r '.[:-1].[].id' | \
             xargs -r -I{} gh cache delete {} --repo ${{ github.repository }} 2>/dev/null || true
+
+  # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Server cargo-deny (PR + merge queue)                            ║
+  # ║                                                                  ║
+  # ║  Supply-chain and policy ratchet that inspects lockfile,         ║
+  # ║  manifests, and deny.toml only — no database required.           ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
+  server-cargo-deny:
+    name: Server cargo-deny
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo-deny check
+        run: cargo deny check
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Lint (PR + merge queue)                                  ║
@@ -535,6 +564,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always() && github.event_name != 'push'
     needs:
+      - server-cargo-deny
       - server-clippy
       - server-size-guard
       - server-migrations-guard
@@ -545,6 +575,7 @@ jobs:
       - name: Check results
         run: |
           results=(
+            "${{ needs.server-cargo-deny.result }}"
             "${{ needs.server-clippy.result }}"
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
