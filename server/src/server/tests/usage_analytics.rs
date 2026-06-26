@@ -756,3 +756,185 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
     assert!((cell.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
     assert_eq!(cell.get("total_tokens").unwrap().as_i64().unwrap(), 150);
 }
+
+// ── Split cost-basis contract: actual + projected + unpriced ────────────────
+
+/// Verify that `/api/admin/usage` returns separate `actual_spend_usd` and
+/// `projected_usd` KPIs, and that unpriced sessions are excluded from both
+/// dollar figures but counted visibly in series, breakdowns, and matrix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_cost_basis_contract_at_api_level() {
+    let db = test_helpers::create_test_db();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-split", "split-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-split",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+
+    // actual-basis session: $2.00
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(2.00),
+            cost_basis: "actual",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // projected-basis session: $3.50
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-12T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(3.50),
+            cost_basis: "projected",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // unpriced-basis session: NULL cost
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-13T10:00:00Z",
+            tokens_in: 50,
+            tokens_out: 25,
+            cache_read_tokens: 5,
+            cache_write_tokens: 2,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    let app = test_helpers::create_test_app_with_db(db);
+
+    let (status, body) =
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // ── KPIs: separate Actual API Spend and Projected Cost cards ──
+    let kpis = array_field(&body, "kpis");
+    let actual_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Actual API Spend"))
+        .expect("Actual API Spend KPI");
+    assert!(
+        (actual_kpi.get("value").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "actual KPI should be $2.00, got: {}",
+        actual_kpi.get("value").unwrap()
+    );
+
+    let projected_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Projected Cost"))
+        .expect("Projected Cost KPI");
+    assert!(
+        (projected_kpi.get("value").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "projected KPI should be $3.50, got: {}",
+        projected_kpi.get("value").unwrap()
+    );
+
+    // ── Sessions KPI: all 3 sessions counted ──
+    let sessions_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Sessions"))
+        .expect("Sessions KPI");
+    assert_eq!(sessions_kpi.get("value").unwrap().as_f64().unwrap(), 3.0);
+
+    // ── Model effectiveness: split costs for model-split ──
+    let me = array_field(&body, "model_effectiveness");
+    let row = model_effectiveness_row(me, "model-split");
+    assert!(
+        (row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "model actual_spend_usd should be $2.00"
+    );
+    assert!(
+        (row.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "model projected_usd should be $3.50"
+    );
+    assert_eq!(
+        row.get("unpriced_session_count").unwrap().as_i64().unwrap(),
+        1,
+        "one unpriced session"
+    );
+
+    // ── Project model matrix: split costs per cell ──
+    let matrix = array_field(&body, "project_model_matrix");
+    let cell = matrix
+        .iter()
+        .find(|c| {
+            c.get("project_id").and_then(Value::as_str) == Some("proj-split")
+                && c.get("model").and_then(Value::as_str) == Some("model-split")
+        })
+        .expect("matrix cell for proj-split/model-split");
+    assert!(
+        (cell.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "matrix cell actual_spend_usd should be $2.00"
+    );
+    assert!(
+        (cell.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "matrix cell projected_usd should be $3.50"
+    );
+    assert_eq!(
+        cell.get("unpriced_session_count")
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1,
+        "matrix cell unpriced"
+    );
+
+    // ── Breakdown (by_project): split costs per entity ──
+    let by_project = array_field(body.get("breakdowns").unwrap(), "by_project");
+    let proj_row = by_project
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_str) == Some("proj-split"))
+        .expect("by_project row for proj-split");
+    assert!(
+        (proj_row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "breakdown actual should be $2.00"
+    );
+    assert!(
+        (proj_row.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "breakdown projected should be $3.50"
+    );
+    assert_eq!(
+        proj_row
+            .get("unpriced_session_count")
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1,
+        "breakdown unpriced"
+    );
+}

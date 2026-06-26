@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE notes SET\n                        title      = $1,\n                        file_path  = '',\n                        note_type  = $2,\n                        folder     = $3,\n                        permalink  = $4,\n                        updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n                     WHERE id = $5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ce77454ba3c44cad6acd413a39f457d7665448db643d446279708679421a03e"
+}

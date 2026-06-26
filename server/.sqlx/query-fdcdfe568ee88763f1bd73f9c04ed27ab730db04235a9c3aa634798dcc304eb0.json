@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"count!: i64\" FROM notes n\n             WHERE n.project_id = $1\n               AND n.note_type NOT IN ('brief', 'roadmap', 'catalog')\n               AND NOT EXISTS (\n                   SELECT 1 FROM note_links l WHERE l.target_id = n.id\n               )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fdcdfe568ee88763f1bd73f9c04ed27ab730db04235a9c3aa634798dcc304eb0"
+}

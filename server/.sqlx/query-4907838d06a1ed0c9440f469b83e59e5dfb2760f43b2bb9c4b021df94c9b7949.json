@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.note_id, m.content_hash, m.model_version, m.embedding_dim, m.embedded_at,\n                    e.updated_at, m.extension_state, m.branch\n             FROM note_embedding_meta m\n             JOIN note_embeddings e ON e.note_id = m.note_id\n             WHERE m.note_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "model_version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "embedding_dim",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "embedded_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "extension_state",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "branch",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4907838d06a1ed0c9440f469b83e59e5dfb2760f43b2bb9c4b021df94c9b7949"
+}

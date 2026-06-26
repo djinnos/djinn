@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM epic_read_sources WHERE epic_id = $1 AND project_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cecb7d2d5a3ef1d4fd9e4dd578d9a068ca07bc88b0222ec61733be3e950a67eb"
+}

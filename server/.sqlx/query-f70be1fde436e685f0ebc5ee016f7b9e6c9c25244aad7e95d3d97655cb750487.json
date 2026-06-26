@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT short_id\n                 FROM tasks\n                 WHERE project_id = $1 AND (id = $2 OR short_id = $3)\n                 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "short_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f70be1fde436e685f0ebc5ee016f7b9e6c9c25244aad7e95d3d97655cb750487"
+}

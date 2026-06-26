@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                    file_a AS \"file_a!\",\n                    file_b AS \"file_b!\",\n                    CAST(COUNT(*) AS BIGINT) AS \"co_edits!\",\n                    MAX(committed_at) AS \"last_co_edit!\"\n                 FROM coupling_pair_events\n                 WHERE project_id = $1 AND committed_at >= $2\n                 GROUP BY file_a, file_b\n                 ORDER BY COUNT(*) DESC, MAX(committed_at) DESC, file_a ASC, file_b ASC\n                 LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "file_a!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "file_b!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "co_edits!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_co_edit!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "a31ab523bf7723bd4f81a61390e6e8451da7f9b3ad08890d9a7d75cd61cf1d64"
+}

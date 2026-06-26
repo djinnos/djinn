@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO proposal_signoffs (proposal_id, kind, user_id, revision_seq)\n             VALUES ($1, $2, $3, $4)\n             ON CONFLICT (proposal_id, kind, user_id) DO UPDATE\n                 SET revision_seq = EXCLUDED.revision_seq,\n                     created_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "561000b0fa4c40e72cc275922f8e69ff8b9baff7a9b6a2ee32f8ff2797619c9a"
+}

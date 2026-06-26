@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO note_embedding_meta (\n            note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state, branch\n         ) VALUES (\n            $1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), $3, $4, $5, $6\n         )\n         ON CONFLICT (note_id) DO UPDATE SET\n            content_hash = EXCLUDED.content_hash,\n            embedded_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),\n            model_version = EXCLUDED.model_version,\n            embedding_dim = EXCLUDED.embedding_dim,\n            extension_state = EXCLUDED.extension_state,\n            branch = EXCLUDED.branch",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "788ae3d8f7f6ab1bb9a02a5de293be6949eda7386c9bf388386d91ef9c81728c"
+}

@@ -84,7 +84,6 @@ pub enum RefinementPhase {
     Complete,
 }
 
-
 /// An adversary objection as seen by the state machine. The coordinator
 /// extracts these from agent session output and feeds them in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,7 +237,6 @@ impl RefinementLoopState {
     pub fn should_invoke_judge(&self) -> bool {
         self.consecutive_dry_rounds >= self.config.dry_rounds_required
     }
-
 
     /// Record that an agent session was spawned. Returns `Err` if the spawn
     /// cap would be exceeded.
@@ -488,8 +486,7 @@ mod tests {
 
     #[test]
     fn stops_after_two_dry_adversary_rounds_and_invokes_judge() {
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, test_config());
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: advocate revises.
         state.record_advocate_revision(1);
@@ -543,8 +540,7 @@ mod tests {
 
     #[test]
     fn dry_rounds_reset_on_blocking_objection() {
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, test_config());
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: dry.
         state.record_advocate_revision(1);
@@ -576,8 +572,7 @@ mod tests {
             max_rounds: 3,
             ..test_config()
         };
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, config);
+        let mut state = RefinementLoopState::with_config("p1", 0, config);
 
         // Rounds 1-3: adversary keeps finding blocking objections.
         for round in 1..=3 {
@@ -613,8 +608,7 @@ mod tests {
             max_total_spawns: 3,
             ..test_config()
         };
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, config);
+        let mut state = RefinementLoopState::with_config("p1", 0, config);
 
         // Spawn 3 agents successfully.
         assert!(state.record_spawn().is_ok());
@@ -636,8 +630,7 @@ mod tests {
             repeat_objection_threshold: 2,
             ..test_config()
         };
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, config);
+        let mut state = RefinementLoopState::with_config("p1", 0, config);
 
         // Round 1: adversary raises a blocking objection.
         state.record_advocate_revision(1);
@@ -689,8 +682,7 @@ mod tests {
             dry_rounds_required: 3,
             ..test_config()
         };
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, config);
+        let mut state = RefinementLoopState::with_config("p1", 0, config);
 
         // Round 1: non-blocking objection.
         state.record_advocate_revision(1);
@@ -857,8 +849,7 @@ mod tests {
 
     #[test]
     fn explicit_dry_signal_overrides_blocking_objections() {
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, test_config());
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
         state.record_advocate_revision(1);
         // Adversary found blocking objections but explicitly signals dry
@@ -899,10 +890,8 @@ mod tests {
         // Each round's advocate revision should carry round number, role,
         // authority mode, and model for attribution in proposal history.
         for round in 1..=5 {
-            let meta = build_revision_event_metadata(
-                round,
-                Some("anthropic/claude-sonnet-4-20250514"),
-            );
+            let meta =
+                build_revision_event_metadata(round, Some("anthropic/claude-sonnet-4-20250514"));
             assert_eq!(meta["round"], round, "round must match for round {round}");
             assert_eq!(meta["role"], "advocate");
             assert_eq!(meta["source"], "refinement_loop");
@@ -917,8 +906,7 @@ mod tests {
     fn debate_trail_attribution_fields_are_consistent_with_state() {
         // Verify that the objection record shape aligns with the debate-trail
         // schema fields (round, against_revision_seq, agent_role, blocking).
-        let mut state =
-            RefinementLoopState::with_config("p1", 0, test_config());
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
 
         // Round 1: advocate advances to revision 1.
         state.record_advocate_revision(1);

@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                 CASE WHEN na.note_a_id = $1 THEN nb.permalink ELSE na_.permalink END AS \"note_permalink!: String\",\n                 CASE WHEN na.note_a_id = $2 THEN nb.title    ELSE na_.title    END AS \"note_title!: String\",\n                 na.weight,\n                 na.kind AS \"kind!: String\",\n                 na.co_access_count,\n                 na.last_co_access\n             FROM note_associations na\n             JOIN notes na_ ON na_.id = na.note_a_id\n             JOIN notes nb  ON nb.id  = na.note_b_id\n             WHERE (na.note_a_id = $3 OR na.note_b_id = $4)\n               AND na.weight >= $5\n             ORDER BY na.weight DESC\n             LIMIT $6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_permalink!: String",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "note_title!: String",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "weight",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "kind!: String",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "co_access_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_co_access",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "858139f17cbd0941e419780a6190da79ace02b004fec687e9d51687ee7a3dd31"
+}
