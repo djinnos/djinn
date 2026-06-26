@@ -80,12 +80,13 @@ use crate::actors::slot::lifecycle::model_resolution::{
     ModelResolutionError, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
-    PromptContext, PromptContextInputs, ReadSourceInfo, build_prompt_context,
+    PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
 };
 use crate::actors::slot::lifecycle::setup::{SetupContext, SetupError, resolve_setup_context};
+use crate::actors::slot::lifecycle::task_classifier::classify_native_skill_trigger;
 use crate::actors::slot::lifecycle::teardown::{PostSessionParams, spawn_post_session_work};
 use crate::actors::slot::reply_loop::error_handling::BudgetWindDownIgnored;
 use crate::actors::slot::reply_loop::loop_guard::{
@@ -417,6 +418,16 @@ pub(crate) async fn execute_stage(
         specialist_overrode_runtime_role,
     } = resolve_role_overrides(task, role_kind, agent_context).await;
 
+    // The CONCRETE role actually running this stage after overrides. For a
+    // refinement tribunal stage `role_kind` is the generic `Refinement` (whose
+    // default arc is Advocate), but `runtime_role` is resolved from
+    // `task.agent_type` to advocate/adversary/judge. Everything that defines
+    // what the agent IS — the session `agent_type`, telemetry, tool schemas,
+    // the system/initial prompt, and the finalize tools — must key off this,
+    // not the generic `role`/`role_name`, or the adversary/judge would run the
+    // advocate prompt + `submit_work` tool and never produce objections/verdicts.
+    let runtime_role_name = runtime_role.config().name;
+
     // ── Conflict-retry context ────────────────────────────────────────────────
     // Populated when a prior task-run aborted with merge conflicts; drives
     // the `TaskContext::conflict_files` + `merge_*_branch` prompt fields the
@@ -481,17 +492,26 @@ pub(crate) async fn execute_stage(
     // `runtime_role` drives resolution so specialists can override the base
     // role's MCP/skill defaults.  `role_mcp_servers` carries the DB row's
     // parsed array (or `None` when no DB row exists).
+    //
+    // The authoring trigger gates native-skill loading: only proposal-authoring
+    // planner sessions (epic_breakdown) receive platform-owned skills like
+    // `visual-spec`.  Non-authoring planner sessions (wave planning, dispatch)
+    // skip native skills to avoid paying the context cost.
+    let authoring_trigger = classify_native_skill_trigger(runtime_role.config().name, task);
+
     let McpAndSkills {
         effective_mcp_servers,
         effective_skills,
         mcp_registry,
         resolved_skills,
+        native_skill_names: _native_skill_names,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
         &task.short_id,
         role_mcp_servers.as_deref(),
         &role_skills,
+        authoring_trigger,
         #[cfg(test)]
         None,
         agent_context,
@@ -540,7 +560,7 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
-    let PromptContext { system_prompt, .. } = build_prompt_context(PromptContextInputs {
+    let PromptContext { system_prompt, .. } = assemble_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),
         role_for_epic_check: role.as_ref(),
@@ -567,7 +587,7 @@ pub(crate) async fn execute_stage(
                 project_id: task.project_id.clone(),
                 task_id: Some(task.id.clone()),
                 model: model_id.clone(),
-                agent_type: role_name.to_string(),
+                agent_type: runtime_role_name.to_string(),
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
             },
@@ -591,7 +611,7 @@ pub(crate) async fn execute_stage(
     } else {
         let resolved = resolved
             .expect("resolved model credential must be populated when provider_override is absent");
-        let telemetry_meta = build_telemetry_meta(role_name, &task.id);
+        let telemetry_meta = build_telemetry_meta(runtime_role_name, &task.id);
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own). Soft fallback to `default_base_url` on a missing
         // catalog entry / empty URL, matching the pre-Phase-6b behaviour.
@@ -638,8 +658,7 @@ pub(crate) async fn execute_stage(
     };
 
     // ── Build the initial conversation ───────────────────────────────────────
-    let agent_type =
-        crate::AgentType::parse(role.config().name).unwrap_or(crate::AgentType::Worker);
+    let agent_type = crate::AgentType::parse(runtime_role_name).unwrap_or(crate::AgentType::Worker);
     let mut tools = crate::roles::tool_schemas_for(agent_type);
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
@@ -647,7 +666,9 @@ pub(crate) async fn execute_stage(
 
     let mut conversation = Conversation::new();
     conversation.push(Message::system(system_prompt));
-    let initial_user_message = role.initial_user_message(&task.id, agent_context).await;
+    let initial_user_message = runtime_role
+        .initial_user_message(&task.id, agent_context)
+        .await;
     conversation.push(Message::user(initial_user_message));
 
     // ── Run the reply loop ───────────────────────────────────────────────────
@@ -673,8 +694,8 @@ pub(crate) async fn execute_stage(
             session_id: &session_id,
             project_path: &project_path_str,
             worktree_path,
-            role_name,
-            finalize_tool_names: role.config().finalize_tool_names,
+            role_name: runtime_role_name,
+            finalize_tool_names: runtime_role.config().finalize_tool_names,
             context_window,
             model_id: &model_id,
             cancel: &callbacks.cancel,
@@ -863,6 +884,32 @@ pub(crate) async fn execute_stage(
                             provider_failure: None,
                         },
                     },
+                    // Refinement tribunal roles each finalize via their own
+                    // configured tool: the Advocate `submit_work`, the Adversary
+                    // `submit_review`, the Judge `submit_decision`. The finalize
+                    // tool is only a session terminator — the coordinator reads
+                    // the DB (proposal revisions + debate trail) after the
+                    // session ends to advance the state machine, so any of the
+                    // three counts as a clean completion. (The real output is
+                    // written via `proposal_debate_append` / `proposal_update`
+                    // during the session, not carried in the finalize call.)
+                    RoleKind::Refinement => match finalize_name {
+                        "submit_work" | "submit_review" | "submit_decision" => {
+                            StageOutcome::WorkerDone
+                        }
+                        "" => StageOutcome::Failed {
+                            reason: "refinement session ended without calling a finalize tool \
+                                     (submit_work / submit_review / submit_decision)"
+                                .into(),
+                            provider_failure: None,
+                        },
+                        other => StageOutcome::Failed {
+                            reason: format!(
+                                "refinement session finalized via unexpected tool '{other}'"
+                            ),
+                            provider_failure: None,
+                        },
+                    },
                 }
             }
         }
@@ -943,6 +990,9 @@ fn role_arc_for(kind: RoleKind) -> Arc<dyn AgentRole> {
         RoleKind::Verifier => role_impl_for(AgentType::Worker),
         RoleKind::Architect => role_impl_for(AgentType::Architect),
         RoleKind::Lead => role_impl_for(AgentType::Lead),
+        // Default for refinement — the concrete tribunal role (advocate,
+        // adversary, judge) is resolved from task.agent_type by role_overrides.
+        RoleKind::Refinement => role_impl_for(AgentType::Advocate),
     }
 }
 

@@ -108,6 +108,51 @@ export const NoMethodMetadata: Story = {
   },
 };
 
+const traitDispatchContext: SymbolContext = {
+  symbol: {
+    uid: "symbol:runtime_bridge.rs::list_taskrun_jobs",
+    name: "list_taskrun_jobs",
+    kind: "method",
+    file_path:
+      "server/crates/djinn-control-plane/src/bridge/runtime_bridge.rs",
+    start_line: 137,
+    end_line: 137,
+    content: null,
+    method_metadata: null,
+  },
+  incoming: {
+    calls: [
+      {
+        uid: "symbol:health.rs::reap_orphaned_taskrun_jobs",
+        name: "reap_orphaned_taskrun_jobs",
+        kind: "function",
+        file_path:
+          "server/crates/djinn-agent/src/actors/coordinator/health.rs",
+        confidence: 0.7,
+        confidence_tier: "inferred",
+        confidence_reason: "trait-dispatch-call",
+      },
+    ],
+  },
+  outgoing: {
+    implements: [
+      {
+        uid: "symbol:app_state.rs::list_taskrun_jobs",
+        name: "list_taskrun_jobs",
+        kind: "method",
+        file_path: "server/src/mcp_bridge/mod.rs",
+        confidence: 0.9,
+        confidence_tier: "extracted",
+      },
+    ],
+  },
+  processes: [],
+};
+
+export const TraitDispatch: Story = {
+  args: { context: traitDispatchContext },
+};
+
 export const NoEdges: Story = {
   args: {
     context: {

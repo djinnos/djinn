@@ -38,7 +38,17 @@ export function BlockShell({
   children,
 }: BlockShellProps) {
   return (
-    <div className={cn("overflow-hidden rounded-lg border bg-card", className)}>
+    // `relative` makes the shell the containing block for any absolutely
+    // positioned descendant (e.g. the header's `sr-only` "Code language" label
+    // on `AnnotatedCode`). Without it, such a child anchors to `<body>` at its
+    // deep in-flow offset, inflating the document's scrollHeight and spawning a
+    // phantom page-level scrollbar alongside the real in-panel one.
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-lg border bg-card",
+        className,
+      )}
+    >
       <div className="flex items-center justify-between gap-3 border-b bg-muted/30 px-4 py-2">
         <span
           className={cn(
@@ -137,5 +147,41 @@ export function BlockMarkdown({ children }: { children?: ReactNode }) {
         children
       )}
     </div>
+  );
+}
+
+/**
+ * Render inline markdown (bold, italic, code, links) without the block-level
+ * `<p>` wrapper that `ReactMarkdown` normally produces. Designed for labels,
+ * checklist items, and other short strings that live inside flex rows where a
+ * `<p>` would break layout.
+ *
+ * The outer `<span>` suppresses the default paragraph margin while preserving
+ * inline formatting like `<strong>`, `<code>`, `<em>`, and `<a>`.
+ */
+export function InlineMarkdown({
+  children,
+  className,
+}: {
+  children?: string;
+  className?: string;
+}) {
+  if (!children) return null;
+  return (
+    <span className={className}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        allowedElements={["p", "strong", "em", "code", "a", "del", "br"]}
+        components={{
+          // Render the auto-generated <p> wrapper as a <span> so it stays inline.
+          // Filter out the `node` AST object that react-markdown passes through.
+          p: ({ children: c, node: _node, ...props }) => (
+            <span {...props}>{c}</span>
+          ),
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    </span>
   );
 }

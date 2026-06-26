@@ -47,6 +47,9 @@ fn all_registered_tool_names() -> BTreeSet<String> {
         AgentType::Lead,
         AgentType::Planner,
         AgentType::Architect,
+        AgentType::Advocate,
+        AgentType::Adversary,
+        AgentType::Judge,
     ]
     .into_iter()
     .flat_map(tool_names_for_agent)
@@ -135,6 +138,24 @@ fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
                 include_str!("../../prompts/architect.md"),
             ),
         ],
+        AgentType::Advocate => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            (
+                "prompts/advocate.md",
+                include_str!("../../prompts/advocate.md"),
+            ),
+        ],
+        AgentType::Adversary => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            (
+                "prompts/adversary.md",
+                include_str!("../../prompts/adversary.md"),
+            ),
+        ],
+        AgentType::Judge => &[
+            ("prompts/base.md", include_str!("../../prompts/base.md")),
+            ("prompts/judge.md", include_str!("../../prompts/judge.md")),
+        ],
     };
 
     prompt_sources
@@ -168,6 +189,9 @@ fn role_prompts_reference_only_registered_tools() {
         AgentType::Lead,
         AgentType::Planner,
         AgentType::Architect,
+        AgentType::Advocate,
+        AgentType::Adversary,
+        AgentType::Judge,
     ] {
         assert_tool_references_registered(agent_type, &prompt_references_for_agent(agent_type));
     }
@@ -181,6 +205,9 @@ fn role_schema_snapshots_match_registered_role_name_source() {
         (AgentType::Lead, tool_schemas_lead()),
         (AgentType::Planner, tool_schemas_planner()),
         (AgentType::Architect, tool_schemas_architect()),
+        (AgentType::Advocate, tool_schemas_advocate()),
+        (AgentType::Adversary, tool_schemas_adversary()),
+        (AgentType::Judge, tool_schemas_judge()),
     ] {
         assert_eq!(
             schema_name_set(&schemas),

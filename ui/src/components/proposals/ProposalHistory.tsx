@@ -96,7 +96,11 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
       cur.includes(id) ? cur.filter((s) => s !== id) : [...cur, id],
     );
 
-  const statusEvents = history.filter((r) => r.event_kind !== "spec_revision");
+  // Only genuine status transitions count as history rows (refinement
+  // lifecycle events and checkpoint reverts are dropped at render time).
+  const statusEvents = history.filter(
+    (r) => r.event_kind !== "spec_revision" && (r.status_from || r.status_to),
+  );
 
   // A lone seed revision has nothing to compare against yet, but status audit
   // events still need to be visible even when no material spec edit exists.
@@ -117,6 +121,12 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           const bodyFormat = revisionBodyFormat(r);
           const titleChanged = !!prev && prev.title !== r.title;
           if (!isSpecRevision) {
+            // Only genuine status transitions belong in the spec revision
+            // history. Refinement lifecycle events (refinement_start/stop) are
+            // a separate concern shown in the Refinement panel, and checkpoint
+            // reverts carry no transition — drop them all so this section stays
+            // about the spec itself.
+            if (!(r.status_from || r.status_to)) return null;
             const statusLabel =
               r.status_to === "done"
                 ? "Marked done (implemented externally)"

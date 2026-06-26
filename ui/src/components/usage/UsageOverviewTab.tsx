@@ -13,7 +13,6 @@ import type {
   UsageKpi,
   UsageTimeSeriesPoint,
 } from "@/api/analytics";
-import { cn } from "@/lib/utils";
 import {
   EM_DASH,
   FALLBACK_GROUP,
@@ -21,7 +20,7 @@ import {
   formatBucket,
   formatCompactNumber,
   formatCurrency,
-  formatDeltaPercent,
+  formatInteger,
   truncateLabel,
 } from "./usageFormatters";
 
@@ -37,18 +36,20 @@ type ChartDatum = Record<string, string | number> & {
   bucket: string;
 };
 
-interface SeriesRow {
+interface SplitSeriesRow {
   bucket: string;
   group: string;
-  cost: number | null;
+  actual: number | null;
+  projected: number | null;
+  unpriced_count: number;
 }
 
-interface BarRow {
+interface SplitBarRow {
   id: string;
   label: string;
-  cost: number | null;
+  actual: number | null;
+  projected: number | null;
   tokens: number;
-  /** Cache-read (cached input) tokens, of the total `tokens`. */
   cached: number;
 }
 
@@ -84,29 +85,32 @@ const nivoTheme = {
   },
 };
 
-export function UsageOverviewTab({
-  data,
-}: {
-  data: UsageAnalyticsResponse;
-}) {
+export function UsageOverviewTab({ data }: { data: UsageAnalyticsResponse }) {
   const [grouping, setGrouping] = useState<SpendGrouping>("model");
 
   const seriesRows = useMemo(
-    () => buildSeriesRows(data.time_series ?? [], data, grouping),
+    () => buildSplitSeriesRows(data.time_series ?? [], data, grouping),
     [data, grouping],
   );
 
-  const stackedSpend = useMemo(() => buildStackedSpend(seriesRows), [seriesRows]);
-  const spendByModel = useMemo(() => buildSpendByModel(data), [data]);
-  const spendByAgent = useMemo(() => buildSpendByAgentRole(data), [data]);
+  const actualStacked = useMemo(
+    () => buildStackedSpend(seriesRows, "actual"),
+    [seriesRows],
+  );
+  const projectedStacked = useMemo(
+    () => buildStackedSpend(seriesRows, "projected"),
+    [seriesRows],
+  );
+  const costByModel = useMemo(() => buildSplitBarRows(data, "model"), [data]);
+  const costByAgent = useMemo(() => buildSplitBarRows(data, "agent"), [data]);
 
   return (
     <div className="space-y-4">
-      <KpiRow kpis={data.kpis ?? []} />
+      <SplitKpiRow data={data} />
 
-      <ChartSection
-        title="Spend over time"
-        description="Stacked priced spend for the selected grouping. Unpriced/null cost buckets are intentionally excluded from the spend stack."
+      <SplitChartSection
+        title="Cost over time"
+        description="Actual API spend and projected subscription-equivalent cost shown separately. Unpriced sessions are excluded from both figures."
         action={
           <div className="flex items-center gap-2">
             <Label className="text-xs text-muted-foreground">Group by</Label>
@@ -117,7 +121,10 @@ export function UsageOverviewTab({
                 if (isSpendGrouping(value)) setGrouping(value);
               }}
             >
-              <SelectTrigger className="h-8 w-[140px] text-xs" title="Spend grouping">
+              <SelectTrigger
+                className="h-8 w-[140px] text-xs"
+                title="Spend grouping"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -130,51 +137,92 @@ export function UsageOverviewTab({
             </Select>
           </div>
         }
-      >
-        {stackedSpend.hasPricedCost ? (
-          <ResponsiveBar
-            data={stackedSpend.data}
-            keys={stackedSpend.keys}
-            indexBy="bucket"
-            margin={{ top: 10, right: 24, bottom: 54, left: 72 }}
-            padding={0.25}
-            innerPadding={1}
-            groupMode="stacked"
-            colors={CHART_COLORS}
-            borderRadius={2}
-            valueFormat={(value) => formatCurrency(Number(value))}
-            axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -30 }}
-            axisLeft={{
-              tickSize: 0,
-              tickPadding: 8,
-              format: (value) => formatCurrency(Number(value)),
-            }}
-            enableLabel={false}
-            theme={nivoTheme}
-            legends={buildLegend(stackedSpend.keys)}
-          />
-        ) : (
-          <ChartEmptyState
-            title={
-              data.time_series.length > 0
-                ? "No priced cost in this range"
-                : "No time-series points"
-            }
-            description="Cost is unavailable for the selected filters, so spend renders as — instead of $0. Token totals remain visible in KPI cards and tables where provided."
-            details={buildTokenSummary(data.time_series)}
-          />
-        )}
-      </ChartSection>
+        actualChart={
+          actualStacked.hasPricedCost ? (
+            <ResponsiveBar
+              data={actualStacked.data}
+              keys={actualStacked.keys}
+              indexBy="bucket"
+              margin={{ top: 10, right: 24, bottom: 54, left: 72 }}
+              padding={0.25}
+              innerPadding={1}
+              groupMode="stacked"
+              colors={CHART_COLORS}
+              borderRadius={2}
+              valueFormat={(value) => formatCurrency(Number(value))}
+              axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -30 }}
+              axisLeft={{
+                tickSize: 0,
+                tickPadding: 8,
+                format: (value) => formatCurrency(Number(value)),
+              }}
+              enableLabel={false}
+              theme={nivoTheme}
+              legends={buildLegend(actualStacked.keys)}
+            />
+          ) : (
+            <ChartEmptyState
+              title={
+                data.time_series.length > 0
+                  ? "No actual API spend in this range"
+                  : "No time-series points"
+              }
+              description="Actual API spend is unavailable for the selected filters."
+              details={buildTokenSummary(data.time_series)}
+            />
+          )
+        }
+        projectedChart={
+          projectedStacked.hasPricedCost ? (
+            <ResponsiveBar
+              data={projectedStacked.data}
+              keys={projectedStacked.keys}
+              indexBy="bucket"
+              margin={{ top: 10, right: 24, bottom: 54, left: 72 }}
+              padding={0.25}
+              innerPadding={1}
+              groupMode="stacked"
+              colors={CHART_COLORS}
+              borderRadius={2}
+              valueFormat={(value) => formatCurrency(Number(value))}
+              axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -30 }}
+              axisLeft={{
+                tickSize: 0,
+                tickPadding: 8,
+                format: (value) => formatCurrency(Number(value)),
+              }}
+              enableLabel={false}
+              theme={nivoTheme}
+              legends={buildLegend(projectedStacked.keys)}
+            />
+          ) : (
+            <ChartEmptyState
+              title={
+                data.time_series.length > 0
+                  ? "No projected cost in this range"
+                  : "No time-series points"
+              }
+              description="Projected subscription-equivalent cost is unavailable for the selected filters."
+              details={buildTokenSummary(data.time_series)}
+            />
+          )
+        }
+      />
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <SpendBarChart title="Spend by model" rows={spendByModel} />
-        <SpendBarChart title="Spend by agent role" rows={spendByAgent} />
+        <SplitBarChart title="Cost by model" rows={costByModel} />
+        <SplitBarChart title="Cost by agent role" rows={costByAgent} />
       </div>
+
+      <MethodologyDisclosure />
     </div>
   );
 }
 
-function KpiRow({ kpis }: { kpis: UsageKpi[] }) {
+// ── Split KPI row ────────────────────────────────────────────────────────────
+
+function SplitKpiRow({ data }: { data: UsageAnalyticsResponse }) {
+  const kpis = data.kpis ?? [];
   if (kpis.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
@@ -186,24 +234,94 @@ function KpiRow({ kpis }: { kpis: UsageKpi[] }) {
     );
   }
 
+  // Aggregate split fields across all KPIs.
+  const totalActual = kpis.reduce(
+    (sum, k) => sum + (k.actual_spend_usd ?? 0),
+    0,
+  );
+  const totalProjected = kpis.reduce(
+    (sum, k) => sum + (k.projected_usd ?? 0),
+    0,
+  );
+  const totalUnpriced = kpis.reduce(
+    (sum, k) => sum + (k.unpriced_count ?? 0),
+    0,
+  );
+
+  // Also include top-level unpriced_session_count when present.
+  const unpricedTotal = totalUnpriced || data.unpriced_session_count || 0;
+
+  // Check if split fields are present at all (backward compat with pre-split).
+  const hasSplitFields = kpis.some(
+    (k) => k.actual_spend_usd !== undefined || k.projected_usd !== undefined,
+  );
+
+  // Token total from existing KPIs (find the tokens KPI if present).
+  const tokensKpi = kpis.find((k) => k.label.toLowerCase().includes("token"));
+
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {kpis.map((kpi) => (
-        <KpiCard key={kpi.label} kpi={kpi} />
-      ))}
+      {/* Actual API spend */}
+      <SimpleKpiCard
+        label="Actual API spend"
+        value={hasSplitFields ? formatCurrency(totalActual) : EM_DASH}
+        caption="Real API-key spend from billed sessions"
+      />
+      {/* Projected subscription-equivalent cost */}
+      <SimpleKpiCard
+        label="Projected subscription-equivalent cost"
+        value={hasSplitFields ? formatCurrency(totalProjected) : EM_DASH}
+        caption="List-price equivalent for flat-rate plan usage"
+      />
+      {/* Unpriced sessions */}
+      <SimpleKpiCard
+        label="Unpriced sessions"
+        value={unpricedTotal > 0 ? formatInteger(unpricedTotal) : "0"}
+        caption="Excluded from both cost figures"
+      />
+      {/* Tokens (re-use existing tokens KPI or compute) */}
+      {tokensKpi ? (
+        <BreakdownKpiCard kpi={tokensKpi} />
+      ) : (
+        <SimpleKpiCard label="Tokens" value={EM_DASH} caption="No token data" />
+      )}
     </div>
   );
 }
 
-function KpiCard({ kpi }: { kpi: UsageKpi }) {
-  const deltaState = getDeltaState(kpi.delta_pct);
-  const value = formatKpiValue(kpi);
+function SimpleKpiCard({
+  label,
+  value,
+  caption,
+}: {
+  label: string;
+  value: string;
+  caption?: string;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border bg-card p-4">
+      <p className="truncate text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-foreground">
+        {value}
+      </p>
+      {caption && (
+        <p
+          className="mt-1 truncate text-[11px] text-muted-foreground"
+          title={caption}
+        >
+          {caption}
+        </p>
+      )}
+    </div>
+  );
+}
 
+function BreakdownKpiCard({ kpi }: { kpi: UsageKpi }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-card p-4">
       <p className="truncate text-xs text-muted-foreground">{kpi.label}</p>
       <p className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-foreground">
-        {value}
+        {formatKpiValue(kpi)}
       </p>
       {kpi.caption && (
         <p
@@ -229,32 +347,24 @@ function KpiCard({ kpi }: { kpi: UsageKpi }) {
           ))}
         </div>
       )}
-      <div
-        className={cn(
-          "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-          deltaState.className,
-        )}
-        title="Period-over-period delta"
-      >
-        <span className="mr-1" aria-hidden>
-          {deltaState.symbol}
-        </span>
-        {formatDelta(kpi.delta_pct)}
-      </div>
     </div>
   );
 }
 
-function ChartSection({
+// ── Split chart section ──────────────────────────────────────────────────────
+
+function SplitChartSection({
   title,
   description,
   action,
-  children,
+  actualChart,
+  projectedChart,
 }: {
   title: string;
   description?: string;
   action?: ReactNode;
-  children: ReactNode;
+  actualChart: ReactNode;
+  projectedChart: ReactNode;
 }) {
   return (
     <section className="rounded-lg border border-border bg-card p-4">
@@ -269,61 +379,150 @@ function ChartSection({
         </div>
         {action}
       </div>
-      <div className="h-[320px]">{children}</div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            Actual API spend
+          </p>
+          <div className="h-[280px]">{actualChart}</div>
+        </div>
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            Projected subscription-equivalent cost
+          </p>
+          <div className="h-[280px]">{projectedChart}</div>
+        </div>
+      </div>
     </section>
   );
 }
 
-function SpendBarChart({ title, rows }: { title: string; rows: BarRow[] }) {
-  const chart = useMemo(() => buildBarChart(rows), [rows]);
+// ── Split bar chart ──────────────────────────────────────────────────────────
+
+function SplitBarChart({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: SplitBarRow[];
+}) {
+  const actualChartData = useMemo(
+    () => buildBarChartData(rows, "actual"),
+    [rows],
+  );
+  const projectedChartData = useMemo(
+    () => buildBarChartData(rows, "projected"),
+    [rows],
+  );
 
   return (
-    <ChartSection title={title}>
-      {chart.hasPricedCost ? (
-        <ResponsiveBar
-          data={chart.data}
-          keys={["Spend"]}
-          indexBy="label"
-          margin={{ top: 10, right: 18, bottom: 72, left: 72 }}
-          padding={0.35}
-          colors={[CHART_COLORS[0]]}
-          borderRadius={4}
-          valueFormat={(value) => formatCurrency(Number(value))}
-          axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -35 }}
-          axisLeft={{
-            tickSize: 0,
-            tickPadding: 8,
-            format: (value) => formatCurrency(Number(value)),
-          }}
-          enableLabel={false}
-          theme={nivoTheme}
-          tooltip={({ data, color }) => <SpendBarTooltip data={data} color={color} />}
-        />
-      ) : (
-        <ChartEmptyState
-          title={rows.length > 0 ? "No priced cost" : "No rows"}
-          description="Spend is unavailable for these rows and is shown as — rather than $0."
-          rows={rows.map((row) => ({
-            label: row.label,
-            value: EM_DASH,
-            detail: `${formatCompactNumber(row.tokens)} tokens`,
-          }))}
-        />
-      )}
-    </ChartSection>
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h3 className="mb-3 text-sm font-medium text-foreground">{title}</h3>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            Actual
+          </p>
+          {actualChartData.hasPricedCost ? (
+            <div className="h-[260px]">
+              <ResponsiveBar
+                data={actualChartData.data}
+                keys={["Actual"]}
+                indexBy="label"
+                margin={{ top: 10, right: 18, bottom: 72, left: 72 }}
+                padding={0.35}
+                colors={["#60a5fa"]}
+                borderRadius={4}
+                valueFormat={(value) => formatCurrency(Number(value))}
+                axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -35 }}
+                axisLeft={{
+                  tickSize: 0,
+                  tickPadding: 8,
+                  format: (value) => formatCurrency(Number(value)),
+                }}
+                enableLabel={false}
+                theme={nivoTheme}
+                tooltip={({ data, color }) => (
+                  <SplitBarTooltip data={data} color={color} kind="Actual" />
+                )}
+              />
+            </div>
+          ) : (
+            <ChartEmptyState
+              title={rows.length > 0 ? "No actual spend" : "No rows"}
+              description="Actual API spend is unavailable for these rows."
+              rows={rows.map((row) => ({
+                label: row.label,
+                value: EM_DASH,
+                detail: `${formatCompactNumber(row.tokens)} tokens`,
+              }))}
+            />
+          )}
+        </div>
+        <div>
+          <p className="mb-2 text-xs font-medium text-muted-foreground">
+            Projected subscription-equivalent
+          </p>
+          {projectedChartData.hasPricedCost ? (
+            <div className="h-[260px]">
+              <ResponsiveBar
+                data={projectedChartData.data}
+                keys={["Projected"]}
+                indexBy="label"
+                margin={{ top: 10, right: 18, bottom: 72, left: 72 }}
+                padding={0.35}
+                colors={["#34d399"]}
+                borderRadius={4}
+                valueFormat={(value) => formatCurrency(Number(value))}
+                axisBottom={{ tickSize: 0, tickPadding: 8, tickRotation: -35 }}
+                axisLeft={{
+                  tickSize: 0,
+                  tickPadding: 8,
+                  format: (value) => formatCurrency(Number(value)),
+                }}
+                enableLabel={false}
+                theme={nivoTheme}
+                tooltip={({ data, color }) => (
+                  <SplitBarTooltip data={data} color={color} kind="Projected" />
+                )}
+              />
+            </div>
+          ) : (
+            <ChartEmptyState
+              title={rows.length > 0 ? "No projected cost" : "No rows"}
+              description="Projected subscription-equivalent cost is unavailable for these rows."
+              rows={rows.map((row) => ({
+                label: row.label,
+                value: EM_DASH,
+                detail: `${formatCompactNumber(row.tokens)} tokens`,
+              }))}
+            />
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
-/** Tooltip for the spend bars: spend plus the token total and cached split. */
-function SpendBarTooltip({
+function SplitBarTooltip({
   data,
   color,
+  kind,
 }: {
-  data: ChartDatum & { fullLabel?: string; Tokens?: number; Cached?: number };
+  data: ChartDatum & {
+    fullLabel?: string;
+    Actual?: number;
+    Projected?: number;
+    Tokens?: number;
+    Cached?: number;
+  };
   color: string;
+  kind: string;
 }) {
   const tokens = Number(data.Tokens ?? 0);
   const cached = Number(data.Cached ?? 0);
+  const value =
+    kind === "Actual" ? Number(data.Actual ?? 0) : Number(data.Projected ?? 0);
   return (
     <div className="rounded-md border border-border bg-popover px-2.5 py-1.5 text-xs shadow-md">
       <div className="flex items-center gap-1.5 font-medium text-foreground">
@@ -337,14 +536,17 @@ function SpendBarTooltip({
         </span>
       </div>
       <div className="mt-1 tabular-nums text-foreground">
-        {formatCurrency(Number(data.Spend ?? 0))}
+        {formatCurrency(value)}
       </div>
       <div className="mt-0.5 tabular-nums text-muted-foreground">
-        {formatCompactNumber(tokens)} tokens · {formatCompactNumber(cached)} cached
+        {formatCompactNumber(tokens)} tokens · {formatCompactNumber(cached)}{" "}
+        cached
       </div>
     </div>
   );
 }
+
+// ── Empty state ──────────────────────────────────────────────────────────────
 
 function ChartEmptyState({
   title,
@@ -376,7 +578,9 @@ function ChartEmptyState({
                 key={row.label}
                 className="flex items-center justify-between gap-3 rounded bg-background/40 px-2 py-1 text-xs"
               >
-                <span className="truncate text-muted-foreground">{row.label}</span>
+                <span className="truncate text-muted-foreground">
+                  {row.label}
+                </span>
                 <span className="shrink-0 tabular-nums text-foreground">
                   {row.value} · {row.detail}
                 </span>
@@ -389,17 +593,54 @@ function ChartEmptyState({
   );
 }
 
+// ── Methodology disclosure ───────────────────────────────────────────────────
+
+function MethodologyDisclosure() {
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h3 className="text-sm font-medium text-foreground">
+        How costs are calculated
+      </h3>
+      <div className="mt-2 space-y-2 text-xs text-muted-foreground">
+        <p>
+          <span className="font-medium text-foreground">Actual API spend</span>{" "}
+          is real billed API-key usage. Sessions run through API keys contribute
+          their list-rate cost to this figure.
+        </p>
+        <p>
+          <span className="font-medium text-foreground">
+            Projected subscription-equivalent cost
+          </span>{" "}
+          is a list-price equivalent estimate for sessions run through flat-rate
+          subscription or coding-plan access. These sessions incur $0 in real
+          API charges — the projected figure shows what the usage <em>would</em>{" "}
+          cost at catalog list rates, and is not a spend figure.
+        </p>
+        <p>
+          <span className="font-medium text-foreground">Unpriced sessions</span>{" "}
+          are excluded from both figures because they had no matching catalog
+          pricing. They are counted separately so you can see how much usage is
+          unaccounted for.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
 function isSpendGrouping(value: string | null): value is SpendGrouping {
   return GROUPING_OPTIONS.some((option) => option.value === value);
 }
 
-function buildSeriesRows(
+function buildSplitSeriesRows(
   points: UsageTimeSeriesPoint[],
   data: UsageAnalyticsResponse,
   grouping: SpendGrouping,
-): SeriesRow[] {
+): SplitSeriesRow[] {
   const projectNames = new Map<string, string>();
-  for (const row of data.breakdowns?.by_project ?? []) projectNames.set(row.id, row.name);
+  for (const row of data.breakdowns?.by_project ?? [])
+    projectNames.set(row.id, row.name);
   for (const cell of data.project_model_matrix ?? []) {
     projectNames.set(cell.project_id, cell.project_name);
   }
@@ -407,7 +648,9 @@ function buildSeriesRows(
   return points.map((point) => ({
     bucket: formatBucket(point.date),
     group: getPointGroup(point, grouping, projectNames),
-    cost: point.cost,
+    actual: point.actual_spend_usd ?? null,
+    projected: point.projected_usd ?? null,
+    unpriced_count: point.unpriced_count ?? 0,
   }));
 }
 
@@ -421,14 +664,20 @@ function getPointGroup(
   }
 
   if (grouping === "project") {
-    const projectName = point.project_name ?? projectNames.get(point.project_id ?? "");
+    const projectName =
+      point.project_name ?? projectNames.get(point.project_id ?? "");
     return projectName ?? point.project_id ?? point.group_key ?? FALLBACK_GROUP;
   }
 
-  return formatAgentRole(point.agent_type ?? point.agent_role ?? point.group_key);
+  return formatAgentRole(
+    point.agent_type ?? point.agent_role ?? point.group_key,
+  );
 }
 
-function buildStackedSpend(rows: SeriesRow[]): {
+function buildStackedSpend(
+  rows: SplitSeriesRow[],
+  basis: "actual" | "projected",
+): {
   data: ChartDatum[];
   keys: string[];
   hasPricedCost: boolean;
@@ -443,9 +692,10 @@ function buildStackedSpend(rows: SeriesRow[]): {
       bucket = { bucket: row.bucket };
       byBucket.set(row.bucket, bucket);
     }
-    if (row.cost !== null) {
+    const value = basis === "actual" ? row.actual : row.projected;
+    if (value !== null) {
       hasPricedCost = true;
-      bucket[row.group] = Number(bucket[row.group] ?? 0) + row.cost;
+      bucket[row.group] = Number(bucket[row.group] ?? 0) + value;
     }
   }
 
@@ -456,49 +706,65 @@ function buildStackedSpend(rows: SeriesRow[]): {
   };
 }
 
-function buildSpendByModel(data: UsageAnalyticsResponse): BarRow[] {
-  // Skip models with no tokens at all — they add empty bars/legend rows.
-  const modelRows = data.model_effectiveness
-    .filter((row) => row.total_tokens > 0)
-    .map((row) => ({
-      id: row.model,
-      label: row.model,
-      cost: row.total_cost,
-      tokens: row.total_tokens,
-      cached: row.tokens_cached ?? 0,
-    }));
+function buildSplitBarRows(
+  data: UsageAnalyticsResponse,
+  dimension: "model" | "agent",
+): SplitBarRow[] {
+  if (dimension === "model") {
+    const modelRows = data.model_effectiveness
+      .filter((row) => row.total_tokens > 0)
+      .map((row) => ({
+        id: row.model,
+        label: row.model,
+        actual: row.actual_spend_usd ?? null,
+        projected: row.projected_usd ?? null,
+        tokens: row.total_tokens,
+        cached: row.tokens_cached ?? 0,
+      }));
+    if (modelRows.length > 0) return sortAndLimitSplitRows(modelRows);
+  }
 
-  if (modelRows.length > 0) return sortAndLimitRows(modelRows);
+  // Fallback: rollup from time series.
+  const groupFn =
+    dimension === "model"
+      ? (point: UsageTimeSeriesPoint) => point.model
+      : (point: UsageTimeSeriesPoint) =>
+          point.agent_type || point.agent_role
+            ? formatAgentRole(point.agent_type ?? point.agent_role)
+            : undefined;
 
-  const rolledUp = rollupTimeSeries(data.time_series, (point) => point.model);
-  return sortAndLimitRows(rolledUp);
-}
-
-function buildSpendByAgentRole(data: UsageAnalyticsResponse): BarRow[] {
-  const fromTimeSeries = rollupTimeSeries(data.time_series, (point) =>
-    point.agent_type || point.agent_role
-      ? formatAgentRole(point.agent_type ?? point.agent_role)
-      : undefined,
+  return sortAndLimitSplitRows(
+    rollupSplitTimeSeries(data.time_series, groupFn),
   );
-
-  return sortAndLimitRows(fromTimeSeries);
 }
 
-function rollupTimeSeries(
+function rollupSplitTimeSeries(
   points: UsageTimeSeriesPoint[],
   groupFn: (point: UsageTimeSeriesPoint) => string | undefined,
-): BarRow[] {
-  const byGroup = new Map<string, BarRow>();
+): SplitBarRow[] {
+  const byGroup = new Map<string, SplitBarRow>();
   for (const point of points) {
     const label = groupFn(point) ?? point.group_key ?? FALLBACK_GROUP;
     const current = byGroup.get(label) ?? {
       id: label,
       label,
-      cost: null,
+      actual: null,
+      projected: null,
       tokens: 0,
       cached: 0,
     };
-    if (point.cost !== null) current.cost = (current.cost ?? 0) + point.cost;
+    if (point.actual_spend_usd != null)
+      current.actual = (current.actual ?? 0) + point.actual_spend_usd;
+    if (point.projected_usd != null)
+      current.projected = (current.projected ?? 0) + point.projected_usd;
+    // Fall back to legacy cost field for pre-split responses.
+    if (
+      current.actual === null &&
+      current.projected === null &&
+      point.cost != null
+    ) {
+      current.actual = (current.actual ?? 0) + point.cost;
+    }
     current.tokens += point.tokens_in + point.tokens_out;
     current.cached += point.tokens_cached ?? 0;
     byGroup.set(label, current);
@@ -506,24 +772,34 @@ function rollupTimeSeries(
   return Array.from(byGroup.values());
 }
 
-function sortAndLimitRows(rows: BarRow[]): BarRow[] {
+function sortAndLimitSplitRows(rows: SplitBarRow[]): SplitBarRow[] {
   return [...rows]
-    .sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1) || b.tokens - a.tokens)
+    .sort(
+      (a, b) =>
+        (b.actual ?? 0) +
+          (b.projected ?? 0) -
+          ((a.actual ?? 0) + (a.projected ?? 0)) || b.tokens - a.tokens,
+    )
     .slice(0, 10);
 }
 
-function buildBarChart(rows: BarRow[]): {
+function buildBarChartData(
+  rows: SplitBarRow[],
+  basis: "actual" | "projected",
+): {
   data: ChartDatum[];
   hasPricedCost: boolean;
 } {
   let hasPricedCost = false;
+  const key = basis === "actual" ? "Actual" : "Projected";
   const data = rows.map((row) => {
-    if (row.cost !== null) hasPricedCost = true;
+    const value = basis === "actual" ? row.actual : row.projected;
+    if (value !== null) hasPricedCost = true;
     return {
       bucket: row.id,
       label: truncateLabel(row.label),
       fullLabel: row.label,
-      Spend: row.cost ?? 0,
+      [key]: value ?? 0,
       Tokens: row.tokens,
       Cached: row.cached,
     };
@@ -557,36 +833,9 @@ function buildLegend(keys: string[]) {
   ];
 }
 
-function getDeltaState(delta: number | null): {
-  symbol: string;
-  className: string;
-} {
-  if (delta === null || Math.abs(delta) < 0.0001) {
-    return {
-      symbol: "–",
-      className: "bg-muted text-muted-foreground",
-    };
-  }
-  if (delta > 0) {
-    return {
-      symbol: "↗",
-      className: "bg-green-500/10 text-green-400",
-    };
-  }
-  return {
-    symbol: "↘",
-    className: "bg-red-500/10 text-red-400",
-  };
-}
-
 function formatKpiValue(kpi: UsageKpi): string {
   if (kpi.value === null) return EM_DASH;
   return kpi.formatted || formatCompactNumber(kpi.value);
-}
-
-function formatDelta(delta: number | null): string {
-  const formatted = formatDeltaPercent(delta);
-  return formatted === EM_DASH ? formatted : `${formatted} vs prior`;
 }
 
 function buildTokenSummary(points: UsageTimeSeriesPoint[]): string | undefined {
@@ -594,5 +843,7 @@ function buildTokenSummary(points: UsageTimeSeriesPoint[]): string | undefined {
     (sum, point) => sum + point.tokens_in + point.tokens_out,
     0,
   );
-  return tokens > 0 ? `${formatCompactNumber(tokens)} tokens in range` : undefined;
+  return tokens > 0
+    ? `${formatCompactNumber(tokens)} tokens in range`
+    : undefined;
 }

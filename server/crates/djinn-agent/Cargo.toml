@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "djinn-agent"
 version = "0.1.0"
 edition = "2024"
@@ -33,6 +34,9 @@ djinn-sandbox = { path = "../djinn-sandbox" }
 djinn-lsp = { path = "../djinn-lsp" }
 djinn-compaction = { path = "../djinn-compaction" }
 djinn-mcp-extension = { path = "../djinn-mcp-extension" }
+djinn-orchestration-types = { path = "../djinn-orchestration-types" }
+djinn-slot = { path = "../djinn-slot" }
+djinn-coordinator = { path = "../djinn-coordinator" }
 kube = { version = "0.95", features = ["runtime", "derive"] }
 anyhow = "1"
 thiserror = "2"

@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::actors::coordinator::{CoordinatorHandle, DebugSlot};
+use crate::actors::coordinator::CoordinatorHandle;
 use crate::context::AgentContext;
 use djinn_db::{SessionRepository, TaskRepository};
+use djinn_orchestration_types::coordinator::DebugSlot;
+use djinn_orchestration_types::trigger::CoordinatorTrigger;
 
 use super::super::{ModelSlotConfig, SlotError, SlotEvent, SlotHandle, SlotPoolConfig, SlotState};
 use super::types::{PoolError, PoolMessage, SlotFactory, now_unix_string};
@@ -920,12 +922,14 @@ impl SlotPool {
     }
 
     async fn trigger_redispatch(&self) {
+        // Use CoordinatorTrigger::try_trigger_dispatch (non-blocking) to avoid
+        // deadlock: the pool actor must not block on the coordinator channel
+        // because the coordinator may be waiting on a pool response (e.g.
+        // has_session).  The trait import breaks the direct slot → coordinator
+        // internal dependency for this dispatch trigger path.
         let coordinator: Option<CoordinatorHandle> = self.app_state.coordinator().await;
         if let Some(coord) = coordinator {
-            // Use try_trigger_dispatch (non-blocking) to avoid deadlock:
-            // the pool actor must not block on the coordinator channel because
-            // the coordinator may be waiting on a pool response (e.g. has_session).
-            coord.try_trigger_dispatch();
+            CoordinatorTrigger::try_trigger_dispatch(&coord);
         }
     }
 

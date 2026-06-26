@@ -284,6 +284,7 @@ async fn handle_rpc(
                 output_price_per_million_snapshot: None,
                 cache_read_price_per_million_snapshot: None,
                 cache_write_price_per_million_snapshot: None,
+                cost_basis: "unpriced".into(),
             }))
         }
         ServiceRpcRequest::UpdateSessionStatus {

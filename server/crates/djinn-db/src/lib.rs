@@ -11,7 +11,8 @@ pub mod short_id;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        build_multi_project_housekeeping_fixture, event_bus_for, make_project,
+        backdate_task_updated_at, build_multi_project_housekeeping_fixture, drop_table_for_test,
+        event_bus_for, make_project,
     };
 }
 
@@ -95,12 +96,16 @@ pub use repositories::{
         ProjectWorkspaceGraphRepository, ProjectWorkspaceGraphUpsert,
     },
     proposal::{
-        ProposalCreateInput, ProposalFeedbackCreateInput, ProposalListQuery, ProposalListResult,
-        ProposalMemoryRef, ProposalRepository, ProposalUpdateInput,
+        ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput,
+        ProposalListQuery, ProposalListResult, ProposalMemoryRef, ProposalRepository,
+        ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     service::{ServicePreset, ServicePresetRepository},
-    session::{CreateSessionParams, SessionRepository},
+    session::{
+        CreateSessionParams, ExtractionBackfillCandidate, OrphanSessionCandidate,
+        SessionRepository, SessionStatusSnapshot,
+    },
     session_auth::{CreateUserAuthSession, SessionAuthRepository, UserAuthSessionRecord},
     session_message::SessionMessageRepository,
     settings::SettingsRepository,

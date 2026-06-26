@@ -29,6 +29,11 @@ pub enum IssueType {
     /// target repos and creates the epics (with cross-repo dependencies). Has
     /// no `epic_id` (it operates one level above epics).
     EpicBreakdown,
+    /// Proposal-refinement tribunal session — simple lifecycle
+    /// (open → in_progress → closed). Routed to the refinement tribunal
+    /// (advocate, adversary, or judge) via `SupervisorFlow::Refinement`.
+    /// The `agent_type` field on the task determines the concrete tribunal role.
+    Refinement,
 }
 
 impl IssueType {
@@ -42,6 +47,7 @@ impl IssueType {
             Self::Planning => "planning",
             Self::Review => "review",
             Self::EpicBreakdown => "epic_breakdown",
+            Self::Refinement => "refinement",
         }
     }
 
@@ -57,6 +63,7 @@ impl IssueType {
             "decomposition" => Ok(Self::Planning),
             "review" => Ok(Self::Review),
             "epic_breakdown" => Ok(Self::EpicBreakdown),
+            "refinement" => Ok(Self::Refinement),
             other => Err(Error::Internal(format!("unknown issue_type: {other}"))),
         }
     }
@@ -66,7 +73,12 @@ impl IssueType {
     pub fn uses_simple_lifecycle(&self) -> bool {
         matches!(
             self,
-            Self::Spike | Self::Research | Self::Planning | Self::Review | Self::EpicBreakdown
+            Self::Spike
+                | Self::Research
+                | Self::Planning
+                | Self::Review
+                | Self::EpicBreakdown
+                | Self::Refinement
         )
     }
 }
@@ -292,6 +304,12 @@ pub enum TransitionAction {
     PrMerge,
     /// GitHub App signals changes requested on PR — transitions pr_review → open.
     PrChangesRequested,
+    /// CI-loop remediation park: hold the source task by moving it back to
+    /// `open` so its already-added remediation blocker keeps it out of dispatch
+    /// (`list_ready` filters blocked-open tasks) until the remediation closes
+    /// and `emit_unblocked_tasks` revives it. Unlike `PrCiFailed` / `Reopen`
+    /// this is a HOLD, not a rework, so it does NOT increment `reopen_count`.
+    ParkForRemediation,
     /// Non-worker role (planner/architect) completed with file changes —
     /// route through the approved → PR pipeline instead of closing directly.
     SubmitForMerge,
@@ -344,6 +362,7 @@ impl TransitionAction {
             "pr_conflict" => Ok(Self::PrConflict),
             "pr_merge" => Ok(Self::PrMerge),
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
+            "park_for_remediation" => Ok(Self::ParkForRemediation),
             "submit_for_merge" => Ok(Self::SubmitForMerge),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
@@ -715,6 +734,29 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Approved)
         }
+
+        TransitionAction::ParkForRemediation => {
+            // Park (hold) the source on its remediation blocker by landing it at
+            // `open`. Legal from every pre-terminal in-flight state a CI-loop
+            // park can observe; a no-op when the task is already `open`. Unlike
+            // `PrCiFailed` / `Reopen` it does NOT bump `reopen_count` — this is a
+            // hold pending remediation, not another rework round.
+            if !matches!(
+                from,
+                TaskStatus::PrDraft
+                    | TaskStatus::PrReview
+                    | TaskStatus::InProgress
+                    | TaskStatus::Open
+                    | TaskStatus::NeedsTaskReview
+                    | TaskStatus::InTaskReview
+                    | TaskStatus::Approved
+            ) {
+                return bad(
+                    "park_for_remediation is only valid from pr_draft, pr_review, in_progress, open, needs_task_review, in_task_review, or approved",
+                );
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
     })
 }
 
@@ -760,6 +802,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::PrConflict
                 | TransitionAction::PrMerge
                 | TransitionAction::PrChangesRequested
+                | TransitionAction::ParkForRemediation
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -788,7 +831,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 26] = [
+    const ACTIONS: [TransitionAction; 27] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -815,6 +858,7 @@ mod tests {
         TransitionAction::PrConflict,
         TransitionAction::PrMerge,
         TransitionAction::PrChangesRequested,
+        TransitionAction::ParkForRemediation,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -882,6 +926,16 @@ mod tests {
                 Some(TaskStatus::Closed)
             }
             (TransitionAction::PrChangesRequested, TaskStatus::PrReview) => Some(TaskStatus::Open),
+            (
+                TransitionAction::ParkForRemediation,
+                TaskStatus::PrDraft
+                | TaskStatus::PrReview
+                | TaskStatus::InProgress
+                | TaskStatus::Open
+                | TaskStatus::NeedsTaskReview
+                | TaskStatus::InTaskReview
+                | TaskStatus::Approved,
+            ) => Some(TaskStatus::Open),
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }

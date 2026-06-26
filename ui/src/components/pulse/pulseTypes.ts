@@ -465,13 +465,28 @@ export type EdgeCategory =
   | "reads"
   | "writes";
 
-/** PR C1: a neighbor of the queried symbol, grouped under its EdgeCategory. */
+/** PR C1: a neighbor of the queried symbol, grouped under its EdgeCategory.
+ *
+ * PR ggrm/5wyo: trait-dispatch edges carry optional `confidence_tier`
+ * and `confidence_reason` so the UI can visually distinguish synthesized
+ * trait-dispatch callers from directly-extracted calls. The parser
+ * accepts these fields but does not require them — existing fixtures
+ * remain compatible.
+ */
 export interface RelatedSymbol {
   uid: string;
   name: string;
   kind: string;
   file_path: string | null;
   confidence: number;
+  /** Model-level confidence tier: `extracted`, `inferred`, or `ambiguous`. */
+  confidence_tier?: string;
+  /** Human-readable explanation for the confidence level (e.g. `trait-dispatch-call`). */
+  confidence_reason?: string;
+  /** Route-exclusion reason for audit-only route/consumer links. */
+  excluded_reason?: string;
+  /** Compat-safe audit metadata for route consumer edges. */
+  route_language_chain?: unknown;
 }
 
 /** PR C1: a single structured method parameter. */

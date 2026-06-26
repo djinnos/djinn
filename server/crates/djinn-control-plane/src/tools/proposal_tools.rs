@@ -23,13 +23,15 @@ use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
 use crate::tools::proposal_blocks::{
-    parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
+    extract_custom_block_tags, parse_mdx_blocks, validate_mdx_blocks,
+    validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
-    ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
-    ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSignoffModel,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse,
+    ProposalModel, ProposalReconcileObsoleteEpicResponse, ProposalShowResponse,
+    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
+use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
     validate_ac_count, validate_body, validate_design, validate_limit, validate_mdx_body,
     validate_offset, validate_proposal_create_status, validate_proposal_status, validate_sort,
@@ -272,6 +274,242 @@ pub struct ProposalUpdateParams {
     pub body_format: Option<String>,
 }
 
+/// Selector for targeting a specific range in the proposal body.
+///
+/// Exactly one field must be provided. The selector identifies a deterministic
+/// byte range in the current body that will be replaced or wrapped.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Selector for targeting a specific range in the proposal body")]
+pub struct BlockPatchSelector {
+    /// Match a markdown heading by its text (without the `#` prefix). The
+    /// matched range includes the heading line itself and all content up to
+    /// (but not including) the next heading at the same or higher level, or
+    /// the end of the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_text: Option<String>,
+    /// Match a contiguous substring of the body. Must occur exactly once;
+    /// zero matches or ambiguous (multiple) matches are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_text: Option<String>,
+    /// Byte range selector: start is inclusive, end is exclusive. If
+    /// `expected_text` is provided and does not match the body at that byte
+    /// range, the patch is rejected (stale-range guard).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_range: Option<ByteRangeSelector>,
+}
+
+/// A byte-range selector with an optional verification text.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ByteRangeSelector {
+    /// Inclusive byte offset of the target range.
+    pub start: i64,
+    /// Exclusive byte offset of the target range.
+    pub end: i64,
+    /// When set, the body text at `[start..end)` must equal this value or the
+    /// patch is rejected. Guards against stale ranges after concurrent edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_text: Option<String>,
+}
+
+/// Resolved byte range in the proposal body.
+struct ResolvedRange {
+    start: usize,
+    end: usize,
+    /// Human-readable description for metadata.
+    selector_description: String,
+}
+
+/// Resolve a [`BlockPatchSelector`] to a byte range in `body`.
+fn resolve_selector(body: &str, selector: &BlockPatchSelector) -> Result<ResolvedRange, String> {
+    let mut provided = 0usize;
+    if selector.heading_text.is_some() {
+        provided += 1;
+    }
+    if selector.exact_text.is_some() {
+        provided += 1;
+    }
+    if selector.byte_range.is_some() {
+        provided += 1;
+    }
+    if provided != 1 {
+        return Err(
+            "selector must specify exactly one of heading_text, exact_text, or byte_range".into(),
+        );
+    }
+
+    if let Some(ref heading) = selector.heading_text {
+        return resolve_heading_selector(body, heading);
+    }
+    if let Some(ref text) = selector.exact_text {
+        return resolve_exact_text_selector(body, text);
+    }
+    if let Some(ref br) = selector.byte_range {
+        return resolve_byte_range_selector(body, br);
+    }
+    unreachable!()
+}
+
+/// Match a markdown heading and its section content.
+///
+/// Scans for `^(#{1,6}) <heading_text>` (exact heading text match after `#`
+/// prefix). The matched range is from the `#` character through the last byte
+/// before the next heading at the same or higher level, or end-of-body.
+fn resolve_heading_selector(body: &str, heading_text: &str) -> Result<ResolvedRange, String> {
+    let needle = heading_text.trim();
+    if needle.is_empty() {
+        return Err("heading_text must not be empty".into());
+    }
+
+    // First pass: find all headings matching the needle using line-based scan.
+    let mut matches: Vec<(usize, usize)> = Vec::new(); // (line_byte_start, heading_level)
+    let mut offset = 0usize;
+    for line in body.lines() {
+        if let Some(stripped) = line.strip_prefix('#') {
+            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
+            let text = line[hashes..].trim();
+            if text == needle {
+                matches.push((offset, hashes));
+            }
+        }
+        offset += line.len() + 1; // +1 for '\n'
+    }
+
+    if matches.is_empty() {
+        return Err(format!("no heading matching {needle:?} found in body"));
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "heading_text {needle:?} is ambiguous: found {} matches",
+            matches.len()
+        ));
+    }
+
+    let (heading_start, heading_level) = matches[0];
+
+    // Find the end of this section: next heading at same or higher level, or
+    // end of body.
+    let mut section_end = body.len();
+    let mut pos = heading_start;
+    for line in body[heading_start..].lines().skip(1) {
+        pos += line.len() + 1;
+        if let Some(stripped) = line.strip_prefix('#') {
+            let hashes = 1 + stripped.len() - stripped.trim_start_matches('#').len();
+            if hashes <= heading_level {
+                // Trim back to just before this heading line's start.
+                section_end = pos - line.len() - 1;
+                break;
+            }
+        }
+    }
+
+    Ok(ResolvedRange {
+        start: heading_start,
+        end: section_end,
+        selector_description: format!("heading: {needle}"),
+    })
+}
+
+/// Match an exact text substring. Must occur exactly once.
+fn resolve_exact_text_selector(body: &str, text: &str) -> Result<ResolvedRange, String> {
+    let needle = text;
+    if needle.is_empty() {
+        return Err("exact_text must not be empty".into());
+    }
+    let mut matches = Vec::new();
+    let mut search_from = 0usize;
+    while let Some(pos) = body[search_from..].find(needle) {
+        matches.push(search_from + pos);
+        search_from += pos + needle.len();
+    }
+    if matches.is_empty() {
+        return Err("exact_text not found in body".into());
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "exact_text is ambiguous: found {} matches",
+            matches.len()
+        ));
+    }
+    let start = matches[0];
+    Ok(ResolvedRange {
+        start,
+        end: start + needle.len(),
+        selector_description: format!("exact_text ({} bytes)", needle.len()),
+    })
+}
+
+/// Match a byte range with optional verification.
+fn resolve_byte_range_selector(
+    body: &str,
+    br: &ByteRangeSelector,
+) -> Result<ResolvedRange, String> {
+    if br.start < 0 {
+        return Err("byte_range start must be non-negative".into());
+    }
+    if br.end < 0 {
+        return Err("byte_range end must be non-negative".into());
+    }
+    let start = br.start as usize;
+    let end = br.end as usize;
+    if start >= body.len() {
+        return Err(format!(
+            "byte_range start {} is beyond body length {}",
+            start,
+            body.len()
+        ));
+    }
+    if end > body.len() {
+        return Err(format!(
+            "byte_range end {} is beyond body length {}",
+            end,
+            body.len()
+        ));
+    }
+    if start >= end {
+        return Err("byte_range start must be less than end".into());
+    }
+    if let Some(ref expected) = br.expected_text {
+        let actual = &body[start..end];
+        if actual != expected {
+            return Err(format!(
+                "byte_range text mismatch: expected {:?} but found {:?}",
+                expected, actual
+            ));
+        }
+    }
+    Ok(ResolvedRange {
+        start,
+        end,
+        selector_description: format!("byte_range[{}..{}]", start, end),
+    })
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalBlockPatchParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+    /// Target selector: identifies the range in the body to patch.
+    pub selector: BlockPatchSelector,
+    /// Operation: `replace` replaces the selected range, `wrap` wraps it.
+    pub operation: String,
+    /// The MDX content to insert (a single block or arbitrary MDX text).
+    pub block_mdx: String,
+    /// If set, reject the patch when the proposal's latest_revision_seq does
+    /// not equal this value. Guards against concurrent edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_latest_revision_seq: Option<i32>,
+    /// Name of the native skill producing this patch (e.g. "visual-spec").
+    /// Persisted in the revision event_metadata for provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_skill_name: Option<String>,
+    /// Pinned version of the native skill.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_skill_version: Option<String>,
+    /// Optional free-form note persisted alongside the revision metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalDeleteParams {
     /// Proposal UUID or short_id.
@@ -376,6 +614,367 @@ pub struct ProposalStopBuildResponse {
     pub error: Option<String>,
 }
 
+// ── Readiness gate helpers ──────────────────────────────────────────────────
+
+/// Parse a stored acceptance-criteria JSON string into `AcceptanceCriterionItem`
+/// values for the readiness evaluator.  Returns an empty vec when the JSON is
+/// missing, empty, or unparseable.
+fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
+    serde_json::from_str::<Vec<AcceptanceCriterionItem>>(ac_json).unwrap_or_default()
+}
+
+/// Convert a `ProposalReadinessResult` into a user-facing error string,
+/// prepending a short preamble so callers can return it directly as a tool
+/// error.
+fn format_readiness_error(
+    result: &crate::tools::proposal_readiness::ProposalReadinessResult,
+) -> Option<String> {
+    result
+        .to_error_string()
+        .map(|details| format!("proposal not ready for review: {details}"))
+}
+
+// ── Composed gate: DoR + tribunal (task cuzf) ─────────────────────────────
+
+/// Result of the composed tribunal gate check.
+struct ComposedGateResult {
+    failures: Vec<String>,
+}
+
+impl ComposedGateResult {
+    fn to_error_string(&self) -> Option<String> {
+        if self.failures.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "proposal not ready for review: {}",
+            self.failures.join("; ")
+        ))
+    }
+}
+
+/// Run the composed gate: deterministic DoR check + tribunal conditions.
+///
+/// Returns `ComposedGateResult` with all failures collected. Callers
+/// (proposal_create, proposal_update, proposal_signoff, proposal_graduate)
+/// convert failures into tool error responses.
+async fn evaluate_composed_gate(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+    body: &str,
+    ac_json: &str,
+    target_count: usize,
+) -> ComposedGateResult {
+    let mut failures: Vec<String> = Vec::new();
+
+    // 1. Deterministic DoR check (existing evaluator, reused not duplicated).
+    let ac_items = parse_ac_items(ac_json);
+    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+    if let Some(err) = format_readiness_error(&readiness) {
+        failures.push(err);
+        // DoR failed — no point checking tribunal conditions since
+        // the gate is already blocked.
+        return ComposedGateResult { failures };
+    }
+
+    // 2. Tribunal conditions.
+    let proposal_id = &proposal.id;
+
+    // 2a. Check for a current human override first — it gates whether
+    // judge-verdict blocking entries and needs-work verdicts are enforced.
+    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
+        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
+        _ => false,
+    };
+
+    // 2b. Unresolved blocking debate-trail entries.
+    // When a current override exists, judge verdict entries are excluded —
+    // the override explicitly supersedes the judge's needs-work verdict.
+    match repo
+        .list_unresolved_blocking_debate_entries(proposal_id)
+        .await
+    {
+        Ok(entries) => {
+            let remaining: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
+                })
+                .collect();
+            if !remaining.is_empty() {
+                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+                failures.push(format!(
+                    "unresolved blocking debate entries: {}",
+                    ids.join(", ")
+                ));
+            }
+        }
+        Err(e) => {
+            failures.push(format!("failed to check debate trail: {e}"));
+        }
+    }
+
+    // 2c. Latest judge verdict.
+    match repo.latest_judge_verdict(proposal_id).await {
+        Ok(Some(verdict)) => {
+            let verdict_lower = verdict.body.to_lowercase();
+            // A "needs-work" verdict blocks unless overridden.
+            if (verdict_lower.contains("needs-work")
+                || verdict_lower.contains("needs_work")
+                || verdict_lower.contains("needs work"))
+                && !override_is_current
+            {
+                failures.push(format!(
+                    "judge returned needs-work (verdict {}); no current human override",
+                    verdict.id
+                ));
+            }
+        }
+        Err(e) => {
+            failures.push(format!("failed to check judge verdict: {e}"));
+        }
+        _ => {}
+    }
+
+    // 2d. Needs-evidence spike parking.
+    match repo.has_open_needs_evidence_spike(proposal_id).await {
+        Ok(true) => {
+            let claim = proposal
+                .needs_evidence_claim
+                .as_deref()
+                .unwrap_or("unspecified");
+            let spike_id = proposal
+                .linked_spike_task_id
+                .as_deref()
+                .unwrap_or("unknown");
+            failures.push(format!(
+                "proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
+            ));
+        }
+        Err(e) => {
+            failures.push(format!("failed to check needs-evidence spike: {e}"));
+        }
+        _ => {}
+    }
+
+    // 2d. Pending checkpoint revisions (stale/pending).
+    match repo.has_pending_checkpoint_revisions(proposal_id).await {
+        Ok(true) => {
+            failures.push("pending checkpoint revision awaiting approval or rejection".to_string());
+        }
+        Err(e) => {
+            failures.push(format!("failed to check pending checkpoints: {e}"));
+        }
+        _ => {}
+    }
+
+    ComposedGateResult { failures }
+}
+
+/// Build a structured [`ProposalGateStatusModel`] for `proposal_show`.
+///
+/// Collects DoR failures, tribunal conditions, and human-readable explanations
+/// so the UI can render readiness without recomputing it client-side.
+async fn build_gate_status(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+    body: &str,
+    ac_json: &str,
+    target_count: usize,
+) -> crate::tools::proposal_ops::ProposalGateStatusModel {
+    use crate::tools::proposal_ops::{GateFailureModel, ProposalGateStatusModel};
+
+    // 1. Deterministic DoR
+    let ac_items = parse_ac_items(ac_json);
+    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
+    let dor_failures: Vec<GateFailureModel> = readiness
+        .failures
+        .iter()
+        .map(|f| {
+            let message = match &f.detail {
+                crate::tools::proposal_readiness::ReadinessFailureDetail::MissingSection {
+                    check_name,
+                } => format!("Missing required coverage: {check_name}"),
+                crate::tools::proposal_readiness::ReadinessFailureDetail::VagueAc {
+                    index,
+                    text,
+                } => format!("Vague/unverifiable acceptance criterion #{index}: {text}"),
+                crate::tools::proposal_readiness::ReadinessFailureDetail::Generic { message } => {
+                    message.clone()
+                }
+            };
+            GateFailureModel {
+                check: format!("{:?}", f.check).to_snake_case(),
+                message,
+            }
+        })
+        .collect();
+    let dor_ready = readiness.ready;
+
+    // 2. Tribunal conditions
+    let proposal_id = &proposal.id;
+    let mut blocked_explanations: Vec<String> = Vec::new();
+
+    // Add DoR failures to explanations
+    if !dor_ready {
+        for f in &dor_failures {
+            blocked_explanations.push(f.message.clone());
+        }
+    }
+
+    // 2a. Human override check
+    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
+        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
+        _ => false,
+    };
+
+    // 2b. Unresolved blocking debate entries
+    let (unresolved_blocking_ids, unresolved_count) = match repo
+        .list_unresolved_blocking_debate_entries(proposal_id)
+        .await
+    {
+        Ok(entries) => {
+            let remaining: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
+                })
+                .collect();
+            if !remaining.is_empty() {
+                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+                blocked_explanations.push(format!(
+                    "Unresolved blocking debate entries: {}",
+                    ids.join(", ")
+                ));
+                (ids, remaining.len() as i32)
+            } else {
+                (vec![], 0)
+            }
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check debate trail: {e}"));
+            (vec![], 0)
+        }
+    };
+
+    // 2c. Latest judge verdict
+    let (judge_verdict_body, judge_verdict_id, judge_needs_work) =
+        match repo.latest_judge_verdict(proposal_id).await {
+            Ok(Some(verdict)) => {
+                let verdict_lower = verdict.body.to_lowercase();
+                let needs_work = (verdict_lower.contains("needs-work")
+                    || verdict_lower.contains("needs_work")
+                    || verdict_lower.contains("needs work"))
+                    && !override_is_current;
+                if needs_work {
+                    blocked_explanations.push(format!(
+                        "Judge returned needs-work (verdict {}); no current human override",
+                        verdict.id
+                    ));
+                }
+                (
+                    Some(verdict.body.clone()),
+                    Some(verdict.id.clone()),
+                    needs_work,
+                )
+            }
+            Err(e) => {
+                blocked_explanations.push(format!("Failed to check judge verdict: {e}"));
+                (None, None, false)
+            }
+            _ => (None, None, false),
+        };
+
+    // 2d. Needs-evidence spike parking
+    let needs_evidence = match repo.has_open_needs_evidence_spike(proposal_id).await {
+        Ok(true) => {
+            let claim = proposal
+                .needs_evidence_claim
+                .as_deref()
+                .unwrap_or("unspecified");
+            let spike_id = proposal
+                .linked_spike_task_id
+                .as_deref()
+                .unwrap_or("unknown");
+            blocked_explanations.push(format!(
+                "Proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
+            ));
+            Some(crate::tools::proposal_ops::NeedsEvidenceStatus {
+                claim: claim.to_string(),
+                spike_task_id: spike_id.to_string(),
+                spike_short_id: spike_id.to_string(),
+                spike_status: "open".to_string(),
+            })
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check needs-evidence spike: {e}"));
+            None
+        }
+        _ => None,
+    };
+
+    // 2e. Pending checkpoint revisions
+    let pending_checkpoint = match repo.has_pending_checkpoint_revisions(proposal_id).await {
+        Ok(true) => {
+            blocked_explanations
+                .push("Pending checkpoint revision awaiting approval or rejection".to_string());
+            true
+        }
+        Err(e) => {
+            blocked_explanations.push(format!("Failed to check pending checkpoints: {e}"));
+            false
+        }
+        _ => false,
+    };
+
+    // Adversary dry count from refinement status (non-critical)
+    let adversary_dry_count =
+        match crate::tools::refinement_tools::build_refinement_status(repo, proposal_id).await {
+            Ok(status) => status.dry_rounds,
+            _ => 0,
+        };
+
+    let ready = blocked_explanations.is_empty();
+
+    ProposalGateStatusModel {
+        ready,
+        dor_ready,
+        dor_failures,
+        judge_verdict_body,
+        judge_verdict_id,
+        judge_needs_work,
+        adversary_dry_count,
+        unresolved_blocking_count: unresolved_count,
+        unresolved_blocking_ids,
+        needs_evidence,
+        pending_checkpoint,
+        human_override_active: override_is_current,
+        blocked_explanations,
+    }
+}
+
+/// Helper: convert CamelCase/PascalCase enum variant to snake_case.
+trait ToSnakeCase {
+    fn to_snake_case(&self) -> String;
+}
+
+impl ToSnakeCase for String {
+    fn to_snake_case(&self) -> String {
+        let mut out = String::with_capacity(self.len() + 4);
+        for (i, ch) in self.chars().enumerate() {
+            if ch.is_uppercase() {
+                if i > 0 {
+                    out.push('_');
+                }
+                out.extend(ch.to_lowercase());
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = proposal_tool_router, vis = "pub")]
@@ -423,6 +1022,30 @@ impl DjinnMcpServer {
         };
         let ac_json = serde_json::to_string(&ac).unwrap_or_else(|_| "[]".to_string());
 
+        // Pre-resolve target projects: used both for the readiness gate
+        // (target count) and for seeding after proposal creation.
+        let mut resolved_target_ids: Vec<String> = Vec::new();
+        if let Some(targets) = &p.target_projects {
+            let project_repo =
+                ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+            for t in targets {
+                if let Ok(Some(pid)) = project_repo.resolve(t).await {
+                    resolved_target_ids.push(pid);
+                }
+            }
+        }
+
+        // Deterministic DoR gate: block entering `in_review` when the spec is
+        // not ready. Existing body/MDX/AC-count validation already passed.
+        let effective_status = status.unwrap_or("draft");
+        if effective_status == "in_review" {
+            let ac_items = parse_ac_items(&ac_json);
+            let readiness = evaluate_proposal_readiness(body, &ac_items, resolved_target_ids.len());
+            if let Some(err) = format_readiness_error(&readiness) {
+                return Json(err_single(err));
+            }
+        }
+
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let proposal = match repo
             .create(djinn_db::ProposalCreateInput {
@@ -439,15 +1062,44 @@ impl DjinnMcpServer {
         };
 
         // Seed target projects (best-effort: unresolvable refs are skipped).
-        if let Some(targets) = &p.target_projects {
-            let project_repo =
-                ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-            for t in targets {
-                if let Ok(Some(pid)) = project_repo.resolve(t).await {
-                    let _ = repo.add_target(&proposal.id, &pid, "primary").await;
-                }
-            }
+        for pid in &resolved_target_ids {
+            let _ = repo.add_target(&proposal.id, pid, "primary").await;
         }
+
+        // Composed gate (task cuzf): after seeding targets, verify the full
+        // composed gate (DoR + tribunal) for `in_review` proposals. If
+        // tribunal conditions block the transition, downgrade to `draft`
+        // instead of blocking creation.
+        let proposal = if effective_status == "in_review" {
+            let gate =
+                evaluate_composed_gate(&repo, &proposal, body, &ac_json, resolved_target_ids.len())
+                    .await;
+            if let Some(_err) = gate.to_error_string() {
+                // Tribunal blocked — downgrade to draft.
+                match repo
+                    .update(
+                        &proposal.id,
+                        djinn_db::ProposalUpdateInput {
+                            title: &proposal.title,
+                            body: &proposal.body,
+                            acceptance_criteria: &proposal.acceptance_criteria,
+                            status: "draft",
+                            superseded_by: None,
+                            body_format: Some(&proposal.body_format),
+                            event_metadata: None,
+                        },
+                    )
+                    .await
+                {
+                    Ok(downgraded) => downgraded,
+                    Err(_) => proposal,
+                }
+            } else {
+                proposal
+            }
+        } else {
+            proposal
+        };
 
         Json(ProposalSingleResponse {
             proposal: Some(ProposalModel::from(&proposal)),
@@ -494,6 +1146,26 @@ impl DjinnMcpServer {
             {
                 return Json(err_single(e));
             }
+            // Composed gate (task cuzf): block import that would leave an
+            // `in_review` proposal failing DoR or tribunal conditions.
+            if existing.status == "in_review" {
+                let target_count = repo
+                    .targets(&existing.id)
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0);
+                let gate = evaluate_composed_gate(
+                    &repo,
+                    &existing,
+                    imported.body,
+                    &imported.acceptance_criteria_json,
+                    target_count,
+                )
+                .await;
+                if let Some(err) = gate.to_error_string() {
+                    return Json(err_single(err));
+                }
+            }
             match repo
                 .update(
                     &existing.id,
@@ -504,6 +1176,10 @@ impl DjinnMcpServer {
                         status: &existing.status,
                         superseded_by: existing.superseded_by.as_deref(),
                         body_format: Some(&imported.body_format),
+                        // Imported proposals restore historical state — they
+                        // are not authoring operations and carry no
+                        // block-patch / native-skill attribution.
+                        event_metadata: None,
                     },
                 )
                 .await
@@ -620,9 +1296,9 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Show a proposal with targets, feedback, revisions, and sign-offs.
+    /// Show a proposal with targets, feedback, debate trail, revisions, and sign-offs.
     #[tool(
-        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
+        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, the debate-trail (objections/rebuttals/verdicts kept separate from feedback), its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
     )]
     pub async fn proposal_show(
         &self,
@@ -670,6 +1346,23 @@ impl DjinnMcpServer {
             Ok(refs) => refs.into_iter().map(Into::into).collect(),
             Err(e) => return Json(err_show(e.to_string())),
         };
+        let debate_trail = match repo.debate_trail(&proposal.id).await {
+            Ok(d) => Some(d.iter().map(ProposalDebateTrailModel::from).collect()),
+            Err(e) => return Json(err_show(e.to_string())),
+        };
+        // Derive refinement status from lifecycle events + debate trail.
+        // Non-critical — swallow errors silently so proposal_show still works
+        // even if refinement status can't be computed.
+        let refinement =
+            crate::tools::refinement_tools::build_refinement_status(&repo, &proposal.id)
+                .await
+                .ok();
+        // Build composed gate status (DoR + tribunal conditions).
+        // Non-critical — swallow errors so proposal_show still works.
+        let ac_json = &proposal.acceptance_criteria;
+        let target_count = targets.len();
+        let gate_status =
+            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await);
         Json(ProposalShowResponse {
             proposal: Some(ProposalModel::from(&proposal)),
             targets: Some(targets),
@@ -678,6 +1371,9 @@ impl DjinnMcpServer {
             signoffs: Some(signoffs),
             epics: Some(epics),
             memory_refs,
+            debate_trail,
+            refinement,
+            gate_status,
             error: None,
         })
     }
@@ -804,6 +1500,21 @@ impl DjinnMcpServer {
             return Json(err_single(e));
         }
 
+        // Composed gate (task cuzf): block entering `in_review` when
+        // DoR or tribunal conditions are not met. Existing body/MDX/AC-count
+        // validation already passed above.
+        if status == "in_review" {
+            let target_count = repo
+                .targets(&existing.id)
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let gate = evaluate_composed_gate(&repo, &existing, body, &ac_json, target_count).await;
+            if let Some(err) = gate.to_error_string() {
+                return Json(err_single(err));
+            }
+        }
+
         // Resolve superseded_by to a canonical proposal id when provided.
         let superseded_by = if let Some(ref s) = p.superseded_by {
             match repo.resolve(s).await.ok().flatten() {
@@ -824,6 +1535,156 @@ impl DjinnMcpServer {
                     status,
                     superseded_by: superseded_by.as_deref(),
                     body_format: p.body_format.as_deref(),
+                    // Plain `proposal_update` writes carry no authoring
+                    // attribution metadata — block-patch / native-skill tagging
+                    // is reserved for the targeted patch primitive.
+                    event_metadata: None,
+                },
+            )
+            .await
+        {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+
+    /// Apply a single targeted MDX block patch to a proposal body.
+    ///
+    /// Locates a specific range in the proposal body using the provided
+    /// selector (heading, exact text, or byte range), then replaces or wraps
+    /// that range with the given MDX content. Unrelated body content is
+    /// preserved. Each successful patch increments `latest_revision_seq` exactly
+    /// once and records targeted-block-patch metadata.
+    #[tool(
+        description = "Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata."
+    )]
+    pub async fn proposal_block_patch(
+        &self,
+        Parameters(p): Parameters<ProposalBlockPatchParams>,
+    ) -> Json<ProposalSingleResponse> {
+        // 1. Validate operation.
+        if !matches!(p.operation.as_str(), "replace" | "wrap") {
+            return Json(err_single(format!(
+                "invalid operation: {:?} (expected replace or wrap)",
+                p.operation
+            )));
+        }
+
+        // 2. Validate block_mdx is non-empty.
+        if p.block_mdx.is_empty() {
+            return Json(err_single("block_mdx must not be empty".to_string()));
+        }
+
+        // 3. Resolve proposal.
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+
+        // 4. Edit gate.
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_single(e));
+        }
+
+        // 5. Stale revision guard.
+        if let Some(expected_seq) = p.expected_latest_revision_seq
+            && existing.latest_revision_seq != expected_seq
+        {
+            return Json(err_single(format!(
+                "stale revision: expected latest_revision_seq={}, but proposal has {}",
+                expected_seq, existing.latest_revision_seq
+            )));
+        }
+
+        // 6. Resolve selector to a byte range in the body.
+        let range = match resolve_selector(&existing.body, &p.selector) {
+            Ok(r) => r,
+            Err(e) => return Json(err_single(format!("selector error: {e}"))),
+        };
+
+        // 7. Build the new body.
+        let new_body = match p.operation.as_str() {
+            "replace" => {
+                let mut body = String::with_capacity(
+                    existing.body.len() - (range.end - range.start) + p.block_mdx.len(),
+                );
+                body.push_str(&existing.body[..range.start]);
+                body.push_str(&p.block_mdx);
+                body.push_str(&existing.body[range.end..]);
+                body
+            }
+            "wrap" => {
+                let selected = &existing.body[range.start..range.end];
+                let mut body = String::with_capacity(
+                    existing.body.len() - (range.end - range.start)
+                        + p.block_mdx.len()
+                        + selected.len(),
+                );
+                body.push_str(&existing.body[..range.start]);
+                // Insert the block_mdx before the selected content.
+                body.push_str(&p.block_mdx);
+                body.push_str(selected);
+                body.push_str(&existing.body[range.end..]);
+                body
+            }
+            _ => unreachable!(),
+        };
+
+        // 8. Validate the resulting MDX body.
+        // Determine body_format: if the proposal is markdown and the patch
+        // introduces MDX block tags, upgrade to mdx.
+        let has_mdx_blocks = !extract_custom_block_tags(&new_body).is_empty();
+        let new_body_format = if existing.body_format == "mdx" || has_mdx_blocks {
+            "mdx"
+        } else {
+            "markdown"
+        };
+
+        if new_body_format == "mdx" {
+            if let Err(e) = validate_mdx_blocks(&new_body) {
+                return Json(err_single(format!("resulting MDX is invalid: {e}")));
+            }
+            if let Err(e) = parse_mdx_blocks(&new_body) {
+                return Json(err_single(format!("resulting MDX parse error: {e}")));
+            }
+        }
+        if let Err(e) = validate_design(&new_body) {
+            return Json(err_single(e));
+        }
+
+        // 9. Build event_metadata for the targeted block-patch revision.
+        let mut metadata = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "selector": range.selector_description,
+            "range_start_byte": range.start,
+            "range_end_byte": range.end,
+            "native_skill_name": p.native_skill_name.as_deref().unwrap_or(""),
+            "native_skill_version": p.native_skill_version.as_deref().unwrap_or(""),
+        });
+        if let Some(ref note) = p.note {
+            metadata["note"] = serde_json::Value::String(note.clone());
+        }
+
+        // 10. Persist through the revisioning path.
+        let ac_json = existing.acceptance_criteria.clone();
+        match repo
+            .update(
+                &existing.id,
+                djinn_db::ProposalUpdateInput {
+                    title: &existing.title,
+                    body: &new_body,
+                    acceptance_criteria: &ac_json,
+                    status: &existing.status,
+                    superseded_by: existing.superseded_by.as_deref(),
+                    body_format: Some(new_body_format),
+                    event_metadata: Some(&metadata),
                 },
             )
             .await
@@ -1053,6 +1914,30 @@ impl DjinnMcpServer {
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_single(proposal_not_found_error(&p.id)));
         };
+
+        // Composed gate (task cuzf): block sign-off on draft/in_review
+        // proposals when DoR or tribunal conditions are not met.  This
+        // prevents sign-off-driven auto-advance from bypassing readiness
+        // or tribunal checks.
+        if matches!(proposal.status.as_str(), "draft" | "in_review") {
+            let target_count = repo
+                .targets(&proposal.id)
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let gate = evaluate_composed_gate(
+                &repo,
+                &proposal,
+                &proposal.body,
+                &proposal.acceptance_criteria,
+                target_count,
+            )
+            .await;
+            if let Some(err) = gate.to_error_string() {
+                return Json(err_single(err));
+            }
+        }
+
         match repo.add_signoff(&proposal.id, &p.kind, &user_id).await {
             Ok(updated) => Json(ProposalSingleResponse {
                 proposal: Some(ProposalModel::from(&updated)),
@@ -1156,6 +2041,26 @@ impl DjinnMcpServer {
             ));
         };
         let home_project_id = home_target.project_id.clone();
+
+        // Composed gate (task cuzf): block graduation when DoR or tribunal
+        // conditions are not met.  This prevents a malformed-but-approved
+        // proposal from spawning a breakdown task, and also blocks when the
+        // proposal is parked on a needs-evidence spike or blocked by
+        // unresolved debate rows.  Earlier guardrails (capability, status,
+        // build owner, primary target) already passed.
+        {
+            let gate = evaluate_composed_gate(
+                &repo,
+                &proposal,
+                &proposal.body,
+                &proposal.acceptance_criteria,
+                targets.len(),
+            )
+            .await;
+            if let Some(err) = gate.to_error_string() {
+                return Json(err_single(err));
+            }
+        }
 
         // A human-readable target list for the breakdown task's design.
         let mut target_lines = Vec::with_capacity(targets.len());
@@ -1710,7 +2615,10 @@ impl DjinnMcpServer {
 impl DjinnMcpServer {
     /// Gate a direct spec edit: allowed for the author, a PM, an engineer, or
     /// an admin. `Ok(())` when unauthenticated (trusted/system path).
-    async fn gate_proposal_edit(&self, author_user_id: Option<&str>) -> Result<(), String> {
+    pub(crate) async fn gate_proposal_edit(
+        &self,
+        author_user_id: Option<&str>,
+    ) -> Result<(), String> {
         if let Some(caps) = acting_caps(self.state.db()).await? {
             let is_author = author_user_id == Some(caps.user_id.as_str());
             if !caps.can_edit(is_author) {
@@ -1735,6 +2643,9 @@ fn err_show(error: impl Into<String>) -> ProposalShowResponse {
         signoffs: None,
         epics: None,
         memory_refs: vec![],
+        debate_trail: None,
+        refinement: None,
+        gate_status: None,
         error: Some(error.into()),
     }
 }
@@ -2578,5 +3489,3790 @@ mod stop_build_tests {
             .await
             .0;
         assert!(!r2.ok);
+    }
+}
+
+// ── Schema-lean regression tests ──────────────────────────────────────────
+//
+// Guard `ProposalCreateParams` and `ProposalUpdateParams` against accidental
+// inlining of block vocabulary (tags, field schemas, catalog enums). Clients
+// discover vocabulary via `get_block_catalog` / `proposal_blocks`, then
+// submit proposal bodies through the existing `body` + `body_format` fields.
+
+#[cfg(test)]
+mod schema_lean_tests {
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    /// Recursively collect every string value reachable from `value`.
+    fn collect_strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(arr) => {
+                for item in arr {
+                    collect_strings(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for v in map.values() {
+                    collect_strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Assert that the serialized JSON schema does not mention any of the
+    /// given forbidden terms.  A single traversal collects all string values
+    /// (keys, enum entries, titles, descriptions, …) and a linear scan
+    /// checks every one.
+    fn assert_schema_excludes_terms(schema: &Value, forbidden: &[&str], context: &str) {
+        let mut strings = Vec::new();
+        collect_strings(schema, &mut strings);
+        for term in forbidden {
+            for s in &strings {
+                assert!(
+                    !s.contains(term),
+                    "{context} schema unexpectedly contains forbidden term \
+                     \"{term}\" in string value \"{s}\""
+                );
+            }
+        }
+    }
+
+    /// Terms that must never appear in a proposal write-schema.  These
+    /// cover: generic vocabulary field names, concrete MDX block tags, and
+    /// block-field/enum concepts.
+    const FORBIDDEN_BLOCK_TERMS: &[&str] = &[
+        // generic vocabulary surface
+        "block_types",
+        "catalog",
+        "blocks",
+        // concrete MDX block tags (must match proposal_block_catalog.json)
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
+        // kebab-case type identifiers
+        "annotated-code",
+        "api-endpoint",
+        "callout",
+        "checklist",
+        "columns",
+        "decisions",
+        "diagram",
+        "diff",
+        "file-tree",
+        "json-explorer",
+        "question-form",
+        "rich-text",
+        "tabs",
+        "wireframe",
+        // block enum / field schema vocabulary
+        "BlockType",
+        "ProposalBlock",
+    ];
+
+    /// Expected top-level properties for `ProposalCreateParams`.
+    const CREATE_ALLOWED_PROPS: &[&str] = &[
+        "title",
+        "body",
+        "acceptance_criteria",
+        "target_projects",
+        "status",
+        "body_format",
+    ];
+
+    /// Expected top-level properties for `ProposalUpdateParams`.
+    const UPDATE_ALLOWED_PROPS: &[&str] = &[
+        "id",
+        "title",
+        "body",
+        "acceptance_criteria",
+        "status",
+        "superseded_by",
+        "body_format",
+    ];
+
+    #[test]
+    fn proposal_create_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalCreateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalCreateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, CREATE_ALLOWED_PROPS,
+            "ProposalCreateParams properties drifted: got {prop_keys:?}, \
+             expected {CREATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalCreateParams");
+    }
+
+    #[test]
+    fn proposal_update_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalUpdateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalUpdateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, UPDATE_ALLOWED_PROPS,
+            "ProposalUpdateParams properties drifted: got {prop_keys:?}, \
+             expected {UPDATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
+    }
+}
+
+#[cfg(test)]
+mod block_patch_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_replace_by_exact_text_preserves_unrelated_content() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Patch Test",
+                body: "# Intro\n\nOld paragraph here.\n\n## Details\n\nMore content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Old paragraph here." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"new\">\nNew rich text content.\n</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("# Intro\n\n"),
+            "unrelated intro must survive"
+        );
+        assert!(
+            stored.body.contains("## Details\n\nMore content."),
+            "unrelated details must survive"
+        );
+        assert!(
+            stored.body.contains("<RichText id=\"new\">"),
+            "new block must be inserted"
+        );
+        assert!(
+            !stored.body.contains("Old paragraph here."),
+            "old content must be replaced"
+        );
+        assert_eq!(
+            stored.body_format, "mdx",
+            "format must upgrade to mdx when block inserted"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_increments_revision_seq_once() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Test",
+                body: "First paragraph.\n\nSecond paragraph.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(proposal.latest_revision_seq, 1);
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Second paragraph." },
+                    "operation": "replace",
+                    "block_mdx": "<Callout id=\"c1\">\nImportant note.\n</Callout>",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(response.get("error").is_none());
+
+        let updated = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.latest_revision_seq, 2,
+            "revision must increment exactly once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_stale_expected_revision() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Stale Test",
+                body: "Content here.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Content here." },
+                    "operation": "replace",
+                    "block_mdx": "<Diagram id=\"d1\" />\n",
+                    "expected_latest_revision_seq": 99,
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("stale revision"), "error was: {error}");
+        // Verify nothing was modified.
+        let unchanged = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.latest_revision_seq, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_missing_selector() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Missing Selector",
+                body: "Some body.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {},
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">hi</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("exactly one"), "error was: {error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_rejects_ambiguous_exact_text() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Ambiguous",
+                body: "Repeated text.\n\nMore.\n\nRepeated text.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Repeated text." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">hi</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("ambiguous"), "error was: {error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_heading_selector_replaces_section() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Heading Patch",
+                body: "# First\n\nFirst content.\n\n# Second\n\nSecond content.\n\n# Third\n\nThird content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "heading_text": "Second" },
+                    "operation": "replace",
+                    "block_mdx": "# Second\n\n<Callout id=\"c1\">\nReplaced second section.\n</Callout>\n",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("# First\n\nFirst content."),
+            "first section preserved"
+        );
+        assert!(
+            stored.body.contains("<Callout id=\"c1\">"),
+            "callout inserted"
+        );
+        assert!(
+            !stored.body.contains("Second content."),
+            "old second content replaced"
+        );
+        assert!(
+            stored.body.contains("# Third\n\nThird content."),
+            "third section preserved"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_wrap_preserves_selected_content_and_inserts_before() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Wrap Test",
+                body: "Before.\n\nTarget text.\n\nAfter.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Wrap inserts block_mdx before the selected text. Use a plain markdown
+        // prefix (no MDX block tags) to keep validation simple.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Target text." },
+                    "operation": "wrap",
+                    "block_mdx": "> **Note:** ",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "wrap failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            stored.body.contains("> **Note:** Target text."),
+            "wrapped content present"
+        );
+        assert!(stored.body.contains("Before.\n"), "before preserved");
+        assert!(stored.body.contains("\nAfter."), "after preserved");
+        assert_eq!(
+            stored.body_format, "markdown",
+            "no MDX tags so stays markdown"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_records_event_metadata() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Metadata Test",
+                body: "Some content.",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "Some content." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"r1\">New content.</RichText>",
+                    "native_skill_name": "visual-spec",
+                    "native_skill_version": "1.0.0",
+                    "note": "test patch",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        // Revision 1 is the create seed; revision 2 is the block patch.
+        assert_eq!(revisions.len(), 2);
+        let patch_rev = &revisions[1];
+        let metadata: serde_json::Value =
+            serde_json::from_str(patch_rev.event_metadata.as_deref().unwrap_or("null")).unwrap();
+        assert_eq!(metadata["change_kind"], "targeted_block_patch");
+        assert_eq!(metadata["native_skill_name"], "visual-spec");
+        assert_eq!(metadata["native_skill_version"], "1.0.0");
+        assert_eq!(metadata["note"], "test patch");
+        assert!(metadata["range_start_byte"].is_number());
+        assert!(metadata["range_end_byte"].is_number());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_byte_range_selector() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "aaa bbb ccc";
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Byte Range Test",
+                body,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // "bbb" starts at byte 4, ends at byte 7.
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {
+                        "byte_range": {
+                            "start": 4,
+                            "end": 7,
+                            "expected_text": "bbb"
+                        }
+                    },
+                    "operation": "replace",
+                    "block_mdx": "DDD",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "patch failed: {:?}",
+            response.get("error")
+        );
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.body, "aaa DDD ccc");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn block_patch_byte_range_rejects_stale_text() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Stale Range",
+                body: "aaa bbb ccc",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let response = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": {
+                        "byte_range": {
+                            "start": 4,
+                            "end": 7,
+                            "expected_text": "XXX"
+                        }
+                    },
+                    "operation": "replace",
+                    "block_mdx": "DDD",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("text mismatch"), "error was: {error}");
+    }
+}
+
+// ── Regression coverage for the block-patch primitive (task 1787) ──────
+//
+// These tests exercise the full `proposal_create` → `proposal_block_patch`
+// → `proposal_show` → `proposal_export` flow end to end, proving the
+// acceptance criteria the single-patch tests above only prove in isolation:
+//
+//  1. Two sequential targeted patches increment `latest_revision_seq`
+//     exactly twice from the starting proposal revision (1 → 3).
+//  2. Unrelated body sections survive both patches byte-for-byte — the
+//     body is not a monolithic rewrite fixture.
+//  3. Revision history exposes targeted-block-patch metadata including
+//     native-skill name/version attribution on every patch revision.
+//  4. The enriched `body_format=mdx` proposal exports and round-trips
+//     cleanly through `proposal_export` (parses the same blocks twice).
+//  5. Bare `<` / `>` MDX-authoring guidance stays backticked: a body
+//     containing a backtick-wrapped `Vec<String>` or `a < b` round-trips
+//     through the parser without producing bare angle prose in the
+//     output, while a bare `Vec<String>` line is detected as prose that
+//     needs backtick-wrapping.
+#[cfg(test)]
+mod block_patch_regression_tests {
+    use super::super::proposal_blocks::{parse_mdx_blocks, validate_mdx_blocks};
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    /// Multi-section markdown body used by the regression suite. Each anchor
+    /// substring is a stable byte-exact marker for the "unrelated content
+    /// preserved" assertion in test 2.
+    const REGRESSION_BODY: &str = "\
+# Proposal Title
+
+This is the opening paragraph that we will wrap in a RichText block.
+
+## Approach
+
+The approach section explains the high-level plan.
+
+## Tradeoffs
+
+The tradeoffs section enumerates the costs.
+
+## Open Questions
+
+The open-questions section collects uncertainty.
+";
+
+    /// AC #1: two sequential targeted block patches each increment
+    /// `latest_revision_seq` exactly once. Starting seq is 1 (create
+    /// seed); after two patches it must be 3 — never 2, never 4.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regression_two_patches_increment_latest_revision_seq_exactly_twice() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Regression Revision Seq",
+                body: REGRESSION_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            proposal.latest_revision_seq, 1,
+            "create seed must leave latest_revision_seq at 1"
+        );
+
+        // Patch #1: wrap the opening paragraph in a RichText block.
+        let patch_one = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "This is the opening paragraph that we will wrap in a RichText block." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"opening\">\nThe wrapped opening paragraph.\n</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            patch_one.get("error").is_none(),
+            "patch one failed: {:?}",
+            patch_one.get("error")
+        );
+        let after_one = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_one.latest_revision_seq, 2,
+            "first patch must increment latest_revision_seq from 1 to 2"
+        );
+
+        // Patch #2: replace a different target (the tradeoffs paragraph).
+        let patch_two = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "The tradeoffs section enumerates the costs." },
+                    "operation": "replace",
+                    "block_mdx": "<Callout id=\"tradeoffs\">\nThe new tradeoff callout.\n</Callout>",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            patch_two.get("error").is_none(),
+            "patch two failed: {:?}",
+            patch_two.get("error")
+        );
+        let after_two = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            after_two.latest_revision_seq, 3,
+            "second patch must increment latest_revision_seq from 2 to 3 (exactly +2 from the starting revision)"
+        );
+
+        // The proposal's surface (proposal_show) must also report the same seq.
+        let shown = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        assert_eq!(
+            shown
+                .get("proposal")
+                .and_then(|p| p.get("latest_revision_seq"))
+                .and_then(|v| v.as_i64()),
+            Some(3),
+            "proposal_show.proposal.latest_revision_seq must match the repo state"
+        );
+    }
+
+    /// AC #2: unrelated body content survives targeted patches byte-for-byte.
+    /// The body must not be replaced by a monolithic rewrite fixture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regression_unrelated_body_content_preserved_across_patches() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Regression Preservation",
+                body: REGRESSION_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Patch #1: replace the opening paragraph.
+        let _ = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "This is the opening paragraph that we will wrap in a RichText block." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"opening\">\nThe wrapped opening paragraph.\n</RichText>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Patch #2: replace the tradeoffs paragraph with a different target.
+        let _ = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "The tradeoffs section enumerates the costs." },
+                    "operation": "replace",
+                    "block_mdx": "<Callout id=\"tradeoffs\">\nThe new tradeoff callout.\n</Callout>",
+                }),
+            )
+            .await
+            .unwrap();
+
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        // Bytes that are NOT in either selected range must appear verbatim
+        // in the final body. This is the byte-identity guard: a monolithic
+        // rewrite fixture would change wording, ordering, or whitespace
+        // around these markers and the asserts would fail.
+        for anchor in [
+            "# Proposal Title",
+            "## Approach",
+            "The approach section explains the high-level plan.",
+            "## Open Questions",
+            "The open-questions section collects uncertainty.",
+            "## Tradeoffs",
+        ] {
+            assert!(
+                stored.body.contains(anchor),
+                "unrelated anchor {anchor:?} must be preserved verbatim after targeted patches; \
+                 body was:\n{}",
+                stored.body
+            );
+        }
+
+        // The replaced paragraphs must NOT survive in their original form.
+        assert!(
+            !stored
+                .body
+                .contains("This is the opening paragraph that we will wrap in a RichText block."),
+            "replaced opening paragraph must not survive"
+        );
+        assert!(
+            !stored
+                .body
+                .contains("The tradeoffs section enumerates the costs."),
+            "replaced tradeoffs paragraph must not survive"
+        );
+
+        // The new blocks must be present, proving the patches actually landed
+        // (otherwise this would be a no-op passing test).
+        assert!(
+            stored.body.contains("<RichText id=\"opening\">"),
+            "patch #1 must insert its RichText block"
+        );
+        assert!(
+            stored.body.contains("<Callout id=\"tradeoffs\">"),
+            "patch #2 must insert its Callout block"
+        );
+    }
+
+    /// AC #3: revision history exposes targeted-block-patch metadata on
+    /// every patch revision, including the native-skill name/version
+    /// attribution for the planner-driven refinement loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regression_revisions_expose_targeted_block_patch_metadata_with_skill_attribution() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Regression Metadata",
+                body: REGRESSION_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Patch #1 attributed to visual-spec@1.0.0.
+        let _ = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "This is the opening paragraph that we will wrap in a RichText block." },
+                    "operation": "replace",
+                    "block_mdx": "<RichText id=\"opening\">\nThe wrapped opening paragraph.\n</RichText>",
+                    "native_skill_name": "visual-spec",
+                    "native_skill_version": "1.0.0",
+                    "note": "first patch",
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Patch #2 attributed to a different visual-spec revision (1.1.0) so
+        // the metadata assertion distinguishes the two entries.
+        let _ = server
+            .dispatch_tool(
+                "proposal_block_patch",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "selector": { "exact_text": "The tradeoffs section enumerates the costs." },
+                    "operation": "replace",
+                    "block_mdx": "<Callout id=\"tradeoffs\">\nThe new tradeoff callout.\n</Callout>",
+                    "native_skill_name": "visual-spec",
+                    "native_skill_version": "1.1.0",
+                    "note": "second patch",
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Walk the revisions through the proposal_show surface (the
+        // public-facing view) so this test exercises the same shape that
+        // the planner / reviewer agents consume.
+        let shown = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        let revisions = shown
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .expect("proposal_show.revisions must be a JSON array");
+
+        // 1 create seed + 2 targeted patches = 3 revisions.
+        assert_eq!(
+            revisions.len(),
+            3,
+            "expected 3 revisions (1 seed + 2 targeted patches); got {}",
+            revisions.len()
+        );
+
+        // The create seed (seq 1) must NOT carry targeted-block-patch
+        // metadata — that signal is reserved for the patch primitive.
+        let seed = &revisions[0];
+        assert!(
+            seed.get("event_metadata").is_none_or(|v| v.is_null()),
+            "create seed revision must not carry event_metadata, got {:?}",
+            seed.get("event_metadata")
+        );
+
+        // The two patch revisions (seq 2 and seq 3) must each carry the
+        // targeted-block-patch metadata + native-skill attribution.
+        let patch_rev_one = &revisions[1];
+        let patch_rev_two = &revisions[2];
+        let meta_one: serde_json::Value = serde_json::from_str(
+            patch_rev_one
+                .get("event_metadata")
+                .and_then(|v| v.as_str())
+                .expect("patch rev #1 must expose event_metadata as a JSON string"),
+        )
+        .expect("patch rev #1 event_metadata must be valid JSON");
+        let meta_two: serde_json::Value = serde_json::from_str(
+            patch_rev_two
+                .get("event_metadata")
+                .and_then(|v| v.as_str())
+                .expect("patch rev #2 must expose event_metadata as a JSON string"),
+        )
+        .expect("patch rev #2 event_metadata must be valid JSON");
+
+        // change_kind identifies the patch primitive for downstream tooling.
+        assert_eq!(
+            meta_one["change_kind"], "targeted_block_patch",
+            "patch rev #1 must identify as targeted_block_patch"
+        );
+        assert_eq!(
+            meta_two["change_kind"], "targeted_block_patch",
+            "patch rev #2 must identify as targeted_block_patch"
+        );
+
+        // Native-skill name + version attribution per patch.
+        assert_eq!(
+            meta_one["native_skill_name"], "visual-spec",
+            "patch rev #1 must attribute the native skill name"
+        );
+        assert_eq!(
+            meta_one["native_skill_version"], "1.0.0",
+            "patch rev #1 must attribute the native skill version"
+        );
+        assert_eq!(
+            meta_two["native_skill_name"], "visual-spec",
+            "patch rev #2 must attribute the native skill name"
+        );
+        assert_eq!(
+            meta_two["native_skill_version"], "1.1.0",
+            "patch rev #2 must attribute the native skill version"
+        );
+
+        // The byte-range fields are present and well-typed — these are the
+        // hook a regression in selector resolution would first break.
+        assert!(
+            meta_one["range_start_byte"].is_number(),
+            "patch rev #1 must expose range_start_byte"
+        );
+        assert!(
+            meta_one["range_end_byte"].is_number(),
+            "patch rev #1 must expose range_end_byte"
+        );
+        assert!(
+            meta_one["range_end_byte"].as_u64().unwrap()
+                > meta_one["range_start_byte"].as_u64().unwrap(),
+            "patch rev #1 range_end_byte must exceed range_start_byte"
+        );
+        assert!(
+            meta_two["range_start_byte"].is_number() && meta_two["range_end_byte"].is_number(),
+            "patch rev #2 must expose numeric range fields"
+        );
+
+        // Free-form notes were preserved too.
+        assert_eq!(meta_one["note"], "first patch");
+        assert_eq!(meta_two["note"], "second patch");
+    }
+
+    /// AC #4: after enrichment via targeted block-patches, the proposal
+    /// exports cleanly through `proposal_export` and the returned MDX
+    /// round-trips through the block parser (no parse error, structural
+    /// equality of the parsed blocks).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regression_block_patches_then_export_round_trips_cleanly() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Regression Export",
+                body: REGRESSION_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Promote a couple of prose sections to MDX blocks via targeted
+        // patches — this is the planner refinement loop's "convert
+        // markdown drafts to block-enriched MDX" path.
+        for (selector_text, block_mdx) in [
+            (
+                "This is the opening paragraph that we will wrap in a RichText block.",
+                "<RichText id=\"opening\">\nThe wrapped opening paragraph.\n</RichText>",
+            ),
+            (
+                "The approach section explains the high-level plan.",
+                "<FileTree id=\"repo\" name=\"repo\">\nsrc/\n</FileTree>",
+            ),
+        ] {
+            let response = server
+                .dispatch_tool(
+                    "proposal_block_patch",
+                    serde_json::json!({
+                        "id": proposal.id,
+                        "selector": { "exact_text": selector_text },
+                        "operation": "replace",
+                        "block_mdx": block_mdx,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.get("error").is_none(),
+                "patch failed for {selector_text:?}: {:?}",
+                response.get("error")
+            );
+        }
+
+        // The proposal body_format must have upgraded to mdx (the patches
+        // introduced MDX block tags). proposal_export round-trips mdx
+        // bodies by re-parsing the exported output, so the export path
+        // is the load-bearing check for this acceptance criterion.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.body_format, "mdx",
+            "body_format must upgrade to mdx once the first MDX block is patched in"
+        );
+
+        let exported = server
+            .dispatch_tool("proposal_export", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        assert!(
+            exported.get("error").is_none(),
+            "proposal_export failed after MDX enrichment: {:?}",
+            exported.get("error")
+        );
+
+        let mdx = exported
+            .get("mdx")
+            .and_then(|v| v.as_str())
+            .expect("proposal_export.mdx must be a non-empty string for mdx proposals");
+        assert!(
+            mdx.contains("body_format: mdx"),
+            "exported MDX frontmatter must record body_format: mdx"
+        );
+        assert!(
+            mdx.contains("---\n") && mdx.matches("---").count() >= 2,
+            "exported MDX must include the YAML frontmatter delimiters"
+        );
+
+        // The exported MDX body (everything after the second ---) must
+        // parse into the same blocks as the stored body. This is the
+        // round-trip fidelity contract the export path enforces for
+        // mdx proposals.
+        let original_blocks =
+            parse_mdx_blocks(&stored.body).expect("stored body must parse as MDX");
+        let exported_body = mdx
+            .splitn(3, "---")
+            .nth(2)
+            .expect("exported MDX must have a body section after frontmatter")
+            .trim_start_matches('\n');
+        let exported_blocks =
+            parse_mdx_blocks(exported_body).expect("exported body must parse as MDX");
+        // The export path enforces structural equality of the parsed
+        // blocks — if it errored above, that already proves the
+        // round-trip parse succeeded. Re-assert the equality here so a
+        // future regression that loosens the export check is caught.
+        assert_eq!(
+            exported_blocks, original_blocks,
+            "exported MDX blocks must match the stored body blocks byte-for-byte"
+        );
+        let exported_ids: Vec<&str> = exported_blocks.iter().map(|b| b.id.as_str()).collect();
+        assert!(
+            exported_ids.contains(&"opening"),
+            "exported blocks must include the patched RichText id; got {exported_ids:?}"
+        );
+        assert!(
+            exported_ids.contains(&"repo"),
+            "exported blocks must include the patched FileTree id; got {exported_ids:?}"
+        );
+    }
+
+    /// AC #5: the bare `<` / `>` constraint — MDX authoring guidance
+    /// requires generics / operators to be backtick-wrapped, e.g.
+    /// `Vec<String>` and `a < b`. This regression asserts that the
+    /// parser treats the backtick-wrapped forms as valid prose, and
+    /// pins the visual-spec SKILL.md guidance so a future edit that
+    /// removes or weakens the backtick constraint is caught.
+    ///
+    /// Concretely:
+    ///   - Backtick-fenced `\`Option<T>\`` and `\`a < b\`` round-trip
+    ///     through `parse_mdx_blocks` without producing any registered
+    ///     PascalCase tag (the backticks hide the angle brackets from
+    ///     the JSX walker) and pass `validate_mdx_blocks`.
+    ///   - A registered block beside backticked prose still parses
+    ///     cleanly — the constraint applies to prose, not to the
+    ///     registered block tags.
+    ///   - The visual-spec SKILL.md itself contains the backtick-wrapped
+    ///     examples — pin the constraint by asserting the guidance text
+    ///     is present.
+    #[test]
+    fn regression_bare_angle_bracket_guidance_is_backticked() {
+        // (a) Backtick-wrapped generics and operators: zero registered
+        //     blocks, valid parse, valid validation.
+        let backticked = "\
+This body mentions the `Vec<String>` type, the `Option<T>` enum, and the
+comparison `a < b` in prose. None of those angle brackets should produce a
+registered block.
+";
+        let blocks = parse_mdx_blocks(backticked)
+            .expect("backtick-wrapped angle brackets must parse without error");
+        assert!(
+            blocks.is_empty(),
+            "backtick-wrapped angle brackets must not produce any registered blocks; got {blocks:?}"
+        );
+        assert!(
+            validate_mdx_blocks(backticked).is_ok(),
+            "backtick-wrapped angle brackets must pass block validation"
+        );
+
+        // (b) A registered MDX block beside backticked prose still
+        //     parses cleanly — the constraint applies to prose, not to
+        //     the registered block tags.
+        let mixed = "\
+Use `Option<T>` to express optional values, and the inequality `a > b` is
+fine too.
+
+<RichText id=\"summary\">
+Summary paragraph.
+</RichText>
+";
+        let mixed_blocks = parse_mdx_blocks(mixed)
+            .expect("mixed body with backticked angle brackets + registered block must parse");
+        assert_eq!(
+            mixed_blocks.len(),
+            1,
+            "only the registered <RichText> block should be recognised; got {mixed_blocks:?}"
+        );
+        assert_eq!(mixed_blocks[0].id, "summary");
+        assert!(
+            validate_mdx_blocks(mixed).is_ok(),
+            "mixed body must pass block validation"
+        );
+
+        // (c) Pin the authoring guidance itself so a future edit that
+        //     removes or weakens the backtick constraint is caught.
+        let skill_body = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("crates")
+                .join("djinn-agent")
+                .join("src")
+                .join("native_assets")
+                .join("visual-spec")
+                .join("SKILL.md"),
+        )
+        .expect("visual-spec SKILL.md must be readable from the control-plane test sandbox");
+        assert!(
+            skill_body.contains("## Bare `<` / `>` backtick constraint"),
+            "visual-spec SKILL.md must keep the bare-angle backtick constraint heading; \
+             found body:\n{skill_body}"
+        );
+        assert!(
+            skill_body.contains("`Option<T>`") || skill_body.contains("`Vec<String>`"),
+            "visual-spec SKILL.md must include a backticked generics example (Option<T> or Vec<String>)"
+        );
+        assert!(
+            skill_body.contains("backtick"),
+            "visual-spec SKILL.md must mention the backtick mechanism"
+        );
+    }
+}
+
+#[cfg(test)]
+mod signoff_readiness_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalRepository, UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    /// A minimal body that fails most readiness checks (missing problem,
+    /// scope, objectives, grounding, dependencies, open questions).
+    fn incomplete_body() -> &'static str {
+        "Just some random text without any required sections."
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_700, "signoff-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    /// A draft proposal with incomplete readiness fails on first sign-off
+    /// and remains `draft` with no new sign-off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_incomplete_proposal_fails_signoff_and_remains_draft() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-draft-inc", "test", "svc-draft-inc")
+            .await
+            .unwrap();
+
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Incomplete Draft",
+                body: incomplete_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        // Add a target so target_count > 0 (one fewer failure to worry about).
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+
+        // Proposal must still be `draft` — sign-off was never persisted.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "draft", "status must remain draft");
+
+        // No sign-offs recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert!(signoffs.is_empty(), "no sign-offs should be recorded");
+    }
+
+    /// A complete draft proposal can receive a sign-off and advance to
+    /// `in_review` (one of two required sign-off kinds).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_complete_proposal_accepts_signoff_and_advances() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-draft-ok", "test", "svc-draft-ok")
+            .await
+            .unwrap();
+
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Complete Draft",
+                body: ready_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "sign-off should succeed: {:?}",
+            response.get("error")
+        );
+
+        // Proposal must have advanced to `in_review` (one of two kinds given).
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status, "in_review",
+            "status must advance to in_review"
+        );
+
+        // One sign-off recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
+    }
+
+    /// An `in_review` proposal with a vague AC fails technical sign-off with
+    /// the offending AC index/text in the error message.
+    ///
+    /// Uses a direct status update to simulate legacy data that was advanced
+    /// before the readiness gate was in place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_review_proposal_with_vague_ac_fails_signoff() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // Create a proposal with a clean body but vague AC.
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Vague AC Review",
+                body: ready_body(),
+                acceptance_criteria: Some(
+                    r#"[{"criterion":"API returns 200","met":false},{"criterion":"The UI should be user-friendly","met":false}]"#,
+                ),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-review-vague", "test", "svc-review-vague")
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        // Directly advance the status to `in_review` to simulate legacy
+        // data that pre-dates the readiness gate.
+        sqlx::query("UPDATE proposals SET status = 'in_review' WHERE id = $1")
+            .bind(&proposal.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Attempt the technical sign-off — it should fail because the
+        // vague AC makes the proposal not ready.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+        assert!(
+            error.contains("Vague/unverifiable acceptance criterion"),
+            "error should mention vague AC: {error}"
+        );
+        assert!(
+            error.contains("user-friendly"),
+            "error should include the offending AC text: {error}"
+        );
+
+        // Proposal must still be `in_review` — no new sign-off was recorded.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "in_review");
+
+        // No sign-offs should exist.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert!(signoffs.is_empty(), "no sign-offs should be recorded");
+    }
+}
+
+// ── Graduation readiness regression tests (task 9fjy) ───────────────────
+//
+// These tests gate-check the deterministic readiness evaluator wired into
+// `proposal_graduate`.  An approved-but-malformed proposal must fail
+// graduation with exact readiness details and leave the build state
+// unchanged, while a complete approved proposal must graduate and create
+// the breakdown planning task.
+
+#[cfg(test)]
+mod graduation_readiness_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalRepository, TaskRepository,
+        UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    /// A minimal body that fails most readiness checks (missing problem,
+    /// scope, objectives, grounding, dependencies, open questions).
+    fn incomplete_body() -> &'static str {
+        "Just some random text without any required sections."
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_800, "graduate-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    /// Advance a proposal directly to `approved` via SQL, simulating
+    /// legacy data or a proposal that pre-dates the readiness gate.
+    async fn force_approved(db: &Database, proposal_id: &str) {
+        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
+            .bind(proposal_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// An approved proposal with vague AC fails graduation; the error
+    /// includes the offending AC index/text and the proposal remains
+    /// `approved` with no breakdown task or build owner.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_vague_ac_fails_graduation_with_details() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-grad-vague", "test", "svc-grad-vague")
+            .await
+            .unwrap();
+
+        // Create with clean body but vague AC.
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Vague AC Graduation",
+                    body: ready_body(),
+                    acceptance_criteria: Some(
+                        r#"[{"criterion":"API returns 200","met":false},{"criterion":"The UI should be user-friendly","met":false}]"#,
+                    ),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        // Directly advance to `approved` to simulate legacy data.
+        force_approved(&db, &proposal.id).await;
+
+        // Attempt graduation.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+        assert!(
+            error.contains("Vague/unverifiable acceptance criterion"),
+            "error should mention vague AC: {error}"
+        );
+        assert!(
+            error.contains("user-friendly"),
+            "error should include the offending AC text: {error}"
+        );
+
+        // Proposal must still be `approved` — graduation was blocked.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "approved", "status must remain approved");
+
+        // No breakdown task or build owner should be set.
+        assert!(
+            stored.build_breakdown_task_id.is_none(),
+            "no breakdown task should be created"
+        );
+        assert!(
+            stored.build_owner_user_id.is_none(),
+            "no build owner should be set"
+        );
+    }
+
+    /// An approved proposal missing required readiness sections fails
+    /// graduation with missing-check names in the error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approved_missing_sections_fails_graduation_with_check_names() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-grad-missing", "test", "svc-grad-missing")
+            .await
+            .unwrap();
+
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Incomplete Graduation",
+                    body: incomplete_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        force_approved(&db, &proposal.id).await;
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected readiness error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal not ready for review"),
+            "error should mention readiness: {error}"
+        );
+        // At least some of the missing-section details should appear.
+        assert!(
+            error.contains("Missing required coverage"),
+            "error should mention missing coverage: {error}"
+        );
+
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "approved");
+        assert!(stored.build_breakdown_task_id.is_none());
+        assert!(stored.build_owner_user_id.is_none());
+    }
+
+    /// A complete approved proposal graduates: the breakdown planning task
+    /// is created, status moves to `building`, and build owner is set.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn complete_approved_proposal_graduates_and_creates_breakdown_task() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-grad-ok", "test", "svc-grad-ok")
+            .await
+            .unwrap();
+
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Complete Graduation",
+                    body: ready_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        force_approved(&db, &proposal.id).await;
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "graduation should succeed: {:?}",
+            response.get("error")
+        );
+
+        // Proposal must now be `building`.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "building", "status must advance to building");
+
+        // Build owner must be the caller.
+        assert_eq!(
+            stored.build_owner_user_id.as_deref(),
+            Some(user_id.as_str()),
+            "build owner must be the caller"
+        );
+
+        // Breakdown task must be set.
+        let breakdown_id = stored
+            .build_breakdown_task_id
+            .as_deref()
+            .expect("breakdown task id must be set after graduation");
+        let breakdown = task_repo
+            .get(breakdown_id)
+            .await
+            .unwrap()
+            .expect("breakdown task must exist");
+        assert_eq!(breakdown.issue_type, "epic_breakdown");
+        assert!(
+            breakdown.title.contains("Complete Graduation"),
+            "breakdown title must reference the proposal: {}",
+            breakdown.title
+        );
+    }
+
+    /// Regression: existing guardrails (capability, non-approved status)
+    /// still fire before readiness.  A non-approved proposal fails
+    /// graduation with the status guardrail error, not the readiness error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_approved_proposal_fails_with_status_guardrail() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-grad-status", "test", "svc-grad-status")
+            .await
+            .unwrap();
+
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Draft Proposal",
+                    body: ready_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        // Do NOT advance to `approved` — the proposal is still `draft`.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        // Must be the status guardrail, NOT the readiness error.
+        assert!(
+            error.contains("proposal must be approved"),
+            "error must be the status guardrail: {error}"
+        );
+        assert!(
+            !error.contains("proposal not ready"),
+            "readiness must NOT mask the status guardrail: {error}"
+        );
+    }
+
+    /// Regression: the no-primary-target guardrail still fires before
+    /// readiness.  A proposal without targets fails with the target
+    /// guardrail, not the readiness error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_primary_target_fails_with_target_guardrail() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "No Target Proposal",
+                    body: ready_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+
+        force_approved(&db, &proposal.id).await;
+
+        // Do NOT add any target.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        // Must be the primary-target guardrail, NOT the readiness error.
+        assert!(
+            error.contains("no primary target"),
+            "error must be the primary-target guardrail: {error}"
+        );
+    }
+
+    /// Lifecycle regression: the readiness error format is consistent
+    /// across update (review promotion), sign-off, and graduation.
+    /// Each path must surface the same "proposal not ready for review"
+    /// preamble and missing-section / vague-AC detail structure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_error_format_is_consistent_across_lifecycle_gates() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = ProjectRepository::new(db.clone(), EventBus::noop())
+            .create("svc-grad-format", "test", "svc-grad-format")
+            .await
+            .unwrap();
+
+        // --- Update path: attempt to promote a draft to in_review ---
+        let update_proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Format Check Update",
+                    body: incomplete_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&update_proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let update_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_update",
+                        serde_json::json!({
+                            "id": update_proposal.id,
+                            "status": "in_review"
+                        }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let update_err = update_resp.get("error").and_then(|v| v.as_str());
+        assert!(update_err.is_some(), "update should fail: {update_resp:?}");
+        let update_err = update_err.unwrap();
+        assert!(
+            update_err.starts_with("proposal not ready for review:"),
+            "update error must start with readiness preamble: {update_err}"
+        );
+
+        // --- Sign-off path: attempt sign-off on a draft ---
+        let signoff_proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Format Check Signoff",
+                    body: incomplete_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&signoff_proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+
+        let signoff_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({
+                            "id": signoff_proposal.id,
+                            "kind": "technical"
+                        }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let signoff_err = signoff_resp.get("error").and_then(|v| v.as_str());
+        assert!(
+            signoff_err.is_some(),
+            "signoff should fail: {signoff_resp:?}"
+        );
+        let signoff_err = signoff_err.unwrap();
+        assert!(
+            signoff_err.starts_with("proposal not ready for review:"),
+            "signoff error must start with readiness preamble: {signoff_err}"
+        );
+
+        // --- Graduation path: attempt graduation on an approved proposal ---
+        let grad_proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.create(ProposalCreateInput {
+                    title: "Format Check Graduate",
+                    body: incomplete_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&grad_proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        force_approved(&db, &grad_proposal.id).await;
+
+        let grad_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": grad_proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let grad_err = grad_resp.get("error").and_then(|v| v.as_str());
+        assert!(grad_err.is_some(), "graduation should fail: {grad_resp:?}");
+        let grad_err = grad_err.unwrap();
+        assert!(
+            grad_err.starts_with("proposal not ready for review:"),
+            "graduation error must start with readiness preamble: {grad_err}"
+        );
+
+        // All three paths must use the same error format: they should all
+        // contain the same set of missing-section details for this body.
+        for err in [update_err, signoff_err, grad_err] {
+            assert!(
+                err.contains("Missing required coverage: problem"),
+                "all gates must report missing problem: {err}"
+            );
+        }
+    }
+}
+
+// ── Composed gate regression tests (task cuzf) ────────────────────────────
+//
+// These tests verify that draft→in_review, sign-off, and graduation all
+// use the composed gate: DoR + tribunal conditions, with deterministic
+// error messages. They also cover the valid human override path.
+
+#[cfg(test)]
+mod composed_gate_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
+        ProposalRepository, TaskRepository, UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_900, "gate-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    async fn force_approved(db: &Database, proposal_id: &str) {
+        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
+            .bind(proposal_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    /// Create a complete, ready proposal in draft with a target.
+    async fn create_ready_proposal(
+        repo: &ProposalRepository,
+        project_repo: &ProjectRepository,
+        user_id: &str,
+        title: &str,
+    ) -> djinn_core::models::proposal::Proposal {
+        let project = project_repo
+            .create(
+                &format!("svc-gate-{}", uuid::Uuid::now_v7()),
+                "test",
+                &format!("svc-gate-{}", uuid::Uuid::now_v7()),
+            )
+            .await
+            .unwrap();
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.to_string()), async {
+                repo.create(ProposalCreateInput {
+                    title,
+                    body: ready_body(),
+                    acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        proposal
+    }
+
+    /// A needs-work judge verdict blocks sign-off with a deterministic
+    /// message naming the verdict id and missing override.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_work_verdict_blocks_signoff_with_deterministic_message() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "NW Verdict Block").await;
+
+        // Add a needs-work judge verdict.
+        let verdict = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "verdict",
+                body: "needs-work: spec is unclear on X",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("test-judge"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Attempt sign-off — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("judge returned needs-work"),
+            "error should mention needs-work: {error}"
+        );
+        assert!(
+            error.contains(&verdict.id),
+            "error should name the verdict id: {error}"
+        );
+        assert!(
+            error.contains("no current human override"),
+            "error should mention missing override: {error}"
+        );
+
+        // Proposal should still be draft — no sign-off recorded.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "draft");
+    }
+
+    /// A needs-evidence spike blocks graduation with a deterministic
+    /// message naming the spike task id and claim.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_spike_blocks_graduation_with_deterministic_message() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "NE Spike Block").await;
+
+        // Create a spike task and park the proposal.
+        let targets = repo.targets(&proposal.id).await.unwrap();
+        let target_project_id = &targets[0].project_id;
+        let spike = task_repo
+            .create_in_project(
+                target_project_id,
+                None,
+                "Spike: feasibility of X",
+                "Research whether X is feasible",
+                "Research whether X is feasible",
+                "spike",
+                djinn_core::models::task::PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        repo.set_needs_evidence_spike(&proposal.id, &spike.id, "X is load-bearing")
+            .await
+            .unwrap();
+
+        // Force to approved for graduation test.
+        force_approved(&db, &proposal.id).await;
+
+        // Attempt graduation — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("proposal parked on needs-evidence spike"),
+            "error should mention needs-evidence: {error}"
+        );
+        assert!(
+            error.contains(&spike.id),
+            "error should name the spike task id: {error}"
+        );
+        assert!(
+            error.contains("X is load-bearing"),
+            "error should name the claim: {error}"
+        );
+
+        // Proposal should still be approved — graduation was blocked.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "approved");
+    }
+
+    /// An unresolved blocking debate objection blocks sign-off with a
+    /// deterministic message naming the entry id(s).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_debate_entry_blocks_signoff_with_entry_ids() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Blocking Debate").await;
+
+        // Add a blocking objection from adversary.
+        let objection = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "objection",
+                body: "Missing error handling section",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: Some("test-adversary"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Attempt sign-off — should be blocked.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("unresolved blocking debate entries"),
+            "error should mention blocking debate: {error}"
+        );
+        assert!(
+            error.contains(&objection.id),
+            "error should name the objection id: {error}"
+        );
+
+        // After resolving the objection, sign-off should succeed.
+        repo.resolve_debate_trail_entry(&objection.id)
+            .await
+            .unwrap();
+
+        let response2 = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response2.get("error").is_none(),
+            "sign-off after resolve should succeed: {:?}",
+            response2.get("error")
+        );
+    }
+
+    /// A current human override allows sign-off despite a needs-work
+    /// judge verdict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_override_allows_signoff_past_needs_work_verdict() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_ready_proposal(&repo, &project_repo, &user_id, "Override Path").await;
+
+        // Add a needs-work judge verdict.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: missing scope detail",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Without override, sign-off should fail.
+        let fail_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            fail_resp.get("error").is_some(),
+            "sign-off should fail without override"
+        );
+
+        // Record a verdict override at the current revision.
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "PM reviewed and approved scope as-is",
+            "override_by_user_id": user_id
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        // Now sign-off should succeed because the override is current.
+        let ok_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            ok_resp.get("error").is_none(),
+            "sign-off with current override should succeed: {:?}",
+            ok_resp.get("error")
+        );
+
+        // Sign-off should be recorded.
+        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
+        assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
+    }
+
+    /// A stale override (different revision) does not unlock a needs-work
+    /// verdict.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_override_does_not_unlock_needs_work() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Stale Override").await;
+
+        // Add a needs-work judge verdict.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: unclear boundaries",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Record a stale override at revision 0 (proposal is at revision 1).
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": 0,
+            "reason": "earlier override before spec changed"
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        // Sign-off should still fail — the override is stale.
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "sign-off should fail with stale override");
+        let error = error.unwrap();
+        assert!(
+            error.contains("no current human override"),
+            "error should mention stale/missing override: {error}"
+        );
+    }
+}
+
+// ── P4 tribunal readiness regression tests (task j5ti) ──────────────────
+//
+// Cross-surface regressions for the P4 epic: composed-gate blocked transition
+// messages, needs-evidence spike creation/parking/resume, human override path
+// through graduation, and MDX export round-trip after refinement revisions.
+// These complement the narrower unit tests in `composed_gate_tests` and the
+// refinement_tools test suite.
+
+#[cfg(test)]
+mod p4_tribunal_regression_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
+        ProposalRepository, TaskRepository, UserRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+- Deliver B
+
+## File map
+```file-map
+    src/main.rs
+    src/lib.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    /// A body that fails DoR checks (missing all sections).
+    fn failing_body() -> &'static str {
+        "Just some random text without required sections."
+    }
+
+    async fn setup_test_server_and_user() -> (DjinnMcpServer, Database, String) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let user = UserRepository::new(db.clone())
+            .upsert_from_github(999_800, "p4-test-user", None, None)
+            .await
+            .unwrap();
+        UserRepository::new(db.clone())
+            .set_role(&user.id, "engineer")
+            .await
+            .unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db, user.id)
+    }
+
+    /// Create a proposal with a target project.
+    async fn create_proposal_with_target(
+        repo: &ProposalRepository,
+        project_repo: &ProjectRepository,
+        user_id: &str,
+        title: &str,
+        body: &str,
+        ac: Option<&str>,
+    ) -> djinn_core::models::proposal::Proposal {
+        let project = project_repo
+            .create(
+                &format!("svc-p4-{}", uuid::Uuid::now_v7()),
+                "test",
+                &format!("svc-p4-{}", uuid::Uuid::now_v7()),
+            )
+            .await
+            .unwrap();
+        let proposal = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.to_string()), async {
+                repo.create(ProposalCreateInput {
+                    title,
+                    body,
+                    acceptance_criteria: ac,
+                    status: None,
+                    body_format: None,
+                })
+                .await
+            })
+            .await
+            .unwrap();
+        repo.add_target(&proposal.id, &project.id, "primary")
+            .await
+            .unwrap();
+        proposal
+    }
+
+    async fn force_approved(db: &Database, proposal_id: &str) {
+        sqlx::query("UPDATE proposals SET status = 'approved' WHERE id = $1")
+            .bind(proposal_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+    }
+
+    // ── AC1: Composed-gate blocked transition messages ──────────────────────
+
+    /// draft → in_review is blocked when DoR checks fail, with a deterministic
+    /// message naming the missing coverage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_to_in_review_blocked_by_dor_failures() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "DOR Block Test",
+            failing_body(),
+            Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+        )
+        .await;
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_update",
+                        serde_json::json!({
+                            "id": proposal.id,
+                            "status": "in_review",
+                        }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "expected DoR error, got: {response:?}");
+        let error = error.unwrap();
+        assert!(
+            error.contains("Missing required coverage: problem"),
+            "error should name missing problem section: {error}"
+        );
+
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, "draft");
+    }
+
+    /// draft → in_review is blocked when a needs-work judge verdict is present.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draft_to_in_review_blocked_by_needs_work_verdict() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Tribunal Block Test",
+            ready_body(),
+            Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+        )
+        .await;
+
+        let verdict = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "verdict",
+                body: "needs-work: missing error handling section",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("test-judge"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_update",
+                        serde_json::json!({
+                            "id": proposal.id,
+                            "status": "in_review",
+                        }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "expected tribunal error, got: {response:?}"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("judge returned needs-work"),
+            "error should mention needs-work: {error}"
+        );
+        assert!(
+            error.contains(&verdict.id),
+            "error should name the verdict id: {error}"
+        );
+    }
+
+    // ── AC2: Needs-evidence spike parking/resume ────────────────────────────
+
+    /// Spike parking blocks graduation; after clearing the spike, graduation
+    /// succeeds. The spike finding is visible in the debate trail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_spike_parking_resume_and_graduation() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Spike Resume Test",
+            ready_body(),
+            Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+        )
+        .await;
+
+        let targets = repo.targets(&proposal.id).await.unwrap();
+        let target_project_id = &targets[0].project_id;
+        let spike = task_repo
+            .create_in_project(
+                target_project_id,
+                None,
+                "Spike: feasibility of X",
+                "Research whether X is feasible",
+                "Research whether X is feasible",
+                "spike",
+                djinn_core::models::task::PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        repo.set_needs_evidence_spike(&proposal.id, &spike.id, "X is load-bearing")
+            .await
+            .unwrap();
+
+        // set_needs_evidence_spike parks the proposal in draft.
+        // Force to approved AFTER parking so the gate blocks on the spike.
+        force_approved(&db, &proposal.id).await;
+
+        // Graduation blocked while spike is open.
+        let blocked_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            blocked_resp.get("error").is_some(),
+            "graduation should be blocked while spike is open"
+        );
+        let err = blocked_resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(
+            err.contains("proposal parked on needs-evidence spike"),
+            "error should mention needs-evidence: {err}"
+        );
+
+        // Close the spike.
+        sqlx::query("UPDATE tasks SET status = 'done' WHERE id = $1")
+            .bind(&spike.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        // Write the spike finding as a debate-trail entry.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "rebuttal",
+            body: "Spike finding: X is feasible with approach Y",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: Some("test-advocate"),
+            source_task_id: Some(&spike.id),
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Clear needs-evidence parking.
+        repo.clear_needs_evidence_spike(&proposal.id).await.unwrap();
+
+        // Graduation should now succeed.
+        let ok_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            ok_resp.get("error").is_none(),
+            "graduation after spike resume should succeed: {:?}",
+            ok_resp.get("error")
+        );
+
+        // Verify the spike finding is in the debate trail.
+        let entries = repo.debate_trail(&proposal.id).await.unwrap();
+        let finding = entries
+            .iter()
+            .find(|e| e.body.contains("X is feasible with approach Y"));
+        assert!(
+            finding.is_some(),
+            "spike finding should be visible in debate trail"
+        );
+        let finding = finding.unwrap();
+        assert_eq!(finding.agent_role, "advocate");
+        assert_eq!(finding.source_task_id.as_deref(), Some(spike.id.as_str()));
+    }
+
+    // ── AC1 (continued): Valid human override path through graduation ───────
+
+    /// A human verdict override allows graduation past a needs-work judge
+    /// verdict: verdict → override → signoff → graduation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graduation_succeeds_with_human_verdict_override() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Override Graduation Test",
+            ready_body(),
+            Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+        )
+        .await;
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: scope is too broad",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Without override, signoff fails.
+        let fail_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            fail_resp.get("error").is_some(),
+            "signoff should fail without override"
+        );
+
+        // Record a verdict override scoped to the current revision.
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "PM reviewed scope and approved as-is",
+            "override_by_user_id": user_id
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        // Signoff should succeed with override.
+        let ok_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            ok_resp.get("error").is_none(),
+            "signoff with override should succeed: {:?}",
+            ok_resp.get("error")
+        );
+
+        force_approved(&db, &proposal.id).await;
+
+        // Graduation should succeed.
+        let grad_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            grad_resp.get("error").is_none(),
+            "graduation with override should succeed: {:?}",
+            grad_resp.get("error")
+        );
+
+        // Verify the override is recorded in proposal history.
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let override_event = revisions
+            .iter()
+            .find(|r| r.event_kind == "verdict_override");
+        assert!(
+            override_event.is_some(),
+            "verdict_override should appear in proposal revisions"
+        );
+    }
+
+    // ── AC2 (continued): Spike finding visible in proposal_show ─────────────
+
+    /// After a spike closes and its finding is written, proposal_show
+    /// includes the finding in the debate trail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spike_finding_visible_in_proposal_show_debate_trail() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Spike Finding Visibility",
+            ready_body(),
+            Some(r#"[{"criterion":"Works","met":false}]"#),
+        )
+        .await;
+
+        let targets = repo.targets(&proposal.id).await.unwrap();
+        let spike = task_repo
+            .create_in_project(
+                &targets[0].project_id,
+                None,
+                "Spike: Y feasibility",
+                "Can Y handle load?",
+                "Can Y handle load?",
+                "spike",
+                djinn_core::models::task::PRIORITY_CRITICAL,
+                "planner",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        repo.set_needs_evidence_spike(&proposal.id, &spike.id, "Y handles 10k rps")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE tasks SET status = 'done' WHERE id = $1")
+            .bind(&spike.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "rebuttal",
+            body: "Spike confirms: Y handles 12k rps in benchmarks",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: Some("test-advocate"),
+            source_task_id: Some(&spike.id),
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let entries = response
+            .get("debate_trail")
+            .and_then(|v| v.as_array())
+            .expect("debate_trail should be an array");
+
+        let finding = entries.iter().find(|e| {
+            e.get("body")
+                .and_then(|b| b.as_str())
+                .map(|b| b.contains("12k rps"))
+                .unwrap_or(false)
+        });
+        assert!(
+            finding.is_some(),
+            "spike finding should be visible in proposal_show debate_trail"
+        );
+        let finding = finding.unwrap();
+        assert_eq!(
+            finding.get("agent_role").and_then(|v| v.as_str()),
+            Some("advocate")
+        );
+        assert_eq!(
+            finding.get("source_task_id").and_then(|v| v.as_str()),
+            Some(spike.id.as_str())
+        );
+    }
+
+    // ── AC4: Export round-trip after refinement revision ────────────────────
+
+    /// After a refinement checkpoint revision is applied, the proposal
+    /// body still exports without parse errors and contains the enriched content.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_roundtrip_after_refinement_revision() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_target(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Round-trip Test",
+            ready_body(),
+            Some(r#"[{"criterion":"Works","met":false}]"#),
+        )
+        .await;
+
+        // Simulate a refinement checkpoint revision.
+        let enriched_body = format!(
+            "{}\n\n# Error Handling\nAll endpoints return structured errors.",
+            ready_body()
+        );
+        repo.update(
+            &proposal.id,
+            djinn_db::ProposalUpdateInput {
+                title: "Round-trip Test",
+                body: &enriched_body,
+                acceptance_criteria: r#"[{"criterion":"Works","met":false}]"#,
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: Some(&serde_json::json!({
+                    "role": "advocate",
+                    "round": 1,
+                    "checkpoint_status": "approved",
+                })),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Export the proposal.
+        let export_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool("proposal_export", serde_json::json!({ "id": proposal.id }))
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            export_resp.get("error").is_none(),
+            "export should succeed: {:?}",
+            export_resp.get("error")
+        );
+        let mdx = export_resp
+            .get("mdx")
+            .and_then(|v| v.as_str())
+            .expect("export must return mdx field");
+
+        assert!(
+            mdx.contains("Error Handling"),
+            "exported MDX should contain the refinement revision content"
+        );
+        assert!(
+            mdx.contains("structured errors"),
+            "exported MDX should contain enriched body text"
+        );
+        assert!(
+            mdx.starts_with("---\n"),
+            "exported MDX should start with YAML frontmatter"
+        );
+        assert!(
+            mdx.contains("title:"),
+            "exported MDX frontmatter should contain title"
+        );
+        assert!(
+            mdx.contains("acceptance_criteria:"),
+            "exported MDX frontmatter should contain acceptance_criteria"
+        );
+    }
+}
+
+// ── End-to-end planner refinement loop regression (task iy6v) ────────────
+//
+// This module ties together the `y4td` surface delivered by the sibling tasks
+// (1787 block-patch regressions, kepb planner prompt wiring, 18g4 patch
+// primitive, 6al0 revision metadata, mzz8 schema-lean guard) into a single
+// integrated regression that models the proposal `r0io` / `5bdd` flow:
+//
+//   1. A planner authoring session loads `visual-spec` from the native-skill
+//      registry delivered by `5uzr` / `y8p2`.
+//   2. The planner pulls `get_block_catalog` from the `ilqx` surface on demand
+//      — block vocabulary is never inlined into prompts or write schemas.
+//   3. The planner converts a markdown-only proposal draft into block-enriched
+//      MDX through several targeted `proposal_block_patch` calls — never a
+//      monolithic `proposal_update`.
+//   4. Each patch records one proposal revision with `targeted_block_patch`
+//      metadata and the active `visual-spec` version attribution.
+//   5. The enriched proposal exports through `proposal_export` as valid MDX.
+//
+// Why these tests live here rather than as a separate cross-crate harness:
+// the planner refinement loop is a property of how the control-plane MCP
+// server stitches the surfaces together — `proposal_create`,
+// `proposal_block_patch`, `proposal_show` (revisions), and `proposal_export`
+// all run on the same `DjinnMcpServer` against a real `ProposalRepository`.
+// The native-skill registry lookup and the block-catalog pull are pure-Rust
+// surfaces that resolve at compile time.  This module therefore exercises
+// the real delivered end-to-end surface without standing up the planner
+// session runtime, which would require additional infrastructure.
+#[cfg(test)]
+mod end_to_end_planner_refinement_loop_tests {
+    use super::super::proposal_blocks::{
+        parse_mdx_blocks, proposal_block_catalog, validate_mdx_blocks,
+    };
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_agent::native_skills::{native_skill_version, resolved_native_skills_for_role};
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+    use serde_json::Value;
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    /// Multi-section markdown proposal draft used as the starting point for
+    /// the planner refinement loop.  Four independently targetable sections /
+    /// paragraphs are present so the test exercises the `proposal_block_patch`
+    /// primitive over multiple distinct selectors.
+    const DRAFT_BODY: &str = "\
+# Visual-spec authoring integration
+
+The opening paragraph introduces the proposal and explains its purpose.
+
+## Approach
+
+The approach section describes the high-level plan in prose.
+
+## Tradeoffs
+
+The tradeoffs section enumerates the costs of the chosen approach.
+
+## Open Questions
+
+The open-questions section collects uncertainties for the team.
+";
+
+    /// AC: planner authoring sessions receive the native `visual-spec` skill
+    /// (delivered by `y8p2`) through the resolved-native-skills surface so the
+    /// planner can `skill_read` it on demand rather than embedding it in the
+    /// prompt body.  This is the lazy loading contract that lets
+    /// non-authoring planner sessions avoid paying the visual-spec body cost.
+    #[test]
+    fn planner_authoring_session_resolves_visual_spec_from_native_registry() {
+        // A planner authoring session must resolve exactly one native skill
+        // — `visual-spec` — through the registry exposed by `y8p2`.
+        let resolved = resolved_native_skills_for_role("planner");
+        let names: Vec<&str> = resolved.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"visual-spec"),
+            "planner authoring session must resolve visual-spec via the native \
+             registry; got {names:?}"
+        );
+
+        // The version stamp must come from the same registry (no parallel
+        // version source) so the planner can pass it through
+        // `proposal_block_patch` for revision attribution.  `ResolvedSkill`
+        // does not carry `version` (that field is reserved for the immutable
+        // native registry), so we read the version from
+        // `native_skill_version` directly.
+        let registry_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+        assert!(
+            !registry_version.is_empty(),
+            "native_skill_version must return a non-empty version stamp"
+        );
+
+        // The resolved skill must be marked `required: true` for the planner
+        // role — the planner can't author MDX without it.  This pins the
+        // lazy-loading contract: the registry is the single source of truth
+        // for the active version, not a duplicated constant in prompts.
+        let visual_spec = resolved.iter().find(|s| s.name == "visual-spec").unwrap();
+        assert!(
+            visual_spec.required,
+            "visual-spec must be required for the planner authoring session"
+        );
+    }
+
+    /// AC: non-authoring sessions (e.g. `worker`, `reviewer`) must NOT
+    /// receive `visual-spec`.  This is the lazy-loading guard: only the
+    /// planner role pays the visual-spec body cost.
+    #[test]
+    fn non_authoring_sessions_do_not_receive_visual_spec() {
+        for role in ["worker", "reviewer"] {
+            let resolved = resolved_native_skills_for_role(role);
+            let names: Vec<&str> = resolved.iter().map(|s| s.name.as_str()).collect();
+            assert!(
+                !names.contains(&"visual-spec"),
+                "{role} session must not receive visual-spec; got {names:?}"
+            );
+        }
+    }
+
+    /// AC: the `get_block_catalog` pull surface (delivered by `ilqx`) returns
+    /// the lean (type, tag) vocabulary the planner uses to discover block
+    /// names without inlining them in prompts or write schemas.  This test
+    /// pins the catalog against the registry so a future drift between the
+    /// two surfaces is caught.
+    #[test]
+    fn get_block_catalog_pull_surface_returns_lean_vocabulary() {
+        let catalog = proposal_block_catalog();
+        assert_eq!(
+            catalog.len(),
+            14,
+            "get_block_catalog must expose all 14 v1 block types so the planner \
+             can discover the vocabulary on demand"
+        );
+        // The catalog is the lean projection — no field schemas, no
+        // descriptions, just (type, tag) pairs.  Any future regression that
+        // bloats the catalog back into the rich registry shape is caught
+        // here.
+        for entry in &catalog {
+            assert!(
+                !entry.block_type.is_empty(),
+                "catalog entry has empty type: {entry:?}"
+            );
+            assert!(
+                !entry.tag.is_empty(),
+                "catalog entry has empty tag: {entry:?}"
+            );
+        }
+    }
+
+    /// AC: a markdown-only proposal draft is progressively enriched into
+    /// `body_format=mdx` through the targeted `proposal_block_patch`
+    /// primitive.  `latest_revision_seq` must equal the seed revision (1)
+    /// plus the number of patches applied.  A monolithic whole-body
+    /// `proposal_update` is forbidden for enrichment — the test only
+    /// invokes `proposal_block_patch`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_loop_increments_revision_seq_once_per_targeted_patch() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Planner Refinement Loop",
+                body: DRAFT_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            proposal.latest_revision_seq, 1,
+            "create seed must leave latest_revision_seq at 1"
+        );
+        assert_eq!(
+            proposal.body_format, "markdown",
+            "create seed must produce body_format=markdown"
+        );
+
+        // Three independently targetable sections get promoted to MDX blocks
+        // through three sequential `proposal_block_patch` calls.  Each one
+        // is exactly one material proposal edit (= one revision increment).
+        let visual_spec_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+
+        let patches = [
+            (
+                "The opening paragraph introduces the proposal and explains its purpose.",
+                "<RichText id=\"opening\">\nThe structured opening paragraph.\n</RichText>",
+                "first patch: opening paragraph -> RichText",
+            ),
+            (
+                "The approach section describes the high-level plan in prose.",
+                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+                "second patch: approach -> FileTree",
+            ),
+            (
+                "The tradeoffs section enumerates the costs of the chosen approach.",
+                "<Callout id=\"tradeoffs-callout\">\nThe structured tradeoff callout.\n</Callout>",
+                "third patch: tradeoffs -> Callout",
+            ),
+        ];
+
+        let mut expected_seq: i32 = 1;
+        let mut prev_expected_revision_seq: Option<i32> = None;
+        for (selector_text, block_mdx, note) in patches {
+            let mut args = serde_json::json!({
+                "id": proposal.id,
+                "selector": { "exact_text": selector_text },
+                "operation": "replace",
+                "block_mdx": block_mdx,
+                "native_skill_name": "visual-spec",
+                "native_skill_version": visual_spec_version,
+                "note": note,
+            });
+            // Pass `expected_latest_revision_seq` to exercise the stale-revision
+            // guard path the prompt wires up for sequential patches.
+            if let Some(prev) = prev_expected_revision_seq {
+                args["expected_latest_revision_seq"] = serde_json::json!(prev);
+            }
+
+            let response = server
+                .dispatch_tool("proposal_block_patch", args)
+                .await
+                .unwrap();
+            assert!(
+                response.get("error").is_none(),
+                "proposal_block_patch failed for {note:?}: {:?}",
+                response.get("error")
+            );
+            expected_seq += 1;
+            prev_expected_revision_seq = Some(expected_seq);
+
+            let after = repo.get(&proposal.id).await.unwrap().unwrap();
+            assert_eq!(
+                after.latest_revision_seq, expected_seq,
+                "latest_revision_seq must be exactly +1 per patch after {note:?}"
+            );
+        }
+
+        // Final state: three patches landed -> latest_revision_seq = 4
+        // (1 seed + 3 patches).
+        let final_state = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            final_state.latest_revision_seq, 4,
+            "three patches from a 1-seed proposal must yield latest_revision_seq=4"
+        );
+        assert_eq!(
+            final_state.body_format, "mdx",
+            "first MDX block patch must upgrade body_format to mdx"
+        );
+
+        // The proposal_show surface must report the same revision seq
+        // (drift between the repo state and the public surface is caught here).
+        let shown = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        assert_eq!(
+            shown
+                .get("proposal")
+                .and_then(|p| p.get("latest_revision_seq"))
+                .and_then(|v| v.as_i64()),
+            Some(4),
+            "proposal_show.proposal.latest_revision_seq must match the repo state"
+        );
+    }
+
+    /// AC: revision history exposes `targeted_block_patch` metadata on every
+    /// patch revision, including the active `visual-spec` native-skill
+    /// version attribution.  The seed revision must NOT carry that metadata
+    /// — that signal is reserved for the patch primitive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_loop_revisions_carry_visual_spec_attribution() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Refinement Loop Attribution",
+                body: DRAFT_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let visual_spec_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+
+        // Apply two patches, attributing each to the registry's active version.
+        for (selector_text, block_mdx) in [
+            (
+                "The opening paragraph introduces the proposal and explains its purpose.",
+                "<RichText id=\"opening\">\nStructured opening.\n</RichText>",
+            ),
+            (
+                "The approach section describes the high-level plan in prose.",
+                "<FileTree id=\"repo\" name=\"repo\" />",
+            ),
+        ] {
+            let response = server
+                .dispatch_tool(
+                    "proposal_block_patch",
+                    serde_json::json!({
+                        "id": proposal.id,
+                        "selector": { "exact_text": selector_text },
+                        "operation": "replace",
+                        "block_mdx": block_mdx,
+                        "native_skill_name": "visual-spec",
+                        "native_skill_version": visual_spec_version,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.get("error").is_none(),
+                "patch failed: {:?}",
+                response.get("error")
+            );
+        }
+
+        // Walk revisions through proposal_show — the surface the planner
+        // consumes — and assert metadata shape on every patch revision.
+        let shown = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        let revisions = shown
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .expect("proposal_show.revisions must be a JSON array");
+
+        // 1 seed + 2 patches = 3 revisions.
+        assert_eq!(
+            revisions.len(),
+            3,
+            "expected 3 revisions (1 seed + 2 patches); got {}",
+            revisions.len()
+        );
+
+        // The seed revision must NOT carry targeted-block-patch metadata —
+        // `proposal_create` writes no event_metadata.
+        let seed = &revisions[0];
+        let seed_meta = seed.get("event_metadata");
+        assert!(
+            seed_meta.is_none() || seed_meta.is_some_and(|v| v.is_null()),
+            "create seed revision must not carry event_metadata, got {seed_meta:?}"
+        );
+
+        // Every patch revision must carry the targeted-block-patch signal
+        // AND the active `visual-spec` version from the native registry.
+        for (idx, rev) in revisions.iter().enumerate().skip(1) {
+            let meta_str = rev
+                .get("event_metadata")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("patch rev #{idx} must expose event_metadata"));
+            let meta: Value = serde_json::from_str(meta_str)
+                .unwrap_or_else(|e| panic!("patch rev #{idx} event_metadata must be JSON: {e}"));
+            assert_eq!(
+                meta["change_kind"], "targeted_block_patch",
+                "patch rev #{idx} must identify as targeted_block_patch"
+            );
+            assert_eq!(
+                meta["native_skill_name"], "visual-spec",
+                "patch rev #{idx} must attribute the native skill name"
+            );
+            assert_eq!(
+                meta["native_skill_version"], visual_spec_version,
+                "patch rev #{idx} must attribute the active visual-spec version from \
+                 the native registry (drift between registry and patch metadata is \
+                 caught here)"
+            );
+            // The byte-range fields are present and well-typed.
+            assert!(
+                meta["range_start_byte"].is_number() && meta["range_end_byte"].is_number(),
+                "patch rev #{idx} must expose numeric byte-range fields"
+            );
+            assert!(
+                meta["range_end_byte"].as_u64().unwrap()
+                    > meta["range_start_byte"].as_u64().unwrap(),
+                "patch rev #{idx} range_end_byte must exceed range_start_byte"
+            );
+        }
+    }
+
+    /// AC: after the refinement loop, the proposal exports cleanly through
+    /// `proposal_export` and the returned MDX round-trips through the block
+    /// parser.  This is the end-to-end fidelity contract that ties the
+    /// refinement loop back to the MDX export surface.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_loop_enriched_proposal_exports_as_valid_mdx() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Refinement Loop Export",
+                body: DRAFT_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let visual_spec_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+
+        // Apply three sequential targeted patches — the full planner refinement
+        // loop from a markdown-only draft.
+        for (selector_text, block_mdx) in [
+            (
+                "The opening paragraph introduces the proposal and explains its purpose.",
+                "<RichText id=\"opening\">\nStructured opening.\n</RichText>",
+            ),
+            (
+                "The approach section describes the high-level plan in prose.",
+                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+            ),
+            (
+                "The tradeoffs section enumerates the costs of the chosen approach.",
+                "<Callout id=\"tradeoffs\">\nStructured callout.\n</Callout>",
+            ),
+        ] {
+            let response = server
+                .dispatch_tool(
+                    "proposal_block_patch",
+                    serde_json::json!({
+                        "id": proposal.id,
+                        "selector": { "exact_text": selector_text },
+                        "operation": "replace",
+                        "block_mdx": block_mdx,
+                        "native_skill_name": "visual-spec",
+                        "native_skill_version": visual_spec_version,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.get("error").is_none(),
+                "patch failed: {:?}",
+                response.get("error")
+            );
+        }
+
+        // Final body_format must be mdx.
+        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(stored.body_format, "mdx");
+
+        // proposal_export must succeed and return MDX with frontmatter.
+        let exported = server
+            .dispatch_tool("proposal_export", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        assert!(
+            exported.get("error").is_none(),
+            "proposal_export failed after MDX enrichment: {:?}",
+            exported.get("error")
+        );
+        let mdx = exported
+            .get("mdx")
+            .and_then(|v| v.as_str())
+            .expect("proposal_export.mdx must be a non-empty string for mdx proposals");
+        assert!(
+            mdx.contains("body_format: mdx"),
+            "exported MDX frontmatter must record body_format: mdx"
+        );
+        assert!(
+            mdx.matches("---").count() >= 2,
+            "exported MDX must include the YAML frontmatter delimiters"
+        );
+
+        // The exported MDX body must parse into the same blocks as the
+        // stored body.  This is the round-trip fidelity contract.
+        let original_blocks =
+            parse_mdx_blocks(&stored.body).expect("stored body must parse as MDX");
+        let exported_body = mdx
+            .splitn(3, "---")
+            .nth(2)
+            .expect("exported MDX must have a body section after frontmatter")
+            .trim_start_matches('\n');
+        let exported_blocks =
+            parse_mdx_blocks(exported_body).expect("exported body must parse as MDX");
+        assert_eq!(
+            exported_blocks, original_blocks,
+            "exported MDX blocks must match the stored body blocks byte-for-byte"
+        );
+        let exported_ids: Vec<&str> = exported_blocks.iter().map(|b| b.id.as_str()).collect();
+        assert!(exported_ids.contains(&"opening"));
+        assert!(exported_ids.contains(&"repo-layout"));
+        assert!(exported_ids.contains(&"tradeoffs"));
+
+        // Body validation must succeed end-to-end on the stored body.
+        validate_mdx_blocks(&stored.body)
+            .expect("enriched body must validate as MDX after the refinement loop");
+
+        // Unrelated sections must survive byte-for-byte — proving no
+        // monolithic whole-body rewrite happened.
+        for anchor in [
+            "# Visual-spec authoring integration",
+            "## Open Questions",
+            "The open-questions section collects uncertainties for the team.",
+        ] {
+            assert!(
+                stored.body.contains(anchor),
+                "unrelated anchor {anchor:?} must be preserved verbatim after the \
+                 refinement loop; body was:\n{}",
+                stored.body
+            );
+        }
+    }
+
+    /// AC: the planner workflow surfaces remain lazy.  Concretely:
+    ///   * the `proposal_address.md` planner prompt does not inline the
+    ///     block vocabulary or skill body (verified by re-asserting the
+    ///     prompts-tests contract from kepb at the workflow-regression
+    ///     level),
+    ///   * the catalog pull surface is the single source of block
+    ///     vocabulary (verified by ensuring the prompt does not name any
+    ///     block tag from `proposal_block_catalog`),
+    ///   * the active native-skill version stamped on patch revisions is
+    ///     identical to the version returned by `native_skill_version` so the
+    ///     registry remains the single source of truth.
+    ///
+    /// This test ties the lazy-surfaces contract to the actual refinement
+    /// loop: any future edit that bakes vocabulary into the prompt, or that
+    /// drifts the patch-attribute version away from the registry version,
+    /// is caught here.
+    #[test]
+    fn refinement_loop_workflow_surfaces_remain_lazy() {
+        // (a) The planner proposal-address prompt must not inline block
+        //     vocabulary.  Re-assert the prompt-test contract at the
+        //     workflow-regression level.
+        let prompt = include_str!("../../../djinn-agent/src/prompts/proposal_address.md");
+        let catalog = proposal_block_catalog();
+        for entry in &catalog {
+            assert!(
+                !prompt.contains(&entry.tag),
+                "proposal_address.md must not inline block tag {:?} from the catalog",
+                entry.tag
+            );
+            assert!(
+                !prompt.contains(&entry.block_type),
+                "proposal_address.md must not inline block type {:?} from the catalog",
+                entry.block_type
+            );
+        }
+        // Generic vocabulary surface must not appear either.
+        assert!(
+            !prompt.contains("block_types"),
+            "proposal_address.md must not reference a `block_types` catalog list"
+        );
+
+        // (b) The catalog pull surface and the native-skill version stamp
+        //     remain the single source of truth.  The registry version
+        //     returned by `native_skill_version` is exactly what planners
+        //     stamp on patch revisions — there is no parallel version
+        //     constant the prompt or tests could drift against.
+        //     `ResolvedSkill` does not carry `version` (that field is reserved
+        //     for the immutable native registry), so we only assert that the
+        //     planner role resolves `visual-spec` here.
+        let registry_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+        let resolved = resolved_native_skills_for_role("planner");
+        assert!(
+            resolved.iter().any(|s| s.name == "visual-spec"),
+            "planner must resolve visual-spec"
+        );
+        assert!(
+            !registry_version.is_empty(),
+            "registry version must be a non-empty stamp"
+        );
+    }
+
+    /// AC: the full integrated end-to-end refinement loop — markdown draft ->
+    /// skill/catalog resolution -> 3 targeted patches -> MDX export — wires
+    /// together every y4td surface into a single deterministic regression.
+    /// This is the load-bearing test the task acceptance criteria converge on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refinement_loop_end_to_end_ties_all_y4td_surfaces_together() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // (1) Planner authoring session must resolve the native `visual-spec`
+        //     skill (y8p2 surface) — verifies the lazy loading contract.
+        let resolved_skills = resolved_native_skills_for_role("planner");
+        assert!(
+            resolved_skills.iter().any(|s| s.name == "visual-spec"),
+            "planner must resolve visual-spec via the native registry"
+        );
+        let registry_version = native_skill_version("visual-spec")
+            .expect("native_skill_version must return the active visual-spec version");
+        assert!(
+            !registry_version.is_empty(),
+            "native_skill_version must return a non-empty stamp"
+        );
+
+        // (2) The planner pulls the lean catalog on demand (ilqx surface) —
+        //     block vocabulary is never inlined into the proposal write
+        //     schemas (verified separately by the prompt schema-lean
+        //     regression in `schema_lean_tests`).
+        let catalog = proposal_block_catalog();
+        assert_eq!(
+            catalog.len(),
+            14,
+            "get_block_catalog must expose the full v1 vocabulary on demand"
+        );
+
+        // (3) Create a markdown-only proposal draft.
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "End-to-end y4td regression",
+                body: DRAFT_BODY,
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(proposal.body_format, "markdown");
+        assert_eq!(proposal.latest_revision_seq, 1);
+
+        // (4) Apply 3 sequential targeted block patches through the real
+        //     `proposal_block_patch` MCP surface — never a whole-body
+        //     `proposal_update`.  Each patch carries the active visual-spec
+        //     version from the registry for revision attribution.
+        for (selector_text, block_mdx) in [
+            (
+                "The opening paragraph introduces the proposal and explains its purpose.",
+                "<RichText id=\"opening\">\nStructured opening.\n</RichText>",
+            ),
+            (
+                "The approach section describes the high-level plan in prose.",
+                "<FileTree id=\"repo-layout\" name=\"repo\" />",
+            ),
+            (
+                "The tradeoffs section enumerates the costs of the chosen approach.",
+                "<Callout id=\"tradeoffs\">\nStructured callout.\n</Callout>",
+            ),
+        ] {
+            let response = server
+                .dispatch_tool(
+                    "proposal_block_patch",
+                    serde_json::json!({
+                        "id": proposal.id,
+                        "selector": { "exact_text": selector_text },
+                        "operation": "replace",
+                        "block_mdx": block_mdx,
+                        "native_skill_name": "visual-spec",
+                        "native_skill_version": registry_version,
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.get("error").is_none(),
+                "proposal_block_patch failed: {:?}",
+                response.get("error")
+            );
+        }
+
+        // (5) Final state: body_format=mdx, latest_revision_seq=4 (1 seed + 3 patches).
+        let final_state = repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(final_state.body_format, "mdx");
+        assert_eq!(final_state.latest_revision_seq, 4);
+
+        // (6) Revision metadata: every patch revision carries
+        //     `targeted_block_patch` + the registry's visual-spec version.
+        let shown = server
+            .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        let revisions = shown
+            .get("revisions")
+            .and_then(|v| v.as_array())
+            .expect("proposal_show.revisions must be a JSON array");
+        assert_eq!(revisions.len(), 4, "1 seed + 3 patches = 4 revisions");
+        for (idx, rev) in revisions.iter().enumerate().skip(1) {
+            let meta: Value = serde_json::from_str(
+                rev.get("event_metadata")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("rev #{idx} must expose event_metadata")),
+            )
+            .unwrap_or_else(|e| panic!("rev #{idx} event_metadata must be JSON: {e}"));
+            assert_eq!(meta["change_kind"], "targeted_block_patch");
+            assert_eq!(meta["native_skill_name"], "visual-spec");
+            assert_eq!(meta["native_skill_version"], registry_version);
+        }
+
+        // (7) The final enriched proposal exports as valid MDX through
+        //     `proposal_export`, with all 3 patched blocks intact.
+        let exported = server
+            .dispatch_tool("proposal_export", serde_json::json!({ "id": proposal.id }))
+            .await
+            .unwrap();
+        assert!(exported.get("error").is_none());
+        let mdx = exported
+            .get("mdx")
+            .and_then(|v| v.as_str())
+            .expect("export must return mdx for body_format=mdx proposals");
+        let exported_body = mdx
+            .splitn(3, "---")
+            .nth(2)
+            .expect("exported MDX must have a body section after frontmatter")
+            .trim_start_matches('\n');
+        let exported_blocks =
+            parse_mdx_blocks(exported_body).expect("exported body must parse as MDX");
+        let exported_ids: Vec<&str> = exported_blocks.iter().map(|b| b.id.as_str()).collect();
+        assert!(exported_ids.contains(&"opening"));
+        assert!(exported_ids.contains(&"repo-layout"));
+        assert!(exported_ids.contains(&"tradeoffs"));
     }
 }

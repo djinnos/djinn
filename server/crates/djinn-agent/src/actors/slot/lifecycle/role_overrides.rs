@@ -115,6 +115,9 @@ fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
         RoleKind::Verifier => AgentType::Worker,
         RoleKind::Architect => AgentType::Architect,
         RoleKind::Lead => AgentType::Lead,
+        // Default for refinement — the concrete tribunal role is resolved from
+        // task.agent_type in resolve_role_overrides below.
+        RoleKind::Refinement => AgentType::Advocate,
     }
 }
 
@@ -209,6 +212,31 @@ pub(crate) async fn resolve_role_overrides(
             }
         }
     }
+
+    // ── Refinement tribunal override path ──────────────────────────────────
+    // For `RoleKind::Refinement`, the `task.agent_type` field directly names
+    // the tribunal role ("advocate", "adversary", or "judge"). We resolve it
+    // to `AgentType` via `from_str` — no DB specialist row needed.
+    if role_kind == RoleKind::Refinement
+        && let Some(tribunal_role) = task.agent_type.as_deref()
+        && !tribunal_role.is_empty()
+    {
+        match AgentType::from_str(tribunal_role) {
+            Ok(agent_type) => {
+                let tribunal_impl = role_impl_for(agent_type);
+                out.runtime_role = tribunal_impl;
+                out.specialist_overrode_runtime_role = agent_type != injected_agent_type;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    tribunal_role,
+                    "Stage: unknown refinement tribunal role; keeping default Advocate"
+                );
+            }
+        }
+    }
+    // Fall through to the default-role path for prompt extensions, etc.
 
     // ── Default role config path ─────────────────────────────────────────
     let base_role = injected_agent_type.as_str();

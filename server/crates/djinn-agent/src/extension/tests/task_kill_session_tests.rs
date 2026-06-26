@@ -60,6 +60,7 @@ async fn call_task_kill_session_settles_paused_session_to_interrupted() {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: None,
         })
         .await
         .expect("session create should succeed");
@@ -116,6 +117,7 @@ async fn call_task_kill_session_is_idempotent_on_already_interrupted_session() {
             metadata_json: None,
             task_run_id: None,
             pricing: None,
+            cost_basis: None,
         })
         .await
         .expect("session create should succeed");

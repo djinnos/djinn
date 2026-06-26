@@ -115,6 +115,7 @@ struct SessionSeed<'a> {
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     cost_usd: Option<f64>,
+    cost_basis: &'a str,
     task_id: Option<&'a str>,
 }
 
@@ -164,8 +165,8 @@ async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
-          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd) \
-         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11)",
+          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(seed.project_id)
@@ -178,6 +179,7 @@ async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
     .bind(seed.cache_read_tokens)
     .bind(seed.cache_write_tokens)
     .bind(seed.cost_usd)
+    .bind(seed.cost_basis)
     .execute(db.pool())
     .await
     .expect("failed to seed session row");
@@ -301,15 +303,19 @@ async fn kpis_have_label_value_and_delta_fields() {
 
     assert_eq!(status, StatusCode::OK);
     let kpis = array_field(&body, "kpis");
-    assert_eq!(kpis.len(), 4, "expected four KPI cards, got {}", kpis.len());
+    assert_eq!(kpis.len(), 5, "expected five KPI cards, got {}", kpis.len());
 
     let labels: Vec<&str> = kpis
         .iter()
         .filter_map(|k| k.get("label").and_then(Value::as_str))
         .collect();
     assert!(
-        labels.contains(&"Spend"),
-        "expected a Spend KPI: {labels:?}"
+        labels.contains(&"Actual API Spend"),
+        "expected an Actual API Spend KPI: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Projected Cost"),
+        "expected a Projected Cost KPI: {labels:?}"
     );
 
     for kpi in kpis {
@@ -370,6 +376,7 @@ async fn weekly_rollup_buckets_to_week_start_and_counts_sessions() {
                 cache_read_tokens: 10,
                 cache_write_tokens: 5,
                 cost_usd: Some(cost),
+                cost_basis: "actual",
                 task_id: None,
             },
         )
@@ -424,6 +431,7 @@ async fn null_cost_yields_null_spend_kpi_and_series_cost() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: None,
+            cost_basis: "unpriced",
             task_id: None,
         },
     )
@@ -437,22 +445,22 @@ async fn null_cost_yields_null_spend_kpi_and_series_cost() {
     assert_eq!(status, StatusCode::OK);
 
     let kpis = array_field(&body, "kpis");
-    let spend = kpis
+    let actual_kpi = kpis
         .iter()
-        .find(|k| k.get("label").and_then(Value::as_str) == Some("Spend"))
-        .expect("Spend KPI");
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Actual API Spend"))
+        .expect("Actual API Spend KPI");
     assert!(
-        spend.get("value").unwrap().is_null(),
-        "expected null Spend value for unpriced sessions, got: {}",
-        spend.get("value").unwrap()
+        actual_kpi.get("value").unwrap().is_null(),
+        "expected null Actual API Spend value for unpriced sessions, got: {}",
+        actual_kpi.get("value").unwrap()
     );
 
     let series = array_field(&body, "time_series");
     assert!(!series.is_empty());
     assert!(
-        series[0].get("cost").unwrap().is_null(),
-        "expected null series cost for unpriced bucket, got: {}",
-        series[0].get("cost").unwrap()
+        series[0].get("actual_spend_usd").unwrap().is_null(),
+        "expected null series actual_spend_usd for unpriced bucket, got: {}",
+        series[0].get("actual_spend_usd").unwrap()
     );
 }
 
@@ -565,6 +573,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(1.00),
+            cost_basis: "actual",
             task_id: Some(&task_id),
         },
     )
@@ -586,8 +595,10 @@ async fn model_effectiveness_uses_frontend_field_names() {
         "task_count",
         "success_rate",
         "avg_reopens",
-        "cost_per_task",
-        "total_cost",
+        "actual_cost_per_task",
+        "actual_spend_usd",
+        "projected_usd",
+        "unpriced_session_count",
         "total_tokens",
         "session_count",
         "completed_task_count",
@@ -603,6 +614,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
     // Repository-only names must not leak into the API.
     assert!(row.get("model_id").is_none());
     assert!(row.get("spend_usd").is_none());
+    assert!(row.get("total_cost").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -633,6 +645,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: None,
+            cost_basis: "unpriced",
             task_id: Some(&task_id),
         },
     )
@@ -648,9 +661,9 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     let me = array_field(&body, "model_effectiveness");
     let row = model_effectiveness_row(me, "unpriced-model");
     assert!(
-        row.get("total_cost").unwrap().is_null(),
-        "expected total_cost null for unpriced model, got: {}",
-        row.get("total_cost").unwrap()
+        row.get("actual_spend_usd").unwrap().is_null(),
+        "expected actual_spend_usd null for unpriced model, got: {}",
+        row.get("actual_spend_usd").unwrap()
     );
 }
 
@@ -684,6 +697,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
             cache_read_tokens: 10,
             cache_write_tokens: 5,
             cost_usd: Some(4.00),
+            cost_basis: "actual",
             task_id: Some(&task_id),
         },
     )
@@ -706,10 +720,10 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
         proj_row.get("name").unwrap().as_str().unwrap(),
         "breakdown-project"
     );
-    assert!((proj_row.get("cost").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+    assert!((proj_row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
 
     // by_task: a row keyed by the task id, carrying a task_id link field and a
-    // derived cost_per_task.
+    // derived actual_cost_per_task.
     let by_task = array_field(body.get("breakdowns").unwrap(), "by_task");
     let task_row = by_task
         .iter()
@@ -719,7 +733,16 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
         task_row.get("task_id").unwrap().as_str().unwrap(),
         task_id.as_str()
     );
-    assert!((task_row.get("cost_per_task").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+    assert!(
+        (task_row
+            .get("actual_cost_per_task")
+            .unwrap()
+            .as_f64()
+            .unwrap()
+            - 4.0)
+            .abs()
+            < 1e-9
+    );
 
     // project_model_matrix: a cell for (proj-bd, model-bd) with frontend names.
     let matrix = array_field(&body, "project_model_matrix");
@@ -730,6 +753,188 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
                 && c.get("model").and_then(Value::as_str) == Some("model-bd")
         })
         .expect("matrix cell for proj-bd/model-bd");
-    assert!((cell.get("total_cost").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
+    assert!((cell.get("actual_spend_usd").unwrap().as_f64().unwrap() - 4.0).abs() < 1e-9);
     assert_eq!(cell.get("total_tokens").unwrap().as_i64().unwrap(), 150);
+}
+
+// ── Split cost-basis contract: actual + projected + unpriced ────────────────
+
+/// Verify that `/api/admin/usage` returns separate `actual_spend_usd` and
+/// `projected_usd` KPIs, and that unpriced sessions are excluded from both
+/// dollar figures but counted visibly in series, breakdowns, and matrix.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_cost_basis_contract_at_api_level() {
+    let db = test_helpers::create_test_db();
+    let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-split", "split-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-split",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+
+    // actual-basis session: $2.00
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(2.00),
+            cost_basis: "actual",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // projected-basis session: $3.50
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-12T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(3.50),
+            cost_basis: "projected",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // unpriced-basis session: NULL cost
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-split",
+            model_id: "model-split",
+            agent_type: "worker",
+            started_at: "2025-03-13T10:00:00Z",
+            tokens_in: 50,
+            tokens_out: 25,
+            cache_read_tokens: 5,
+            cache_write_tokens: 2,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    let app = test_helpers::create_test_app_with_db(db);
+
+    let (status, body) =
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // ── KPIs: separate Actual API Spend and Projected Cost cards ──
+    let kpis = array_field(&body, "kpis");
+    let actual_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Actual API Spend"))
+        .expect("Actual API Spend KPI");
+    assert!(
+        (actual_kpi.get("value").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "actual KPI should be $2.00, got: {}",
+        actual_kpi.get("value").unwrap()
+    );
+
+    let projected_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Projected Cost"))
+        .expect("Projected Cost KPI");
+    assert!(
+        (projected_kpi.get("value").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "projected KPI should be $3.50, got: {}",
+        projected_kpi.get("value").unwrap()
+    );
+
+    // ── Sessions KPI: all 3 sessions counted ──
+    let sessions_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Sessions"))
+        .expect("Sessions KPI");
+    assert_eq!(sessions_kpi.get("value").unwrap().as_f64().unwrap(), 3.0);
+
+    // ── Model effectiveness: split costs for model-split ──
+    let me = array_field(&body, "model_effectiveness");
+    let row = model_effectiveness_row(me, "model-split");
+    assert!(
+        (row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "model actual_spend_usd should be $2.00"
+    );
+    assert!(
+        (row.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "model projected_usd should be $3.50"
+    );
+    assert_eq!(
+        row.get("unpriced_session_count").unwrap().as_i64().unwrap(),
+        1,
+        "one unpriced session"
+    );
+
+    // ── Project model matrix: split costs per cell ──
+    let matrix = array_field(&body, "project_model_matrix");
+    let cell = matrix
+        .iter()
+        .find(|c| {
+            c.get("project_id").and_then(Value::as_str) == Some("proj-split")
+                && c.get("model").and_then(Value::as_str) == Some("model-split")
+        })
+        .expect("matrix cell for proj-split/model-split");
+    assert!(
+        (cell.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "matrix cell actual_spend_usd should be $2.00"
+    );
+    assert!(
+        (cell.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "matrix cell projected_usd should be $3.50"
+    );
+    assert_eq!(
+        cell.get("unpriced_session_count")
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1,
+        "matrix cell unpriced"
+    );
+
+    // ── Breakdown (by_project): split costs per entity ──
+    let by_project = array_field(body.get("breakdowns").unwrap(), "by_project");
+    let proj_row = by_project
+        .iter()
+        .find(|r| r.get("id").and_then(Value::as_str) == Some("proj-split"))
+        .expect("by_project row for proj-split");
+    assert!(
+        (proj_row.get("actual_spend_usd").unwrap().as_f64().unwrap() - 2.0).abs() < 1e-9,
+        "breakdown actual should be $2.00"
+    );
+    assert!(
+        (proj_row.get("projected_usd").unwrap().as_f64().unwrap() - 3.5).abs() < 1e-9,
+        "breakdown projected should be $3.50"
+    );
+    assert_eq!(
+        proj_row
+            .get("unpriced_session_count")
+            .unwrap()
+            .as_i64()
+            .unwrap(),
+        1,
+        "breakdown unpriced"
+    );
 }

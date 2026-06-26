@@ -4,7 +4,7 @@ use djinn_agent::actors::slot::SlotPoolHandle;
 use djinn_agent::lsp::LspManager;
 use djinn_control_plane::bridge::{
     CoordinatorOps, CoordinatorStatus, LspOps, LspWarning, ModelPoolStatus, PoolStatus,
-    RunningTaskInfo, SlotPoolOps,
+    ProposalRefinementStartRequest, RunningTaskInfo, SlotPoolOps,
 };
 
 // ── Newtype wrappers ───────────────────────────────────────────────────────────
@@ -30,6 +30,42 @@ impl CoordinatorOps for CoordinatorBridge {
     async fn trigger_dispatch_for_project(&self, project_id: &str) -> Result<(), String> {
         self.0
             .trigger_dispatch_for_project(project_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn start_proposal_refinement(
+        &self,
+        request: ProposalRefinementStartRequest,
+    ) -> Result<(), String> {
+        self.0
+            .start_proposal_refinement(
+                request.proposal_id,
+                request.current_revision_seq,
+                request.owner_user_id,
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn demand_proposal_refinement_round(
+        &self,
+        request: ProposalRefinementStartRequest,
+    ) -> Result<(), String> {
+        self.0
+            .demand_proposal_refinement_round(request.proposal_id, request.current_revision_seq)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn resolve_refinement_review(
+        &self,
+        proposal_id: String,
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        self.0
+            .resolve_refinement_review(proposal_id, accept, feedback)
             .await
             .map_err(|e| e.to_string())
     }

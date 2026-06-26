@@ -20,12 +20,13 @@ use djinn_runtime::GraphWarmerService;
 use djinn_workspace::MirrorManager;
 use tokio::sync::Mutex;
 
-use crate::actors::coordinator::{BackgroundWorkTracker, CoordinatorHandle};
+use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::Database;
+use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).

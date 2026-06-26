@@ -8,6 +8,83 @@ use djinn_core::models::{
 };
 use serde::{Deserialize, Serialize};
 
+// ── Revision metadata convention ─────────────────────────────────────────────
+//
+// Material proposal revisions persist structured metadata in
+// `proposal_revisions.event_metadata` (a JSONB column already surfaced by
+// `ProposalRevisionModel::event_metadata` and `ProposalRepository::revisions`).
+// The convention below is the typed shape future targeted-patch callers use to
+// attribute authoring revisions to the active native-skill version (and to
+// record the targeted range they patched). Ordinary `proposal_update` calls
+// leave the column `NULL`, preserving the pre-existing contract.
+//
+// Persistence is fully additive: callers build a `TargetedBlockPatchMetadata`
+// (or any compatible JSON object), serialize it with [`serde_json::to_value`],
+// and pass the resulting `serde_json::Value` to
+// `ProposalRepository::update` via `ProposalUpdateInput { event_metadata, .. }`.
+
+/// Change-kind tags persisted on `proposal_revisions.event_metadata`.
+///
+/// The string values are part of the public contract for downstream consumers
+/// (UI attribution badges, audit queries, planner provenance). New tags are
+/// additive; renaming an existing tag is a breaking change and must update any
+/// consumers that filter on the literal.
+pub mod revision_change_kind {
+    /// A targeted MDX block-patch — one selected paragraph/section/list was
+    /// wrapped or replaced with valid MDX block content while the rest of the
+    /// body was preserved. Drives one proposal revision per patch.
+    pub const TARGETED_BLOCK_PATCH: &str = "targeted_block_patch";
+
+    /// A full-body rewrite of the proposal spec. Reserved for cases where the
+    /// planner intentionally regenerates the whole spec (rare; the targeted
+    /// patch primitive is preferred for refinement).
+    pub const BODY_REWRITE: &str = "body_rewrite";
+}
+
+/// One targeted block-patch attribution payload. Serialized into
+/// `proposal_revisions.event_metadata` so the planner refinement loop and
+/// downstream UI can render a per-revision provenance badge linking the
+/// revision to the active native-skill version and the section it touched.
+///
+/// `serde_json::Value` is the on-disk shape — the structured form here is the
+/// typed contract callers build before serializing. This keeps the metadata
+/// type-safe at the call site (so the planner and the future patch primitive
+/// can't drift on field names) while leaving the database and HTTP layers
+/// schema-free.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TargetedBlockPatchMetadata {
+    /// [`revision_change_kind::TARGETED_BLOCK_PATCH`] (or another declared kind).
+    /// Always present — it discriminates which metadata fields downstream
+    /// consumers can rely on.
+    pub change_kind: String,
+    /// Stable identifier of the block catalog entry that was inserted, when
+    /// the patch installs a known block. `None` for free-form text edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
+    /// Human-readable description of the targeted range (e.g. the matched
+    /// paragraph, section heading, or fenced offset). `None` when the patch
+    /// has no meaningful range (e.g. a body rewrite).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Inclusive byte offset of the patched range, when known. Paired with
+    /// [`Self::range_end_byte`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_start_byte: Option<i64>,
+    /// Exclusive byte offset of the patched range, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_end_byte: Option<i64>,
+    /// Name of the active native skill that produced the patch (e.g.
+    /// `visual-spec`). Surfaces provenance for the per-revision badge.
+    pub native_skill_name: String,
+    /// Pinned version of the active native skill. Combined with
+    /// `native_skill_name`, this fully identifies the authoring surface.
+    pub native_skill_version: String,
+    /// Optional free-form notes the caller wants persisted alongside the
+    /// structured fields. Kept short; not queryable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct ProposalModel {
     pub id: String,
@@ -44,6 +121,12 @@ pub struct ProposalModel {
     /// proposals list. Only populated on `proposal_list`; `0` on show paths.
     #[serde(default)]
     pub unresolved_feedback_count: i64,
+    /// When parked for needs-evidence: the linked spike task id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_spike_task_id: Option<String>,
+    /// When parked for needs-evidence: the named feasibility claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence_claim: Option<String>,
 }
 
 /// An epic this proposal graduated into.
@@ -89,6 +172,8 @@ impl ProposalModel {
             pending_reconcile: p.pending_reconcile,
             build_owner_user_id: p.build_owner_user_id.clone(),
             unresolved_feedback_count,
+            linked_spike_task_id: p.linked_spike_task_id.clone(),
+            needs_evidence_claim: p.needs_evidence_claim.clone(),
         }
     }
 }
@@ -261,8 +346,86 @@ pub struct ProposalShowResponse {
     /// Memory notes linked to this proposal's graduated epics/tasks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_refs: Vec<ProposalMemoryRefModel>,
+    /// Structured debate-trail rows (objections, rebuttals, verdicts).
+    /// Kept separate from `feedback` (plain human discussion).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debate_trail: Option<Vec<ProposalDebateTrailModel>>,
+    /// Refinement session status (active round, stop reason, update authority).
+    /// `None` when refinement has not been started for this proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    /// Composed gate status: deterministic DoR + tribunal conditions.
+    /// Always present on a successful `proposal_show` response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_status: Option<ProposalGateStatusModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// A structured debate-trail row for the proposal tribunal. Separate from
+/// [`ProposalFeedbackModel`] (human discussion): debate rows are typed
+/// (objection, rebuttal, verdict), track blocking state, and carry
+/// resolution/reopen lifecycle.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailModel {
+    pub id: String,
+    pub proposal_id: String,
+    /// `objection` | `rebuttal` | `verdict`.
+    pub kind: String,
+    pub body: String,
+    /// When true, this entry blocks proposal readiness.
+    pub blocking: bool,
+    /// Agent role (e.g. "advocate", "adversary", "judge").
+    pub agent_role: String,
+    /// `agent` or `user`.
+    pub author_kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_task_id: Option<String>,
+    /// The proposal revision this entry was written against.
+    pub against_revision_seq: i32,
+    /// Debate round (1-based).
+    pub round: i32,
+    /// When set, the entry has been resolved. `None` while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_by_user_id: Option<String>,
+    /// When set alongside `resolved_at`, the entry was reopened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reopened_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<&djinn_core::models::ProposalDebateTrail> for ProposalDebateTrailModel {
+    fn from(d: &djinn_core::models::ProposalDebateTrail) -> Self {
+        Self {
+            id: d.id.clone(),
+            proposal_id: d.proposal_id.clone(),
+            kind: d.kind.clone(),
+            body: d.body.clone(),
+            blocking: d.blocking,
+            agent_role: d.agent_role.clone(),
+            author_kind: d.author_kind.clone(),
+            author_user_id: d.author_user_id.clone(),
+            author_model: d.author_model.clone(),
+            source_task_id: d.source_task_id.clone(),
+            against_revision_seq: d.against_revision_seq,
+            round: d.round,
+            resolved_at: d.resolved_at.clone(),
+            resolved_by_user_id: d.resolved_by_user_id.clone(),
+            reopened_at: d.reopened_at.clone(),
+            reopened_by_user_id: d.reopened_by_user_id.clone(),
+            created_at: d.created_at.clone(),
+            updated_at: d.updated_at.clone(),
+        }
+    }
 }
 
 /// A memory note linked to a proposal via its graduated epics/tasks.
@@ -341,6 +504,152 @@ pub struct ProposalDeleteResponse {
     pub error: Option<String>,
 }
 
+// ── Debate-trail responses ───────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<ProposalDebateTrailModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalDebateTrailListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<ProposalDebateTrailModel>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Refinement status models ────────────────────────────────────────────────
+
+/// Refinement session state tracked on the proposal's event_metadata.
+/// The coordinator refinement workflow populates these fields; the
+/// control-plane surfaces them read-only to the UI.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStatusModel {
+    /// Whether refinement has been started for this proposal.
+    pub active: bool,
+    /// Current debate round (1-based). `None` when refinement has not started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_round: Option<i32>,
+    /// How many consecutive adversary dry rounds have been observed.
+    pub dry_rounds: i32,
+    /// Total debate-trail entries produced so far.
+    pub total_entries: i32,
+    /// Update authority mode. Always `checkpoint` (advocate revisions are
+    /// proposed for approval, never auto-applied); retained for display compat.
+    pub update_authority: String,
+    /// When set, refinement has stopped for this reason.
+    /// Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
+    /// `agent_failure`, or `null` (still running / not started).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// True when the autonomous tribunal has converged (or escalated) and is
+    /// parked for the human's single accept/reject review of the refined spec.
+    #[serde(default)]
+    pub awaiting_review: bool,
+    /// The judge's summary shown alongside the accept/reject review.
+    /// `None` unless `awaiting_review` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_summary: Option<String>,
+    /// The pre-refinement snapshot revision seq (the diff baseline) when
+    /// `awaiting_review` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_revision_seq: Option<i32>,
+    /// When the proposal is parked for a needs-evidence spike, this contains
+    /// the claim and spike task reference. `None` when not parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence: Option<NeedsEvidenceStatus>,
+}
+
+/// Needs-evidence parking state for a proposal.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct NeedsEvidenceStatus {
+    /// The named feasibility claim that the Judge identified.
+    pub claim: String,
+    /// The spike task id (UUID).
+    pub spike_task_id: String,
+    /// The spike task short id (human-readable).
+    pub spike_short_id: String,
+    /// Current status of the spike task.
+    pub spike_status: String,
+}
+
+/// Response for `proposal_refinement_start`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStartResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// The initial refinement status after starting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_refinement_status`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalRefinementStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ── Gate status models (task g11d) ────────────────────────────────────────
+
+/// Composed gate status for a proposal: deterministic DoR + tribunal
+/// conditions. Returned by `proposal_show` so the UI can render readiness
+/// without recomputing it client-side.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ProposalGateStatusModel {
+    /// Whether the composed gate passes (DoR ready + tribunal conditions met).
+    pub ready: bool,
+    /// Whether the deterministic DoR checks pass.
+    pub dor_ready: bool,
+    /// Specific DoR failures (empty when `dor_ready` is true).
+    pub dor_failures: Vec<GateFailureModel>,
+    /// Latest judge verdict body text, when a judge has issued a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_verdict_body: Option<String>,
+    /// Latest judge verdict entry id, when a judge has issued a verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_verdict_id: Option<String>,
+    /// Whether the latest judge verdict contains "needs-work".
+    pub judge_needs_work: bool,
+    /// Consecutive adversary dry rounds at the end of the trail.
+    pub adversary_dry_count: i32,
+    /// Count of unresolved blocking debate-trail entries.
+    pub unresolved_blocking_count: i32,
+    /// IDs of unresolved blocking debate-trail entries.
+    pub unresolved_blocking_ids: Vec<String>,
+    /// Needs-evidence spike parking state. `None` when not parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_evidence: Option<NeedsEvidenceStatus>,
+    /// Whether there are pending checkpoint revisions awaiting decision.
+    pub pending_checkpoint: bool,
+    /// Whether a current human override exists for this revision.
+    pub human_override_active: bool,
+    /// Human-readable explanations of all gate failures, each naming the
+    /// exact blocking condition. Empty when `ready` is true.
+    pub blocked_explanations: Vec<String>,
+}
+
+/// One DoR failure in the gate status.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct GateFailureModel {
+    /// Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`).
+    pub check: String,
+    /// Human-readable failure message.
+    pub message: String,
+}
+
 /// Parse the stored acceptance-criteria JSON array into structured items,
 /// accepting both plain strings and `{criterion, met}` objects (same
 /// tolerance as the task layer).
@@ -356,4 +665,46 @@ fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
                 .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
         })
         .collect()
+}
+
+// ── Human authority control responses ──────────────────────────────────────
+
+/// Response for `proposal_refinement_demand_round`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct DemandRoundResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the demand was accepted and a new round started.
+    pub accepted: bool,
+    /// Refinement status after the demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<ProposalRefinementStatusModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_refinement_resolve`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct ResolveReviewResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the human's accept/reject was applied.
+    pub resolved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response for `proposal_verdict_override`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct VerdictOverrideResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the override was recorded.
+    pub overridden: bool,
+    /// The revision seq the override is scoped to. Later revisions make
+    /// this override stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_on_revision_seq: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

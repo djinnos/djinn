@@ -21,14 +21,20 @@ pub use djinn_roles::config::config_for;
 
 // ─── Agent-specific role implementations ─────────────────────────────────────
 
+mod adversary;
+mod advocate;
 mod architect;
 pub mod finalize;
+mod judge;
 mod lead;
 mod planner;
 mod reviewer;
 mod worker;
 
+pub(crate) use adversary::AdversaryRole;
+pub(crate) use advocate::AdvocateRole;
 pub(crate) use architect::ArchitectRole;
+pub(crate) use judge::JudgeRole;
 pub(crate) use lead::LeadRole;
 pub(crate) use planner::PlannerRole;
 pub(crate) use reviewer::ReviewerRole;
@@ -88,6 +94,9 @@ pub(crate) fn role_impl_for(agent_type: crate::AgentType) -> Arc<dyn AgentRole> 
         crate::AgentType::Lead => Arc::new(LeadRole),
         crate::AgentType::Planner => Arc::new(PlannerRole),
         crate::AgentType::Architect => Arc::new(ArchitectRole),
+        crate::AgentType::Advocate => Arc::new(AdvocateRole),
+        crate::AgentType::Adversary => Arc::new(AdversaryRole),
+        crate::AgentType::Judge => Arc::new(JudgeRole),
     }
 }
 
@@ -132,6 +141,9 @@ pub(crate) fn role_for_task_dispatch(
             "lead" | "pm" => Some(crate::AgentType::Lead),
             "planner" => Some(crate::AgentType::Planner),
             "architect" => Some(crate::AgentType::Architect),
+            "advocate" => Some(crate::AgentType::Advocate),
+            "adversary" => Some(crate::AgentType::Adversary),
+            "judge" => Some(crate::AgentType::Judge),
             _ => None,
         }
     {
@@ -203,6 +215,10 @@ pub(crate) fn flow_for_task_dispatch(
         "planning" | "decomposition" | "review" | "epic_breakdown" => {
             return SupervisorFlow::Planning;
         }
+        // Proposal-refinement tribunal: single-stage flow that runs one
+        // refinement role (advocate, adversary, or judge). The concrete
+        // agent type is resolved from task.agent_type in role_overrides.
+        "refinement" => return SupervisorFlow::Refinement,
         _ => {}
     }
 
@@ -242,12 +258,15 @@ pub(crate) fn flow_for_task_dispatch(
 pub(crate) struct DispatchContext;
 
 pub(crate) struct DispatchRule {
+    #[allow(dead_code)]
     pub(crate) role_name: &'static str,
+    #[allow(dead_code)]
     pub(crate) claims: fn(&Task, &DispatchContext) -> bool,
 }
 
 pub struct RoleRegistry {
     pub(crate) roles: HashMap<&'static str, crate::AgentType>,
+    #[allow(dead_code)]
     pub(crate) dispatch_rules: Vec<DispatchRule>,
 }
 
@@ -270,6 +289,10 @@ impl RoleRegistry {
             ("lead", crate::AgentType::Lead),
             ("planner", crate::AgentType::Planner),
             ("architect", crate::AgentType::Architect),
+            // Tribunal refinement roles (k9zw).
+            ("advocate", crate::AgentType::Advocate),
+            ("adversary", crate::AgentType::Adversary),
+            ("judge", crate::AgentType::Judge),
         ]);
 
         let dispatch_rules = vec![
@@ -294,6 +317,7 @@ impl RoleRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn role_for_task(&self, task: &Task, ctx: &DispatchContext) -> Option<&'static str> {
         self.dispatch_rules
             .iter()
@@ -318,6 +342,7 @@ impl RoleRegistry {
     }
 
     /// Get the model-pool role (dispatch_role) for a task.
+    #[allow(dead_code)]
     pub(crate) fn dispatch_role_for_task(
         &self,
         task: &Task,
@@ -641,6 +666,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn registry_includes_tribunal_roles() {
+        let registry = RoleRegistry::new();
+        for role_name in ["advocate", "adversary", "judge"] {
+            assert!(
+                registry.roles.contains_key(role_name),
+                "RoleRegistry should contain '{role_name}'"
+            );
+        }
+        let model_pool_roles = registry.model_pool_roles();
+        for role_name in ["advocate", "adversary", "judge"] {
+            assert!(
+                model_pool_roles.contains(&role_name),
+                "model_pool_roles should include '{role_name}'"
+            );
+        }
+    }
+
     // ── flow_for_task_dispatch ────────────────────────────────────────────────
 
     #[test]
@@ -750,5 +793,27 @@ mod tests {
             );
             assert_eq!(SupervisorFlow::Lead.role_sequence(), &[RoleKind::Lead]);
         }
+    }
+
+    #[test]
+    fn flow_for_refinement_is_refinement() {
+        use crate::supervisor::SupervisorFlow;
+        let task = make_task_with_type("open", "refinement");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, false),
+            SupervisorFlow::Refinement
+        );
+    }
+
+    #[test]
+    fn refinement_issue_type_takes_precedence_over_status() {
+        use crate::supervisor::SupervisorFlow;
+        // Even if the task status is needs_task_review, a refinement issue_type
+        // short-circuits to the Refinement flow.
+        let task = make_task_with_type("needs_task_review", "refinement");
+        assert_eq!(
+            flow_for_task_dispatch(&task, false, true),
+            SupervisorFlow::Refinement
+        );
     }
 }

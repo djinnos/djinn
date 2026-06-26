@@ -648,4 +648,19 @@ impl TaskRepository {
 
         Ok(result.rows_affected() as usize)
     }
+
+    /// Read only the `created_by_user_id` column for a single task.
+    ///
+    /// Returns `None` when the task is not found or when the column is NULL
+    /// (background-agent-created tasks).  Errors are propagated.
+    pub async fn created_by_user_id(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let row: Option<Option<String>> =
+            sqlx::query_scalar("SELECT created_by_user_id FROM tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        // Flatten: outer None = no row, inner None = NULL column value.
+        Ok(row.flatten())
+    }
 }

@@ -1,98 +1,68 @@
-use std::collections::{HashMap, HashSet};
+// ─── Re-exports from djinn-orchestration-types ─────────────────────────────
+// Shared slot DTOs and config types are now owned by the orchestration-types
+// crate so the slot side can use them without importing coordinator internals.
 
-use serde::{Deserialize, Serialize};
+pub use djinn_orchestration_types::slot::{
+    MERGE_CONFLICT_PREFIX, MergeConflictMetadata, ModelSlotConfig, SlotInfo, SlotPoolConfig,
+    SlotState,
+};
 
-// ─── Slot types ──────────────────────────────────────────────────────────────
+// ─── SlotEvent (unified: re-export from djinn-slot) ────────────────────────
+// Phase 5 + hfhw cutover: the canonical SlotEvent enum now lives in
+// `djinn-slot`.  Re-export it here so `djinn_agent::actors::slot::SlotEvent`
+// and `djinn_slot::SlotEvent` name the same type (not a duplicate).
 
-#[derive(Debug, Clone)]
-pub enum SlotEvent {
-    /// Slot finished its task (success or failure) and is free for reassignment.
-    Free {
-        slot_id: usize,
-        model_id: String,
-        task_id: String,
-    },
-    /// Slot's task was killed by external request.
-    Killed {
-        slot_id: usize,
-        model_id: String,
-        task_id: String,
-    },
-}
+pub use djinn_slot::SlotEvent;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SlotInfo {
-    pub slot_id: usize,
-    pub model_id: String,
-    pub state: SlotState,
-}
+// ─── Memory enrichment re-exports (delegated to djinn-slot) ────────────────
+// hfhw cutover: the memory enrichment types and public entry points are now
+// owned by `djinn-slot`.  Re-export them here so external callers
+// (`djinn-server`'s `mcp_bridge`, `djinn-control-plane` test-support) continue
+// to compile under `djinn_agent::actors::slot::*` paths.
+//
+// The old local production implementation of `run_memory_enrichment_inner` has
+// been removed; the public API delegates to `djinn-slot`'s implementation.
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SlotState {
-    Free,
-    Busy {
-        task_id: String,
-        started_at: String,
-        agent_type: String,
-    },
-    Draining,
-}
+pub use djinn_slot::{
+    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
+    run_memory_enrichment_with_db,
+};
 
-#[derive(Debug, Clone)]
-pub struct ModelSlotConfig {
-    pub model_id: String,
-    pub max_slots: u32,
-    pub roles: HashSet<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SlotPoolConfig {
-    pub models: Vec<ModelSlotConfig>,
-    pub role_priorities: HashMap<String, Vec<String>>,
-}
-
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-pub(crate) const MERGE_CONFLICT_PREFIX: &str = "merge_conflict:";
-
-// ─── Shared metadata structs ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct MergeConflictMetadata {
-    pub(crate) conflicting_files: Vec<String>,
-    pub(crate) base_branch: String,
-    pub(crate) merge_target: String,
-}
-
-// ─── Submodules ───────────────────────────────────────────────────────────────
+// ─── Submodules ────────────────────────────────────────────────────────────
 
 mod actor;
 mod commands;
 pub(crate) mod finalize_handlers;
 pub mod helpers;
+// hfhw cutover: host callback implementation for the djinn-slot dispatch pathway.
+// `AgentDispatchCallbacks` implements `SlotHostCallbacks::run_task_dispatch`
+// by delegating to `supervisor_runner::dispatch_task_runtime`.
+pub(crate) mod host_callbacks;
 // Task #8: `lifecycle` is now a thin module owning only the per-stage helpers
 // (setup / model / mcp / prompt-context / teardown / retry) reused by the
 // supervisor's `execute_stage`.  The legacy `run_task_lifecycle` entry point
 // and worktree orchestration have been deleted.
+//
+// hfhw cutover: the lifecycle module owns per-stage helpers including
+// `assemble_prompt_context` (the prompt assembly logic).  The old
+// `build_prompt_context` stub has been removed — `stage::execute_stage`
+// calls `assemble_prompt_context` directly with `AgentContext` through the
+// host callback dispatch path.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
-pub(crate) mod memory_enrichment;
-/// Re-export the public memory-enrichment entry point so non-agent crates
-/// (e.g. `djinn-server`'s `mcp_bridge`) can trigger the pass without
-/// depending on `djinn_agent::actors::slot` internals.
-///
-/// The trigger (`memory_run_enrichment` MCP tool) is intentionally a thin
-/// admin/operator surface — see `djinn-control-plane::tools::memory_tools::run_enrichment`.
-pub use memory_enrichment::{
-    EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
-    run_memory_enrichment_with_db,
-};
 mod pool;
 pub(crate) mod reply_loop;
 #[cfg(test)]
 mod reply_loop_tests;
+// hfhw cutover: `session_extraction` is a thin adapter that converts
+// `AgentContext` → `SlotContext` and delegates to `djinn_slot::run_extraction_backfill`.
+// The full structural extraction implementation now lives in `djinn-slot`.
 pub(crate) mod session_extraction;
+// hfhw cutover: `supervisor_runner` contains the host-side dispatch logic
+// (`dispatch_task_runtime`) called through `host_callbacks::AgentDispatchCallbacks`.
+// The old `run_supervisor_dispatch` stub has been removed — the slot actor
+// dispatches through `djinn_slot::run_supervisor_dispatch` →
+// `SlotHostCallbacks::run_task_dispatch` → `dispatch_task_runtime`.
 mod supervisor_runner;
 
 pub use actor::*;

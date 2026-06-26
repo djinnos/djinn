@@ -1,0 +1,52 @@
+[package]
+publish = false
+name = "djinn-slot"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[features]
+# Exposes cluster-free slot-pool factory hooks for downstream integration tests.
+test-support = []
+
+[dependencies]
+djinn-core = { path = "../djinn-core" }
+djinn-db = { path = "../djinn-db" }
+djinn-memory = { path = "../djinn-memory" }
+djinn-provider = { path = "../djinn-provider" }
+djinn-control-plane = { path = "../djinn-control-plane" }
+djinn-runtime = { path = "../djinn-runtime" }
+djinn-supervisor = { path = "../djinn-supervisor" }
+djinn-roles = { path = "../djinn-roles" }
+djinn-compaction = { path = "../djinn-compaction" }
+djinn-mcp-extension = { path = "../djinn-mcp-extension" }
+djinn-orchestration-types = { path = "../djinn-orchestration-types" }
+djinn-stack = { path = "../djinn-stack" }
+djinn-lsp = { path = "../djinn-lsp" }
+djinn-telemetry = { path = "../djinn-telemetry" }
+anyhow = "1"
+regex = "1.12.3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+async-stream = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+uuid = { version = "1", features = ["v7"] }
+async-trait = "0.1"
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = "3"
+insta = { version = "1", features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

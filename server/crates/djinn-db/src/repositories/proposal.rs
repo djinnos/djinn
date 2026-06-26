@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
+    Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision, ProposalSignoff,
+    ProposalTarget,
 };
 
 use crate::database::Database;
@@ -104,6 +105,13 @@ pub struct ProposalUpdateInput<'a> {
     pub superseded_by: Option<&'a str>,
     /// Body encoding: `markdown` (default) or `mdx`.
     pub body_format: Option<&'a str>,
+    /// Optional structured metadata persisted to `proposal_revisions.event_metadata`
+    /// when the update triggers a material spec revision. When `None`, the
+    /// revision row's `event_metadata` stays `NULL` (preserves the pre-existing
+    /// behavior for ordinary `proposal_update` callers). Used by the planner
+    /// refinement loop to attribute authoring revisions to the active native-skill
+    /// version and to record targeted block-patch context (selector, range, etc.).
+    pub event_metadata: Option<&'a serde_json::Value>,
 }
 
 pub struct ProposalFeedbackCreateInput<'a> {
@@ -113,6 +121,26 @@ pub struct ProposalFeedbackCreateInput<'a> {
     pub author_kind: &'a str,
     pub author_model: Option<&'a str>,
     pub body: &'a str,
+}
+
+pub struct ProposalDebateTrailCreateInput<'a> {
+    pub proposal_id: &'a str,
+    /// `objection` | `rebuttal` | `verdict`.
+    pub kind: &'a str,
+    pub body: &'a str,
+    /// When true, this entry blocks proposal readiness.
+    pub blocking: bool,
+    /// Agent role (e.g. "advocate", "adversary", "judge").
+    pub agent_role: &'a str,
+    /// `agent` (default) or `user`.
+    pub author_kind: &'a str,
+    pub author_model: Option<&'a str>,
+    /// Optional source task attribution.
+    pub source_task_id: Option<&'a str>,
+    /// The proposal revision this entry is written against.
+    pub against_revision_seq: i32,
+    /// Debate round (1-based).
+    pub round: i32,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -153,6 +181,12 @@ struct ProposalRevisionSnapshot<'a> {
     body_format: &'a str,
     acceptance_criteria: &'a serde_json::Value,
     edited_by: Option<&'a str>,
+    /// Optional structured metadata to persist into the revision row's
+    /// `event_metadata` JSONB column. `None` writes SQL `NULL` (the historical
+    /// default for ordinary `proposal_update` revisions). Set by callers that
+    /// need to attribute the revision to a specific source (e.g. a planner
+    /// targeted block-patch attached to the active native-skill version).
+    event_metadata: Option<&'a serde_json::Value>,
 }
 
 pub struct ProposalRepository {
@@ -165,13 +199,23 @@ impl ProposalRepository {
         Self { db, events }
     }
 
+    /// Access the underlying database for constructing sibling repositories.
+    pub fn db(&self) -> &Database {
+        &self.db
+    }
+
+    /// Access the underlying event bus for constructing sibling repositories.
+    pub fn events(&self) -> &EventBus {
+        &self.events
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Proposal>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_as!(
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE id = $1"#,
             id
         )
@@ -185,7 +229,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE short_id = $1"#,
             short_id
         )
@@ -200,7 +244,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals WHERE id = $1 OR short_id = $2"#,
             id_or_short,
             id_or_short
@@ -239,7 +283,9 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         // Seed revision 1 with the initial spec so every proposal has a head to
-        // diff against.
+        // diff against. The seed carries no authoring metadata — the proposal
+        // is brand-new, so the block-patch / native-skill attribution contract
+        // does not apply.
         self.insert_revision(ProposalRevisionSnapshot {
             proposal_id: &id,
             seq: 1,
@@ -248,6 +294,7 @@ impl ProposalRepository {
             body_format,
             acceptance_criteria: &acceptance_criteria,
             edited_by: author_user_id.as_deref(),
+            event_metadata: None,
         })
         .await?;
         let proposal = self.get_required(&id).await?;
@@ -333,6 +380,7 @@ impl ProposalRepository {
                 body_format,
                 acceptance_criteria: &acceptance_criteria,
                 edited_by: editor.as_deref(),
+                event_metadata: input.event_metadata,
             })
             .await?;
         } else if record_done_status_event {
@@ -521,6 +569,184 @@ impl ProposalRepository {
         Ok(feedback)
     }
 
+    // ── Debate trail (structured objections/rebuttals/verdicts) ──────────────
+
+    /// List debate-trail entries for a proposal, ordered by round then creation.
+    pub async fn debate_trail(&self, proposal_id: &str) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+             ORDER BY round, created_at"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Get a single debate-trail entry by id.
+    pub async fn get_debate_trail_entry(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE id = $1"#,
+            entry_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Append a debate-trail entry. Validates that the proposal exists and that
+    /// `kind` is one of the allowed values. Emits a `proposal_debate_trail_created` event.
+    pub async fn add_debate_trail_entry(
+        &self,
+        input: ProposalDebateTrailCreateInput<'_>,
+    ) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        // Validate kind.
+        match input.kind {
+            "objection" | "rebuttal" | "verdict" => {}
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, or verdict"
+                )));
+            }
+        }
+        // Validate author_kind.
+        match input.author_kind {
+            "agent" | "user" => {}
+            other => {
+                return Err(Error::InvalidData(format!(
+                    "invalid author_kind: {other:?}; expected agent or user"
+                )));
+            }
+        }
+        // Validate proposal exists.
+        if self.get(input.proposal_id).await?.is_none() {
+            return Err(Error::InvalidData(format!(
+                "proposal not found: {}",
+                input.proposal_id
+            )));
+        }
+        let id = uuid::Uuid::now_v7().to_string();
+        let author_user_id: Option<String> = if input.author_kind == "user" {
+            djinn_core::auth_context::current_user_id()
+        } else {
+            None
+        };
+        sqlx::query!(
+            "INSERT INTO proposal_debate_trail
+                (id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                 author_user_id, author_model, source_task_id,
+                 against_revision_seq, round)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            id,
+            input.proposal_id,
+            input.kind,
+            input.body,
+            input.blocking,
+            input.agent_role,
+            input.author_kind,
+            author_user_id,
+            input.author_model,
+            input.source_task_id,
+            input.against_revision_seq,
+            input.round,
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(&id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_created(
+                input.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
+    /// Resolve a debate-trail entry. Stamps the resolving user via
+    /// `current_user_id()`. Clears any prior reopen state. Idempotent.
+    pub async fn resolve_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        let resolved_by = djinn_core::auth_context::current_user_id();
+        sqlx::query!(
+            r#"UPDATE proposal_debate_trail SET
+                    resolved_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    resolved_by_user_id = $1,
+                    reopened_at = NULL,
+                    reopened_by_user_id = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2"#,
+            resolved_by,
+            entry_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(entry_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_updated(
+                &entry.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
+    /// Reopen a previously resolved debate-trail entry. Stamps the reopening
+    /// user via `current_user_id()`. No-op (idempotent) if already open.
+    pub async fn reopen_debate_trail_entry(&self, entry_id: &str) -> Result<ProposalDebateTrail> {
+        self.reopen_debate_trail_entry_with_user(entry_id, None)
+            .await
+    }
+
+    /// Reopen a previously resolved debate-trail entry with an explicit user
+    /// attribution. When `user_id` is `None`, falls back to
+    /// `current_user_id()`. No-op (idempotent) if already open.
+    pub async fn reopen_debate_trail_entry_with_user(
+        &self,
+        entry_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<ProposalDebateTrail> {
+        self.db.ensure_initialized().await?;
+        let reopened_by = user_id
+            .map(|s| Some(s.to_string()))
+            .unwrap_or_else(djinn_core::auth_context::current_user_id);
+        sqlx::query!(
+            r#"UPDATE proposal_debate_trail SET
+                    reopened_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    reopened_by_user_id = $1,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $2 AND resolved_at IS NOT NULL"#,
+            reopened_by,
+            entry_id
+        )
+        .execute(self.db.pool())
+        .await?;
+        let entry = self.get_debate_trail_entry_required(entry_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_debate_trail_updated(
+                &entry.proposal_id,
+                &entry,
+            ));
+        Ok(entry)
+    }
+
     // ── Listing ──────────────────────────────────────────────────────────────
 
     pub async fn list_filtered(&self, query: ProposalListQuery) -> Result<ProposalListResult> {
@@ -549,7 +775,7 @@ impl ProposalRepository {
         // the `proposal_feedback_unresolved` partial index) for the list badge.
         let sql = format!(
             r#"SELECT id, short_id, title, body, body_format, acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id,
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim,
                     (SELECT COUNT(*) FROM proposal_feedback pf
                        WHERE pf.proposal_id = proposals.id AND pf.resolved_at IS NULL) AS unresolved_feedback_count
              FROM proposals WHERE {where_sql} ORDER BY {order_sql} LIMIT {limit_ph} OFFSET {offset_ph}"#
@@ -579,10 +805,18 @@ impl ProposalRepository {
     #[allow(clippy::too_many_arguments)]
     async fn insert_revision(&self, revision: ProposalRevisionSnapshot<'_>) -> Result<()> {
         let id = uuid::Uuid::now_v7().to_string();
+        // When the caller passes no event_metadata (the common case for ordinary
+        // `proposal_update` writes), bind SQL NULL so the column stays empty —
+        // preserving the historical shape. A non-None payload is stored as JSONB
+        // for downstream attribution (targeted block-patch selection, native-skill
+        // version, etc.). We persist `serde_json::Value` directly: `sqlx`'s Pg
+        // encoder maps `Value::Null` to a SQL NULL, while any object/array is
+        // sent as the underlying JSON literal.
+        let metadata: Option<serde_json::Value> = revision.event_metadata.cloned();
         sqlx::query(
             r#"INSERT INTO proposal_revisions
-                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision')"#,
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'spec_revision', $9)"#,
         )
         .bind(id)
         .bind(revision.proposal_id)
@@ -592,6 +826,7 @@ impl ProposalRepository {
         .bind(revision.body_format)
         .bind(revision.acceptance_criteria)
         .bind(revision.edited_by)
+        .bind(metadata)
         .execute(self.db.pool())
         .await?;
         Ok(())
@@ -635,6 +870,321 @@ impl ProposalRepository {
         .bind(proposal_id)
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    /// Record a refinement lifecycle event (`refinement_start` or
+    /// `refinement_stop`) as a lightweight `proposal_revisions` row. These
+    /// events carry `event_metadata` with structured JSON (e.g.
+    /// `{ "update_authority": "checkpoint" }` or
+    /// `{ "stop_reason": "adversary_dry" }`) but no spec snapshot — `title`,
+    /// `body`, etc. are empty. The row's `seq` is set to the proposal's current
+    /// head revision so ordering stays correct.
+    pub async fn record_refinement_lifecycle(
+        &self,
+        proposal_id: &str,
+        event_kind: &str,
+        event_metadata: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let proposal = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            r#"INSERT INTO proposal_revisions
+                (id, proposal_id, seq, title, body, body_format, acceptance_criteria, edited_by_user_id, event_kind, event_metadata)
+               VALUES ($1, $2, $3, '', '', 'markdown', '[]', NULL, $4, $5)"#,
+        )
+        .bind(id)
+        .bind(proposal_id)
+        .bind(proposal.latest_revision_seq)
+        .bind(event_kind)
+        .bind(event_metadata)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Return the proposal IDs whose refinement is currently dangling — i.e.
+    /// they have more `refinement_start` lifecycle events than `refinement_stop`
+    /// events, so a refinement was started but never recorded as stopped.
+    ///
+    /// On a clean run this is exactly the set the coordinator is actively
+    /// driving in memory. After a server restart the in-memory loops are lost
+    /// but these DB rows remain, leaving "zombie" refinements that report
+    /// `active` yet make no progress. Startup recovery uses this to reconcile
+    /// them.
+    pub async fn dangling_refinement_proposal_ids(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let ids = sqlx::query_scalar::<_, String>(
+            r#"SELECT proposal_id
+               FROM proposal_revisions
+               WHERE event_kind IN ('refinement_start', 'refinement_stop')
+               GROUP BY proposal_id
+               HAVING SUM(CASE WHEN event_kind = 'refinement_start' THEN 1 ELSE 0 END)
+                    > SUM(CASE WHEN event_kind = 'refinement_stop' THEN 1 ELSE 0 END)"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(ids)
+    }
+
+    /// Find the latest verdict override for a proposal. Returns
+    /// `Some((override_on_revision_seq, override_metadata_json))` when an
+    /// active override exists, or `None` when no override has been recorded.
+    ///
+    /// Gate composition (task cuzf) uses this to check whether a human
+    /// override supersedes a judge `needs-work` verdict: the override is
+    /// active when its `override_on_revision_seq` equals the proposal's
+    /// current `latest_revision_seq`.
+    pub async fn latest_verdict_override(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<(i32, String)>> {
+        self.db.ensure_initialized().await?;
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            r#"SELECT event_metadata::text FROM proposal_revisions
+               WHERE proposal_id = $1
+                 AND event_kind = 'verdict_override'
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .fetch_optional(self.db.pool())
+        .await?;
+        if let Some(Some(meta_str)) = row {
+            // Extract override_on_revision_seq from the JSON.
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str)
+                && let Some(seq) = meta
+                    .get("override_on_revision_seq")
+                    .and_then(|v| v.as_i64())
+            {
+                return Ok(Some((seq as i32, meta_str)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Patch the `event_metadata` column on the latest `spec_revision` row for
+    /// `proposal_id`.  Used by the refinement coordinator to retroactively
+    /// attribute an advocate-authored revision after the agent session completes
+    /// (the agent's `proposal_update` tool call doesn't carry refinement
+    /// context, so the metadata is set post-hoc).
+    ///
+    /// When no `spec_revision` row exists for the given `seq`, this is a
+    /// no-op — the revision was created by a non-spec source (lifecycle event,
+    /// status change, etc.) and doesn't need attribution.
+    pub async fn set_latest_revision_event_metadata(
+        &self,
+        proposal_id: &str,
+        seq: i32,
+        event_metadata: &serde_json::Value,
+    ) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        let metadata: Option<serde_json::Value> = Some(event_metadata.clone());
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(seq)
+        .bind(metadata)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Return all `spec_revision` rows whose `event_metadata` marks them as
+    /// `checkpoint_pending` — i.e. advocate revisions produced in checkpoint
+    /// mode that have not yet been approved or rejected.
+    ///
+    /// Rows are ordered newest-first so the UI can surface the most recent
+    /// pending revision at the top.
+    pub async fn pending_checkpoint_revisions(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalRevision>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalRevision>(
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to,
+                    event_metadata::text AS event_metadata, created_at
+             FROM proposal_revisions
+             WHERE proposal_id = $1
+               AND event_kind = 'spec_revision'
+               AND event_metadata->>'checkpoint_status' = 'pending'
+             ORDER BY created_at DESC, id DESC"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Approve a pending checkpoint revision: apply its body/title/AC to the
+    /// live proposal, advance the head revision, and mark the revision row as
+    /// `checkpoint_approved`.
+    ///
+    /// Idempotent: if the revision is already approved or rejected, this is a
+    /// no-op that returns the current proposal unchanged.
+    ///
+    /// `approved_by_user_id` is recorded in the event_metadata for audit.
+    pub async fn approve_checkpoint_revision(
+        &self,
+        proposal_id: &str,
+        revision_seq: i32,
+        approved_by_user_id: Option<&str>,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+
+        // 1. Load the pending revision row.
+        let revision = sqlx::query_as::<_, ProposalRevision>(
+            r#"SELECT id, proposal_id, seq, title, body, body_format,
+                    acceptance_criteria::text AS acceptance_criteria,
+                    edited_by_user_id, event_kind, status_from, status_to,
+                    event_metadata::text AS event_metadata, created_at
+             FROM proposal_revisions
+             WHERE proposal_id = $1 AND seq = $2
+               AND event_kind = 'spec_revision'
+               AND event_metadata->>'checkpoint_status' = 'pending'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        let Some(revision) = revision else {
+            // No pending revision at this seq — idempotent no-op.
+            return self.get_required(proposal_id).await;
+        };
+
+        // 2. Apply the revision's body/title/AC to the live proposal.
+        let ac: serde_json::Value =
+            serde_json::from_str(&revision.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        let new_seq = {
+            let current = self.get_required(proposal_id).await?;
+            current.latest_revision_seq + 1
+        };
+        sqlx::query(
+            r#"UPDATE proposals SET title = $1, body = $2, body_format = $3,
+                    acceptance_criteria = $4, latest_revision_seq = $5,
+                    pending_reconcile = true,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $6"#,
+        )
+        .bind(&revision.title)
+        .bind(&revision.body)
+        .bind(&revision.body_format)
+        .bind(&ac)
+        .bind(new_seq)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+
+        // 3. Insert a new spec_revision row for the approval event so history
+        //    records the apply.
+        self.insert_revision(ProposalRevisionSnapshot {
+            proposal_id,
+            seq: new_seq,
+            title: &revision.title,
+            body: &revision.body,
+            body_format: &revision.body_format,
+            acceptance_criteria: &ac,
+            edited_by: approved_by_user_id,
+            event_metadata: Some(&serde_json::json!({
+                "source": "checkpoint_approval",
+                "approved_from_seq": revision_seq,
+                "approved_by": approved_by_user_id,
+            })),
+        })
+        .await?;
+
+        // 4. Mark the original pending row as `checkpoint_approved`.
+        let approved_meta = {
+            let mut meta: serde_json::Value = revision
+                .event_metadata
+                .as_ref()
+                .and_then(|m| serde_json::from_str(m).ok())
+                .unwrap_or(serde_json::json!({}));
+            meta["checkpoint_status"] = serde_json::json!("approved");
+            if let Some(uid) = approved_by_user_id {
+                meta["approved_by_user_id"] = serde_json::json!(uid);
+            }
+            meta
+        };
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .bind(&approved_meta)
+        .execute(self.db.pool())
+        .await?;
+
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// Reject a pending checkpoint revision: mark it as `checkpoint_rejected`
+    /// without modifying the live proposal body.
+    ///
+    /// Idempotent: if the revision is already approved or rejected, this is a
+    /// no-op that returns the current proposal unchanged.
+    ///
+    /// `rejected_by_user_id` is recorded in the event_metadata for audit.
+    pub async fn reject_checkpoint_revision(
+        &self,
+        proposal_id: &str,
+        revision_seq: i32,
+        rejected_by_user_id: Option<&str>,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+
+        // Mark the pending row as `checkpoint_rejected` (no body mutation).
+        let rejected_meta = {
+            let existing = sqlx::query_scalar::<_, Option<String>>(
+                r#"SELECT event_metadata::text FROM proposal_revisions
+                   WHERE proposal_id = $1 AND seq = $2
+                     AND event_kind = 'spec_revision'
+                     AND event_metadata->>'checkpoint_status' = 'pending'"#,
+            )
+            .bind(proposal_id)
+            .bind(revision_seq)
+            .fetch_optional(self.db.pool())
+            .await?;
+
+            let Some(existing_str) = existing.flatten() else {
+                // No pending revision — idempotent no-op.
+                return self.get_required(proposal_id).await;
+            };
+
+            let mut meta: serde_json::Value =
+                serde_json::from_str(&existing_str).unwrap_or(serde_json::json!({}));
+            meta["checkpoint_status"] = serde_json::json!("rejected");
+            if let Some(uid) = rejected_by_user_id {
+                meta["rejected_by_user_id"] = serde_json::json!(uid);
+            }
+            meta
+        };
+
+        sqlx::query(
+            r#"UPDATE proposal_revisions
+               SET event_metadata = $3
+             WHERE proposal_id = $1 AND seq = $2 AND event_kind = 'spec_revision'"#,
+        )
+        .bind(proposal_id)
+        .bind(revision_seq)
+        .bind(&rejected_meta)
+        .execute(self.db.pool())
+        .await?;
+
+        self.get_required(proposal_id).await
     }
 
     pub async fn signoffs(&self, proposal_id: &str) -> Result<Vec<ProposalSignoff>> {
@@ -990,6 +1540,72 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Park the proposal for a needs-evidence spike: move status back to
+    /// `draft`, link the spike task, and record the named feasibility claim.
+    /// Emits a `proposal_updated` event.
+    pub async fn set_needs_evidence_spike(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        claim: &str,
+    ) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            r#"UPDATE proposals SET
+                    status = 'draft',
+                    linked_spike_task_id = $1,
+                    needs_evidence_claim = $2,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $3"#,
+        )
+        .bind(spike_task_id)
+        .bind(claim)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// Clear the needs-evidence spike linkage after the spike closes and
+    /// refinement resumes. Emits a `proposal_updated` event.
+    pub async fn clear_needs_evidence_spike(&self, proposal_id: &str) -> Result<Proposal> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(
+            r#"UPDATE proposals SET
+                    linked_spike_task_id = NULL,
+                    needs_evidence_claim = NULL,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1"#,
+        )
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(proposal)
+    }
+
+    /// Find a proposal that is parked on the given spike task (reverse lookup
+    /// from spike task id to proposal). Returns `None` when no proposal is
+    /// parked on this spike.
+    pub async fn find_by_linked_spike(&self, spike_task_id: &str) -> Result<Option<Proposal>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            Proposal,
+            r#"SELECT id, short_id, title, body, body_format,
+                    acceptance_criteria::text AS "acceptance_criteria!",
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
+             FROM proposals WHERE linked_spike_task_id = $1"#,
+            spike_task_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     /// Freeze or un-freeze a build. Frozen builds stay `building` but their
     /// epics' tasks are held out of dispatch (see `build_ready_where`).
     pub async fn set_frozen(&self, proposal_id: &str, frozen: bool) -> Result<Proposal> {
@@ -1342,6 +1958,10 @@ impl ProposalRepository {
             body_format: &current.body_format,
             acceptance_criteria: &acceptance_criteria,
             edited_by: editor.as_deref(),
+            // AC amendments stamp a separate `proposal_feedback` audit entry
+            // that holds the structured change list — no extra metadata needed
+            // on the spec revision itself.
+            event_metadata: None,
         })
         .await?;
 
@@ -1376,7 +1996,7 @@ impl ProposalRepository {
             Proposal,
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS "acceptance_criteria!",
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals p
              WHERE p.status = 'building'
                AND EXISTS (SELECT 1 FROM proposal_epics pe WHERE pe.proposal_id = p.id)
@@ -1400,7 +2020,7 @@ impl ProposalRepository {
         Ok(sqlx::query_as::<_, Proposal>(
             r#"SELECT id, short_id, title, body, body_format,
                     acceptance_criteria::text AS acceptance_criteria,
-                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id
+                    status, author_user_id, superseded_by, created_at, updated_at, closed_at, latest_revision_seq, last_reconciled_revision_seq, pending_reconcile, build_owner_user_id, build_frozen, build_breakdown_task_id, linked_spike_task_id, needs_evidence_claim
              FROM proposals p
              WHERE p.status = 'building'
                AND (
@@ -1425,6 +2045,12 @@ impl ProposalRepository {
         self.get_feedback(id)
             .await?
             .ok_or_else(|| Error::InvalidData(format!("feedback not found after write: {id}")))
+    }
+
+    async fn get_debate_trail_entry_required(&self, id: &str) -> Result<ProposalDebateTrail> {
+        self.get_debate_trail_entry(id).await?.ok_or_else(|| {
+            Error::InvalidData(format!("debate trail entry not found after write: {id}"))
+        })
     }
 
     /// Generate a globally-unique 4-char base36 short id for proposals.
@@ -1578,6 +2204,86 @@ impl ProposalRepository {
                 },
             )
             .collect())
+    }
+
+    // ── Composed gate helpers (task cuzf) ─────────────────────────────
+
+    /// List unresolved blocking debate-trail entries for a proposal.
+    ///
+    /// An entry is "unresolved" when `resolved_at IS NULL` OR
+    /// (`resolved_at IS NOT NULL AND reopened_at IS NOT NULL`).
+    /// Only `blocking = true` entries are returned.
+    pub async fn list_unresolved_blocking_debate_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalDebateTrail>(
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND blocking = true
+               AND (resolved_at IS NULL
+                    OR (resolved_at IS NOT NULL AND reopened_at IS NOT NULL))
+             ORDER BY round, created_at"#,
+        )
+        .bind(proposal_id)
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the latest judge verdict entry for a proposal.
+    ///
+    /// Looks for debate-trail entries with `kind = 'verdict'` and
+    /// `agent_role = 'judge'`, ordered newest-first.
+    pub async fn latest_judge_verdict(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, ProposalDebateTrail>(
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND kind = 'verdict'
+               AND agent_role = 'judge'
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Check whether a proposal is currently parked on an open
+    /// needs-evidence spike.
+    pub async fn has_open_needs_evidence_spike(&self, proposal_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM proposals
+             WHERE id = $1
+               AND linked_spike_task_id IS NOT NULL"#,
+        )
+        .bind(proposal_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(count > 0)
+    }
+
+    /// Check whether any pending checkpoint revisions exist.
+    pub async fn has_pending_checkpoint_revisions(&self, proposal_id: &str) -> Result<bool> {
+        let pending = self.pending_checkpoint_revisions(proposal_id).await?;
+        Ok(!pending.is_empty())
     }
 }
 
@@ -1787,6 +2493,7 @@ mod tests {
                     status: "archived",
                     superseded_by: None,
                     body_format: None,
+                    event_metadata: None,
                 },
             )
             .await
@@ -1939,6 +2646,7 @@ mod tests {
             status,
             superseded_by: None,
             body_format: None,
+            event_metadata: None,
         }
     }
 
@@ -2953,6 +3661,7 @@ mod tests {
                 status: "archived",
                 superseded_by: None,
                 body_format: None,
+                event_metadata: None,
             },
         )
         .await
@@ -2963,5 +3672,610 @@ mod tests {
             !results.iter().any(|r| r.short_id == p.short_id),
             "archived proposals should not appear in search results"
         );
+    }
+
+    // ── Material revision metadata (event_metadata) plumbing ──────────────────
+    //
+    // The block-patch primitive and the planner refinement loop depend on the
+    // repository persisting structured metadata on the spec revision row so
+    // each targeted patch (and the native-skill version that produced it) is
+    // attributable after the fact. These tests pin the contract:
+    //
+    //   * The create seed revision and ordinary `proposal_update` calls write
+    //     `event_metadata = NULL` (backward compatible — no schema change, no
+    //     contract drift for existing callers).
+    //   * When a caller passes a `serde_json::Value` through
+    //     `ProposalUpdateInput { event_metadata, .. }`, the same value is
+    //     round-tripped through `ProposalRepository::revisions`.
+    //   * Status-only updates and the `status_change` audit events keep
+    //     `event_metadata = NULL` (audit history stays metadata-free).
+    //   * A `proposal_create` followed by an `update` with metadata produces
+    //     a head revision whose metadata survives the read path unchanged.
+
+    /// The seed revision written by `ProposalRepository::create` must keep
+    /// `event_metadata` NULL. The seed is not an authoring operation — the
+    /// block-patch / native-skill attribution contract does not apply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_seed_revision_has_null_event_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Seed Meta")).await.unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 1, "create must seed exactly one revision");
+        let seed = &revisions[0];
+        assert_eq!(seed.seq, 1);
+        assert_eq!(seed.event_kind, "spec_revision");
+        assert!(
+            seed.event_metadata.is_none(),
+            "create seed revision must leave event_metadata NULL, got {:?}",
+            seed.event_metadata
+        );
+    }
+
+    /// Ordinary `proposal_update` (no `event_metadata` payload) must keep the
+    /// `event_metadata` column NULL. This is the backward-compatibility
+    /// contract the task description pins for every existing caller
+    /// (`proposal_update`, `proposal_create`, `proposal_import`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ordinary_update_writes_null_event_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Backward Compat")).await.unwrap();
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Backward Compat v2",
+                body: "v2 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 2);
+        let head = revisions.last().expect("head revision");
+        assert_eq!(head.seq, 2);
+        assert!(
+            head.event_metadata.is_none(),
+            "ordinary proposal_update must keep event_metadata NULL, got {:?}",
+            head.event_metadata
+        );
+    }
+
+    /// When the caller supplies structured metadata through
+    /// `ProposalUpdateInput { event_metadata, .. }`, the repository must
+    /// persist it into the `proposal_revisions.event_metadata` JSONB column
+    /// unchanged (stable JSON shape) and the read path must surface the same
+    /// text. The metadata is the typed contract that future targeted-patch
+    /// calls will build.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_with_event_metadata_round_trips_to_revision() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Patchy")).await.unwrap();
+        let metadata = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "callout-tip",
+            "selector": "paragraph: 'lifecycle: draft'",
+            "range_start_byte": 12,
+            "range_end_byte": 48,
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+            "note": "replace markdown tip prose with <Callout />"
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Patchy",
+                body: "lifecycle: <Callout>draft</Callout>",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&metadata),
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        let head = revisions.last().expect("head revision");
+        assert_eq!(head.seq, 2);
+        let stored = head
+            .event_metadata
+            .as_deref()
+            .expect("head revision must carry event_metadata for a targeted patch");
+        let parsed: serde_json::Value = serde_json::from_str(stored)
+            .expect("event_metadata must be a valid JSON document on the read path");
+        assert_eq!(parsed, metadata);
+        // Stable field-by-field contract: every key the design promises is
+        // present and round-trips byte-for-byte. This is what the
+        // `proposal_show`/revision model surfaces to UI consumers.
+        assert_eq!(parsed["change_kind"], "targeted_block_patch");
+        assert_eq!(parsed["block_id"], "callout-tip");
+        assert_eq!(parsed["native_skill_name"], "visual-spec");
+        assert_eq!(parsed["native_skill_version"], "0.1.0");
+        assert_eq!(parsed["range_start_byte"], 12);
+        assert_eq!(parsed["range_end_byte"], 48);
+    }
+
+    /// Two successive material updates — each carrying distinct metadata —
+    /// must each land on their own revision row, with `latest_revision_seq`
+    /// advancing once per patch. This is the per-patch attribution contract
+    /// the design pins (one revision per targeted block-patch, not a
+    /// monolithic body rewrite).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_targeted_patches_persist_two_distinct_revisions() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Multi Patch")).await.unwrap();
+
+        let first = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "callout-tip",
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Multi Patch",
+                body: "patch-1 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&first),
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = serde_json::json!({
+            "change_kind": "targeted_block_patch",
+            "block_id": "metric-tile",
+            "selector": "section: '## Metrics'",
+            "native_skill_name": "visual-spec",
+            "native_skill_version": "0.1.0",
+        });
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: "Multi Patch",
+                body: "patch-1 + patch-2 body",
+                acceptance_criteria: "[]",
+                status: "draft",
+                superseded_by: None,
+                body_format: Some("mdx"),
+                event_metadata: Some(&second),
+            },
+        )
+        .await
+        .unwrap();
+
+        let updated = repo.get(&p.id).await.unwrap().expect("proposal row");
+        assert_eq!(updated.latest_revision_seq, 3, "seed + two patches = 3");
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert!(revisions[0].event_metadata.is_none(), "seed stays NULL");
+        let r1: serde_json::Value = serde_json::from_str(
+            revisions[1]
+                .event_metadata
+                .as_deref()
+                .expect("first patch metadata"),
+        )
+        .unwrap();
+        assert_eq!(r1["block_id"], "callout-tip");
+        let r2: serde_json::Value = serde_json::from_str(
+            revisions[2]
+                .event_metadata
+                .as_deref()
+                .expect("second patch metadata"),
+        )
+        .unwrap();
+        assert_eq!(r2["block_id"], "metric-tile");
+        assert_eq!(r2["selector"], "section: '## Metrics'");
+    }
+
+    /// `dangling_refinement_proposal_ids` reports a proposal exactly while it
+    /// has more `refinement_start` than `refinement_stop` lifecycle rows — the
+    /// signal startup recovery uses to reconcile refinements lost across a
+    /// restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dangling_refinement_ids_track_unmatched_start() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Dangling Refinement")).await.unwrap();
+
+        // No refinement lifecycle yet → not dangling.
+        assert!(
+            repo.dangling_refinement_proposal_ids()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A start with no matching stop → dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.dangling_refinement_proposal_ids().await.unwrap(),
+            vec![p.id.clone()]
+        );
+
+        // An awaiting_review event does not balance the start → still dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_awaiting_review", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.dangling_refinement_proposal_ids().await.unwrap(),
+            vec![p.id.clone()]
+        );
+
+        // A matching stop → balanced → no longer dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+        assert!(
+            repo.dangling_refinement_proposal_ids()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Status-only updates and the `status_change` audit events they emit
+    /// must keep `event_metadata` NULL. The audit trail of lifecycle
+    /// transitions is not authoring metadata and should not be conflated
+    /// with the targeted-patch contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn status_only_event_keeps_event_metadata_null() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Status Only")).await.unwrap();
+        // Move the proposal to `done` (status-only path that triggers a
+        // `status_change` audit row in addition to the create seed).
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: &p.title,
+                body: &p.body,
+                acceptance_criteria: &p.acceptance_criteria,
+                status: "done",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        // seed (spec_revision) + status_change audit
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[1].event_kind, "status_change");
+        assert!(
+            revisions[1].event_metadata.is_none(),
+            "status_change rows must leave event_metadata NULL"
+        );
+    }
+
+    // ── Debate trail tests ──────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_append_and_list_ordered() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("Trail")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        // Append three entries in mixed order; list should return round then created_at.
+        let obj = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "objection",
+                body: "too broad",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(obj.kind, "objection");
+        assert!(obj.blocking);
+        assert_eq!(obj.round, 1);
+        assert!(obj.resolved_at.is_none());
+        assert!(obj.reopened_at.is_none());
+
+        let reb = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "rebuttal",
+                body: "scope is fine because...",
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(reb.kind, "rebuttal");
+
+        let verdict = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "verdict",
+                body: "narrow scope to X",
+                blocking: false,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 3);
+        // Ordered by round then created_at; ids are UUIDv7 so created_at ordering
+        // is deterministic within the same millisecond.
+        assert_eq!(trail[0].id, obj.id);
+        assert_eq!(trail[1].id, reb.id);
+        assert_eq!(trail[2].id, verdict.id);
+
+        // get by id works
+        let fetched = repo.get_debate_trail_entry(&obj.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, obj.id);
+
+        // events fired for each append
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.entity_type == "proposal_debate_trail")
+        );
+        assert!(events.iter().all(|e| e.action == "created"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_isolation_by_proposal() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p1 = repo.create(create_input("One")).await.unwrap();
+        let p2 = repo.create(create_input("Two")).await.unwrap();
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p1.id,
+            kind: "objection",
+            body: "obj-1",
+            blocking: false,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p2.id,
+            kind: "rebuttal",
+            body: "reb-2",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        let trail1 = repo.debate_trail(&p1.id).await.unwrap();
+        let trail2 = repo.debate_trail(&p2.id).await.unwrap();
+        assert_eq!(trail1.len(), 1);
+        assert_eq!(trail1[0].body, "obj-1");
+        assert_eq!(trail2.len(), 1);
+        assert_eq!(trail2[0].body, "reb-2");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_resolve_and_reopen() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("Resolve")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "objection",
+                body: "blocking issue",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap();
+
+        // Resolve it.
+        let resolved = repo.resolve_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(resolved.resolved_at.is_some());
+        assert!(resolved.reopened_at.is_none());
+
+        // Reopen it.
+        let reopened = repo.reopen_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(reopened.resolved_at.is_some());
+        assert!(reopened.reopened_at.is_some());
+
+        // Re-resolve clears reopen state.
+        let re_resolved = repo.resolve_debate_trail_entry(&entry.id).await.unwrap();
+        assert!(re_resolved.resolved_at.is_some());
+        assert!(re_resolved.reopened_at.is_none());
+        assert!(re_resolved.reopened_by_user_id.is_none());
+
+        let events = captured.lock().unwrap();
+        // 1 created + 3 updates = 4 events
+        assert_eq!(events.len(), 4);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.entity_type == "proposal_debate_trail")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_invalid_kind_rejected() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Invalid")).await.unwrap();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "comment",
+                body: "nope",
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("invalid debate trail kind"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_proposal_must_exist() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: "nonexistent-id",
+                kind: "objection",
+                body: "nope",
+                blocking: false,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("proposal not found"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn debate_trail_multiround_ordering() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Rounds")).await.unwrap();
+
+        // Round 1
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "objection",
+            body: "r1-obj",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Round 2
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "rebuttal",
+            body: "r2-reb",
+            blocking: false,
+            agent_role: "advocate",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 2,
+            round: 2,
+        })
+        .await
+        .unwrap();
+
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 2);
+        assert_eq!(trail[0].round, 1);
+        assert_eq!(trail[0].body, "r1-obj");
+        assert_eq!(trail[1].round, 2);
+        assert_eq!(trail[1].body, "r2-reb");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn existing_feedback_crud_unaffected_by_debate_trail() {
+        // Verify that adding debate-trail entries does not interfere with
+        // existing proposal_feedback operations.
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Both")).await.unwrap();
+
+        // Add a feedback entry.
+        let fb = repo
+            .add_feedback(ProposalFeedbackCreateInput {
+                proposal_id: &p.id,
+                parent_id: None,
+                author_kind: "user",
+                author_model: None,
+                body: "human comment",
+            })
+            .await
+            .unwrap();
+        assert!(fb.resolved_at.is_none());
+
+        // Add a debate trail entry.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "objection",
+            body: "ai objection",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 1,
+        })
+        .await
+        .unwrap();
+
+        // Feedback still works independently.
+        let feedbacks = repo.feedback(&p.id).await.unwrap();
+        assert_eq!(feedbacks.len(), 1);
+        assert_eq!(feedbacks[0].body, "human comment");
+
+        let resolved = repo.set_feedback_resolved(&fb.id, Some(2)).await.unwrap();
+        assert!(resolved.resolved_at.is_some());
+        assert_eq!(resolved.resolved_revision_seq, Some(2));
+
+        // Debate trail is still separate.
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].body, "ai objection");
     }
 }

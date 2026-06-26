@@ -1,5 +1,8 @@
 import { useMemo, useState } from "react";
-import type { UsageAnalyticsResponse, UsageProjectModelCell } from "@/api/analytics";
+import type {
+  UsageAnalyticsResponse,
+  UsageProjectModelCell,
+} from "@/api/analytics";
 import {
   Select,
   SelectContent,
@@ -24,6 +27,8 @@ export type MatrixMetricKey =
   | "success_rate"
   | "avg_reopens"
   | "total_cost"
+  | "actual_spend_usd"
+  | "projected_usd"
   | "total_tokens";
 
 interface MatrixMetricSpec {
@@ -39,9 +44,26 @@ const MATRIX_METRICS: MatrixMetricSpec[] = [
   {
     key: "cost_per_task",
     label: "Cost / task",
-    description: "Priced spend divided by credited worker tasks. Unpriced pairs render as —.",
+    description:
+      "Priced spend divided by credited worker tasks. Unpriced pairs render as —.",
     format: formatCurrency,
     emptyLabel: "No priced cost/task",
+  },
+  {
+    key: "actual_spend_usd",
+    label: "Actual API spend",
+    description:
+      "Real API-key spend for the project/model pair. Subscription sessions contribute $0.",
+    format: formatCurrency,
+    emptyLabel: "No actual spend",
+  },
+  {
+    key: "projected_usd",
+    label: "Projected subscription-equivalent cost",
+    description:
+      "List-price equivalent for flat-rate plan sessions. API-key sessions contribute $0 here.",
+    format: formatCurrency,
+    emptyLabel: "No projected cost",
   },
   {
     key: "success_rate",
@@ -61,15 +83,17 @@ const MATRIX_METRICS: MatrixMetricSpec[] = [
   },
   {
     key: "total_cost",
-    label: "Total spend",
-    description: "Total priced spend. Unpriced/null cost still renders as — while tokens remain visible.",
+    label: "Legacy total cost",
+    description:
+      "Combined cost field (legacy). For split view use Actual API spend or Projected subscription-equivalent cost.",
     format: formatCurrency,
     emptyLabel: "No priced spend",
   },
   {
     key: "total_tokens",
     label: "Tokens",
-    description: "Input plus output tokens for the pair. Zero-token runs remain distinct from never-ran pairs.",
+    description:
+      "Input plus output tokens for the pair. Zero-token runs remain distinct from never-ran pairs.",
     format: formatCompactNumber,
     emptyLabel: "No token data",
   },
@@ -91,7 +115,8 @@ export function UsageProjectModelMatrixTab({
 }: {
   data: UsageAnalyticsResponse;
 }) {
-  const [metricKey, setMetricKey] = useState<MatrixMetricKey>("cost_per_task");
+  const [metricKey, setMetricKey] =
+    useState<MatrixMetricKey>("actual_spend_usd");
   const metric = getMatrixMetric(metricKey);
   const matrix = useMemo(
     () => buildProjectModelMatrix(data.project_model_matrix),
@@ -105,7 +130,9 @@ export function UsageProjectModelMatrixTab({
   if (data.project_model_matrix.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
-        <p className="text-sm font-medium text-foreground">No project/model usage</p>
+        <p className="text-sm font-medium text-foreground">
+          No project/model usage
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
           Matrix cells will appear once project/model pairs have worker usage in
           the selected filter range.
@@ -126,6 +153,8 @@ export function UsageProjectModelMatrixTab({
               Heatmap of project/model worker usage. Blank patterned cells mean
               the pair never ran in the selected filters; unpriced cost metrics
               render as — rather than $0, while token counts remain visible.
+              Actual API spend and projected subscription-equivalent cost are
+              available as separate metrics.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -136,7 +165,10 @@ export function UsageProjectModelMatrixTab({
                 if (isMatrixMetricKey(value)) setMetricKey(value);
               }}
             >
-              <SelectTrigger className="h-8 w-[160px] text-xs" title="Matrix metric">
+              <SelectTrigger
+                className="h-8 w-[160px] text-xs"
+                title="Matrix metric"
+              >
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -190,13 +222,18 @@ export function UsageProjectModelMatrixTab({
                     {project.name}
                   </span>
                   {project.id !== project.name && (
-                    <span className="block truncate text-xs font-normal text-muted-foreground" title={project.id}>
+                    <span
+                      className="block truncate text-xs font-normal text-muted-foreground"
+                      title={project.id}
+                    >
                       {project.id}
                     </span>
                   )}
                 </th>
                 {matrix.models.map((model) => {
-                  const cell = matrix.cellsByPair.get(pairKey(project.id, model));
+                  const cell = matrix.cellsByPair.get(
+                    pairKey(project.id, model),
+                  );
                   return (
                     <ProjectModelCell
                       key={model}
@@ -248,9 +285,13 @@ function ProjectModelCell({
   const label = metric.format(value);
   const intensity = getMetricIntensity(value, scale, metric);
   const cached = cell.tokens_cached ?? 0;
-  const title = `${projectName} / ${model}: ${metric.label} ${label}; spend ${formatCurrency(
-    cell.total_cost,
-  )}; tokens ${formatCompactNumber(cell.total_tokens)} (${formatCompactNumber(cached)} cached)`;
+  const unpricedLabel =
+    cell.unpriced_count != null && cell.unpriced_count > 0
+      ? `; ${cell.unpriced_count} unpriced`
+      : "";
+  const title = `${projectName} / ${model}: ${metric.label} ${label}; actual spend ${formatCurrency(
+    cell.actual_spend_usd,
+  )}; projected ${formatCurrency(cell.projected_usd)}${unpricedLabel}; tokens ${formatCompactNumber(cell.total_tokens)} (${formatCompactNumber(cached)} cached)`;
 
   return (
     <td className="h-full border-b border-border p-2" title={title}>
@@ -264,7 +305,9 @@ function ProjectModelCell({
         style={
           value === null || value === undefined
             ? undefined
-            : { backgroundColor: `color-mix(in oklch, var(--primary) ${intensity}%, transparent)` }
+            : {
+                backgroundColor: `color-mix(in oklch, var(--primary) ${intensity}%, transparent)`,
+              }
         }
       >
         <div className="font-semibold text-foreground">{label}</div>
@@ -274,7 +317,11 @@ function ProjectModelCell({
           </div>
         )}
         <div className="mt-auto space-y-0.5 pt-3 text-xs text-muted-foreground">
-          <div>Spend {formatCurrency(cell.total_cost)}</div>
+          <div>Actual {formatCurrency(cell.actual_spend_usd)}</div>
+          <div>Projected {formatCurrency(cell.projected_usd)}</div>
+          {cell.unpriced_count != null && cell.unpriced_count > 0 && (
+            <div>Unpriced {formatInteger(cell.unpriced_count)}</div>
+          )}
           <div>
             Tokens {formatCompactNumber(cell.total_tokens)}
             {cached > 0 && ` · ${formatCompactNumber(cached)} cached`}
@@ -304,7 +351,10 @@ export function buildProjectModelMatrix(
       cell.project_id,
       (projectTokens.get(cell.project_id) ?? 0) + cell.total_tokens,
     );
-    modelTokens.set(cell.model, (modelTokens.get(cell.model) ?? 0) + cell.total_tokens);
+    modelTokens.set(
+      cell.model,
+      (modelTokens.get(cell.model) ?? 0) + cell.total_tokens,
+    );
   }
 
   const projectsById = new Map<string, MatrixProject>();
@@ -358,7 +408,12 @@ function getMetricIntensity(
   scale: MetricScale,
   metric: MatrixMetricSpec,
 ): number {
-  if (value === null || value === undefined || scale.min === null || scale.max === null) {
+  if (
+    value === null ||
+    value === undefined ||
+    scale.min === null ||
+    scale.max === null
+  ) {
     return 0;
   }
   if (scale.min === scale.max) return 28;
@@ -371,11 +426,14 @@ function getMetricValue(
   cell: UsageProjectModelCell,
   metricKey: MatrixMetricKey,
 ): number | null {
-  return cell[metricKey];
+  const val = cell[metricKey];
+  return val ?? null;
 }
 
 function getMatrixMetric(key: MatrixMetricKey): MatrixMetricSpec {
-  return MATRIX_METRICS.find((metric) => metric.key === key) ?? MATRIX_METRICS[0];
+  return (
+    MATRIX_METRICS.find((metric) => metric.key === key) ?? MATRIX_METRICS[0]
+  );
 }
 
 function isMatrixMetricKey(value: string | null): value is MatrixMetricKey {

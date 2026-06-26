@@ -151,6 +151,11 @@ pub(crate) const EDGE_CONFIDENCE_FETCHES: f64 = 0.75;
 // analysis rather than directly extracted. They sit in the inferred tier
 // (below 0.9) so `confidence_tier()` classifies them as `Inferred` unless
 // the confidence is dropped below the floor (→ `Ambiguous`).
+//
+// The 0.70 floor is deliberately below the default `impact` min_confidence
+// (0.85), so synthesized trait-dispatch callers are excluded from blast-
+// radius results unless the caller explicitly lowers the threshold.
+// See `docs/TRAIT_DISPATCH_VALIDATION.md` for the full semantics.
 pub(crate) const EDGE_CONFIDENCE_TRAIT_DISPATCH_CALL: f64 = 0.70;
 pub(crate) const EDGE_CONFIDENCE_LOCAL_PENALTY: f64 = 0.15;
 pub(crate) const EDGE_WEIGHT_DEFINITION_TO_FILE: f64 = 4.0;
@@ -205,6 +210,23 @@ pub const REASON_TRAIT_DISPATCH_FANOUT: &str = "trait-dispatch-fanout";
 /// Reason stamped when a potential fan-out edge is suppressed (fan-out cap
 /// reached, ambiguous impl, etc.).
 pub const REASON_TRAIT_DISPATCH_SUPPRESSED: &str = "trait-dispatch-suppressed";
+
+/// Maximum number of concrete implementation methods to which a caller →
+/// trait-method dispatch edge will fan out. When a trait method has more
+/// known implementations than this cap, the builder suppresses the
+/// synthesized fan-out edges entirely to prevent unbounded edge
+/// multiplication (e.g. `RuntimeOps` with 10+ impls). The direct caller
+/// → trait-method `TraitDispatchCall` edge is still emitted regardless of
+/// the cap; only the impl-fanout edges are suppressed.
+///
+/// The cap is deliberately conservative: most traits in real Rust codebases
+/// have fewer than 5 implementations, so a cap of 5 covers the common case
+/// while preventing pathological multiplication for widely-implemented
+/// framework traits.
+///
+/// See `docs/TRAIT_DISPATCH_VALIDATION.md` for the full validation matrix
+/// and confidence/provenance semantics.
+pub const TRAIT_DISPATCH_FANOUT_CAP: usize = 5;
 
 pub(crate) const SYMBOL_KIND_TYPE_MULTIPLIER: f64 = 1.15;
 pub(crate) const SYMBOL_KIND_METHOD_MULTIPLIER: f64 = 1.05;

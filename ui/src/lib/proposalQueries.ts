@@ -10,8 +10,11 @@ import { queryOptions } from "@tanstack/react-query";
 import { callMcpTool } from "@/api/mcpClient";
 import type {
   Proposal,
+  ProposalDebateTrailRow,
   ProposalEpic,
   ProposalFeedback,
+  ProposalGateStatus,
+  ProposalRefinementStatus,
   ProposalRevision,
   ProposalSignoff,
   ProposalTarget,
@@ -62,6 +65,12 @@ export interface ProposalDetail {
   revisions: ProposalHistoryEntry[];
   signoffs: ProposalSignoff[];
   epics: ProposalEpic[];
+  /** Structured debate-trail rows (objections, rebuttals, verdicts). */
+  debate_trail: ProposalDebateTrailRow[];
+  /** Refinement session status. null when refinement has not been started. */
+  refinement: ProposalRefinementStatus | null;
+  /** Composed gate status: deterministic DoR + tribunal conditions. */
+  gate_status: ProposalGateStatus | null;
 }
 
 export function proposalDetailQueryOptions(id: string | null) {
@@ -77,6 +86,9 @@ export function proposalDetailQueryOptions(id: string | null) {
         revisions: (res.revisions ?? []) as ProposalHistoryEntry[],
         signoffs: (res.signoffs ?? []) as ProposalSignoff[],
         epics: (res.epics ?? []) as ProposalEpic[],
+        debate_trail: (res.debate_trail ?? []) as ProposalDebateTrailRow[],
+        refinement: (res.refinement ?? null) as ProposalRefinementStatus | null,
+        gate_status: (res.gate_status ?? null) as ProposalGateStatus | null,
       };
     },
     staleTime: 15_000,

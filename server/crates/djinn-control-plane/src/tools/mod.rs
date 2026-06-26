@@ -1,6 +1,7 @@
 pub mod acting_user;
 pub mod agent_tools;
 pub mod credential_tools;
+pub mod debate_tools;
 pub mod dispatch_pause_tools;
 pub mod doctor_tools;
 pub mod epic_ops;
@@ -19,8 +20,10 @@ pub mod pr_review_tools;
 pub mod project_tools;
 pub mod proposal_blocks;
 pub mod proposal_ops;
+pub mod proposal_readiness;
 pub mod proposal_tools;
 pub mod provider_tools;
+pub mod refinement_tools;
 pub mod service_tools;
 pub mod session_tools;
 pub mod settings_tools;

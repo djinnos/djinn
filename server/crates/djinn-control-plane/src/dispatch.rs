@@ -9,6 +9,10 @@ use crate::tools::agent_tools::{
 use crate::tools::credential_tools::{
     CredentialDeleteInput, CredentialListInput, CredentialSetInput,
 };
+use crate::tools::debate_tools::{
+    ProposalDebateAppendParams, ProposalDebateListParams, ProposalDebateReopenParams,
+    ProposalDebateResolveParams,
+};
 use crate::tools::dispatch_pause_tools::{
     DispatchPauseParams, DispatchPauseStatusParams, DispatchResumeParams,
 };
@@ -41,17 +45,22 @@ use crate::tools::project_tools::{
     ProjectEnvironmentConfigSetParams, ProjectGraphExclusionsGetParams,
     ProjectGraphExclusionsSetParams, ProjectRemoveParams, RetriggerImageBuildParams,
 };
-use crate::tools::proposal_blocks::ProposalBlocksParams;
+use crate::tools::proposal_blocks::{GetBlockCatalogParams, ProposalBlocksParams};
 use crate::tools::proposal_tools::{
-    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalFeedbackAddParams,
-    ProposalFeedbackResolveParams, ProposalGraduateParams, ProposalImportParams,
-    ProposalListParams, ProposalReconcileObsoleteEpicParams, ProposalShowParams,
-    ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams, ProposalUpdateParams,
+    ProposalBlockPatchParams, ProposalCreateParams, ProposalDeleteParams, ProposalExportParams,
+    ProposalFeedbackAddParams, ProposalFeedbackResolveParams, ProposalGraduateParams,
+    ProposalImportParams, ProposalListParams, ProposalReconcileObsoleteEpicParams,
+    ProposalShowParams, ProposalSignoffParams, ProposalStopBuildParams, ProposalTargetParams,
+    ProposalUpdateParams,
 };
 use crate::tools::provider_tools::{
     ModelHealthInput, ProviderCatalogInput, ProviderConnectedInput, ProviderModelLookupInput,
     ProviderModelsConnectedInput, ProviderModelsInput, ProviderOauthStartInput,
     ProviderRemoveInput, ProviderValidateInput,
+};
+use crate::tools::refinement_tools::{
+    ProposalRefinementDemandRoundParams, ProposalRefinementResolveParams,
+    ProposalRefinementStartParams, ProposalRefinementStatusParams, ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -408,6 +417,13 @@ impl DjinnMcpServer {
                 self.proposal_blocks(Parameters(decode_args::<ProposalBlocksParams>(name, args)?))
                     .await,
             ),
+            "get_block_catalog" => map_json(
+                name,
+                self.get_block_catalog(Parameters(decode_args::<GetBlockCatalogParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
             "proposal_show" => map_json(
                 name,
                 self.proposal_show(Parameters(decode_args::<ProposalShowParams>(name, args)?))
@@ -422,6 +438,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_update(Parameters(decode_args::<ProposalUpdateParams>(name, args)?))
                     .await,
+            ),
+            "proposal_block_patch" => map_json(
+                name,
+                self.proposal_block_patch(Parameters(decode_args::<ProposalBlockPatchParams>(
+                    name, args,
+                )?))
+                .await,
             ),
             "proposal_delete" => map_json(
                 name,
@@ -490,6 +513,69 @@ impl DjinnMcpServer {
                     name, args,
                 )?))
                 .await,
+            ),
+            "proposal_debate_append" => map_json(
+                name,
+                self.proposal_debate_append(Parameters(decode_args::<ProposalDebateAppendParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_debate_list" => map_json(
+                name,
+                self.proposal_debate_list(Parameters(decode_args::<ProposalDebateListParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_debate_resolve" => map_json(
+                name,
+                self.proposal_debate_resolve(Parameters(
+                    decode_args::<ProposalDebateResolveParams>(name, args)?,
+                ))
+                .await,
+            ),
+            "proposal_debate_reopen" => map_json(
+                name,
+                self.proposal_debate_reopen(Parameters(decode_args::<ProposalDebateReopenParams>(
+                    name, args,
+                )?))
+                .await,
+            ),
+            "proposal_refinement_start" => map_json(
+                name,
+                self.proposal_refinement_start(Parameters(decode_args::<
+                    ProposalRefinementStartParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_status" => map_json(
+                name,
+                self.proposal_refinement_status(Parameters(decode_args::<
+                    ProposalRefinementStatusParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_demand_round" => map_json(
+                name,
+                self.proposal_refinement_demand_round(Parameters(decode_args::<
+                    ProposalRefinementDemandRoundParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_resolve" => map_json(
+                name,
+                self.proposal_refinement_resolve(Parameters(decode_args::<
+                    ProposalRefinementResolveParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_verdict_override" => map_json(
+                name,
+                self.proposal_verdict_override(Parameters(decode_args::<
+                    ProposalVerdictOverrideParams,
+                >(name, args)?))
+                    .await,
             ),
             "model_health" => map_json(
                 name,

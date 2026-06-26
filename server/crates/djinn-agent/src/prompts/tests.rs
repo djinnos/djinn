@@ -139,7 +139,7 @@ fn facade_parity_agent_type_and_role_config() {
     assert_eq!(super::format_acceptance_criteria("not json"), "not json");
 
     // MAX_SYSTEM_PROMPT_CHARS re-exported
-    assert!(super::MAX_SYSTEM_PROMPT_CHARS > 0);
+    const { assert!(super::MAX_SYSTEM_PROMPT_CHARS > 0) }
 }
 
 // ── Tests that require extension tool-schema registry ────────────────────
@@ -555,6 +555,36 @@ fn architect_tools_section_snapshot() {
 }
 
 #[test]
+fn advocate_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Advocate);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
+fn adversary_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Adversary);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
+fn judge_tools_section_snapshot() {
+    ensure_registry();
+    let schemas = crate::roles::tool_schemas_for(AgentType::Judge);
+    let section = format_tools_section(&schemas);
+    insta::with_settings!({ snapshot_path => "../snapshots" }, {
+        insta::assert_snapshot!(section);
+    });
+}
+
+#[test]
 fn tools_section_injected_into_rendered_prompt() {
     ensure_registry();
     let task = make_task();
@@ -653,5 +683,292 @@ fn tools_section_injected_into_rendered_prompt() {
     assert!(
         planner_has_amend_tool,
         "planner tool schemas should expose agent_amend_prompt for evidence-based learned-prompt amendments"
+    );
+
+    // Tribunal roles (k9zw): verify each role renders its finalize tool.
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    assert!(
+        advocate_prompt.contains("`submit_work("),
+        "advocate prompt should contain submit_work"
+    );
+    assert!(
+        !advocate_prompt.contains("{{"),
+        "advocate prompt should have no unresolved placeholders"
+    );
+
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        adversary_prompt.contains("`submit_review("),
+        "adversary prompt should contain submit_review"
+    );
+    assert!(
+        !adversary_prompt.contains("{{"),
+        "adversary prompt should have no unresolved placeholders"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("`submit_decision("),
+        "judge prompt should contain submit_decision"
+    );
+    assert!(
+        !judge_prompt.contains("{{"),
+        "judge prompt should have no unresolved placeholders"
+    );
+}
+
+// ── Advocate enrichment guidance regressions (k9zw) ─────────────────────
+//
+// Verify that the advocate prompt contains the expected enrichment guidance
+// for progressive MDX block-catalog consumption, and that the rendered prompt
+// includes the new block-catalog tools while adversary/judge do not.
+
+#[test]
+fn advocate_prompt_contains_enrichment_guidance() {
+    let prompt = include_str!("../prompts/advocate.md");
+
+    // Must reference proposal_block_patch for targeted enrichment.
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "advocate.md must mention proposal_block_patch for MDX enrichment"
+    );
+    // Must instruct get_block_catalog pull on demand.
+    assert!(
+        prompt.contains("get_block_catalog"),
+        "advocate.md must instruct get_block_catalog pull on demand"
+    );
+    // Must declare enrichment as default-but-optional, not DoR gate.
+    assert!(
+        prompt.contains("default behavior, not a deterministic DoR gate"),
+        "advocate.md must state enrichment is default-but-optional"
+    );
+    // Must bound enrichment to at most one block per revision.
+    assert!(
+        prompt.contains("at most one stable block"),
+        "advocate.md must bound enrichment to one block per revision"
+    );
+    // Must not require MDX for readiness.
+    assert!(
+        prompt.contains("prose grounding remains sufficient"),
+        "advocate.md must not require MDX for DoR readiness"
+    );
+}
+
+#[test]
+fn advocate_rendered_prompt_includes_block_catalog_tools() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let advocate_prompt = render_prompt(AgentType::Advocate, &task, &ctx);
+    // Advocate prompt must include block-catalog enrichment tools.
+    assert!(
+        advocate_prompt.contains("`proposal_block_patch("),
+        "advocate rendered prompt should include proposal_block_patch tool"
+    );
+    assert!(
+        advocate_prompt.contains("`get_block_catalog("),
+        "advocate rendered prompt should include get_block_catalog tool"
+    );
+    assert!(
+        advocate_prompt.contains("`proposal_blocks("),
+        "advocate rendered prompt should include proposal_blocks tool"
+    );
+    assert!(
+        advocate_prompt.contains("`proposal_update("),
+        "advocate rendered prompt should include proposal_update tool"
+    );
+}
+
+#[test]
+fn adversary_judge_do_not_include_block_catalog_tools() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    // Adversary and Judge must NOT have block-catalog/advocacy tools.
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        !adversary_prompt.contains("`proposal_block_patch("),
+        "adversary rendered prompt must NOT include proposal_block_patch"
+    );
+    assert!(
+        !adversary_prompt.contains("`get_block_catalog("),
+        "adversary rendered prompt must NOT include get_block_catalog"
+    );
+    assert!(
+        !adversary_prompt.contains("`proposal_update("),
+        "adversary rendered prompt must NOT include proposal_update"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        !judge_prompt.contains("`proposal_block_patch("),
+        "judge rendered prompt must NOT include proposal_block_patch"
+    );
+    assert!(
+        !judge_prompt.contains("`get_block_catalog("),
+        "judge rendered prompt must NOT include get_block_catalog"
+    );
+    assert!(
+        !judge_prompt.contains("`proposal_update("),
+        "judge rendered prompt must NOT include proposal_update"
+    );
+}
+
+/// Regression guard for the tribunal debate-trail wiring bug: the refinement
+/// loop detects an Adversary's objections and a Judge's verdict by reading
+/// `proposal_debate_append` entries from the debate trail. If those roles are
+/// not given `proposal_debate_append`, their structured output (filed via
+/// `submit_review`/`submit_decision`) is dropped, the round looks "dry", and
+/// the tribunal hollow-converges. Both roles MUST carry the tool the loop reads.
+#[test]
+fn adversary_and_judge_can_file_debate_trail_entries() {
+    ensure_registry();
+    let task = make_task();
+    let ctx = make_ctx();
+
+    let adversary_prompt = render_prompt(AgentType::Adversary, &task, &ctx);
+    assert!(
+        adversary_prompt.contains("`proposal_debate_append("),
+        "adversary MUST have proposal_debate_append — it is the only channel the \
+         refinement loop reads for objections"
+    );
+
+    let judge_prompt = render_prompt(AgentType::Judge, &task, &ctx);
+    assert!(
+        judge_prompt.contains("`proposal_debate_append("),
+        "judge MUST have proposal_debate_append — it is the only channel the \
+         refinement loop reads for the verdict"
+    );
+}
+
+mod visual_spec;
+
+// ── Proposal-address prompt regressions (y4td) ───────────────────────────
+//
+// Verify that the proposal_address.md prompt text contains the expected
+// workflow guidance for progressive markdown-to-MDX enrichment via targeted
+// block patches, without inlining block vocabulary or forcing non-authoring
+// planner prompts to pay the catalog/skill body cost.
+
+#[test]
+fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Must reference the targeted block-patch primitive.
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "proposal_address.md must mention proposal_block_patch for targeted enrichment"
+    );
+
+    // Must reference visual-spec skill loading.
+    assert!(
+        prompt.contains("visual-spec"),
+        "proposal_address.md must mention visual-spec native skill for authoring sessions"
+    );
+    assert!(
+        prompt.contains("skill_read"),
+        "proposal_address.md must instruct skill_read to load visual-spec on demand"
+    );
+
+    // Must reference catalog pull on demand.
+    assert!(
+        prompt.contains("get_block_catalog"),
+        "proposal_address.md must instruct get_block_catalog pull on demand"
+    );
+
+    // Must reference memory retrieval for learned refinements.
+    assert!(
+        prompt.contains("memory_search") || prompt.contains("memory_build_context"),
+        "proposal_address.md must instruct memory retrieval for learned refinements"
+    );
+
+    // Must mention revision sequencing / latest_revision_seq inspection.
+    assert!(
+        prompt.contains("latest_revision_seq"),
+        "proposal_address.md must mention latest_revision_seq for patch sequencing"
+    );
+
+    // Must mention attribution fields.
+    assert!(
+        prompt.contains("native_skill_version"),
+        "proposal_address.md must mention native_skill_version for attribution"
+    );
+    assert!(
+        prompt.contains("native_skill_name"),
+        "proposal_address.md must mention native_skill_name for attribution"
+    );
+
+    // Lazy semantics: must NOT inline the full block vocabulary (no concrete
+    // block tag names from the catalog).
+    let forbidden_block_tags = [
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
+    ];
+    for tag in &forbidden_block_tags {
+        assert!(
+            !prompt.contains(tag),
+            "proposal_address.md must not inline block vocabulary tag {tag}"
+        );
+    }
+
+    // Must not embed a giant catalog or list of block types.
+    assert!(
+        !prompt.contains("block_types"),
+        "proposal_address.md must not embed a block_types catalog list"
+    );
+}
+
+#[test]
+fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Both paths (simple update and block-patch) should be mentioned.
+    assert!(
+        prompt.contains("proposal_update"),
+        "proposal_address.md must still mention proposal_update for simple edits"
+    );
+    assert!(
+        prompt.contains("proposal_block_patch"),
+        "proposal_address.md must mention proposal_block_patch for MDX enrichment"
+    );
+
+    // The block-patch path should be framed as progressive enrichment.
+    let lower = prompt.to_lowercase();
+    assert!(
+        lower.contains("progressive") || lower.contains("one patch per revision"),
+        "proposal_address.md must frame block-patch as progressive enrichment"
+    );
+}
+
+#[test]
+fn proposal_address_prompt_preserves_existing_feedback_rules() {
+    let prompt = include_str!("../prompts/proposal_address.md");
+
+    // Existing rules must survive.
+    assert!(
+        prompt.contains("proposal_feedback_resolve"),
+        "proposal_address.md must still mention proposal_feedback_resolve"
+    );
+    assert!(
+        prompt.contains("building"),
+        "proposal_address.md must still mention the building guard"
+    );
+    assert!(
+        prompt.contains("{{PROPOSAL_CONTEXT}}"),
+        "proposal_address.md must keep the PROPOSAL_CONTEXT substitution marker"
     );
 }

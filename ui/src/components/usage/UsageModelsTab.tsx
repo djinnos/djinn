@@ -1,8 +1,12 @@
 import { useMemo } from "react";
-import type { UsageAnalyticsResponse, UsageModelEffectiveness } from "@/api/analytics";
+import type {
+  UsageAnalyticsResponse,
+  UsageModelEffectiveness,
+} from "@/api/analytics";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
+  EM_DASH,
   formatAverageReopens,
   formatCompactNumber,
   formatCurrency,
@@ -45,7 +49,8 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
   const models = useMemo(
     () =>
       data.model_effectiveness.filter(
-        (row) => totalTokens(row.tokens_in, row.tokens_out, row.total_tokens) > 0,
+        (row) =>
+          totalTokens(row.tokens_in, row.tokens_out, row.total_tokens) > 0,
       ),
     [data],
   );
@@ -54,10 +59,12 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
   if (models.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
-        <p className="text-sm font-medium text-foreground">No worker model data</p>
+        <p className="text-sm font-medium text-foreground">
+          No worker model data
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
-          Worker-scoped model effectiveness appears once worker sessions complete
-          in the selected range.
+          Worker-scoped model effectiveness appears once worker sessions
+          complete in the selected range.
         </p>
       </div>
     );
@@ -72,9 +79,11 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               Worker model effectiveness
             </h2>
             <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
-              Compares models using worker sessions/results only. Completed tasks
-              are attributed to every model that ran a worker session on them, so
-              task counts use shared credit rather than exclusive ownership.
+              Compares models using worker sessions/results only. Completed
+              tasks are attributed to every model that ran a worker session on
+              them, so task counts use shared credit rather than exclusive
+              ownership. Actual API spend and projected subscription-equivalent
+              cost are shown separately.
             </p>
           </div>
           <Badge variant="outline" className="text-muted-foreground">
@@ -84,7 +93,7 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] text-left text-sm">
+        <table className="w-full min-w-[1140px] text-left text-sm">
           <thead className="border-b border-border text-xs text-muted-foreground">
             <tr>
               <th className="px-4 py-3 font-medium">Model</th>
@@ -96,7 +105,9 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               <th className="px-4 py-3 font-medium">Tasks</th>
               <th className="px-4 py-3 font-medium">Sessions</th>
               <th className="px-4 py-3 font-medium">Tokens</th>
-              <th className="px-4 py-3 font-medium">Spend</th>
+              <th className="px-4 py-3 font-medium">Actual API spend</th>
+              <th className="px-4 py-3 font-medium">Projected subscription-equivalent cost</th>
+              <th className="px-4 py-3 font-medium">Unpriced</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -109,7 +120,10 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
               .map((row) => (
                 <tr key={row.model} className="align-top hover:bg-muted/30">
                   <td className="max-w-[260px] px-4 py-3">
-                    <div className="truncate font-medium text-foreground" title={row.model}>
+                    <div
+                      className="truncate font-medium text-foreground"
+                      title={row.model}
+                    >
                       {row.model}
                     </div>
                   </td>
@@ -133,15 +147,34 @@ export function UsageModelsTab({ data }: { data: UsageAnalyticsResponse }) {
                     {formatInteger(row.session_count)}
                   </td>
                   <td className="px-4 py-3 tabular-nums text-foreground">
-                    <div>{formatCompactNumber(totalTokens(row.tokens_in, row.tokens_out, row.total_tokens))}</div>
-                    {(row.tokens_in !== undefined || row.tokens_out !== undefined) && (
+                    <div>
+                      {formatCompactNumber(
+                        totalTokens(
+                          row.tokens_in,
+                          row.tokens_out,
+                          row.total_tokens,
+                        ),
+                      )}
+                    </div>
+                    {(row.tokens_in !== undefined ||
+                      row.tokens_out !== undefined) && (
                       <div className="text-xs text-muted-foreground">
-                        {formatCompactNumber(row.tokens_in ?? 0)} in · {formatCompactNumber(row.tokens_cached ?? 0)} cached · {formatCompactNumber(row.tokens_out ?? 0)} out
+                        {formatCompactNumber(row.tokens_in ?? 0)} in ·{" "}
+                        {formatCompactNumber(row.tokens_cached ?? 0)} cached ·{" "}
+                        {formatCompactNumber(row.tokens_out ?? 0)} out
                       </div>
                     )}
                   </td>
                   <td className="px-4 py-3 tabular-nums text-foreground">
-                    {formatCurrency(row.total_cost)}
+                    {formatCurrency(row.actual_spend_usd)}
+                  </td>
+                  <td className="px-4 py-3 tabular-nums text-foreground">
+                    {formatCurrency(row.projected_usd)}
+                  </td>
+                  <td className="px-4 py-3 tabular-nums text-foreground">
+                    {row.unpriced_count != null && row.unpriced_count > 0
+                      ? formatInteger(row.unpriced_count)
+                      : EM_DASH}
                   </td>
                 </tr>
               ))}
@@ -184,7 +217,10 @@ function MetricCell({
       {value !== null && value !== undefined && (
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
           <div
-            className={cn("h-full rounded-full", isBest ? "bg-primary" : "bg-muted-foreground/50")}
+            className={cn(
+              "h-full rounded-full",
+              isBest ? "bg-primary" : "bg-muted-foreground/50",
+            )}
             style={{ width: `${barPct}%` }}
           />
         </div>
@@ -205,7 +241,9 @@ function buildMetricStats(rows: UsageModelEffectiveness[]): MetricStatsMap {
   return METRICS.reduce((acc, metric) => {
     const values = rows
       .map((row) => row[metric.key])
-      .filter((value): value is number => value !== null && value !== undefined);
+      .filter(
+        (value): value is number => value !== null && value !== undefined,
+      );
     const min = values.length ? Math.min(...values) : null;
     const max = values.length ? Math.max(...values) : null;
     acc[metric.key] = {
@@ -222,7 +260,12 @@ function getBarPct(
   stats: MetricStats,
   lowerIsBetter: boolean,
 ): number {
-  if (value === null || value === undefined || stats.min === null || stats.max === null) {
+  if (
+    value === null ||
+    value === undefined ||
+    stats.min === null ||
+    stats.max === null
+  ) {
     return 0;
   }
   if (stats.max === stats.min) return 100;

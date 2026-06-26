@@ -31,7 +31,17 @@ import {
 } from "./usageFormatters";
 
 type BreakdownKind = "user" | "project" | "proposal" | "task";
-type SortKey = "name" | "cost" | "cost_per_task" | "success_rate" | "avg_reopens" | "task_count" | "tokens";
+type SortKey =
+  | "name"
+  | "actual_spend"
+  | "projected_cost"
+  | "cost"
+  | "cost_per_task"
+  | "success_rate"
+  | "avg_reopens"
+  | "task_count"
+  | "tokens"
+  | "unpriced";
 type SortDirection = "asc" | "desc";
 
 interface BreakdownConfig {
@@ -42,19 +52,39 @@ interface BreakdownConfig {
 }
 
 const DEFAULT_SORT: Record<BreakdownKind, SortKey> = {
-  user: "cost",
-  project: "cost",
+  user: "actual_spend",
+  project: "actual_spend",
   proposal: "task_count",
-  task: "cost",
+  task: "actual_spend",
 };
 
 export function UsageBreakdownsTab({ data }: { data: UsageAnalyticsResponse }) {
   const breakdowns = data.breakdowns;
   const configs: BreakdownConfig[] = [
-    { kind: "user", value: "user", label: "By User", rows: breakdowns?.by_user ?? [] },
-    { kind: "project", value: "project", label: "By Project", rows: breakdowns?.by_project ?? [] },
-    { kind: "proposal", value: "proposal", label: "By Proposal", rows: breakdowns?.by_proposal ?? [] },
-    { kind: "task", value: "task", label: "By Task", rows: breakdowns?.by_task ?? [] },
+    {
+      kind: "user",
+      value: "user",
+      label: "By User",
+      rows: breakdowns?.by_user ?? [],
+    },
+    {
+      kind: "project",
+      value: "project",
+      label: "By Project",
+      rows: breakdowns?.by_project ?? [],
+    },
+    {
+      kind: "proposal",
+      value: "proposal",
+      label: "By Proposal",
+      rows: breakdowns?.by_proposal ?? [],
+    },
+    {
+      kind: "task",
+      value: "task",
+      label: "By Task",
+      rows: breakdowns?.by_task ?? [],
+    },
   ];
 
   return (
@@ -97,7 +127,9 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
   if (config.rows.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-border bg-card/50 px-4 py-8 text-center">
-        <p className="text-sm font-medium text-foreground">No {config.label.toLowerCase()} rows</p>
+        <p className="text-sm font-medium text-foreground">
+          No {config.label.toLowerCase()} rows
+        </p>
         <p className="mt-1 text-sm text-muted-foreground">
           Rows will appear when usage exists for the selected filters.
         </p>
@@ -110,21 +142,81 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
       <div className="border-b border-border px-4 py-3">
         <h2 className="text-sm font-medium text-foreground">{config.label}</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          Sort by any metric. Expand rows with detail to inspect per-model split and time-series buckets.
+          Sort by any metric. Expand rows with detail to inspect per-model split
+          and time-series buckets. Actual API spend and projected
+          subscription-equivalent cost are shown separately.
         </p>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1040px] text-left text-sm">
+        <table className="w-full min-w-[1240px] text-left text-sm">
           <thead className="border-b border-border text-xs text-muted-foreground">
             <tr>
-              <th className="w-10 px-3 py-3 font-medium" aria-label="Expand row" />
-              <SortableHeader label={config.kind === "task" ? "Task" : config.kind === "proposal" ? "Proposal" : "Name"} sortKey="name" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Spend" sortKey="cost" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Cost / task" sortKey="cost_per_task" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Success" sortKey="success_rate" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Avg reopens" sortKey="avg_reopens" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Tasks" sortKey="task_count" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
-              <SortableHeader label="Tokens" sortKey="tokens" activeKey={sortKey} direction={sortDirection} onSort={toggleSort} />
+              <th
+                className="w-10 px-3 py-3 font-medium"
+                aria-label="Expand row"
+              />
+              <SortableHeader
+                label={
+                  config.kind === "task"
+                    ? "Task"
+                    : config.kind === "proposal"
+                      ? "Proposal"
+                      : "Name"
+                }
+                sortKey="name"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Actual API spend"
+                sortKey="actual_spend"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Projected subscription-equivalent cost"
+                sortKey="projected_cost"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Unpriced"
+                sortKey="unpriced"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Success"
+                sortKey="success_rate"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Avg reopens"
+                sortKey="avg_reopens"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Tasks"
+                sortKey="task_count"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
+              <SortableHeader
+                label="Tokens"
+                sortKey="tokens"
+                activeKey={sortKey}
+                direction={sortDirection}
+                onSort={toggleSort}
+              />
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -133,16 +225,35 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
               const open = expanded[row.id] ?? false;
               return (
                 <tr key={row.id} className="align-top hover:bg-muted/30">
-                  <td colSpan={8} className="p-0">
-                    <Collapsible open={open} onOpenChange={(next) => setExpanded((current) => ({ ...current, [row.id]: next }))}>
-                      <div className="grid grid-cols-[40px_minmax(260px,1.4fr)_repeat(6,minmax(110px,1fr))] items-start">
+                  <td colSpan={10} className="p-0">
+                    <Collapsible
+                      open={open}
+                      onOpenChange={(next) =>
+                        setExpanded((current) => ({
+                          ...current,
+                          [row.id]: next,
+                        }))
+                      }
+                    >
+                      <div className="grid grid-cols-[40px_minmax(220px,1.2fr)_repeat(8,minmax(100px,1fr))] items-start">
                         <div className="px-3 py-3">
                           {hasDetail ? (
                             <CollapsibleTrigger
                               className="flex h-6 w-6 items-center justify-center rounded border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                              aria-label={open ? "Collapse row details" : "Expand row details"}
+                              aria-label={
+                                open
+                                  ? "Collapse row details"
+                                  : "Expand row details"
+                              }
                             >
-                              <span className={cn("text-xs transition-transform", open && "rotate-90")}>›</span>
+                              <span
+                                className={cn(
+                                  "text-xs transition-transform",
+                                  open && "rotate-90",
+                                )}
+                              >
+                                ›
+                              </span>
                             </CollapsibleTrigger>
                           ) : (
                             <span className="block h-6 w-6" />
@@ -151,12 +262,28 @@ function BreakdownTable({ config }: { config: BreakdownConfig }) {
                         <div className="min-w-0 px-4 py-3">
                           <EntityLabel row={row} kind={config.kind} />
                         </div>
-                        <MetricText value={formatCurrency(row.cost)} />
-                        <MetricText value={formatCurrency(row.cost_per_task)} />
+                        <MetricText
+                          value={formatCurrency(row.actual_spend_usd)}
+                        />
+                        <MetricText value={formatCurrency(row.projected_usd)} />
+                        <MetricText
+                          value={
+                            row.unpriced_count != null && row.unpriced_count > 0
+                              ? formatInteger(row.unpriced_count)
+                              : EM_DASH
+                          }
+                        />
                         <MetricText value={formatPercent(row.success_rate)} />
-                        <MetricText value={formatAverageReopens(row.avg_reopens)} />
+                        <MetricText
+                          value={formatAverageReopens(row.avg_reopens)}
+                        />
                         <MetricText value={formatInteger(row.task_count)} />
-                        <MetricText value={formatCompactNumber(row.tokens_in + row.tokens_out)} detail={`${formatCompactNumber(row.tokens_in)} in · ${formatCompactNumber(row.tokens_cached ?? 0)} cached · ${formatCompactNumber(row.tokens_out)} out`} />
+                        <MetricText
+                          value={formatCompactNumber(
+                            row.tokens_in + row.tokens_out,
+                          )}
+                          detail={`${formatCompactNumber(row.tokens_in)} in · ${formatCompactNumber(row.tokens_cached ?? 0)} cached · ${formatCompactNumber(row.tokens_out)} out`}
+                        />
                       </div>
                       {hasDetail && (
                         <CollapsibleContent>
@@ -219,7 +346,13 @@ function MetricText({ value, detail }: { value: string; detail?: string }) {
   );
 }
 
-function EntityLabel({ row, kind }: { row: UsageBreakdownRow; kind: BreakdownKind }) {
+function EntityLabel({
+  row,
+  kind,
+}: {
+  row: UsageBreakdownRow;
+  kind: BreakdownKind;
+}) {
   const href = getEntityHref(row, kind);
   const label = row.name || row.id;
   const id = getEntityId(row, kind);
@@ -233,13 +366,21 @@ function EntityLabel({ row, kind }: { row: UsageBreakdownRow; kind: BreakdownKin
           title={label}
         >
           <span className="truncate">{label}</span>
-          <HugeiconsIcon icon={ArrowRight01Icon} size={12} className="shrink-0" />
+          <HugeiconsIcon
+            icon={ArrowRight01Icon}
+            size={12}
+            className="shrink-0"
+          />
         </a>
       ) : (
-        <div className="truncate font-medium text-foreground" title={label}>{label}</div>
+        <div className="truncate font-medium text-foreground" title={label}>
+          {label}
+        </div>
       )}
       {id && id !== label && (
-        <div className="truncate text-xs text-muted-foreground" title={id}>{id}</div>
+        <div className="truncate text-xs text-muted-foreground" title={id}>
+          {id}
+        </div>
       )}
     </div>
   );
@@ -249,11 +390,18 @@ function RowDetail({ row }: { row: UsageBreakdownRow }) {
   return (
     <div className="border-t border-border bg-muted/20 px-4 py-4">
       <div className="grid gap-4 lg:grid-cols-2">
-        <DetailPanel title="Per-model split" empty="No per-model detail supplied">
-          {row.model_split && row.model_split.length > 0 && <ModelSplitTable rows={row.model_split} />}
+        <DetailPanel
+          title="Per-model split"
+          empty="No per-model detail supplied"
+        >
+          {row.model_split && row.model_split.length > 0 && (
+            <ModelSplitTable rows={row.model_split} />
+          )}
         </DetailPanel>
         <DetailPanel title="Time series" empty="No time-series detail supplied">
-          {row.time_series && row.time_series.length > 0 && <TimeSeriesTable rows={row.time_series} />}
+          {row.time_series && row.time_series.length > 0 && (
+            <TimeSeriesTable rows={row.time_series} />
+          )}
         </DetailPanel>
       </div>
     </div>
@@ -271,8 +419,12 @@ function DetailPanel({
 }) {
   return (
     <div className="rounded-md border border-border bg-card/70 p-3">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{title}</h3>
-      {children ?? <p className="mt-3 text-sm text-muted-foreground">{empty}</p>}
+      <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        {title}
+      </h3>
+      {children ?? (
+        <p className="mt-3 text-sm text-muted-foreground">{empty}</p>
+      )}
     </div>
   );
 }
@@ -280,12 +432,13 @@ function DetailPanel({
 function ModelSplitTable({ rows }: { rows: UsageModelSplit[] }) {
   return (
     <div className="mt-3 max-h-72 overflow-auto">
-      <table className="w-full min-w-[560px] text-left text-xs">
+      <table className="w-full min-w-[640px] text-left text-xs">
         <thead className="text-muted-foreground">
           <tr>
             <th className="py-2 pr-3 font-medium">Model</th>
-            <th className="py-2 pr-3 font-medium">Spend</th>
-            <th className="py-2 pr-3 font-medium">Cost/task</th>
+            <th className="py-2 pr-3 font-medium">Actual spend</th>
+            <th className="py-2 pr-3 font-medium">Projected subscription-equivalent cost</th>
+            <th className="py-2 pr-3 font-medium">Unpriced</th>
             <th className="py-2 pr-3 font-medium">Success</th>
             <th className="py-2 pr-3 font-medium">Tasks</th>
             <th className="py-2 pr-3 font-medium">Tokens</th>
@@ -294,12 +447,33 @@ function ModelSplitTable({ rows }: { rows: UsageModelSplit[] }) {
         <tbody className="divide-y divide-border">
           {rows.map((row) => (
             <tr key={row.model}>
-              <td className="max-w-[180px] py-2 pr-3 font-medium text-foreground"><span className="block truncate" title={row.model}>{row.model}</span></td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatCurrency(row.cost)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatCurrency(row.cost_per_task)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatPercent(row.success_rate)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatInteger(row.task_count)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatCompactNumber(totalTokens(row.tokens_in, row.tokens_out, row.total_tokens))}</td>
+              <td className="max-w-[180px] py-2 pr-3 font-medium text-foreground">
+                <span className="block truncate" title={row.model}>
+                  {row.model}
+                </span>
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCurrency(row.actual_spend_usd)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCurrency(row.projected_usd)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {row.unpriced_count != null && row.unpriced_count > 0
+                  ? formatInteger(row.unpriced_count)
+                  : EM_DASH}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatPercent(row.success_rate)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatInteger(row.task_count)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCompactNumber(
+                  totalTokens(row.tokens_in, row.tokens_out, row.total_tokens),
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -311,11 +485,13 @@ function ModelSplitTable({ rows }: { rows: UsageModelSplit[] }) {
 function TimeSeriesTable({ rows }: { rows: UsageTimeSeriesPoint[] }) {
   return (
     <div className="mt-3 max-h-72 overflow-auto">
-      <table className="w-full min-w-[440px] text-left text-xs">
+      <table className="w-full min-w-[560px] text-left text-xs">
         <thead className="text-muted-foreground">
           <tr>
             <th className="py-2 pr-3 font-medium">Bucket</th>
-            <th className="py-2 pr-3 font-medium">Spend</th>
+            <th className="py-2 pr-3 font-medium">Actual spend</th>
+            <th className="py-2 pr-3 font-medium">Projected subscription-equivalent cost</th>
+            <th className="py-2 pr-3 font-medium">Unpriced</th>
             <th className="py-2 pr-3 font-medium">Tasks</th>
             <th className="py-2 pr-3 font-medium">Tokens</th>
             <th className="py-2 pr-3 font-medium">Group</th>
@@ -324,11 +500,34 @@ function TimeSeriesTable({ rows }: { rows: UsageTimeSeriesPoint[] }) {
         <tbody className="divide-y divide-border">
           {rows.map((row, index) => (
             <tr key={`${row.date}-${row.group_key ?? index}`}>
-              <td className="py-2 pr-3 text-foreground">{formatBucket(row.date)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatCurrency(row.cost)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatInteger(row.task_count)}</td>
-              <td className="py-2 pr-3 tabular-nums text-foreground">{formatCompactNumber(row.tokens_in + row.tokens_out)}</td>
-              <td className="max-w-[160px] py-2 pr-3 text-muted-foreground"><span className="block truncate" title={row.group_key ?? undefined}>{row.group_key ?? EM_DASH}</span></td>
+              <td className="py-2 pr-3 text-foreground">
+                {formatBucket(row.date)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCurrency(row.actual_spend_usd)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCurrency(row.projected_usd)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {row.unpriced_count != null && row.unpriced_count > 0
+                  ? formatInteger(row.unpriced_count)
+                  : EM_DASH}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatInteger(row.task_count)}
+              </td>
+              <td className="py-2 pr-3 tabular-nums text-foreground">
+                {formatCompactNumber(row.tokens_in + row.tokens_out)}
+              </td>
+              <td className="max-w-[160px] py-2 pr-3 text-muted-foreground">
+                <span
+                  className="block truncate"
+                  title={row.group_key ?? undefined}
+                >
+                  {row.group_key ?? EM_DASH}
+                </span>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -337,14 +536,38 @@ function TimeSeriesTable({ rows }: { rows: UsageTimeSeriesPoint[] }) {
   );
 }
 
-function sortRows(rows: UsageBreakdownRow[], key: SortKey, direction: SortDirection): UsageBreakdownRow[] {
+function sortRows(
+  rows: UsageBreakdownRow[],
+  key: SortKey,
+  direction: SortDirection,
+): UsageBreakdownRow[] {
   const sign = direction === "asc" ? 1 : -1;
-  return [...rows].sort((a, b) => compareRows(a, b, key) * sign || a.name.localeCompare(b.name));
+  return [...rows].sort(
+    (a, b) => compareRows(a, b, key) * sign || a.name.localeCompare(b.name),
+  );
 }
 
-function compareRows(a: UsageBreakdownRow, b: UsageBreakdownRow, key: SortKey): number {
+function compareRows(
+  a: UsageBreakdownRow,
+  b: UsageBreakdownRow,
+  key: SortKey,
+): number {
   if (key === "name") return a.name.localeCompare(b.name);
-  if (key === "tokens") return a.tokens_in + a.tokens_out - (b.tokens_in + b.tokens_out);
+  if (key === "tokens")
+    return a.tokens_in + a.tokens_out - (b.tokens_in + b.tokens_out);
+  if (key === "actual_spend")
+    return (
+      numericSortValue(a.actual_spend_usd) -
+      numericSortValue(b.actual_spend_usd)
+    );
+  if (key === "projected_cost")
+    return (
+      numericSortValue(a.projected_usd) - numericSortValue(b.projected_usd)
+    );
+  if (key === "unpriced")
+    return (
+      numericSortValue(a.unpriced_count) - numericSortValue(b.unpriced_count)
+    );
   return numericSortValue(a[key]) - numericSortValue(b[key]);
 }
 
@@ -356,16 +579,31 @@ function hasRowDetail(row: UsageBreakdownRow): boolean {
   return Boolean(row.model_split?.length || row.time_series?.length);
 }
 
-function getEntityId(row: UsageBreakdownRow, kind: BreakdownKind): string | null | undefined {
+function getEntityId(
+  row: UsageBreakdownRow,
+  kind: BreakdownKind,
+): string | null | undefined {
   if (kind === "task") return row.task_id ?? row.id;
   if (kind === "proposal") return row.proposal_id ?? row.id;
   return row.id;
 }
 
-function getEntityHref(row: UsageBreakdownRow, kind: BreakdownKind): string | null | undefined {
-  if (kind === "task") return row.task_url ?? row.url ?? (row.task_id ? `/task/${row.task_id}` : undefined);
+function getEntityHref(
+  row: UsageBreakdownRow,
+  kind: BreakdownKind,
+): string | null | undefined {
+  if (kind === "task")
+    return (
+      row.task_url ??
+      row.url ??
+      (row.task_id ? `/task/${row.task_id}` : undefined)
+    );
   if (kind === "proposal") {
-    return row.proposal_url ?? row.url ?? (row.proposal_id ? `/proposals/${row.proposal_id}` : undefined);
+    return (
+      row.proposal_url ??
+      row.url ??
+      (row.proposal_id ? `/proposals/${row.proposal_id}` : undefined)
+    );
   }
   return row.url;
 }

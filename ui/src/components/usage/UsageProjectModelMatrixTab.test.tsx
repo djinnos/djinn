@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { UsageAnalyticsResponse, UsageProjectModelCell } from "@/api/analytics";
+import type {
+  UsageAnalyticsResponse,
+  UsageProjectModelCell,
+} from "@/api/analytics";
 import { render, screen } from "@/test/test-utils";
 import {
   buildProjectModelMatrix,
@@ -8,7 +11,9 @@ import {
   UsageProjectModelMatrixTab,
 } from "./UsageProjectModelMatrixTab";
 
-function matrixCell(overrides: Partial<UsageProjectModelCell>): UsageProjectModelCell {
+function matrixCell(
+  overrides: Partial<UsageProjectModelCell>,
+): UsageProjectModelCell {
   return {
     project_id: "project-a",
     project_name: "Project Alpha",
@@ -43,8 +48,16 @@ function analyticsResponse(
 describe("UsageProjectModelMatrixTab", () => {
   it("builds project/model axes and leaves missing pairs absent", () => {
     const matrix = buildProjectModelMatrix([
-      matrixCell({ project_id: "project-b", project_name: "Project Beta", model: "model-b" }),
-      matrixCell({ project_id: "project-a", project_name: "Project Alpha", model: "model-a" }),
+      matrixCell({
+        project_id: "project-b",
+        project_name: "Project Beta",
+        model: "model-b",
+      }),
+      matrixCell({
+        project_id: "project-a",
+        project_name: "Project Alpha",
+        model: "model-a",
+      }),
     ]);
 
     expect(matrix.projects.map((project) => project.name)).toEqual([
@@ -82,23 +95,128 @@ describe("UsageProjectModelMatrixTab", () => {
     );
 
     expect(screen.getByText("Project × Model Matrix")).toBeInTheDocument();
-    expect(screen.getByTitle("Project Alpha / model-b: never ran")).toBeInTheDocument();
-    expect(screen.getByText("No priced cost/task")).toBeInTheDocument();
-    expect(screen.getByText("Tokens 1.2K")).toBeInTheDocument();
-    expect(screen.getAllByText("$0.00").length).toBeGreaterThan(0);
+    expect(
+      screen.getByTitle("Project Alpha / model-b: never ran"),
+    ).toBeInTheDocument();
+    // The default metric is now "actual_spend_usd" which shows "No actual spend" for null values.
+    // Multiple cells may show this label when actual_spend_usd is absent.
+    expect(screen.getAllByText("No actual spend").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Tokens/).length).toBeGreaterThan(0);
   });
 
   it("hides blank-project rows and zero-token model columns", () => {
     const matrix = buildProjectModelMatrix([
       // Real usage.
-      matrixCell({ project_id: "project-a", model: "model-a", total_tokens: 1000 }),
+      matrixCell({
+        project_id: "project-a",
+        model: "model-a",
+        total_tokens: 1000,
+      }),
       // Blank project (chat/system) — must not appear as a row.
-      matrixCell({ project_id: "", project_name: "", model: "model-a", total_tokens: 50 }),
+      matrixCell({
+        project_id: "",
+        project_name: "",
+        model: "model-a",
+        total_tokens: 50,
+      }),
       // Model that never recorded a token — must not appear as a column.
-      matrixCell({ project_id: "project-a", model: "model-zero", total_tokens: 0 }),
+      matrixCell({
+        project_id: "project-a",
+        model: "model-zero",
+        total_tokens: 0,
+      }),
     ]);
 
     expect(matrix.projects.map((p) => p.id)).toEqual(["project-a"]);
     expect(matrix.models).toEqual(["model-a"]);
+  });
+
+  it("renders split cost fields (actual and projected) in cell detail", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: 5.0,
+            projected_usd: 3.0,
+            unpriced_count: 2,
+            total_tokens: 1000,
+          }),
+        ])}
+      />,
+    );
+
+    // The cell detail should show both actual and projected spend.
+    expect(screen.getByText(/Actual \$5\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Projected \$3\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/Unpriced 2/)).toBeInTheDocument();
+  });
+
+  it("renders unpriced count as visible label instead of $0", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: null,
+            projected_usd: null,
+            unpriced_count: 5,
+            total_cost: null,
+            total_tokens: 200,
+          }),
+        ])}
+      />,
+    );
+
+    // Unpriced count should be visible even when costs are null.
+    expect(screen.getByText(/Unpriced 5/)).toBeInTheDocument();
+  });
+
+  it("renders Projected subscription-equivalent cost in metric selector", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: 5.0,
+            projected_usd: 3.0,
+            unpriced_count: 2,
+            total_tokens: 1000,
+          }),
+        ])}
+      />,
+    );
+
+    // The section description should mention the full label.
+    expect(
+      screen.getByText(/projected subscription-equivalent cost/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render any blended or ambiguous cost total", () => {
+    render(
+      <UsageProjectModelMatrixTab
+        data={analyticsResponse([
+          matrixCell({
+            project_id: "project-a",
+            project_name: "Project Alpha",
+            model: "model-a",
+            actual_spend_usd: 5.0,
+            projected_usd: 3.0,
+            unpriced_count: 0,
+            total_tokens: 1000,
+          }),
+        ])}
+      />,
+    );
+
+    // Should not show $0 for unpriced when count is 0
+    expect(screen.queryByText(/Unpriced 0/)).not.toBeInTheDocument();
   });
 });

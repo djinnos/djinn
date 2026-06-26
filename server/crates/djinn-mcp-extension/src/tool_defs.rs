@@ -722,3 +722,148 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     }
     tool_values
 }
+
+/// Tool schemas for Advocate: base + write/edit + memory + proposal tools +
+/// proposal block enrichment tools + submit_work finalize tool.
+///
+/// The Advocate authors/revises proposal specifications in the tribunal
+/// refinement workflow (k9zw). It has write access for proposal enrichment,
+/// block-catalog enrichment tools for progressive MDX refinement, and memory
+/// tools for design rationale.
+pub fn tool_schemas_advocate() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(tool_write(), destructive()));
+    tool_values.push(serialize_tool(tool_edit(), destructive()));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_write(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_edit(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    // Read the debate trail to see exactly which adversary objections this
+    // revision must address.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_update(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_set(),
+        idempotent_mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_ac_amend(),
+        mutation(),
+    ));
+    // Block-catalog enrichment tools for progressive MDX refinement (k9zw).
+    // These are default-but-optional enrichment; failure to enrich must not
+    // fail the deterministic DoR evaluator.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_block_patch(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_get_block_catalog(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_blocks(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_work(),
+        mutation(),
+    ));
+    tool_values
+}
+
+/// Tool schemas for Adversary: base + memory + proposal read tools +
+/// task_comment_add + submit_review finalize tool.
+///
+/// The Adversary produces falsifiable blocking/non-blocking objections to
+/// proposal specifications (k9zw). Read-only by design — it challenges but
+/// does not modify proposals.
+pub fn tool_schemas_adversary() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    // Read the debate trail to avoid re-raising objections from prior rounds.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    // The Adversary files each objection here — the ONLY channel the refinement
+    // loop reads. Objections placed in `submit_review` are NOT read by the loop.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_review(),
+        mutation(),
+    ));
+    tool_values
+}
+
+/// Tool schemas for Judge: base + memory + proposal read tools +
+/// proposal_debate_append (verdict) + task_comment_add + submit_decision.
+///
+/// The Judge adjudicates proposal readiness after the Adversary is dry (k9zw).
+/// It records its verdict via `proposal_debate_append` (the channel the loop
+/// reads) and does not otherwise modify proposals.
+pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
+    let mut tool_values = base_tool_schemas();
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    // Read the full debate trail to verify each blocking objection was
+    // resolved or rebutted before ruling.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    // The Judge records its readiness verdict here (kind="verdict") — the ONLY
+    // channel the refinement loop reads. A verdict in `submit_decision` text is
+    // NOT read by the loop.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_append(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_comment_add(),
+        mutation(),
+    ));
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_decision(),
+        mutation(),
+    ));
+    tool_values
+}

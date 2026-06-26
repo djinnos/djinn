@@ -215,7 +215,7 @@ mod tests {
 
         assert_eq!(resolved.name, "visual-spec");
         assert_eq!(resolved.trust_level, "platform");
-        assert_eq!(resolved.required, true);
+        assert!(resolved.required);
         assert_eq!(resolved.recommended_for_roles, vec!["planner"]);
         assert!(resolved.tags.is_empty());
         assert!(!resolved.description.is_empty());

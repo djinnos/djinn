@@ -46,6 +46,15 @@ pub struct Proposal {
     /// generation). Set on graduate, cleared on stop. Lets a stop find and
     /// force-close the breakdown task even before it has produced epics.
     pub build_breakdown_task_id: Option<String>,
+    /// When the Judge issues a `needs-evidence` verdict, this is the FK to the
+    /// spike task that must close before refinement can resume. `None` when not
+    /// parked. ON DELETE SET NULL keeps the proposal safe if the task is
+    /// hard-deleted.
+    pub linked_spike_task_id: Option<String>,
+    /// The named load-bearing feasibility claim that the Judge identified as
+    /// needing research. Set alongside `linked_spike_task_id`; cleared when
+    /// the spike closes and refinement resumes.
+    pub needs_evidence_claim: Option<String>,
 }
 
 /// An immutable proposal-history row. Spec revisions are appended on every
@@ -132,6 +141,52 @@ pub struct ProposalFeedback {
     pub resolved_revision_seq: Option<i32>,
     /// User who resolved it (`None` for system/agent resolution).
     pub resolved_by_user_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A structured debate-trail entry for the proposal tribunal. Distinct from
+/// [`ProposalFeedback`] (human discussion): debate rows are typed (objection,
+/// rebuttal, verdict), track blocking state, and carry resolution/reopen
+/// lifecycle so the adversarial refinement workflow can stand up, resolve, and
+/// re-open individual positions.
+///
+/// Resolution state machine:
+///   `resolved_at == None`                                  → open
+///   `resolved_at` set, `reopened_at == None`               → resolved
+///   `resolved_at` set, `reopened_at` set                   → reopened (effectively open)
+///   Re-resolving clears `reopened_at`/`reopened_by_user_id`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
+pub struct ProposalDebateTrail {
+    pub id: String,
+    pub proposal_id: String,
+    /// `objection` | `rebuttal` | `verdict`.
+    pub kind: String,
+    pub body: String,
+    /// When true, this entry blocks proposal readiness.
+    pub blocking: bool,
+    /// Agent role (e.g. "advocate", "adversary", "judge").
+    pub agent_role: String,
+    /// `agent` or `user`.
+    pub author_kind: String,
+    pub author_user_id: Option<String>,
+    /// Model id when `author_kind == "agent"`.
+    pub author_model: Option<String>,
+    /// Optional source task that produced this entry.
+    pub source_task_id: Option<String>,
+    /// The proposal revision this entry was written against.
+    pub against_revision_seq: i32,
+    /// Debate round (1-based).
+    pub round: i32,
+    /// When set, the entry has been resolved. `None` while open.
+    pub resolved_at: Option<String>,
+    /// User who resolved it (`None` for system/agent resolution).
+    pub resolved_by_user_id: Option<String>,
+    /// When set alongside `resolved_at`, the entry was reopened.
+    pub reopened_at: Option<String>,
+    /// User who reopened it.
+    pub reopened_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

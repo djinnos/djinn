@@ -556,3 +556,179 @@ fn parse_block_with_bare_json_children_no_error() {
         "bare-brace JSON children must be preserved byte-for-byte"
     );
 }
+
+// ── get_block_catalog lean surface tests ──────────────────────────────
+
+#[test]
+fn proposal_block_catalog_returns_14_entries() {
+    let catalog = proposal_block_catalog();
+    assert_eq!(
+        catalog.len(),
+        14,
+        "catalog must cover all 14 v1 block types"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_entries_match_canonical_types() {
+    let catalog = proposal_block_catalog();
+    // The catalog is the lean (type, tag) projection of CANONICAL_BLOCK_TYPES.
+    let expected: std::collections::HashSet<(&str, &str)> = CANONICAL_BLOCK_TYPES
+        .iter()
+        .map(|(ty, tag)| (*ty, *tag))
+        .collect();
+    let actual: std::collections::HashSet<(&str, &str)> = catalog
+        .iter()
+        .map(|entry| (entry.block_type.as_str(), entry.tag.as_str()))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "proposal_block_catalog() entries must match CANONICAL_BLOCK_TYPES"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_sourced_from_json_file() {
+    // Verify the catalog function deserializes from the committed JSON artifact
+    // by round-tripping: read the file, parse it, and compare.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tools/proposal_blocks/proposal_block_catalog.json");
+    let raw = std::fs::read_to_string(&path).expect("proposal_block_catalog.json must exist");
+    let from_disk: Vec<super::types::BlockCatalogEntry> =
+        serde_json::from_str(&raw).expect("proposal_block_catalog.json must be valid JSON");
+    let from_fn = proposal_block_catalog();
+    assert_eq!(
+        from_fn, from_disk,
+        "proposal_block_catalog() must return the same entries as the committed JSON file"
+    );
+}
+
+#[test]
+fn proposal_block_catalog_covers_all_registry_tags() {
+    let catalog = proposal_block_catalog();
+    let catalog_tags: std::collections::HashSet<&str> =
+        catalog.iter().map(|e| e.tag.as_str()).collect();
+    let registry_tags: std::collections::HashSet<&str> =
+        proposal_block_tags().into_iter().collect();
+    assert_eq!(
+        catalog_tags, registry_tags,
+        "catalog tags must be identical to registry tags"
+    );
+}
+
+// ── drift-gate hardening (i8is) ──────────────────────────────────────
+
+/// The committed `proposal_block_catalog.json` must never contain duplicate
+/// `type` or `tag` values — drift would silently add a second vocabulary entry
+/// that shadows or conflicts with an existing one.
+#[test]
+fn committed_catalog_json_has_unique_types_and_tags() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tools/proposal_blocks/proposal_block_catalog.json");
+    let raw = std::fs::read_to_string(&path).expect("proposal_block_catalog.json must exist");
+    let entries: Vec<super::types::BlockCatalogEntry> =
+        serde_json::from_str(&raw).expect("proposal_block_catalog.json must be valid JSON");
+
+    let mut seen_types = std::collections::HashSet::new();
+    let mut seen_tags = std::collections::HashSet::new();
+    for entry in &entries {
+        assert!(
+            seen_types.insert(&entry.block_type),
+            "duplicate type in proposal_block_catalog.json: {:?}",
+            entry.block_type
+        );
+        assert!(
+            seen_tags.insert(&entry.tag),
+            "duplicate tag in proposal_block_catalog.json: {:?}",
+            entry.tag
+        );
+    }
+}
+
+/// Every catalog entry must have non-empty `type` and `tag` — the JSON shape
+/// is otherwise valid (deserializes) but semantically broken.
+#[test]
+fn committed_catalog_json_entries_have_valid_shape() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tools/proposal_blocks/proposal_block_catalog.json");
+    let raw = std::fs::read_to_string(&path).expect("proposal_block_catalog.json must exist");
+    let entries: Vec<super::types::BlockCatalogEntry> =
+        serde_json::from_str(&raw).expect("proposal_block_catalog.json must be valid JSON");
+
+    assert!(
+        !entries.is_empty(),
+        "proposal_block_catalog.json must not be empty"
+    );
+    for entry in &entries {
+        assert!(
+            !entry.block_type.is_empty(),
+            "catalog entry has empty type: {:?}",
+            entry
+        );
+        assert!(
+            !entry.tag.is_empty(),
+            "catalog entry has empty tag: {:?}",
+            entry
+        );
+    }
+}
+
+/// `proposal_block_catalog()` returns the same type/tag vocabulary as the
+/// committed JSON file, sorted deterministically by `type` key, byte-for-byte.
+/// This proves the catalog pull surface and the JSON artifact cannot drift.
+#[test]
+fn get_block_catalog_output_matches_committed_json_byte_for_byte() {
+    use std::path::Path;
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/tools/proposal_blocks/proposal_block_catalog.json");
+    let on_disk = std::fs::read_to_string(&path).expect("proposal_block_catalog.json must exist");
+
+    // Reconstruct the expected JSON from the catalog function output.
+    // The committed file is sorted by type; the function returns the same order.
+    let mut catalog = proposal_block_catalog();
+    catalog.sort_by(|a, b| a.block_type.cmp(&b.block_type));
+    let mut reconstructed =
+        serde_json::to_string_pretty(&catalog).expect("serialize catalog entries");
+    reconstructed.push('\n');
+
+    assert_eq!(
+        on_disk, reconstructed,
+        "proposal_block_catalog() output must match committed proposal_block_catalog.json byte-for-byte"
+    );
+}
+
+/// The rich `proposal_block_registry()` keys (kebab-case type strings) must be
+/// a superset-or-equal of the catalog types. Since both are 14 entries, this is
+/// an exact set match — the catalog cannot introduce types absent from the
+/// registry or vice-versa.
+#[test]
+fn registry_keys_match_catalog_types() {
+    let catalog = proposal_block_catalog();
+    let catalog_types: std::collections::HashSet<&str> =
+        catalog.iter().map(|e| e.block_type.as_str()).collect();
+    let registry_types: std::collections::HashSet<&str> =
+        proposal_block_registry().keys().copied().collect();
+    assert_eq!(
+        catalog_types, registry_types,
+        "catalog type strings must exactly match proposal_block_registry() keys"
+    );
+}
+
+/// The rich registry's tag values must match the catalog's tag vocabulary.
+/// Combined with `registry_keys_match_catalog_types`, this proves the registry
+/// and the lean catalog cannot drift apart on either dimension.
+#[test]
+fn registry_tags_match_catalog_tags() {
+    let catalog = proposal_block_catalog();
+    let catalog_tags: std::collections::HashSet<&str> =
+        catalog.iter().map(|e| e.tag.as_str()).collect();
+    let registry_tags: std::collections::HashSet<&str> = proposal_block_registry()
+        .values()
+        .map(|def| def.tag)
+        .collect();
+    assert_eq!(
+        catalog_tags, registry_tags,
+        "catalog tags must exactly match proposal_block_registry() tag values"
+    );
+}

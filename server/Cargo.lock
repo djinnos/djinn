@@ -1065,6 +1065,7 @@ dependencies = [
  "base64 0.22.1",
  "djinn-compaction",
  "djinn-control-plane",
+ "djinn-coordinator",
  "djinn-core",
  "djinn-db",
  "djinn-git",
@@ -1072,10 +1073,12 @@ dependencies = [
  "djinn-lsp",
  "djinn-mcp-extension",
  "djinn-memory",
+ "djinn-orchestration-types",
  "djinn-provider",
  "djinn-roles",
  "djinn-runtime",
  "djinn-sandbox",
+ "djinn-slot",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",
@@ -1187,6 +1190,50 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-coordinator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "djinn-control-plane",
+ "djinn-core",
+ "djinn-db",
+ "djinn-git",
+ "djinn-lsp",
+ "djinn-memory",
+ "djinn-orchestration-types",
+ "djinn-provider",
+ "djinn-roles",
+ "djinn-runtime",
+ "djinn-slot",
+ "djinn-stack",
+ "djinn-supervisor",
+ "djinn-telemetry",
+ "djinn-workspace",
+ "futures",
+ "git2",
+ "hex",
+ "insta",
+ "libc",
+ "regex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "workspace-hack",
 ]
@@ -1419,6 +1466,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "djinn-orchestration-types"
+version = "0.1.0"
+dependencies = [
+ "djinn-provider",
+ "serde",
+ "thiserror 2.0.18",
+ "workspace-hack",
+]
+
+[[package]]
 name = "djinn-provider"
 version = "0.1.0"
 dependencies = [
@@ -1578,6 +1635,46 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+ "workspace-hack",
+]
+
+[[package]]
+name = "djinn-slot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "djinn-compaction",
+ "djinn-control-plane",
+ "djinn-core",
+ "djinn-db",
+ "djinn-lsp",
+ "djinn-mcp-extension",
+ "djinn-memory",
+ "djinn-orchestration-types",
+ "djinn-provider",
+ "djinn-roles",
+ "djinn-runtime",
+ "djinn-stack",
+ "djinn-supervisor",
+ "djinn-telemetry",
+ "futures",
+ "hex",
+ "insta",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
  "tracing-subscriber",
  "uuid",
  "workspace-hack",

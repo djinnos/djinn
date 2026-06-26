@@ -15,7 +15,8 @@ use djinn_control_plane::tools::task_tools::{
 };
 use djinn_db::repositories::proposal::ProposalAcceptanceCriteriaAmendment;
 use djinn_db::{
-    EpicRepository, ProjectRepository, ProposalRepository, SessionRepository, TaskRepository,
+    EpicRepository, ProjectRepository, ProposalDebateTrailCreateInput, ProposalRepository,
+    SessionRepository, TaskRepository,
 };
 use rmcp::Json;
 
@@ -514,6 +515,89 @@ pub(crate) async fn call_proposal_show(
         "status": proposal.status,
         "acceptance_criteria": acceptance,
         "targets": target_json,
+    }))
+}
+
+pub(crate) async fn call_proposal_debate_append(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalDebateAppendParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let Some(proposal) = proposal_repo.resolve(&p.proposal_id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.proposal_id));
+    };
+    let kind = p.kind.trim();
+    if !matches!(kind, "objection" | "rebuttal" | "verdict") {
+        return Err(format!(
+            "invalid kind: {kind:?} (expected objection, rebuttal, or verdict)"
+        ));
+    }
+    if p.body.trim().is_empty() {
+        return Err("body must not be empty".to_string());
+    }
+    if p.agent_role.trim().is_empty() {
+        return Err("agent_role must not be empty".to_string());
+    }
+    if p.round < 1 {
+        return Err(format!("round must be >= 1 (got {})", p.round));
+    }
+    let entry = proposal_repo
+        .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind,
+            body: &p.body,
+            blocking: p.blocking,
+            agent_role: p.agent_role.trim(),
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: None,
+            against_revision_seq: p.against_revision_seq,
+            round: p.round,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "id": entry.id,
+        "kind": entry.kind,
+        "blocking": entry.blocking,
+        "round": entry.round,
+    }))
+}
+
+pub(crate) async fn call_proposal_debate_list(
+    ctx: &dyn ExtensionContext,
+    arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p: ProposalDebateListParams = parse_args(arguments)?;
+    let proposal_repo = ProposalRepository::new(ctx.db(), ctx.event_bus());
+    let Some(proposal) = proposal_repo.resolve(&p.proposal_id).await.ok().flatten() else {
+        return Err(format!("proposal not found: {}", p.proposal_id));
+    };
+    let entries = proposal_repo
+        .debate_trail(&proposal.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rows: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "round": e.round,
+                "agent_role": e.agent_role,
+                "kind": e.kind,
+                "blocking": e.blocking,
+                "resolved": e.resolved_at.is_some() && e.reopened_at.is_none(),
+                "against_revision_seq": e.against_revision_seq,
+                "body": e.body,
+                "created_at": e.created_at,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "proposal_id": proposal.id,
+        "entries": rows,
     }))
 }
 

@@ -25,7 +25,9 @@ pub(crate) fn render_github_write_error(
 
 pub(crate) trait GithubWriteError {
     fn github_write_envelope(&self) -> Option<Cow<'_, ToolError>>;
+    #[allow(dead_code)]
     fn github_write_body(&self) -> Option<&str>;
+    #[allow(dead_code)]
     fn github_write_status(&self) -> Option<u16>;
     fn display_string(&self) -> String;
 }
@@ -305,6 +307,7 @@ pub(crate) fn compact_json_like_envelope(envelope: &ToolError) -> String {
     Value::Object(value).to_string()
 }
 
+#[allow(dead_code)]
 pub(crate) fn github_write_body_contains(
     err: &(impl GithubWriteError + ?Sized),
     needle: &str,
@@ -316,6 +319,7 @@ pub(crate) fn github_write_body_contains(
     body.to_ascii_lowercase().contains(&needle)
 }
 
+#[allow(dead_code)]
 pub(crate) fn github_write_status_is(err: &(impl GithubWriteError + ?Sized), status: u16) -> bool {
     err.github_write_status()
         .is_some_and(|actual| actual == status)

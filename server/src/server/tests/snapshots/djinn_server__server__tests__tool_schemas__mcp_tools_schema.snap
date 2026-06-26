@@ -3537,6 +3537,57 @@ expression: signatures
     }
   },
   {
+    "name": "get_block_catalog",
+    "read_only": true,
+    "destructive": false,
+    "idempotent": true,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Params for the lean `get_block_catalog` tool (no fields required).",
+      "title": "GetBlockCatalogParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "BlockCatalogEntry": {
+          "description": "A single entry in the lean block catalog: just the stable type tag and\nMDX component tag name, loaded from `proposal_block_catalog.json`.",
+          "properties": {
+            "tag": {
+              "description": "MDX component tag, e.g. `AnnotatedCode`.",
+              "type": "string"
+            },
+            "type": {
+              "description": "Stable kebab-case block type, e.g. `annotated-code`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tag"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response envelope for `get_block_catalog`: a lean list of type/tag pairs.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/BlockCatalogEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "blocks"
+      ],
+      "title": "GetBlockCatalogResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "get_project_devcontainer_status",
     "read_only": false,
     "destructive": true,
@@ -11604,6 +11655,243 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_block_patch",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$defs": {
+        "BlockPatchSelector": {
+          "description": "Selector for targeting a specific range in the proposal body",
+          "properties": {
+            "byte_range": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ByteRangeSelector"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Byte range selector: start is inclusive, end is exclusive. If\n`expected_text` is provided and does not match the body at that byte\nrange, the patch is rejected (stale-range guard)."
+            },
+            "exact_text": {
+              "description": "Match a contiguous substring of the body. Must occur exactly once;\nzero matches or ambiguous (multiple) matches are rejected.",
+              "nullable": true,
+              "type": "string"
+            },
+            "heading_text": {
+              "description": "Match a markdown heading by its text (without the `#` prefix). The\nmatched range includes the heading line itself and all content up to\n(but not including) the next heading at the same or higher level, or\nthe end of the body.",
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "ByteRangeSelector": {
+          "description": "A byte-range selector with an optional verification text.",
+          "properties": {
+            "end": {
+              "description": "Exclusive byte offset of the target range.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "expected_text": {
+              "description": "When set, the body text at `[start..end)` must equal this value or the\npatch is rejected. Guards against stale ranges after concurrent edits.",
+              "nullable": true,
+              "type": "string"
+            },
+            "start": {
+              "description": "Inclusive byte offset of the target range.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "block_mdx": {
+          "description": "The MDX content to insert (a single block or arbitrary MDX text).",
+          "type": "string"
+        },
+        "expected_latest_revision_seq": {
+          "description": "If set, reject the patch when the proposal's latest_revision_seq does\nnot equal this value. Guards against concurrent edits.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "native_skill_name": {
+          "description": "Name of the native skill producing this patch (e.g. \"visual-spec\").\nPersisted in the revision event_metadata for provenance.",
+          "nullable": true,
+          "type": "string"
+        },
+        "native_skill_version": {
+          "description": "Pinned version of the native skill.",
+          "nullable": true,
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional free-form note persisted alongside the revision metadata.",
+          "nullable": true,
+          "type": "string"
+        },
+        "operation": {
+          "description": "Operation: `replace` replaces the selected range, `wrap` wraps it.",
+          "type": "string"
+        },
+        "selector": {
+          "$ref": "#/$defs/BlockPatchSelector",
+          "description": "Target selector: identifies the range in the body to patch."
+        }
+      },
+      "required": [
+        "id",
+        "selector",
+        "operation",
+        "block_mdx"
+      ],
+      "title": "ProposalBlockPatchParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "AcceptanceCriterionItem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/$defs/AcceptanceCriterionStatus"
+            }
+          ]
+        },
+        "AcceptanceCriterionStatus": {
+          "properties": {
+            "criterion": {
+              "type": "string"
+            },
+            "met": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "criterion"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "acceptance_criteria": {
+          "description": "Structured acceptance criteria (`{criterion, met}` or plain string),\nsame shape as tasks. `met` means \"agreed during scoping\".",
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterionItem"
+          },
+          "type": "array"
+        },
+        "author_user_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "body_format": {
+          "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
+          "type": "string"
+        },
+        "build_owner_user_id": {
+          "description": "Build owner once graduated.",
+          "nullable": true,
+          "type": "string"
+        },
+        "closed_at": {
+          "nullable": true,
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_reconciled_revision_seq": {
+          "description": "Last proposal revision that the in-flight build has reconciled against.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "latest_revision_seq": {
+          "description": "Head revision number (sign-offs anchored earlier are stale).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
+        "mdx": {
+          "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
+          "nullable": true,
+          "type": "string"
+        },
+        "pending_reconcile": {
+          "description": "True when the in-flight build is behind the latest proposal revision.",
+          "type": "boolean"
+        },
+        "short_id": {
+          "type": "string"
+        },
+        "status": {
+          "description": "Lifecycle: draft | in_review | approved | building | done | rejected |\narchived | superseded.",
+          "type": "string"
+        },
+        "superseded_by": {
+          "nullable": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_feedback_count": {
+          "default": 0,
+          "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list. Only populated on `proposal_list`; `0` on show paths.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_blocks",
     "read_only": true,
     "destructive": false,
@@ -11857,8 +12145,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -11891,6 +12189,603 @@ expression: signatures
         }
       },
       "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_append",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "against_revision_seq": {
+          "description": "The proposal revision this entry is written against.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "agent_role": {
+          "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+          "type": "string"
+        },
+        "author_kind": {
+          "default": "agent",
+          "description": "`agent` (default) or `user`.",
+          "type": "string"
+        },
+        "author_model": {
+          "description": "Model id when `author_kind == \"agent\"`.",
+          "nullable": true,
+          "type": "string"
+        },
+        "blocking": {
+          "default": false,
+          "description": "When true, this entry blocks proposal readiness.\nMeaningful for objection and verdict kinds.",
+          "type": "boolean"
+        },
+        "body": {
+          "description": "Body text of the debate entry.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "`objection` | `rebuttal` | `verdict`.",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "round": {
+          "description": "Debate round (1-based).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "source_task_id": {
+          "description": "Optional source task attribution.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "kind",
+        "body",
+        "agent_role",
+        "against_revision_seq",
+        "round"
+      ],
+      "title": "ProposalDebateAppendParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_list",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalDebateListParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/ProposalDebateTrailModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailListResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_reopen",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Debate-trail entry UUID.",
+          "type": "string"
+        },
+        "user_id": {
+          "default": null,
+          "description": "Optional user ID to attribute the reopen action to. When omitted,\nfalls back to the current session user (if any). Passed through\nto the audit trail as `reopened_by_user_id`.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalDebateReopenParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_debate_resolve",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "description": "Debate-trail entry UUID.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ProposalDebateResolveParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalDebateTrailModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "title": "ProposalDebateTrailResponse",
       "type": "object"
     }
   },
@@ -12030,8 +12925,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -12406,8 +13311,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -12542,8 +13457,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -12699,6 +13624,16 @@ expression: signatures
               "description": "Head revision number (sign-offs anchored earlier are stale).",
               "format": "int32",
               "type": "integer"
+            },
+            "linked_spike_task_id": {
+              "description": "When parked for needs-evidence: the linked spike task id.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence_claim": {
+              "description": "When parked for needs-evidence: the named feasibility claim.",
+              "nullable": true,
+              "type": "string"
             },
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
@@ -12893,6 +13828,526 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_demand_round",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why another round is being demanded. Recorded in proposal history.",
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementDemandRoundParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_demand_round`.",
+      "properties": {
+        "accepted": {
+          "description": "True when the demand was accepted and a new round started.",
+          "type": "boolean"
+        },
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Refinement status after the demand."
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "title": "DemandRoundResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_resolve",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "decision": {
+          "description": "The human's decision: `accept` (keep the refined spec) or `reject`\n(revert the live spec to the pre-refinement snapshot).",
+          "type": "string"
+        },
+        "feedback": {
+          "default": null,
+          "description": "Optional reviewer note — why accepted/rejected. Recorded for the audit\ntrail.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "decision"
+      ],
+      "title": "ProposalRefinementResolveParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_resolve`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "resolved": {
+          "description": "True when the human's accept/reject was applied.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "resolved"
+      ],
+      "title": "ResolveReviewResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_start",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "owner_user_id": {
+          "default": null,
+          "description": "User the refinement run is attributed to: owner of the spawned\nrefinement (tribunal) tasks and the scope for per-user role-model\nresolution. Omit to attribute the run to the proposal author.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementStartParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_start`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "The initial refinement status after starting."
+        }
+      },
+      "title": "ProposalRefinementStartResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_refinement_status",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id"
+      ],
+      "title": "ProposalRefinementStatusParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_refinement_status`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "title": "ProposalRefinementStatusResponse",
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_remove_target",
     "read_only": false,
     "destructive": true,
@@ -13022,6 +14477,142 @@ expression: signatures
           ],
           "type": "object"
         },
+        "GateFailureModel": {
+          "description": "One DoR failure in the gate status.",
+          "properties": {
+            "check": {
+              "description": "Which high-level check failed (e.g. `problem_coverage`, `vague_acceptance_criteria`).",
+              "type": "string"
+            },
+            "message": {
+              "description": "Human-readable failure message.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "check",
+            "message"
+          ],
+          "type": "object"
+        },
+        "NeedsEvidenceStatus": {
+          "description": "Needs-evidence parking state for a proposal.",
+          "properties": {
+            "claim": {
+              "description": "The named feasibility claim that the Judge identified.",
+              "type": "string"
+            },
+            "spike_short_id": {
+              "description": "The spike task short id (human-readable).",
+              "type": "string"
+            },
+            "spike_status": {
+              "description": "Current status of the spike task.",
+              "type": "string"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "claim",
+            "spike_task_id",
+            "spike_short_id",
+            "spike_status"
+          ],
+          "type": "object"
+        },
+        "ProposalDebateTrailModel": {
+          "description": "A structured debate-trail row for the proposal tribunal. Separate from\n[`ProposalFeedbackModel`] (human discussion): debate rows are typed\n(objection, rebuttal, verdict), track blocking state, and carry\nresolution/reopen lifecycle.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The proposal revision this entry was written against.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "agent_role": {
+              "description": "Agent role (e.g. \"advocate\", \"adversary\", \"judge\").",
+              "type": "string"
+            },
+            "author_kind": {
+              "description": "`agent` or `user`.",
+              "type": "string"
+            },
+            "author_model": {
+              "nullable": true,
+              "type": "string"
+            },
+            "author_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "blocking": {
+              "description": "When true, this entry blocks proposal readiness.",
+              "type": "boolean"
+            },
+            "body": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "description": "`objection` | `rebuttal` | `verdict`.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "type": "string"
+            },
+            "reopened_at": {
+              "description": "When set alongside `resolved_at`, the entry was reopened.",
+              "nullable": true,
+              "type": "string"
+            },
+            "reopened_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_at": {
+              "description": "When set, the entry has been resolved. `None` while open.",
+              "nullable": true,
+              "type": "string"
+            },
+            "resolved_by_user_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "round": {
+              "description": "Debate round (1-based).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "source_task_id": {
+              "nullable": true,
+              "type": "string"
+            },
+            "updated_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "proposal_id",
+            "kind",
+            "body",
+            "blocking",
+            "agent_role",
+            "author_kind",
+            "against_revision_seq",
+            "round",
+            "created_at",
+            "updated_at"
+          ],
+          "type": "object"
+        },
         "ProposalEpicModel": {
           "description": "An epic this proposal graduated into.",
           "properties": {
@@ -13124,6 +14715,97 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalGateStatusModel": {
+          "description": "Composed gate status for a proposal: deterministic DoR + tribunal\nconditions. Returned by `proposal_show` so the UI can render readiness\nwithout recomputing it client-side.",
+          "properties": {
+            "adversary_dry_count": {
+              "description": "Consecutive adversary dry rounds at the end of the trail.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "blocked_explanations": {
+              "description": "Human-readable explanations of all gate failures, each naming the\nexact blocking condition. Empty when `ready` is true.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dor_failures": {
+              "description": "Specific DoR failures (empty when `dor_ready` is true).",
+              "items": {
+                "$ref": "#/$defs/GateFailureModel"
+              },
+              "type": "array"
+            },
+            "dor_ready": {
+              "description": "Whether the deterministic DoR checks pass.",
+              "type": "boolean"
+            },
+            "human_override_active": {
+              "description": "Whether a current human override exists for this revision.",
+              "type": "boolean"
+            },
+            "judge_needs_work": {
+              "description": "Whether the latest judge verdict contains \"needs-work\".",
+              "type": "boolean"
+            },
+            "judge_verdict_body": {
+              "description": "Latest judge verdict body text, when a judge has issued a verdict.",
+              "nullable": true,
+              "type": "string"
+            },
+            "judge_verdict_id": {
+              "description": "Latest judge verdict entry id, when a judge has issued a verdict.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "Needs-evidence spike parking state. `None` when not parked."
+            },
+            "pending_checkpoint": {
+              "description": "Whether there are pending checkpoint revisions awaiting decision.",
+              "type": "boolean"
+            },
+            "ready": {
+              "description": "Whether the composed gate passes (DoR ready + tribunal conditions met).",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking debate-trail entries.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "unresolved_blocking_ids": {
+              "description": "IDs of unresolved blocking debate-trail entries.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "ready",
+            "dor_ready",
+            "dor_failures",
+            "judge_needs_work",
+            "adversary_dry_count",
+            "unresolved_blocking_count",
+            "unresolved_blocking_ids",
+            "pending_checkpoint",
+            "human_override_active",
+            "blocked_explanations"
+          ],
+          "type": "object"
+        },
         "ProposalMemoryRefModel": {
           "description": "A memory note linked to a proposal via its graduated epics/tasks.",
           "properties": {
@@ -13200,6 +14882,16 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "linked_spike_task_id": {
+              "description": "When parked for needs-evidence: the linked spike task id.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence_claim": {
+              "description": "When parked for needs-evidence: the named feasibility claim.",
+              "nullable": true,
+              "type": "string"
+            },
             "pending_reconcile": {
               "description": "True when the in-flight build is behind the latest proposal revision.",
               "type": "boolean"
@@ -13240,6 +14932,75 @@ expression: signatures
             "updated_at",
             "latest_revision_seq",
             "pending_reconcile"
+          ],
+          "type": "object"
+        },
+        "ProposalRefinementStatusModel": {
+          "description": "Refinement session state tracked on the proposal's event_metadata.\nThe coordinator refinement workflow populates these fields; the\ncontrol-plane surfaces them read-only to the UI.",
+          "properties": {
+            "active": {
+              "description": "Whether refinement has been started for this proposal.",
+              "type": "boolean"
+            },
+            "awaiting_review": {
+              "default": false,
+              "description": "True when the autonomous tribunal has converged (or escalated) and is\nparked for the human's single accept/reject review of the refined spec.",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Current debate round (1-based). `None` when refinement has not started.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "dry_rounds": {
+              "description": "How many consecutive adversary dry rounds have been observed.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "judge_summary": {
+              "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
+              "nullable": true,
+              "type": "string"
+            },
+            "needs_evidence": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NeedsEvidenceStatus"
+                },
+                {
+                  "const": null,
+                  "nullable": true
+                }
+              ],
+              "description": "When the proposal is parked for a needs-evidence spike, this contains\nthe claim and spike task reference. `None` when not parked."
+            },
+            "snapshot_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq (the diff baseline) when\n`awaiting_review` is true.",
+              "format": "int32",
+              "nullable": true,
+              "type": "integer"
+            },
+            "stop_reason": {
+              "description": "When set, refinement has stopped for this reason.\nValues: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,\n`agent_failure`, or `null` (still running / not started).",
+              "nullable": true,
+              "type": "string"
+            },
+            "total_entries": {
+              "description": "Total debate-trail entries produced so far.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "update_authority": {
+              "description": "Update authority mode. Always `checkpoint` (advocate revisions are\nproposed for approval, never auto-applied); retained for display compat.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "active",
+            "dry_rounds",
+            "total_entries",
+            "update_authority"
           ],
           "type": "object"
         },
@@ -13368,6 +15129,14 @@ expression: signatures
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "debate_trail": {
+          "description": "Structured debate-trail rows (objections, rebuttals, verdicts).\nKept separate from `feedback` (plain human discussion).",
+          "items": {
+            "$ref": "#/$defs/ProposalDebateTrailModel"
+          },
+          "nullable": true,
+          "type": "array"
+        },
         "epics": {
           "items": {
             "$ref": "#/$defs/ProposalEpicModel"
@@ -13386,6 +15155,18 @@ expression: signatures
           "nullable": true,
           "type": "array"
         },
+        "gate_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalGateStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Composed gate status: deterministic DoR + tribunal conditions.\nAlways present on a successful `proposal_show` response."
+        },
         "memory_refs": {
           "description": "Memory notes linked to this proposal's graduated epics/tasks.",
           "items": {
@@ -13403,6 +15184,18 @@ expression: signatures
               "nullable": true
             }
           ]
+        },
+        "refinement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalRefinementStatusModel"
+            },
+            {
+              "const": null,
+              "nullable": true
+            }
+          ],
+          "description": "Refinement session status (active round, stop reason, update authority).\n`None` when refinement has not been started for this proposal."
         },
         "revisions": {
           "items": {
@@ -13534,8 +15327,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13675,8 +15478,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13959,8 +15772,18 @@ expression: signatures
           "format": "int32",
           "type": "integer"
         },
+        "linked_spike_task_id": {
+          "description": "When parked for needs-evidence: the linked spike task id.",
+          "nullable": true,
+          "type": "string"
+        },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
+          "nullable": true,
+          "type": "string"
+        },
+        "needs_evidence_claim": {
+          "description": "When parked for needs-evidence: the named feasibility claim.",
           "nullable": true,
           "type": "string"
         },
@@ -13993,6 +15816,68 @@ expression: signatures
         }
       },
       "title": "ProposalSingleResponse",
+      "type": "object"
+    }
+  },
+  {
+    "name": "proposal_verdict_override",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "overridden_verdict_entry_id": {
+          "default": null,
+          "description": "Optional debate-trail entry id of the verdict being overridden.",
+          "nullable": true,
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the verdict is being overridden. Required — recorded in proposal\nhistory for audit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "reason"
+      ],
+      "title": "ProposalVerdictOverrideParams",
+      "type": "object"
+    },
+    "output_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Response for `proposal_verdict_override`.",
+      "properties": {
+        "error": {
+          "nullable": true,
+          "type": "string"
+        },
+        "overridden": {
+          "description": "True when the override was recorded.",
+          "type": "boolean"
+        },
+        "override_on_revision_seq": {
+          "description": "The revision seq the override is scoped to. Later revisions make\nthis override stale.",
+          "format": "int32",
+          "nullable": true,
+          "type": "integer"
+        },
+        "proposal_id": {
+          "nullable": true,
+          "type": "string"
+        }
+      },
+      "required": [
+        "overridden"
+      ],
+      "title": "VerdictOverrideResponse",
       "type": "object"
     }
   },
@@ -17102,6 +18987,10 @@ expression: signatures
           "description": "Auto-approve PRs that are otherwise ready to merge. When true, the\npoller POSTs an APPROVE review using this user's GitHub token at the\nmoment the PR has CI green + no conflicts + no existing approvals.\nDefaults to false. Each task's `created_by_user_id` decides whose\ntoggle applies; background-agent tasks (`created_by_user_id IS NULL`)\nare never auto-approved.",
           "type": "boolean"
         },
+        "diverse_refinement": {
+          "description": "Cross-model (\"Diverse\") refinement. When true (the default), the\nproposal-refinement roles (advocate, adversary, judge) prefer a model id\ndifferent from the primary task model. Falls back to same-model when\nalternatives are unavailable.",
+          "type": "boolean"
+        },
         "diverse_review": {
           "description": "Cross-model (\"Thorough\") review. When true (the default), a task\ndispatched to the reviewer role prefers a model id different from the one\nthat implemented it. A degenerate single-model selection falls back to\nsame-model review.",
           "type": "boolean"
@@ -17141,7 +19030,8 @@ expression: signatures
         "lanes",
         "lane_locked",
         "max_sessions",
-        "diverse_review"
+        "diverse_review",
+        "diverse_refinement"
       ],
       "title": "UserSettingsGetResponse",
       "type": "object"
@@ -17191,6 +19081,11 @@ expression: signatures
       "properties": {
         "auto_approve_prs": {
           "description": "Enable or disable auto-approve. Omit to keep the current value.",
+          "nullable": true,
+          "type": "boolean"
+        },
+        "diverse_refinement": {
+          "description": "Enable or disable cross-model (\"Diverse\") refinement for THIS user. When\non (the default), proposal-refinement roles prefer a different model from\nthe primary task model. Falls back to same-model when alternatives are\nunavailable. Omit to keep the current value.",
           "nullable": true,
           "type": "boolean"
         },
@@ -17269,6 +19164,11 @@ expression: signatures
           "type": "boolean"
         },
         "auto_approve_prs": {
+          "nullable": true,
+          "type": "boolean"
+        },
+        "diverse_refinement": {
+          "description": "The resulting cross-model refinement toggle after the patch.",
           "nullable": true,
           "type": "boolean"
         },

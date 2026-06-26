@@ -3,6 +3,9 @@ import reviewerAvatar from "@/assets/reviewer.png";
 import leadAvatar from "@/assets/lead.png";
 import plannerAvatar from "@/assets/planner.png";
 import architectAvatar from "@/assets/architect.png";
+import advocateAvatar from "@/assets/advocate.png";
+import adversaryAvatar from "@/assets/adversary.png";
+import judgeAvatar from "@/assets/judge.png";
 
 export interface AgentIdentity {
   label: string;
@@ -18,6 +21,9 @@ const AGENTS: Record<string, AgentIdentity> = {
   planner:       { label: "Planner",       color: "text-purple-400",  avatar: plannerAvatar },
   architect:     { label: "Architect",     color: "text-emerald-400", avatar: architectAvatar },
   epic_reviewer: { label: "Epic Reviewer", color: "text-teal-400",    avatar: reviewerAvatar },
+  advocate:      { label: "Advocate",      color: "text-sky-400",     avatar: advocateAvatar },
+  adversary:     { label: "Adversary",     color: "text-orange-400",  avatar: adversaryAvatar },
+  judge:         { label: "Judge",         color: "text-violet-400",  avatar: judgeAvatar },
   system:        { label: "System",        color: "text-zinc-400",    avatar: workerAvatar },
 };
 
