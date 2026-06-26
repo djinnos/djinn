@@ -7064,7 +7064,7 @@ The open-questions section collects uncertainties for the team.
         // (a) The planner proposal-address prompt must not inline block
         //     vocabulary.  Re-assert the prompt-test contract at the
         //     workflow-regression level.
-        let prompt = include_str!("../../../djinn-agent/src/prompts/proposal_address.md");
+        let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
         let catalog = proposal_block_catalog();
         for entry in &catalog {
             assert!(

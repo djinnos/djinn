@@ -38,7 +38,10 @@ After your revision, the Adversary re-evaluates and the Judge adjudicates — th
 
 ## Enrichment Guidance
 
-When the block catalog (`proposal_blocks`) is available, you may progressively enrich the proposal with structured MDX blocks — one patch per revision cycle. This is **optional progressive enrichment**, not a DoR requirement. If the block catalog is unavailable, prose grounding is fully acceptable.
+When the block catalog is available, you may progressively enrich the proposal with structured MDX blocks. This is **optional progressive enrichment**, not a DoR requirement. If the block catalog is unavailable, prose grounding is fully acceptable.
+
+- Pull the lean vocabulary on demand with `get_block_catalog` — do not rely on inlined or hard-coded block lists. Use `proposal_blocks` when you need full field schemas.
+- Apply **at most one stable block** per revision cycle via `proposal_block_patch`; prefer a single targeted patch over many. If no suitable target exists this round, skip enrichment.
 
 ## Session Completion
 

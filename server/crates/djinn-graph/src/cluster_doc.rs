@@ -15,7 +15,7 @@
 //!   counts, keywords). The plan calls for an LLM-rendered prose doc
 //!   here — this PR ships the placeholder summarizer; the slot for the
 //!   LLM rendered template lives at
-//!   `djinn-agent/src/prompts/cluster-doc.md` and will be wired in once
+//!   `djinn-roles/src/prompts/cluster-doc.md` and will be wired in once
 //!   the agent runtime is reachable from the warm context. The
 //!   placeholder text is descriptive enough that `memory_search` can
 //!   still index and surface it.
@@ -102,7 +102,7 @@ pub fn cluster_doc_permalink(community: &Community) -> String {
 /// 5. top outgoing call targets, capped by [`TOP_OUTGOING_LIMIT`]
 ///
 /// The format intentionally tracks the slots in
-/// `djinn-agent/src/prompts/cluster-doc.md` so the same body shape
+/// `djinn-roles/src/prompts/cluster-doc.md` so the same body shape
 /// works as the eventual LLM prompt's "structural facts" block.
 pub fn build_placeholder_body(graph: &RepoDependencyGraph, community: &Community) -> String {
     let pg = graph.graph();

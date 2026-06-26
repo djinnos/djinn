@@ -725,7 +725,7 @@ fn tools_section_injected_into_rendered_prompt() {
 
 #[test]
 fn advocate_prompt_contains_enrichment_guidance() {
-    let prompt = include_str!("../prompts/advocate.md");
+    let prompt = include_str!("../../../djinn-roles/src/prompts/advocate.md");
 
     // Must reference proposal_block_patch for targeted enrichment.
     assert!(
@@ -854,7 +854,7 @@ mod visual_spec;
 
 #[test]
 fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
-    let prompt = include_str!("../prompts/proposal_address.md");
+    let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
 
     // Must reference the targeted block-patch primitive.
     assert!(
@@ -934,7 +934,7 @@ fn proposal_address_prompt_contains_block_patch_workflow_guidance() {
 
 #[test]
 fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
-    let prompt = include_str!("../prompts/proposal_address.md");
+    let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
 
     // Both paths (simple update and block-patch) should be mentioned.
     assert!(
@@ -956,7 +956,7 @@ fn proposal_address_prompt_distinguishes_simple_update_from_block_patch() {
 
 #[test]
 fn proposal_address_prompt_preserves_existing_feedback_rules() {
-    let prompt = include_str!("../prompts/proposal_address.md");
+    let prompt = include_str!("../../../djinn-roles/src/prompts/proposal_address.md");
 
     // Existing rules must survive.
     assert!(
