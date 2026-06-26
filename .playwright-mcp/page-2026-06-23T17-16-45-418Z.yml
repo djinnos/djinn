@@ -1,6 +1,0 @@
-- generic [ref=e2]:
-  - generic [ref=e4]:
-    - img [ref=e5]
-    - heading "Djinn" [level=1] [ref=e7]
-    - paragraph [ref=e8]: Checking authentication...
-  - region "Notifications alt+T"
