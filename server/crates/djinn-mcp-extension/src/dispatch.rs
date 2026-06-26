@@ -252,6 +252,8 @@ async fn dispatch_proposal_tools(
         "proposal_show" => Some(task_epic::call_proposal_show(ctx, args).await),
         "proposal_update" => Some(task_epic::call_proposal_update(ctx, args).await),
         "proposal_block_patch" => Some(task_epic::call_proposal_block_patch(ctx, args).await),
+        "get_block_catalog" => Some(task_epic::call_get_block_catalog(ctx, args).await),
+        "proposal_blocks" => Some(task_epic::call_proposal_blocks(ctx, args).await),
         "proposal_debate_append" => Some(task_epic::call_proposal_debate_append(ctx, args).await),
         "proposal_debate_list" => Some(task_epic::call_proposal_debate_list(ctx, args).await),
         "proposal_debate_resolve" => Some(task_epic::call_proposal_debate_resolve(ctx, args).await),

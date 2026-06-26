@@ -374,6 +374,62 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
     );
 }
 
+/// `skill_read(name="visual-spec")` succeeds for the tribunal **Advocate** on a
+/// `refinement` task. Regression: the skill_read gate hardcoded planner-only and
+/// rejected the advocate ("not an assigned skill") even though session
+/// construction assigns the skill — so the advocate could never author rich MDX.
+#[tokio::test]
+async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+
+    let task_repo = djinn_db::TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+    let task = task_repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Refinement advocate — revise proposal spec",
+            "advocate refinement task",
+            "",
+            "refinement",
+            1,
+            "test-owner",
+            None,
+            None,
+        )
+        .await
+        .expect("create refinement task");
+
+    let tmp = crate::test_helpers::test_tempdir("djinn-native-skill-advocate-");
+
+    let ok = call_tool(
+        &state,
+        &services,
+        "skill_read",
+        Some(
+            serde_json::json!({ "name": "visual-spec" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        tmp.path(),
+        Some(&task.short_id),
+        Some("advocate"),
+        None,
+    )
+    .await
+    .expect("skill_read should succeed for visual-spec in an advocate refinement session");
+
+    assert_eq!(ok.get("name").and_then(|v| v.as_str()), Some("visual-spec"));
+    assert!(
+        ok.get("content").and_then(|v| v.as_str()).unwrap().len() > 10,
+        "native body should be non-trivial"
+    );
+}
+
 /// `skill_read` rejects `visual-spec` for a non-planner role even when the
 /// task is `epic_breakdown`, because native skills are role-gated.
 #[tokio::test]
