@@ -7064,11 +7064,6 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    * Total debate-trail entries produced so far.
    */
   total_entries: number
-  /**
-   * Update authority mode. Always `checkpoint` (advocate revisions are
-   * proposed for approval, never auto-applied); retained for display compat.
-   */
-  update_authority: string
   [k: string]: any
   }
   /**
@@ -7211,11 +7206,6 @@ export namespace ProposalRefinementStartOutputSchema {
    * Total debate-trail entries produced so far.
    */
   total_entries: number
-  /**
-   * Update authority mode. Always `checkpoint` (advocate revisions are
-   * proposed for approval, never auto-applied); retained for display compat.
-   */
-  update_authority: string
   [k: string]: any
   }
   /**
@@ -7312,11 +7302,6 @@ export namespace ProposalRefinementStatusOutputSchema {
    * Total debate-trail entries produced so far.
    */
   total_entries: number
-  /**
-   * Update authority mode. Always `checkpoint` (advocate revisions are
-   * proposed for approval, never auto-applied); retained for display compat.
-   */
-  update_authority: string
   [k: string]: any
   }
   /**
@@ -7573,10 +7558,6 @@ export namespace ProposalShowOutputSchema {
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
   /**
-   * Whether there are pending checkpoint revisions awaiting decision.
-   */
-  pending_checkpoint: boolean
-  /**
    * Whether the composed gate passes (DoR ready + tribunal conditions met).
    */
   ready: boolean
@@ -7751,11 +7732,6 @@ export namespace ProposalShowOutputSchema {
    * Total debate-trail entries produced so far.
    */
   total_entries: number
-  /**
-   * Update authority mode. Always `checkpoint` (advocate revisions are
-   * proposed for approval, never auto-applied); retained for display compat.
-   */
-  update_authority: string
   [k: string]: any
   }
   export interface ProposalRevisionModel {

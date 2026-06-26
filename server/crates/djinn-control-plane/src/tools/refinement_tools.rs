@@ -2,8 +2,8 @@
 //
 // The refinement workflow coordinates Advocate, Adversary, and Judge roles
 // through bounded debate rounds. These tools expose the minimal control-plane
-// surfaces: starting refinement with an update-authority mode, and reading
-// the current refinement status derived from debate-trail entries.
+// surfaces: starting refinement, and reading the current refinement status
+// derived from debate-trail entries.
 //
 // Refinement state is tracked via lightweight `proposal_revisions` lifecycle
 // entries (`event_kind = "refinement_start"` / `"refinement_stop"`) with
@@ -104,12 +104,12 @@ impl DjinnMcpServer {
     /// coordinator rejects the start (e.g. duplicate active run), a
     /// `refinement_stop` lifecycle entry is recorded with the error reason.
     ///
-    /// Refinement is always checkpoint-gated: the advocate's revisions are
-    /// proposed for explicit approval/rejection and never auto-applied.
+    /// The autonomous tribunal (Adversary → Advocate → Judge) revises the spec
+    /// in place and parks for a single human accept/reject when it converges.
     /// Same-model fallback is allowed when diverse models are unavailable —
     /// this is not presented as an error.
     #[tool(
-        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. Refinement is always checkpoint-gated: the advocate's revisions are proposed for explicit approval/rejection and never auto-applied. Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
+        description = "Start proposal refinement for the given proposal. Validates the proposal exists and is in draft or in_review state. Records a refinement_start lifecycle event and delegates to the coordinator to initialize the runtime refinement loop. The autonomous tribunal revises the spec in place and parks for a single human accept/reject when the judge converges. Returns the initial refinement status. Same-model fallback is used when diverse models are unavailable."
     )]
     pub async fn proposal_refinement_start(
         &self,
@@ -140,13 +140,9 @@ impl DjinnMcpServer {
             ));
         }
 
-        // Record refinement_start lifecycle entry. Refinement is always
-        // checkpoint-gated; the field is retained for status-display compat.
-        let metadata = json!({
-            "update_authority": "checkpoint",
-        });
+        // Record refinement_start lifecycle entry.
         match repo
-            .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&metadata))
+            .record_refinement_lifecycle(&proposal.id, "refinement_start", None)
             .await
         {
             Ok(_) => {}
@@ -220,7 +216,6 @@ impl DjinnMcpServer {
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
-            update_authority: "checkpoint".to_string(),
             stop_reason: None,
             awaiting_review: false,
             judge_summary: None,
@@ -242,7 +237,7 @@ impl DjinnMcpServer {
     /// Status is derived from the refinement lifecycle events and debate trail.
     /// Returns an empty (inactive) status when refinement has not been started.
     #[tool(
-        description = "Read proposal refinement status. Returns active flag, current round, dry-round count, total entries, update_authority (always `checkpoint`), and stop_reason if refinement has ended. Derived from refinement lifecycle events and debate-trail entries."
+        description = "Read proposal refinement status. Returns active flag, current round, dry-round count, total entries, and stop_reason if refinement has ended. Derived from refinement lifecycle events and debate-trail entries."
     )]
     pub async fn proposal_refinement_status(
         &self,
@@ -303,12 +298,10 @@ impl DjinnMcpServer {
             });
         }
 
-        // Record the demand-round action as a lifecycle event. Refinement is
-        // always checkpoint-gated; the field is retained for status-display compat.
+        // Record the demand-round action as a lifecycle event.
         let demand_metadata = serde_json::json!({
             "source": "human_demand_round",
             "reason": p.reason,
-            "update_authority": "checkpoint",
         });
         if let Err(e) = repo
             .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
@@ -379,7 +372,6 @@ impl DjinnMcpServer {
             current_round: Some(1),
             dry_rounds: 0,
             total_entries: 0,
-            update_authority: "checkpoint".to_string(),
             stop_reason: None,
             awaiting_review: false,
             judge_summary: None,
@@ -535,14 +527,13 @@ pub async fn build_refinement_status(
         .rev()
         .find(|r| r.event_kind == "refinement_start");
 
-    let Some(start_rev) = latest_start else {
+    let Some(_start_rev) = latest_start else {
         // No refinement started.
         return Ok(ProposalRefinementStatusModel {
             active: false,
             current_round: None,
             dry_rounds: 0,
             total_entries: 0,
-            update_authority: "checkpoint".to_string(),
             stop_reason: None,
             awaiting_review: false,
             judge_summary: None,
@@ -561,14 +552,6 @@ pub async fn build_refinement_status(
         (Some(stop), Some(start)) => stop.created_at <= start.created_at,
         _ => true,
     };
-
-    // Read update_authority from start metadata.
-    let update_authority = start_rev
-        .event_metadata
-        .as_ref()
-        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-        .and_then(|v| v.get("update_authority")?.as_str().map(String::from))
-        .unwrap_or_else(|| "checkpoint".to_string());
 
     // Read stop reason from stop metadata (if stopped).
     // The coordinator's persist_refinement_stop writes `reason_tag`, while
@@ -686,7 +669,6 @@ pub async fn build_refinement_status(
         current_round: Some(current_round),
         dry_rounds,
         total_entries,
-        update_authority,
         stop_reason,
         awaiting_review,
         judge_summary,

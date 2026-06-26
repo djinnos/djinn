@@ -757,17 +757,6 @@ async fn evaluate_composed_gate(
         _ => {}
     }
 
-    // 2d. Pending checkpoint revisions (stale/pending).
-    match repo.has_pending_checkpoint_revisions(proposal_id).await {
-        Ok(true) => {
-            failures.push("pending checkpoint revision awaiting approval or rejection".to_string());
-        }
-        Err(e) => {
-            failures.push(format!("failed to check pending checkpoints: {e}"));
-        }
-        _ => {}
-    }
-
     ComposedGateResult { failures }
 }
 
@@ -913,20 +902,6 @@ async fn build_gate_status(
         _ => None,
     };
 
-    // 2e. Pending checkpoint revisions
-    let pending_checkpoint = match repo.has_pending_checkpoint_revisions(proposal_id).await {
-        Ok(true) => {
-            blocked_explanations
-                .push("Pending checkpoint revision awaiting approval or rejection".to_string());
-            true
-        }
-        Err(e) => {
-            blocked_explanations.push(format!("Failed to check pending checkpoints: {e}"));
-            false
-        }
-        _ => false,
-    };
-
     // Adversary dry count from refinement status (non-critical)
     let adversary_dry_count =
         match crate::tools::refinement_tools::build_refinement_status(repo, proposal_id).await {
@@ -947,7 +922,6 @@ async fn build_gate_status(
         unresolved_blocking_count: unresolved_count,
         unresolved_blocking_ids,
         needs_evidence,
-        pending_checkpoint,
         human_override_active: override_is_current,
         blocked_explanations,
     }

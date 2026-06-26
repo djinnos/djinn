@@ -39,10 +39,6 @@
             Some(true)
         );
         assert_eq!(
-            refinement.get("update_authority").and_then(|v| v.as_str()),
-            Some("checkpoint")
-        );
-        assert_eq!(
             refinement.get("current_round").and_then(|v| v.as_i64()),
             Some(1)
         );
@@ -428,10 +424,6 @@
             refinement.get("active").and_then(|v| v.as_bool()),
             Some(true)
         );
-        assert_eq!(
-            refinement.get("update_authority").and_then(|v| v.as_str()),
-            Some("checkpoint")
-        );
 
         // 2. Round 1: adversary raises a blocking objection.
         server
@@ -518,10 +510,6 @@
         assert_eq!(
             refinement.get("stop_reason").and_then(|v| v.as_str()),
             Some("adversary_dry")
-        );
-        assert_eq!(
-            refinement.get("update_authority").and_then(|v| v.as_str()),
-            Some("checkpoint")
         );
         // Round should reflect the max round in the debate trail.
         assert_eq!(

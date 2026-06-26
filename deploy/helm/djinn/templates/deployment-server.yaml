@@ -191,6 +191,12 @@ spec:
             # sets this to `localhost:5001/djinn-agent-runtime:dev`.
             - name: DJINN_IMAGE_AGENT_WORKER_IMAGE
               value: {{ .Values.image.runtime | quote }}
+            # The djinn release version (tag of the server image). Folded into
+            # the per-project catalog image hash so a version bump rebuilds
+            # every project image — guaranteeing new agent prompts/tools reach
+            # task-run pods even when `image.runtime` is an unversioned tag.
+            - name: DJINN_VERSION
+              value: {{ .Values.image.server | toString | splitList ":" | last | quote }}
             # Image-pipeline hostnames are computed from the release name
             # here so the Rust controller doesn't fall back to its
             # hardcoded `djinn-`-prefixed defaults when the Helm release

@@ -156,11 +156,6 @@ export function ReadinessPanel({
               </span>
             </span>
           )}
-          {gateStatus.pending_checkpoint && (
-            <Badge variant="outline" className="text-xs">
-              Pending checkpoint
-            </Badge>
-          )}
         </div>
       )}
 

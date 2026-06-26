@@ -204,59 +204,10 @@
         assert_eq!(dt.get("blocking").and_then(|v| v.as_bool()), Some(true));
     }
 
-    // ── Checkpoint vs auto-accept authority in status ─────────────────────────
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refinement_checkpoint_authority_preserved_in_status() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "Checkpoint Authority",
-                body: "body",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-
-        // Start with checkpoint mode.
-        server
-            .dispatch_tool(
-                "proposal_refinement_start",
-                serde_json::json!({
-                    "proposal_id": proposal.id,
-                    "update_authority": "checkpoint",
-                }),
-            )
-            .await
-            .unwrap();
-
-        let status_resp = server
-            .dispatch_tool(
-                "proposal_refinement_status",
-                serde_json::json!({ "proposal_id": proposal.id }),
-            )
-            .await
-            .unwrap();
-        let refinement = status_resp.get("refinement").unwrap();
-        assert_eq!(
-            refinement.get("update_authority").and_then(|v| v.as_str()),
-            Some("checkpoint"),
-            "checkpoint authority must be preserved"
-        );
-        assert_eq!(
-            refinement.get("active").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-    }
-
     // ── Lifecycle attribution metadata ────────────────────────────────────────
 
-    /// Refinement-start lifecycle entries carry the update_authority in
-    /// event_metadata (always `checkpoint`); refinement-stop entries carry the
-    /// stop_reason tag.
+    /// Refinement-start and refinement-stop lifecycle entries are recorded;
+    /// stop entries carry the stop_reason tag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refinement_lifecycle_entries_carry_attribution_metadata() {
         let (server, db) = test_server().await;
@@ -306,15 +257,6 @@
             .collect();
         assert_eq!(starts.len(), 1, "expected one refinement_start");
         assert_eq!(stops.len(), 1, "expected one refinement_stop");
-
-        // Start metadata carries the authority mode.
-        let start_meta: serde_json::Value =
-            serde_json::from_str(starts[0].event_metadata.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(
-            start_meta.get("update_authority").and_then(|v| v.as_str()),
-            Some("checkpoint"),
-            "start metadata must include update_authority"
-        );
 
         // Stop metadata carries the reason tag.
         let stop_meta: serde_json::Value =
