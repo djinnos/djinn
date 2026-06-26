@@ -93,6 +93,30 @@ describe("ProposalRefinement", () => {
     expect(screen.getByText(/Adversary exhausted/)).toBeInTheDocument();
   });
 
+  it("offers a restart button for an interrupted refinement", () => {
+    // A stopped refinement must offer a way forward — otherwise an
+    // interrupted run (e.g. one lost across a deploy) is a dead end in the UI.
+    const status: ProposalRefinementStatus = {
+      active: false,
+      current_round: 1,
+      dry_rounds: 0,
+      total_entries: 0,
+      update_authority: "checkpoint",
+      stop_reason: "interrupted",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Restart refinement/ }),
+    ).toBeInTheDocument();
+  });
+
   it("explains same-model fallback in the status panel", () => {
     const status: ProposalRefinementStatus = {
       active: true,
