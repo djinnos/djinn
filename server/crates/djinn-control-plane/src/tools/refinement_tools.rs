@@ -17,10 +17,8 @@ use serde_json::json;
 use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    CheckpointApproveResponse, CheckpointListResponse, CheckpointRejectResponse,
-    CheckpointRevisionModel, DemandRoundResponse, NeedsEvidenceStatus,
-    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
-    ProposalRefinementStatusResponse, VerdictOverrideResponse,
+    DemandRoundResponse, NeedsEvidenceStatus, ProposalRefinementStartResponse,
+    ProposalRefinementStatusModel, ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
 use djinn_db::ProposalRepository;
 use djinn_db::TaskRepository;
@@ -61,33 +59,24 @@ pub struct ProposalRefinementStatusParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct CheckpointListParams {
-    /// Proposal UUID or short_id.
-    pub proposal_id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct CheckpointApproveParams {
-    /// Proposal UUID or short_id.
-    pub proposal_id: String,
-    /// Revision sequence number to approve.
-    pub revision_seq: i32,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct CheckpointRejectParams {
-    /// Proposal UUID or short_id.
-    pub proposal_id: String,
-    /// Revision sequence number to reject.
-    pub revision_seq: i32,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalRefinementDemandRoundParams {
     /// Proposal UUID or short_id.
     pub proposal_id: String,
     /// Why another round is being demanded. Recorded in proposal history.
     pub reason: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementResolveParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// The human's decision: `accept` (keep the refined spec) or `reject`
+    /// (revert the live spec to the pre-refinement snapshot).
+    pub decision: String,
+    /// Optional reviewer note — why accepted/rejected. Recorded for the audit
+    /// trail.
+    #[serde(default)]
+    pub feedback: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -233,7 +222,9 @@ impl DjinnMcpServer {
             total_entries: 0,
             update_authority: "checkpoint".to_string(),
             stop_reason: None,
-            pending_checkpoint_count: 0,
+            awaiting_review: false,
+            judge_summary: None,
+            snapshot_revision_seq: None,
             needs_evidence: None,
         };
 
@@ -273,125 +264,6 @@ impl DjinnMcpServer {
                 error: None,
             }),
             Err(e) => Json(err_refinement_status(e)),
-        }
-    }
-
-    /// List pending checkpoint revisions for a proposal. Returns the
-    /// pending advocate revisions that await human approval in checkpoint
-    /// mode. In auto-accept mode the list is always empty.
-    #[tool(
-        description = "List pending checkpoint revisions for a proposal. Returns advocate revisions that await approval in checkpoint mode. Each entry includes the revision seq, round, author model, title, and a body preview. Empty list in auto-accept mode."
-    )]
-    pub async fn proposal_refinement_checkpoint_list(
-        &self,
-        Parameters(p): Parameters<CheckpointListParams>,
-    ) -> Json<CheckpointListResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
-            return Json(CheckpointListResponse {
-                proposal_id: None,
-                pending: vec![],
-                error: Some(format!("proposal not found: {}", p.proposal_id)),
-            });
-        };
-
-        match repo.pending_checkpoint_revisions(&proposal.id).await {
-            Ok(revisions) => {
-                let pending = revisions
-                    .iter()
-                    .map(CheckpointRevisionModel::from_revision)
-                    .collect();
-                Json(CheckpointListResponse {
-                    proposal_id: Some(proposal.id),
-                    pending,
-                    error: None,
-                })
-            }
-            Err(e) => Json(CheckpointListResponse {
-                proposal_id: Some(proposal.id),
-                pending: vec![],
-                error: Some(format!("failed to list pending revisions: {e}")),
-            }),
-        }
-    }
-
-    /// Approve a pending checkpoint revision: apply its title, body, and
-    /// acceptance criteria to the live proposal. The revision row is marked
-    /// as `checkpoint_approved` for audit. Idempotent — no-op if already
-    /// approved or rejected.
-    #[tool(
-        description = "Approve a pending checkpoint revision. Applies the revision's body, title, and acceptance criteria to the live proposal. Marks the revision as checkpoint_approved. Idempotent — returns success even if the revision was already approved or rejected."
-    )]
-    pub async fn proposal_refinement_checkpoint_approve(
-        &self,
-        Parameters(p): Parameters<CheckpointApproveParams>,
-    ) -> Json<CheckpointApproveResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
-            return Json(CheckpointApproveResponse {
-                proposal_id: None,
-                approved: false,
-                error: Some(format!("proposal not found: {}", p.proposal_id)),
-            });
-        };
-
-        let user_id = djinn_core::auth_context::current_user_id();
-
-        match repo
-            .approve_checkpoint_revision(&proposal.id, p.revision_seq, user_id.as_deref())
-            .await
-        {
-            Ok(_) => Json(CheckpointApproveResponse {
-                proposal_id: Some(proposal.id),
-                approved: true,
-                error: None,
-            }),
-            Err(e) => Json(CheckpointApproveResponse {
-                proposal_id: Some(proposal.id),
-                approved: false,
-                error: Some(format!("failed to approve checkpoint revision: {e}")),
-            }),
-        }
-    }
-
-    /// Reject a pending checkpoint revision: mark it as `checkpoint_rejected`
-    /// without modifying the live proposal body. Idempotent — no-op if
-    /// already approved or rejected.
-    #[tool(
-        description = "Reject a pending checkpoint revision. Marks the revision as checkpoint_rejected without modifying the live proposal body. Idempotent — returns success even if the revision was already approved or rejected."
-    )]
-    pub async fn proposal_refinement_checkpoint_reject(
-        &self,
-        Parameters(p): Parameters<CheckpointRejectParams>,
-    ) -> Json<CheckpointRejectResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-
-        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
-            return Json(CheckpointRejectResponse {
-                proposal_id: None,
-                rejected: false,
-                error: Some(format!("proposal not found: {}", p.proposal_id)),
-            });
-        };
-
-        let user_id = djinn_core::auth_context::current_user_id();
-
-        match repo
-            .reject_checkpoint_revision(&proposal.id, p.revision_seq, user_id.as_deref())
-            .await
-        {
-            Ok(_) => Json(CheckpointRejectResponse {
-                proposal_id: Some(proposal.id),
-                rejected: true,
-                error: None,
-            }),
-            Err(e) => Json(CheckpointRejectResponse {
-                proposal_id: Some(proposal.id),
-                rejected: false,
-                error: Some(format!("failed to reject checkpoint revision: {e}")),
-            }),
         }
     }
 
@@ -509,7 +381,9 @@ impl DjinnMcpServer {
             total_entries: 0,
             update_authority: "checkpoint".to_string(),
             stop_reason: None,
-            pending_checkpoint_count: 0,
+            awaiting_review: false,
+            judge_summary: None,
+            snapshot_revision_seq: None,
             needs_evidence: None,
         };
 
@@ -517,6 +391,67 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             accepted: true,
             refinement: Some(refinement),
+            error: None,
+        })
+    }
+
+    #[tool(
+        description = "Resolve the human's single accept/reject review of a converged proposal refinement (the autonomous Adversary→Advocate→Judge tribunal parks for one human review when it converges). `decision` is `accept` (keep the refined spec) or `reject` (revert the live spec to the pre-refinement snapshot). Optional `feedback` is recorded. Errors if no refinement is parked awaiting review."
+    )]
+    pub async fn proposal_refinement_resolve(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementResolveParams>,
+    ) -> Json<crate::tools::proposal_ops::ResolveReviewResponse> {
+        use crate::tools::proposal_ops::ResolveReviewResponse;
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(ResolveReviewResponse {
+                proposal_id: None,
+                resolved: false,
+                error: Some(format!("proposal not found: {}", p.proposal_id)),
+            });
+        };
+
+        let accept = match p.decision.as_str() {
+            "accept" => true,
+            "reject" => false,
+            other => {
+                return Json(ResolveReviewResponse {
+                    proposal_id: Some(proposal.id),
+                    resolved: false,
+                    error: Some(format!(
+                        "invalid decision: {other:?} (expected `accept` or `reject`)"
+                    )),
+                });
+            }
+        };
+
+        match self.state.coordinator().await {
+            Some(handle) => {
+                if let Err(e) = handle
+                    .resolve_refinement_review(proposal.id.clone(), accept, p.feedback.clone())
+                    .await
+                {
+                    return Json(ResolveReviewResponse {
+                        proposal_id: Some(proposal.id),
+                        resolved: false,
+                        error: Some(format!("coordinator could not resolve review: {e}")),
+                    });
+                }
+            }
+            None => {
+                return Json(ResolveReviewResponse {
+                    proposal_id: Some(proposal.id),
+                    resolved: false,
+                    error: Some("coordinator not available".to_string()),
+                });
+            }
+        }
+
+        Json(ResolveReviewResponse {
+            proposal_id: Some(proposal.id),
+            resolved: true,
             error: None,
         })
     }
@@ -609,7 +544,9 @@ pub async fn build_refinement_status(
             total_entries: 0,
             update_authority: "checkpoint".to_string(),
             stop_reason: None,
-            pending_checkpoint_count: 0,
+            awaiting_review: false,
+            judge_summary: None,
+            snapshot_revision_seq: None,
             needs_evidence: None,
         });
     };
@@ -650,12 +587,33 @@ pub async fn build_refinement_status(
         None
     };
 
-    // Count pending checkpoint revisions (refinement is always checkpoint-gated).
-    let pending_checkpoint_count = repo
-        .pending_checkpoint_revisions(proposal_id)
-        .await
-        .map(|v| v.len() as i32)
-        .unwrap_or(0);
+    // Detect the parked "awaiting human review" state: the autonomous tribunal
+    // records a `refinement_awaiting_review` lifecycle event when it converges,
+    // and the human's resolve records a `refinement_stop` after it.
+    let latest_awaiting = revisions
+        .iter()
+        .rev()
+        .find(|r| r.event_kind == "refinement_awaiting_review");
+    let awaiting_review = match (&latest_awaiting, &stop_after) {
+        (Some(aw), Some(stop)) => stop.created_at < aw.created_at,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let (judge_summary, snapshot_revision_seq) = if awaiting_review {
+        let meta = latest_awaiting
+            .and_then(|r| r.event_metadata.as_ref())
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
+        let summary = meta
+            .as_ref()
+            .and_then(|v| v.get("judge_summary")?.as_str().map(String::from));
+        let snap = meta
+            .as_ref()
+            .and_then(|v| v.get("snapshot_revision_seq")?.as_i64())
+            .map(|n| n as i32);
+        (summary, snap)
+    } else {
+        (None, None)
+    };
 
     // Derive round and dry-round counts from debate trail.
     let trail = repo
@@ -730,7 +688,9 @@ pub async fn build_refinement_status(
         total_entries,
         update_authority,
         stop_reason,
-        pending_checkpoint_count,
+        awaiting_review,
+        judge_summary,
+        snapshot_revision_seq,
         needs_evidence,
     })
 }

@@ -1,9 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, userEvent } from "@/test/test-utils";
+import { render, screen } from "@/test/test-utils";
 import type {
   ProposalGateStatus,
   ProposalRefinementStatus,
-  CheckpointRevision,
 } from "@/api/types";
 import { ReadinessPanel } from "./ReadinessPanel";
 import { callMcpTool } from "@/api/mcpClient";
@@ -51,22 +50,6 @@ function refinement(
     total_entries: 0,
     update_authority: "checkpoint",
     stop_reason: null,
-    pending_checkpoint_count: 0,
-    ...overrides,
-  };
-}
-
-function checkpointRevision(
-  overrides: Partial<CheckpointRevision> = {},
-): CheckpointRevision {
-  return {
-    seq: 1,
-    role: "advocate",
-    round: 1,
-    author_model: "gpt-4o",
-    body_preview: "Updated proposal body preview",
-    title: "Advocate revision",
-    created_at: "2026-06-20T10:00:00Z",
     ...overrides,
   };
 }
@@ -82,27 +65,13 @@ describe("ReadinessPanel", () => {
 
   it("renders nothing when gateStatus and refinement are both null", () => {
     const { container } = render(
-      <ReadinessPanel
-        gateStatus={null}
-        refinement={null}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
-      />,
+      <ReadinessPanel gateStatus={null} refinement={null} />,
     );
     expect(container.innerHTML).toBe("");
   });
 
   it("renders Ready badge when gate passes", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
-      />,
-    );
+    render(<ReadinessPanel gateStatus={gateStatus()} refinement={refinement()} />);
     expect(screen.getByText("Ready")).toBeInTheDocument();
   });
 
@@ -114,9 +83,6 @@ describe("ReadinessPanel", () => {
           blocked_explanations: ["Missing problem section"],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Blocked")).toBeInTheDocument();
@@ -129,9 +95,6 @@ describe("ReadinessPanel", () => {
       <ReadinessPanel
         gateStatus={gateStatus({ dor_ready: true })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/Definition of Ready: Pass/)).toBeInTheDocument();
@@ -153,14 +116,13 @@ describe("ReadinessPanel", () => {
           ready: false,
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/Definition of Ready: Fail/)).toBeInTheDocument();
     expect(screen.getByText(/Problem coverage/)).toBeInTheDocument();
-    expect(screen.getByText(/Missing required coverage: problem/)).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/Missing required coverage: problem/).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText(/Grounding/)).toBeInTheDocument();
   });
 
@@ -175,13 +137,11 @@ describe("ReadinessPanel", () => {
           judge_needs_work: false,
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Judge verdict")).toBeInTheDocument();
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    // "Ready" appears both as the header readiness badge and the judge badge.
+    expect(screen.getAllByText("Ready").length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders judge verdict badge as Needs-work when judge_needs_work is true", () => {
@@ -197,9 +157,6 @@ describe("ReadinessPanel", () => {
           ],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Judge verdict")).toBeInTheDocument();
@@ -213,9 +170,6 @@ describe("ReadinessPanel", () => {
       <ReadinessPanel
         gateStatus={gateStatus({ adversary_dry_count: 2 })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/Adversary dry:/)).toBeInTheDocument();
@@ -234,9 +188,6 @@ describe("ReadinessPanel", () => {
           blocked_explanations: ["Unresolved blocking debate entries: e-1, e-2, e-3"],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText(/Blocking rows:/)).toBeInTheDocument();
@@ -261,14 +212,11 @@ describe("ReadinessPanel", () => {
           ],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Parked: needs-evidence spike")).toBeInTheDocument();
-    expect(screen.getByText(/X is load-bearing/)).toBeInTheDocument();
-    expect(screen.getByText(/ab12/)).toBeInTheDocument();
+    expect(screen.getAllByText(/X is load-bearing/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/ab12/).length).toBeGreaterThan(0);
     expect(screen.getByText(/open/)).toBeInTheDocument();
   });
 
@@ -281,19 +229,14 @@ describe("ReadinessPanel", () => {
           ready: false,
           blocked_explanations: [
             "Missing required coverage: problem",
-            "Pending checkpoint revision awaiting approval or rejection",
             "Judge returned needs-work (verdict v-1); no current human override",
           ],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Blocked because")).toBeInTheDocument();
     expect(screen.getByText(/Missing required coverage: problem/)).toBeInTheDocument();
-    expect(screen.getByText(/Pending checkpoint revision/)).toBeInTheDocument();
     expect(screen.getByText(/Judge returned needs-work/)).toBeInTheDocument();
   });
 
@@ -304,9 +247,6 @@ describe("ReadinessPanel", () => {
       <ReadinessPanel
         gateStatus={gateStatus({ human_override_active: true })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Human override")).toBeInTheDocument();
@@ -317,199 +257,26 @@ describe("ReadinessPanel", () => {
       <ReadinessPanel
         gateStatus={gateStatus({ human_override_active: false })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.queryByText("Human override")).not.toBeInTheDocument();
   });
 
-  // ── Checkpoint mode explanation ─────────────────────────────────────────
+  // ── Active-refinement note ──────────────────────────────────────────────
 
-  it("renders checkpoint mode explanation when refinement is active and checkpoint", () => {
+  it("renders the autonomous-tribunal note when refinement is active", () => {
     render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement({ update_authority: "checkpoint" })}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
-      />,
+      <ReadinessPanel gateStatus={gateStatus()} refinement={refinement({ active: true })} />,
     );
     expect(
-      screen.getByText(/Checkpoint mode: advocate revisions require explicit approval/),
+      screen.getByText(/Autonomous tribunal in progress/),
     ).toBeInTheDocument();
   });
 
-  it("always renders checkpoint explanation when refinement is active", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement({ update_authority: "checkpoint" })}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
-      />,
-    );
+  it("renders note when gateStatus is null but refinement is active", () => {
+    render(<ReadinessPanel gateStatus={null} refinement={refinement()} />);
     expect(
-      screen.getByText(/Checkpoint mode: advocate revisions require explicit approval/),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/Auto-accept/)).not.toBeInTheDocument();
-  });
-
-  // ── Checkpoint revisions with diff ──────────────────────────────────────
-
-  it("renders pending checkpoint revisions with Diff and Approve/Reject buttons", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision()]}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(screen.getByText(/Pending revisions/)).toBeInTheDocument();
-    expect(screen.getByText("Advocate revision")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Diff/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Approve/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Reject/i })).toBeInTheDocument();
-  });
-
-  it("shows diff preview when Diff button is clicked", async () => {
-    const user = userEvent.setup();
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision()]}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /Diff/i }));
-
-    expect(
-      screen.getByText(/Preview of proposed revision/),
-    ).toBeInTheDocument();
-    // Button text should change to "Hide diff"
-    expect(screen.getByRole("button", { name: /Hide diff/i })).toBeInTheDocument();
-  });
-
-  // ── Checkpoint approve/reject actions ───────────────────────────────────
-
-  it("calls proposal_refinement_checkpoint_approve on Approve click", async () => {
-    vi.mocked(callMcpTool).mockResolvedValueOnce({ approved: true } as never);
-    const onChanged = vi.fn();
-    const user = userEvent.setup();
-
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision({ seq: 42 })]}
-        onChanged={onChanged}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /Approve/i }));
-
-    expect(callMcpTool).toHaveBeenCalledWith(
-      "proposal_refinement_checkpoint_approve",
-      { proposal_id: "p-1", revision_seq: 42 },
-    );
-    expect(showToast.success).toHaveBeenCalledWith("Checkpoint revision approved");
-    expect(onChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it("calls proposal_refinement_checkpoint_reject on Reject click", async () => {
-    vi.mocked(callMcpTool).mockResolvedValueOnce({ rejected: true } as never);
-    const onChanged = vi.fn();
-    const user = userEvent.setup();
-
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision({ seq: 7 })]}
-        onChanged={onChanged}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /Reject/i }));
-
-    expect(callMcpTool).toHaveBeenCalledWith(
-      "proposal_refinement_checkpoint_reject",
-      { proposal_id: "p-1", revision_seq: 7 },
-    );
-    expect(showToast.success).toHaveBeenCalledWith("Checkpoint revision rejected");
-    expect(onChanged).toHaveBeenCalledTimes(1);
-  });
-
-  it("shows error toast when checkpoint approve fails", async () => {
-    vi.mocked(callMcpTool).mockResolvedValueOnce({
-      error: "not found",
-    } as never);
-    const user = userEvent.setup();
-
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision()]}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /Approve/i }));
-
-    expect(showToast.error).toHaveBeenCalledWith(
-      "Failed to approve revision",
-      { description: "not found" },
-    );
-  });
-
-  it("shows error toast when checkpoint reject throws", async () => {
-    vi.mocked(callMcpTool).mockRejectedValueOnce(new Error("Network error"));
-    const user = userEvent.setup();
-
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus()}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[checkpointRevision()]}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /Reject/i }));
-
-    expect(showToast.error).toHaveBeenCalledWith(
-      "Failed to reject revision",
-      { description: "Network error" },
-    );
-  });
-
-  // ── Renders with refinement-only data (no gate_status) ──────────────────
-
-  it("renders mode explanation when gateStatus is null but refinement exists", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={null}
-        refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByText(/Checkpoint mode/),
+      screen.getByText(/Autonomous tribunal in progress/),
     ).toBeInTheDocument();
   });
 
@@ -531,14 +298,11 @@ describe("ReadinessPanel", () => {
           ],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Parked: needs-evidence spike")).toBeInTheDocument();
-    expect(screen.getByText(/Y handles 10k rps/)).toBeInTheDocument();
-    expect(screen.getByText(/cd34/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Y handles 10k rps/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/cd34/).length).toBeGreaterThan(0);
     expect(screen.getByText(/done/)).toBeInTheDocument();
   });
 
@@ -557,27 +321,22 @@ describe("ReadinessPanel", () => {
           judge_needs_work: true,
           unresolved_blocking_count: 1,
           unresolved_blocking_ids: ["e-1"],
-          pending_checkpoint: true,
           blocked_explanations: [
             "Missing required coverage: problem",
             "Missing grounding: add entry points",
             "Judge returned needs-work (verdict v-1); no current human override",
             "Unresolved blocking debate entries: e-1",
-            "Pending checkpoint revision awaiting approval or rejection",
           ],
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Blocked because")).toBeInTheDocument();
-    expect(screen.getByText(/Missing required coverage: problem/)).toBeInTheDocument();
-    expect(/Missing grounding/);
+    expect(
+      screen.getAllByText(/Missing required coverage: problem/).length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText(/Judge returned needs-work/)).toBeInTheDocument();
     expect(screen.getByText(/Unresolved blocking debate entries/)).toBeInTheDocument();
-    expect(screen.getByText(/Pending checkpoint revision/)).toBeInTheDocument();
   });
 
   // ── P4 regression: pending checkpoint badge ──────────────────────────
@@ -587,9 +346,6 @@ describe("ReadinessPanel", () => {
       <ReadinessPanel
         gateStatus={gateStatus({ pending_checkpoint: true })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Pending checkpoint")).toBeInTheDocument();
@@ -607,13 +363,11 @@ describe("ReadinessPanel", () => {
           human_override_active: true,
         })}
         refinement={refinement()}
-        proposalId="p-1"
-        pendingRevisions={[]}
-        onChanged={vi.fn()}
       />,
     );
     expect(screen.getByText("Judge verdict")).toBeInTheDocument();
-    expect(screen.getByText("Ready")).toBeInTheDocument();
+    // "Ready" appears as both the header readiness badge and the judge badge.
+    expect(screen.getAllByText("Ready").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("Human override")).toBeInTheDocument();
   });
 });

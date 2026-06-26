@@ -44,7 +44,7 @@ describe("ProposalRefinement", () => {
     expect(screen.getByText("Start refinement")).toBeInTheDocument();
   });
 
-  it("renders active status panel", () => {
+  it("renders active in-progress status panel", () => {
     const status: ProposalRefinementStatus = {
       active: true,
       current_round: 3,
@@ -52,7 +52,7 @@ describe("ProposalRefinement", () => {
       total_entries: 7,
       update_authority: "checkpoint",
       stop_reason: null,
-      pending_checkpoint_count: 0,
+      awaiting_review: false,
     };
     render(
       <ProposalRefinement
@@ -63,13 +63,13 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(screen.getByText("Active")).toBeInTheDocument();
-    expect(screen.getByText("Checkpoint")).toBeInTheDocument();
-    expect(screen.getByText("Round")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("Entries")).toBeInTheDocument();
+    expect(screen.getByText("Refinement in progress")).toBeInTheDocument();
+    expect(screen.getAllByText("Entries").length).toBeGreaterThan(0);
     expect(screen.getByText("7")).toBeInTheDocument();
     expect(screen.getByText("Dry rounds")).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(
+      screen.getByText(/running autonomously; you'll review the result/),
+    ).toBeInTheDocument();
   });
 
   it("renders stopped status panel with stop reason", () => {
@@ -90,10 +90,7 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(screen.getByText("Stopped")).toBeInTheDocument();
-    expect(screen.getByText("Checkpoint")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Adversary exhausted/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Adversary exhausted/)).toBeInTheDocument();
   });
 
   it("explains same-model fallback in the status panel", () => {
@@ -121,7 +118,7 @@ describe("ProposalRefinement", () => {
     ).toBeInTheDocument();
   });
 
-  it("explains checkpoint behavior in kickoff affordance", () => {
+  it("explains the autonomous review flow in the kickoff affordance", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -131,7 +128,7 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(
-      screen.getByText(/proposed for your approval before they're applied/),
+      screen.getByText(/when it converges you'll review the full refined result/),
     ).toBeInTheDocument();
   });
 
@@ -295,81 +292,19 @@ describe("ProposalRefinement", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
-  // ── Pending checkpoint controls ──────────────────────────────────────────
+  // ── Autonomous review flow (awaiting_review) ─────────────────────────────
 
-  it("renders pending checkpoint count in checkpoint mode", () => {
+  it("renders the review panel with Accept/Reject when awaiting_review", () => {
     const status: ProposalRefinementStatus = {
       active: true,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 4,
-      update_authority: "checkpoint",
-      stop_reason: null,
-      pending_checkpoint_count: 2,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(screen.getByText(/2 advocate revision\(s\) awaiting approval/)).toBeInTheDocument();
-  });
-
-  it("does not show pending revisions block when count is zero", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 4,
-      update_authority: "checkpoint",
-      stop_reason: null,
-      pending_checkpoint_count: 0,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(screen.queryByText(/Pending revisions/)).not.toBeInTheDocument();
-  });
-
-  it("shows checkpoint approval message when no pending revisions", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 1,
-      dry_rounds: 0,
-      total_entries: 0,
-      update_authority: "checkpoint",
-      stop_reason: null,
-      pending_checkpoint_count: 0,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByText(/Advocate revisions require explicit approval/),
-    ).toBeInTheDocument();
-  });
-
-  it("does not show checkpoint explanation when stopped", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 5,
+      current_round: 4,
       dry_rounds: 2,
       total_entries: 12,
       update_authority: "checkpoint",
-      stop_reason: "adversary_dry",
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "The spec was tightened and ambiguities resolved.",
+      snapshot_revision_seq: 3,
     };
     render(
       <ProposalRefinement
@@ -379,28 +314,139 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
-    // Checkpoint explanation only shown for active + checkpoint mode.
     expect(
-      screen.queryByText(/Advocate revisions require explicit approval/),
-    ).not.toBeInTheDocument();
+      screen.getByText("Tribunal converged — review the result"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("The spec was tightened and ambiguities resolved."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/the diff from your original is in the revision history/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Accept" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reject" }),
+    ).toBeInTheDocument();
   });
 
-  // ── Checkpoint kickoff mode ──────────────────────────────────────────────
-
-  it("shows checkpoint explanation in kickoff (checkpoint is the only mode)", () => {
+  it("falls back to a default summary when judge_summary is empty", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "",
+    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={null}
-        canStart={true}
+        status={status}
+        canStart={false}
         onChanged={vi.fn()}
       />,
     );
+    expect(screen.getByText("The tribunal converged.")).toBeInTheDocument();
+  });
 
-    // Checkpoint is the only mode — always shows the checkpoint explanation.
+  it("calls proposal_refinement_resolve with accept on Accept click", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({ ok: true } as never);
+
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Accept" }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
+      proposal_id: proposalId,
+      decision: "accept",
+      feedback: undefined,
+    });
+    expect(showToast.success).toHaveBeenCalledWith("Refined spec accepted");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls proposal_refinement_resolve with reject on Reject click", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({ ok: true } as never);
+
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+
+    expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
+      proposal_id: proposalId,
+      decision: "reject",
+      feedback: undefined,
+    });
+    expect(showToast.success).toHaveBeenCalledWith(
+      "Refinement rejected — reverted to your original",
+    );
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render the review panel while in progress", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      update_authority: "checkpoint",
+      stop_reason: null,
+      awaiting_review: false,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
     expect(
-      screen.getByText(/proposed for your approval before they're applied/),
-    ).toBeInTheDocument();
+      screen.queryByText("Tribunal converged — review the result"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Refinement in progress")).toBeInTheDocument();
   });
 
   // ── Status panel does not show dry rounds when zero ──────────────────────
@@ -436,7 +482,7 @@ describe("ProposalRefinement", () => {
       update_authority: "checkpoint",
       stop_reason: null,
     };
-    const { container } = render(
+    render(
       <ProposalRefinement
         proposalId={proposalId}
         status={status}
@@ -471,85 +517,14 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
-    // The refinement panel shows its own data (round, entries, dry rounds).
-    expect(screen.getByText("Round")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("Entries")).toBeInTheDocument();
+    // The refinement panel shows its own data (entries, dry rounds).
+    expect(screen.getAllByText("Entries").length).toBeGreaterThan(0);
     expect(screen.getByText("7")).toBeInTheDocument();
     // The refinement panel does NOT render debate trail entries itself.
     // Debate trail is rendered by the separate <DebateTrail> component.
     expect(screen.queryByText("Debate trail")).not.toBeInTheDocument();
     expect(screen.queryByText("objection")).not.toBeInTheDocument();
     expect(screen.queryByText("verdict")).not.toBeInTheDocument();
-  });
-
-  // ── Diff button in checkpoint revisions ────────────────────────────────
-
-  it("renders Diff button for pending checkpoint revisions when loaded", async () => {
-    const pendingRev = {
-      seq: 3,
-      role: "advocate",
-      round: 2,
-      author_model: "gpt-4o",
-      body_preview: "Updated body text",
-      title: "Advocate R2 revision",
-      created_at: "2026-06-22T10:00:00Z",
-    };
-    vi.mocked(callMcpTool).mockResolvedValueOnce({
-      pending: [pendingRev],
-    } as never);
-
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 4,
-      update_authority: "checkpoint",
-      stop_reason: null,
-      pending_checkpoint_count: 1,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-
-    // Wait for the pending revisions to load.
-    expect(await screen.findByText("Advocate R2 revision")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Diff/i })).toBeInTheDocument();
-  });
-
-  // ── P4 regression: refinement status panel displays active round info ──
-
-  it("renders active refinement with multiple rounds and entries", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 0,
-      total_entries: 12,
-      update_authority: "checkpoint",
-      stop_reason: null,
-      pending_checkpoint_count: 3,
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(screen.getByText("Active")).toBeInTheDocument();
-    expect(screen.getByText("Round")).toBeInTheDocument();
-    expect(screen.getByText("4")).toBeInTheDocument();
-    expect(screen.getByText("Entries")).toBeInTheDocument();
-    expect(screen.getByText("12")).toBeInTheDocument();
-    expect(
-      screen.getByText(/3 advocate revision\(s\) awaiting approval/),
-    ).toBeInTheDocument();
   });
 
   it("renders demand round explanation in stopped status", () => {

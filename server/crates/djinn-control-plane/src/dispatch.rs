@@ -59,9 +59,8 @@ use crate::tools::provider_tools::{
     ProviderRemoveInput, ProviderValidateInput,
 };
 use crate::tools::refinement_tools::{
-    CheckpointApproveParams, CheckpointListParams, CheckpointRejectParams,
-    ProposalRefinementDemandRoundParams, ProposalRefinementStartParams,
-    ProposalRefinementStatusParams, ProposalVerdictOverrideParams,
+    ProposalRefinementDemandRoundParams, ProposalRefinementResolveParams,
+    ProposalRefinementStartParams, ProposalRefinementStatusParams, ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -557,35 +556,17 @@ impl DjinnMcpServer {
                 >(name, args)?))
                     .await,
             ),
-            "proposal_refinement_checkpoint_list" => map_json(
-                name,
-                self.proposal_refinement_checkpoint_list(Parameters(decode_args::<
-                    CheckpointListParams,
-                >(name, args)?))
-                    .await,
-            ),
-            "proposal_refinement_checkpoint_approve" => map_json(
-                name,
-                self.proposal_refinement_checkpoint_approve(Parameters(decode_args::<
-                    CheckpointApproveParams,
-                >(
-                    name, args
-                )?))
-                .await,
-            ),
-            "proposal_refinement_checkpoint_reject" => map_json(
-                name,
-                self.proposal_refinement_checkpoint_reject(Parameters(decode_args::<
-                    CheckpointRejectParams,
-                >(
-                    name, args
-                )?))
-                .await,
-            ),
             "proposal_refinement_demand_round" => map_json(
                 name,
                 self.proposal_refinement_demand_round(Parameters(decode_args::<
                     ProposalRefinementDemandRoundParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_resolve" => map_json(
+                name,
+                self.proposal_refinement_resolve(Parameters(decode_args::<
+                    ProposalRefinementResolveParams,
                 >(name, args)?))
                     .await,
             ),

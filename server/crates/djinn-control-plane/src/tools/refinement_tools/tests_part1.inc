@@ -249,6 +249,14 @@
             ) -> Result<(), String> {
                 Err("refinement still active".to_string())
             }
+            async fn resolve_refinement_review(
+                &self,
+                _: String,
+                _: bool,
+                _: Option<String>,
+            ) -> Result<(), String> {
+                Err("no refinement awaiting review".to_string())
+            }
         }
 
         let db = Database::open_in_memory().unwrap();

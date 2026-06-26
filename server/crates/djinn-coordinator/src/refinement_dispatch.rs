@@ -137,36 +137,17 @@ impl CoordinatorActor {
         let round = state.current_round;
         let revision_seq = state.current_revision_seq;
 
-        // Checkpoint pause gate: when an advocate revision is awaiting human
-        // approval/rejection, do NOT dispatch the next phase. The loop resumes
-        // on a later tick once the pending checkpoint is resolved (approve
-        // applies it to the live spec; reject discards it). Without this gate,
-        // checkpoint mode runs every round autonomously and the per-round body
-        // reverts compound — silently applying the advocate's edits to the live
-        // spec across rounds without the human ever approving them.
-        {
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-            match proposal_repo
-                .has_pending_checkpoint_revisions(proposal_id)
-                .await
-            {
-                Ok(true) => {
-                    tracing::info!(
-                        proposal_id = %proposal_id,
-                        "Refinement paused: advocate revision awaiting checkpoint approval"
-                    );
-                    return;
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        proposal_id = %proposal_id,
-                        error = %e,
-                        "Failed to check pending checkpoints; proceeding with dispatch"
-                    );
-                }
-            }
+        // Human-review pause gate: when the tribunal has converged (or hit a
+        // cap) and is parked for the human's single accept/reject, dispatch no
+        // further phases. The loop resumes only when the human resolves the
+        // review (`resolve_human_review`): accept → Complete; reject+feedback →
+        // a fresh round; reject → Complete (spec reverted to the snapshot).
+        if phase == RefinementPhase::AwaitingHumanReview {
+            tracing::debug!(
+                proposal_id = %proposal_id,
+                "Refinement parked: awaiting human accept/reject of the refined spec"
+            );
+            return;
         }
 
         // The user this run is attributed to (task owner + model scope).
@@ -315,7 +296,7 @@ impl CoordinatorActor {
             RefinementPhase::JudgeAdjudication => {
                 self.process_judge_outcome(proposal_id, &state).await;
             }
-            RefinementPhase::Complete => {}
+            RefinementPhase::AwaitingHumanReview | RefinementPhase::Complete => {}
         }
     }
 
@@ -327,10 +308,10 @@ impl CoordinatorActor {
     /// refinement-loop attribution (role, round, authority mode, model)
     /// via `ProposalRepository::set_latest_revision_event_metadata`.
     ///
-    /// In checkpoint mode, the revision is additionally marked as
-    /// `checkpoint_pending` and the live proposal body is reverted to
-    /// the previous revision so the pending revision is inspectable
-    /// without mutating the live proposal.
+    /// The advocate's revision applies directly to the working spec — there is
+    /// no per-revision checkpoint or body revert. The human reviews the
+    /// converged result once, at the end of the loop, and only then is the
+    /// spec reverted (to the pre-refinement snapshot) if they reject.
     async fn process_advocate_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
@@ -366,21 +347,18 @@ impl CoordinatorActor {
         let new_revision_seq = proposal.latest_revision_seq;
         let advanced = new_revision_seq > state.current_revision_seq;
 
-        // Persist revision attribution when the advocate advanced the spec.
-        // The agent's `proposal_update` tool call doesn't carry refinement
-        // context, so we patch the event_metadata post-hoc. Refinement is
-        // always checkpoint-gated: mark the revision pending and revert the live
-        // body so the proposal stays the author's until they approve.
+        // The advocate's revision applies directly to the working spec — no
+        // human-in-the-loop checkpoint, no body revert (the human reviews the
+        // converged result once, at the end). We only patch the new revision's
+        // event_metadata with refinement attribution, since the agent's
+        // `proposal_update` call doesn't carry loop context.
         if advanced {
             let model_id = self
                 .refinement_sessions
                 .get(proposal_id)
                 .map(|s| s.model_id.clone());
-            let mut event_meta =
+            let event_meta =
                 build_revision_event_metadata(state.current_round, model_id.as_deref());
-            event_meta["checkpoint_status"] = serde_json::json!("pending");
-            event_meta["previous_revision_seq"] = serde_json::json!(state.current_revision_seq);
-
             let event_bus2 = crate::events::event_bus_for(&self.events_tx);
             let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
             if let Err(e) = proposal_repo2
@@ -394,28 +372,9 @@ impl CoordinatorActor {
                     "Failed to patch advocate revision event_metadata"
                 );
             }
-
-            // Revert the live proposal body to the pre-revision state. The
-            // revision row retains the advocate's full output for later approval.
-            if let Err(e) = self
-                .revert_checkpoint_body(proposal_id, state.current_revision_seq)
-                .await
-            {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "Failed to revert proposal body for checkpoint pending"
-                );
-            } else {
-                tracing::info!(
-                    proposal_id = %proposal_id,
-                    pending_seq = new_revision_seq,
-                    reverted_to_seq = state.current_revision_seq,
-                    "Checkpoint: advocate revision marked pending, live body reverted"
-                );
-            }
         }
 
+        // Either way, the round now goes to the Judge to rule.
         if let Some(state) = self.active_refinements.get_mut(proposal_id) {
             if advanced {
                 state.record_advocate_revision(new_revision_seq);
@@ -423,15 +382,15 @@ impl CoordinatorActor {
                     proposal_id = %proposal_id,
                     new_seq = new_revision_seq,
                     round = state.current_round,
-                    "Advocate produced revision"
+                    "Advocate produced revision; handing to judge"
                 );
             } else {
-                state.phase = RefinementPhase::AdversaryAttack;
+                state.phase = RefinementPhase::JudgeAdjudication;
                 tracing::info!(
                     proposal_id = %proposal_id,
                     revision_seq = state.current_revision_seq,
                     round = state.current_round,
-                    "Advocate session completed without advancing revision"
+                    "Advocate session produced no revision; handing to judge on current spec"
                 );
             }
         }
@@ -507,10 +466,48 @@ impl CoordinatorActor {
                     proposal_id = %proposal_id,
                     round,
                     ?reason,
-                    "Refinement escalated"
+                    "Refinement escalated — parking for human review"
                 );
-                self.persist_refinement_stop(proposal_id, &reason).await;
+                // Escalation parks the loop for the human (it does not silently
+                // stop). Surface it with the escalation reason as the summary.
+                if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                    let summary = format!("Escalated to human review: {reason:?}");
+                    self.persist_awaiting_review(proposal_id, &summary, &state)
+                        .await;
+                }
             }
+        }
+    }
+
+    /// Persist that the tribunal has parked for the human's single accept/reject
+    /// review (judge converged, or escalated). The status tool reads this event
+    /// to render the review panel; it carries the judge's summary and the
+    /// snapshot/refined revision seqs that bound the diff.
+    async fn persist_awaiting_review(
+        &self,
+        proposal_id: &str,
+        judge_summary: &str,
+        state: &RefinementLoopState,
+    ) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let meta = serde_json::json!({
+            "source": "refinement_loop",
+            "event": "refinement_awaiting_review",
+            "judge_summary": judge_summary,
+            "snapshot_revision_seq": state.snapshot_revision_seq,
+            "refined_revision_seq": state.current_revision_seq,
+            "stop_reason": state.stop_reason.as_ref().map(|r| r.tag()),
+        });
+        if let Err(e) = proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_awaiting_review", Some(&meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to persist refinement_awaiting_review lifecycle metadata"
+            );
         }
     }
 
@@ -557,18 +554,30 @@ impl CoordinatorActor {
             }
         };
 
-        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
             state.record_judge_verdict(&verdict);
+            state.is_awaiting_human_review()
+        } else {
+            false
+        };
+
+        if now_awaiting {
+            if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                self.persist_awaiting_review(proposal_id, &verdict.body, &state)
+                    .await;
+            }
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge ruled READY — tribunal parked for human accept/reject"
+            );
+        } else {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge ruled not-ready — running another round"
+            );
         }
-
-        self.persist_refinement_stop(proposal_id, &StopReason::AdversaryDry)
-            .await;
-
-        tracing::info!(
-            proposal_id = %proposal_id,
-            blocking = verdict.blocking,
-            "Judge verdict recorded — refinement complete"
-        );
     }
 
     /// Terminate a refinement loop and persist stop metadata.
@@ -580,14 +589,85 @@ impl CoordinatorActor {
         self.refinement_sessions.remove(proposal_id);
     }
 
-    /// Revert the live proposal body to the state at `target_revision_seq`
-    /// after a checkpoint-mode advocate revision. Reads the spec_snapshot
-    /// from the proposal_revisions row at `target_revision_seq` and writes
-    /// it back to the live proposals table.
+    /// Resolve the human's single accept/reject review of a converged
+    /// refinement. `accept` keeps the refined spec; reject restores the
+    /// pre-refinement snapshot. `feedback` is recorded for the audit trail.
+    /// Returns `Err` if no refinement is parked for review on this proposal.
+    pub(super) async fn resolve_refinement_review(
+        &mut self,
+        proposal_id: &str,
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+            return Err(format!("no active refinement for proposal {proposal_id}"));
+        };
+        if !state.is_awaiting_human_review() {
+            return Err("refinement is not awaiting human review".into());
+        }
+
+        if !accept {
+            // Reject → restore the pre-refinement snapshot spec.
+            if let Err(e) = self
+                .reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
+                .await
+            {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to revert spec to snapshot on reject"
+                );
+            }
+        }
+
+        if let Some(s) = self.active_refinements.get_mut(proposal_id) {
+            // v1: reject always reverts + stops (we record the feedback but do
+            // not auto-re-loop yet); accept keeps the refined spec.
+            s.resolve_human_review(accept, false);
+        }
+
+        let reason_tag = if accept {
+            "human_accepted"
+        } else {
+            "human_rejected"
+        };
+        let meta = serde_json::json!({
+            "source": "human_review",
+            "event": "refinement_stop",
+            "reason_tag": reason_tag,
+            "feedback": feedback,
+        });
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        if let Err(e) = proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to persist human-review resolution"
+            );
+        }
+
+        self.refinement_sessions.remove(proposal_id);
+        self.active_refinements.retain(|_, s| !s.is_complete());
+        tracing::info!(
+            proposal_id = %proposal_id,
+            accept,
+            "Human resolved refinement review"
+        );
+        Ok(())
+    }
+
+    /// Reset the live proposal spec to the state at `target_revision_seq` —
+    /// used when the human REJECTS the refined result, to restore the
+    /// pre-refinement snapshot. Reads the spec from the `proposal_revisions`
+    /// row at `target_revision_seq` and writes it back to the live proposal.
     ///
-    /// This is a best-effort operation: if the target revision doesn't exist
-    /// or the revert fails, the caller logs a warning and continues.
-    async fn revert_checkpoint_body(
+    /// Best-effort: if the target revision doesn't exist or the write fails,
+    /// the caller logs a warning and continues.
+    async fn reset_live_spec_to_revision(
         &self,
         proposal_id: &str,
         target_revision_seq: i32,
@@ -642,7 +722,7 @@ impl CoordinatorActor {
                     superseded_by: current.superseded_by.as_deref(),
                     body_format: Some(&rev.body_format),
                     event_metadata: Some(&serde_json::json!({
-                        "source": "checkpoint_revert",
+                        "source": "refinement_reject_revert",
                         "reverted_from_seq": current.latest_revision_seq,
                         "reverted_to_seq": target_revision_seq,
                     })),
@@ -711,7 +791,9 @@ impl CoordinatorActor {
             RefinementPhase::AdvocateRevision => "advocate",
             RefinementPhase::AdversaryAttack => "adversary",
             RefinementPhase::JudgeAdjudication => "judge",
-            RefinementPhase::Complete => return ("advocate".into(), String::new()),
+            RefinementPhase::AwaitingHumanReview | RefinementPhase::Complete => {
+                return ("advocate".into(), String::new());
+            }
         };
 
         // The tribunal runs on the attributed user's "Plan" role models

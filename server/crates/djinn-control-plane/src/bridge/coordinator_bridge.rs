@@ -49,4 +49,13 @@ pub trait CoordinatorOps: Send + Sync {
         &self,
         request: ProposalRefinementStartRequest,
     ) -> Result<(), String>;
+    /// Resolve the human's accept/reject review of a converged refinement.
+    /// `accept` keeps the refined spec; reject reverts to the pre-refinement
+    /// snapshot. `feedback` is recorded for the audit trail.
+    async fn resolve_refinement_review(
+        &self,
+        proposal_id: String,
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String>;
 }

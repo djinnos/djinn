@@ -57,6 +57,18 @@ impl CoordinatorOps for CoordinatorBridge {
             .await
             .map_err(|e| e.to_string())
     }
+
+    async fn resolve_refinement_review(
+        &self,
+        proposal_id: String,
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        self.0
+            .resolve_refinement_review(proposal_id, accept, feedback)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 // ── SlotPoolBridge → SlotPoolOps ──────────────────────────────────────────────

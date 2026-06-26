@@ -258,8 +258,13 @@ describe("ProposalHistory", () => {
       />,
     );
 
-    // Both status events should be visible.
-    expect(screen.getAllByText("Status changed")).toHaveLength(2);
+    // Both status events should be visible: the in_review transition renders
+    // as a generic "Status changed", while the transition to "done" renders
+    // with the dedicated externally-implemented label.
+    expect(screen.getByText("Status changed")).toBeInTheDocument();
+    expect(
+      screen.getByText("Marked done (implemented externally)"),
+    ).toBeInTheDocument();
     // Spec revision should be visible.
     expect(screen.getByText("rev 2")).toBeInTheDocument();
   });

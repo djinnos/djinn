@@ -6984,128 +6984,6 @@ export namespace ProposalReconcileObsoleteEpicOutputSchema {
 
 }
 export type ProposalReconcileObsoleteEpicOutput = ProposalReconcileObsoleteEpicOutputSchema.ProposalReconcileObsoleteEpicOutput;
-export namespace ProposalRefinementCheckpointApproveInputSchema {
-  export interface ProposalRefinementCheckpointApproveInput {
-  /**
-   * Proposal UUID or short_id.
-   */
-  proposal_id: string
-  /**
-   * Revision sequence number to approve.
-   */
-  revision_seq: number
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointApproveInput = ProposalRefinementCheckpointApproveInputSchema.ProposalRefinementCheckpointApproveInput;
-export namespace ProposalRefinementCheckpointApproveOutputSchema {
-  /**
-   * Response for `proposal_refinement_checkpoint_approve`.
-   */
-  export interface ProposalRefinementCheckpointApproveOutput {
-  /**
-   * True when the pending revision was found and applied.
-   */
-  approved: boolean
-  error?: string
-  proposal_id?: string
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointApproveOutput = ProposalRefinementCheckpointApproveOutputSchema.ProposalRefinementCheckpointApproveOutput;
-export namespace ProposalRefinementCheckpointListInputSchema {
-  export interface ProposalRefinementCheckpointListInput {
-  /**
-   * Proposal UUID or short_id.
-   */
-  proposal_id: string
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointListInput = ProposalRefinementCheckpointListInputSchema.ProposalRefinementCheckpointListInput;
-export namespace ProposalRefinementCheckpointListOutputSchema {
-  /**
-   * Response for `proposal_refinement_checkpoint_list`.
-   */
-  export interface ProposalRefinementCheckpointListOutput {
-  error?: string
-  pending?: CheckpointRevisionModel[]
-  proposal_id?: string
-  [k: string]: any
-  }
-  /**
-   * A pending checkpoint revision visible in the UI for approval or rejection.
-   * Derived from a `proposal_revisions` row whose `event_metadata` marks it as
-   * `checkpoint_status: "pending"`.
-   */
-  export interface CheckpointRevisionModel {
-  /**
-   * Model that authored this revision.
-   */
-  author_model?: string
-  /**
-   * Short preview of the proposed body (first 300 chars).
-   */
-  body_preview: string
-  /**
-   * When the revision was created.
-   */
-  created_at: string
-  /**
-   * Advocate role attribution from event_metadata.
-   */
-  role?: string
-  /**
-   * Refinement round that produced this revision.
-   */
-  round?: number
-  /**
-   * The `proposal_revisions.seq` this pending revision targets.
-   */
-  seq: number
-  /**
-   * Title of the pending revision.
-   */
-  title: string
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointListOutput = ProposalRefinementCheckpointListOutputSchema.ProposalRefinementCheckpointListOutput;
-export namespace ProposalRefinementCheckpointRejectInputSchema {
-  export interface ProposalRefinementCheckpointRejectInput {
-  /**
-   * Proposal UUID or short_id.
-   */
-  proposal_id: string
-  /**
-   * Revision sequence number to reject.
-   */
-  revision_seq: number
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointRejectInput = ProposalRefinementCheckpointRejectInputSchema.ProposalRefinementCheckpointRejectInput;
-export namespace ProposalRefinementCheckpointRejectOutputSchema {
-  /**
-   * Response for `proposal_refinement_checkpoint_reject`.
-   */
-  export interface ProposalRefinementCheckpointRejectOutput {
-  error?: string
-  proposal_id?: string
-  /**
-   * True when the pending revision was found and rejected.
-   */
-  rejected: boolean
-  [k: string]: any
-  }
-
-}
-export type ProposalRefinementCheckpointRejectOutput = ProposalRefinementCheckpointRejectOutputSchema.ProposalRefinementCheckpointRejectOutput;
 export namespace ProposalRefinementDemandRoundInputSchema {
   export interface ProposalRefinementDemandRoundInput {
   /**
@@ -7149,6 +7027,11 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   active: boolean
   /**
+   * True when the autonomous tribunal has converged (or escalated) and is
+   * parked for the human's single accept/reject review of the refined spec.
+   */
+  awaiting_review?: boolean
+  /**
    * Current debate round (1-based). `None` when refinement has not started.
    */
   current_round?: number
@@ -7157,15 +7040,20 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   dry_rounds: number
   /**
+   * The judge's summary shown alongside the accept/reject review.
+   * `None` unless `awaiting_review` is true.
+   */
+  judge_summary?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
   /**
-   * Count of pending checkpoint revisions awaiting approval.
-   * Always 0 in auto-accept mode.
+   * The pre-refinement snapshot revision seq (the diff baseline) when
+   * `awaiting_review` is true.
    */
-  pending_checkpoint_count?: number
+  snapshot_revision_seq?: number
   /**
    * When set, refinement has stopped for this reason.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
@@ -7208,6 +7096,43 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
 
 }
 export type ProposalRefinementDemandRoundOutput = ProposalRefinementDemandRoundOutputSchema.ProposalRefinementDemandRoundOutput;
+export namespace ProposalRefinementResolveInputSchema {
+  export interface ProposalRefinementResolveInput {
+  /**
+   * The human's decision: `accept` (keep the refined spec) or `reject`
+   * (revert the live spec to the pre-refinement snapshot).
+   */
+  decision: string
+  /**
+   * Optional reviewer note — why accepted/rejected. Recorded for the audit
+   * trail.
+   */
+  feedback?: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementResolveInput = ProposalRefinementResolveInputSchema.ProposalRefinementResolveInput;
+export namespace ProposalRefinementResolveOutputSchema {
+  /**
+   * Response for `proposal_refinement_resolve`.
+   */
+  export interface ProposalRefinementResolveOutput {
+  error?: string
+  proposal_id?: string
+  /**
+   * True when the human's accept/reject was applied.
+   */
+  resolved: boolean
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementResolveOutput = ProposalRefinementResolveOutputSchema.ProposalRefinementResolveOutput;
 export namespace ProposalRefinementStartInputSchema {
   export interface ProposalRefinementStartInput {
   /**
@@ -7249,6 +7174,11 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   active: boolean
   /**
+   * True when the autonomous tribunal has converged (or escalated) and is
+   * parked for the human's single accept/reject review of the refined spec.
+   */
+  awaiting_review?: boolean
+  /**
    * Current debate round (1-based). `None` when refinement has not started.
    */
   current_round?: number
@@ -7257,15 +7187,20 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   dry_rounds: number
   /**
+   * The judge's summary shown alongside the accept/reject review.
+   * `None` unless `awaiting_review` is true.
+   */
+  judge_summary?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
   /**
-   * Count of pending checkpoint revisions awaiting approval.
-   * Always 0 in auto-accept mode.
+   * The pre-refinement snapshot revision seq (the diff baseline) when
+   * `awaiting_review` is true.
    */
-  pending_checkpoint_count?: number
+  snapshot_revision_seq?: number
   /**
    * When set, refinement has stopped for this reason.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
@@ -7340,6 +7275,11 @@ export namespace ProposalRefinementStatusOutputSchema {
    */
   active: boolean
   /**
+   * True when the autonomous tribunal has converged (or escalated) and is
+   * parked for the human's single accept/reject review of the refined spec.
+   */
+  awaiting_review?: boolean
+  /**
    * Current debate round (1-based). `None` when refinement has not started.
    */
   current_round?: number
@@ -7348,15 +7288,20 @@ export namespace ProposalRefinementStatusOutputSchema {
    */
   dry_rounds: number
   /**
+   * The judge's summary shown alongside the accept/reject review.
+   * `None` unless `awaiting_review` is true.
+   */
+  judge_summary?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
   /**
-   * Count of pending checkpoint revisions awaiting approval.
-   * Always 0 in auto-accept mode.
+   * The pre-refinement snapshot revision seq (the diff baseline) when
+   * `awaiting_review` is true.
    */
-  pending_checkpoint_count?: number
+  snapshot_revision_seq?: number
   /**
    * When set, refinement has stopped for this reason.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
@@ -7769,6 +7714,11 @@ export namespace ProposalShowOutputSchema {
    */
   active: boolean
   /**
+   * True when the autonomous tribunal has converged (or escalated) and is
+   * parked for the human's single accept/reject review of the refined spec.
+   */
+  awaiting_review?: boolean
+  /**
    * Current debate round (1-based). `None` when refinement has not started.
    */
   current_round?: number
@@ -7777,15 +7727,20 @@ export namespace ProposalShowOutputSchema {
    */
   dry_rounds: number
   /**
+   * The judge's summary shown alongside the accept/reject review.
+   * `None` unless `awaiting_review` is true.
+   */
+  judge_summary?: string
+  /**
    * When the proposal is parked for a needs-evidence spike, this contains
    * the claim and spike task reference. `None` when not parked.
    */
   needs_evidence?: (NeedsEvidenceStatus | null)
   /**
-   * Count of pending checkpoint revisions awaiting approval.
-   * Always 0 in auto-accept mode.
+   * The pre-refinement snapshot revision seq (the diff baseline) when
+   * `awaiting_review` is true.
    */
-  pending_checkpoint_count?: number
+  snapshot_revision_seq?: number
   /**
    * When set, refinement has stopped for this reason.
    * Values: `adversary_dry`, `round_cap`, `spawn_cap`, `repeated_objection`,
@@ -9926,7 +9881,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_checkpoint_approve" | "proposal_refinement_checkpoint_list" | "proposal_refinement_checkpoint_reject" | "proposal_refinement_demand_round" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -10028,10 +9983,8 @@ export interface McpToolMap {
   "proposal_import": { input: ProposalImportInput; output: ProposalImportOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
   "proposal_reconcile_obsolete_epic": { input: ProposalReconcileObsoleteEpicInput; output: ProposalReconcileObsoleteEpicOutput };
-  "proposal_refinement_checkpoint_approve": { input: ProposalRefinementCheckpointApproveInput; output: ProposalRefinementCheckpointApproveOutput };
-  "proposal_refinement_checkpoint_list": { input: ProposalRefinementCheckpointListInput; output: ProposalRefinementCheckpointListOutput };
-  "proposal_refinement_checkpoint_reject": { input: ProposalRefinementCheckpointRejectInput; output: ProposalRefinementCheckpointRejectOutput };
   "proposal_refinement_demand_round": { input: ProposalRefinementDemandRoundInput; output: ProposalRefinementDemandRoundOutput };
+  "proposal_refinement_resolve": { input: ProposalRefinementResolveInput; output: ProposalRefinementResolveOutput };
   "proposal_refinement_start": { input: ProposalRefinementStartInput; output: ProposalRefinementStartOutput };
   "proposal_refinement_status": { input: ProposalRefinementStatusInput; output: ProposalRefinementStatusOutput };
   "proposal_remove_target": { input: ProposalRemoveTargetInput; output: ProposalRemoveTargetOutput };
