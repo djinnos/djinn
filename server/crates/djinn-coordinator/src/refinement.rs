@@ -60,6 +60,10 @@ pub enum StopReason {
     HumanAccepted,
     /// The human rejected the refined spec at the final review (no re-loop).
     HumanRejected,
+    /// The in-memory loop was lost across a server restart and reconciled by
+    /// startup recovery. The spec is left as-is; the user can start a fresh
+    /// refinement.
+    Interrupted,
 }
 
 impl StopReason {
@@ -73,6 +77,7 @@ impl StopReason {
             StopReason::AgentFailure { .. } => "agent_failure",
             StopReason::HumanAccepted => "human_accepted",
             StopReason::HumanRejected => "human_rejected",
+            StopReason::Interrupted => "interrupted",
         }
     }
 }
@@ -203,6 +208,12 @@ pub struct RefinementLoopState {
     pub objection_signatures: HashMap<String, usize>,
     /// Per-round blocking objection counts: `(round, count)`.
     pub round_blocking_objections: Vec<(i32, usize)>,
+    /// Consecutive times a dispatched role session never actually ran (the
+    /// task closed with zero session rows — e.g. a runtime/devcontainer setup
+    /// failure). Reset to 0 whenever a session does run. Distinguishes "the
+    /// adversary ran and was dry" from "the adversary never started", so a
+    /// dispatch outage isn't silently treated as a dry round.
+    pub dispatch_failures: i32,
     /// Set when the loop terminates.
     pub stop_reason: Option<StopReason>,
 }
@@ -235,6 +246,7 @@ impl RefinementLoopState {
             attributed_user_id: None,
             objection_signatures: HashMap::new(),
             round_blocking_objections: Vec::new(),
+            dispatch_failures: 0,
             stop_reason: None,
         }
     }

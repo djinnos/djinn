@@ -906,6 +906,30 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Return the proposal IDs whose refinement is currently dangling — i.e.
+    /// they have more `refinement_start` lifecycle events than `refinement_stop`
+    /// events, so a refinement was started but never recorded as stopped.
+    ///
+    /// On a clean run this is exactly the set the coordinator is actively
+    /// driving in memory. After a server restart the in-memory loops are lost
+    /// but these DB rows remain, leaving "zombie" refinements that report
+    /// `active` yet make no progress. Startup recovery uses this to reconcile
+    /// them.
+    pub async fn dangling_refinement_proposal_ids(&self) -> Result<Vec<String>> {
+        self.db.ensure_initialized().await?;
+        let ids = sqlx::query_scalar::<_, String>(
+            r#"SELECT proposal_id
+               FROM proposal_revisions
+               WHERE event_kind IN ('refinement_start', 'refinement_stop')
+               GROUP BY proposal_id
+               HAVING SUM(CASE WHEN event_kind = 'refinement_start' THEN 1 ELSE 0 END)
+                    > SUM(CASE WHEN event_kind = 'refinement_stop' THEN 1 ELSE 0 END)"#,
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(ids)
+    }
+
     /// Find the latest verdict override for a proposal. Returns
     /// `Some((override_on_revision_seq, override_metadata_json))` when an
     /// active override exists, or `None` when no override has been recorded.
@@ -3851,6 +3875,53 @@ mod tests {
         .unwrap();
         assert_eq!(r2["block_id"], "metric-tile");
         assert_eq!(r2["selector"], "section: '## Metrics'");
+    }
+
+    /// `dangling_refinement_proposal_ids` reports a proposal exactly while it
+    /// has more `refinement_start` than `refinement_stop` lifecycle rows — the
+    /// signal startup recovery uses to reconcile refinements lost across a
+    /// restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dangling_refinement_ids_track_unmatched_start() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Dangling Refinement")).await.unwrap();
+
+        // No refinement lifecycle yet → not dangling.
+        assert!(
+            repo.dangling_refinement_proposal_ids()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A start with no matching stop → dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.dangling_refinement_proposal_ids().await.unwrap(),
+            vec![p.id.clone()]
+        );
+
+        // An awaiting_review event does not balance the start → still dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_awaiting_review", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.dangling_refinement_proposal_ids().await.unwrap(),
+            vec![p.id.clone()]
+        );
+
+        // A matching stop → balanced → no longer dangling.
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+        assert!(
+            repo.dangling_refinement_proposal_ids()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Status-only updates and the `status_change` audit events they emit

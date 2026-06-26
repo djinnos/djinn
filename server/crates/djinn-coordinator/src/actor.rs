@@ -620,6 +620,13 @@ impl CoordinatorActor {
         health::reap_orphaned_taskrun_jobs_for_startup(&self.db, &startup_context).await;
         self.rehydrate_durable_dispatch_state().await;
 
+        // Reconcile refinements whose in-memory loop was lost across this
+        // restart: their durable `refinement_start` rows still report `active`
+        // but no loop drives them. Stop them cleanly so they don't linger as
+        // zombies. Runs before the loop starts, so `active_refinements` is
+        // empty and there is no race with a freshly-started refinement.
+        self.recover_interrupted_refinements().await;
+
         loop {
             tokio::select! {
                 biased;

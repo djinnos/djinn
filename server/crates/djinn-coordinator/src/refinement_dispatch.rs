@@ -41,6 +41,13 @@ use super::actor::CoordinatorActor;
 /// before treating it as stalled (conservative — sessions can take 5+ min).
 const REFINEMENT_SESSION_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// How many consecutive times a refinement role session may fail to start
+/// (runtime/devcontainer setup failure, zero session rows) before the loop
+/// gives up and terminates instead of re-dispatching. Bounds the retry on a
+/// transient runtime outage (e.g. a cold post-deploy devcontainer warm) while
+/// still escalating a persistently broken environment.
+const REFINEMENT_DISPATCH_RETRY_CAP: i32 = 3;
+
 /// The in-flight session tracking for one active refinement loop.
 #[derive(Debug, Clone)]
 pub(super) struct RefinementSession {
@@ -110,8 +117,84 @@ impl CoordinatorActor {
                 return;
             }
 
-            // Session completed — process the outcome, then close the task so
-            // finished phase/round tasks don't linger `open` on the board.
+            // The slot is no longer running this task. That can mean two very
+            // different things:
+            //   (a) the agent session actually ran and finished — process its
+            //       outcome from the DB (debate trail / revisions); or
+            //   (b) the session never started (runtime/devcontainer setup
+            //       failure freed the slot before any session row was created).
+            // Treating (b) as a completed-but-"dry" round silently burns rounds
+            // on a dispatch outage and can hollow-converge the tribunal. Tell
+            // them apart by whether any session row exists for the task.
+            let session_ran = {
+                let event_bus = crate::events::event_bus_for(&self.events_tx);
+                let session_repo =
+                    djinn_db::SessionRepository::new(self.db.clone(), event_bus);
+                match session_repo.list_for_task(&session.task_id).await {
+                    Ok(sessions) => !sessions.is_empty(),
+                    // On a DB read error, fail safe toward "it ran" so we don't
+                    // spin forever re-dispatching.
+                    Err(e) => {
+                        tracing::warn!(
+                            proposal_id = %proposal_id,
+                            task_id = %session.task_id,
+                            error = %e,
+                            "Failed to read sessions for refinement task; assuming it ran"
+                        );
+                        true
+                    }
+                }
+            };
+
+            if !session_ran {
+                // Dispatch/setup failure: the role never executed. Re-dispatch
+                // the same phase on the next tick, bounded by a retry cap so a
+                // persistently broken runtime escalates instead of looping.
+                self.close_refinement_task(
+                    &session.task_id,
+                    "refinement role session never started (dispatch/setup failure)",
+                )
+                .await;
+                self.refinement_sessions.remove(proposal_id);
+                let over_cap = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                    state.dispatch_failures += 1;
+                    state.dispatch_failures >= REFINEMENT_DISPATCH_RETRY_CAP
+                } else {
+                    true
+                };
+                if over_cap {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        phase = ?session.phase,
+                        "Refinement role session repeatedly failed to start — terminating"
+                    );
+                    self.terminate_refinement(
+                        proposal_id,
+                        StopReason::AgentFailure {
+                            role: format!("{:?}", session.phase),
+                            error: format!(
+                                "role session failed to start {REFINEMENT_DISPATCH_RETRY_CAP} times \
+                                 (runtime/devcontainer setup failure)"
+                            ),
+                        },
+                    )
+                    .await;
+                } else {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        phase = ?session.phase,
+                        "Refinement role session never started; will re-dispatch (not counted as dry)"
+                    );
+                }
+                return;
+            }
+
+            // Session actually ran — clear the dispatch-failure counter and
+            // process the outcome, then close the task so finished phase/round
+            // tasks don't linger `open` on the board.
+            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                state.dispatch_failures = 0;
+            }
             self.process_refinement_outcome(proposal_id, &session).await;
             self.close_refinement_task(&session.task_id, "refinement phase complete")
                 .await;
@@ -743,6 +826,51 @@ impl CoordinatorActor {
             .map_err(|e| format!("failed to revert proposal body: {e}"))?;
 
         Ok(())
+    }
+
+    /// Startup reconciliation for refinements interrupted by a restart.
+    ///
+    /// A refinement's loop state lives only in memory (`active_refinements`),
+    /// but its `refinement_start` lifecycle row is durable. After a restart the
+    /// in-memory loop is gone yet the DB still reports the proposal as `active`,
+    /// so it becomes a "zombie": it makes no progress and the human cannot
+    /// resolve it. This runs ONCE, before the actor's message/tick loop begins
+    /// (so `active_refinements` is empty and there is no race with a fresh
+    /// start), and records a `refinement_stop` for every DB-dangling refinement
+    /// so the proposal returns to a clean, restartable state.
+    pub(super) async fn recover_interrupted_refinements(&mut self) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let dangling = match proposal_repo.dangling_refinement_proposal_ids().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to query dangling refinements for startup recovery"
+                );
+                return;
+            }
+        };
+        if dangling.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = dangling.len(),
+            "Reconciling refinements interrupted by restart"
+        );
+        for proposal_id in dangling {
+            // Skip anything already being driven in memory (defensive — this
+            // runs before the loop starts, so the map is normally empty).
+            if self.active_refinements.contains_key(&proposal_id) {
+                continue;
+            }
+            self.persist_refinement_stop(&proposal_id, &StopReason::Interrupted)
+                .await;
+            tracing::info!(
+                proposal_id = %proposal_id,
+                "Stopped interrupted refinement (lost across restart); proposal is restartable"
+            );
+        }
     }
 
     /// Persist refinement-stop lifecycle metadata.
