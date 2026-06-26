@@ -109,7 +109,11 @@ export function ProposalRefinement({
   }, [proposalId]);
 
   useEffect(() => {
-    if (status?.active) {
+    // Fetch pending checkpoint revisions whenever any exist — even after the
+    // loop has STOPPED. A stopped refinement can still have advocate revisions
+    // awaiting your approve/reject; gating this on `active` left them invisible
+    // (only the count showed, with a "refresh to see details" fallback).
+    if (status?.active || (status?.pending_checkpoint_count ?? 0) > 0) {
       fetchPending();
     }
   }, [status?.active, status?.pending_checkpoint_count, fetchPending]);
