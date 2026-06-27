@@ -295,6 +295,21 @@ pub fn validate_mdx_blocks(body: &str) -> Result<(), BlockError> {
             return Err(BlockError::UnknownBlock(tag));
         }
     }
+    // Don't-accept guard: a Diagram block must carry a source. An empty diagram
+    // renders as a broken box for human reviewers, so reject it at authoring
+    // time (block-patch / proposal_update) rather than letting it land.
+    for block in parse_mdx_blocks(body)? {
+        if block.block_type == "diagram" {
+            let source_empty = block
+                .attributes
+                .get("source")
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true);
+            if source_empty && block.raw_content.trim().is_empty() {
+                return Err(BlockError::EmptyDiagram(block.id));
+            }
+        }
+    }
     Ok(())
 }
 

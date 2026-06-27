@@ -18,7 +18,7 @@ use crate::skills::ResolvedSkill;
 /// way that downstream consumers (prompts, telemetry, lazy-loading caches)
 /// should detect.  The value is exposed through [`native_skill_version`] and
 /// embedded in the skill's metadata.
-pub const VISUAL_SPEC_VERSION: &str = "1.0.0";
+pub const VISUAL_SPEC_VERSION: &str = "1.1.0";
 
 // ─── Embedded asset ─────────────────────────────────────────────────────────
 

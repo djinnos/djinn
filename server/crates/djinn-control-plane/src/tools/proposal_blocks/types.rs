@@ -23,6 +23,9 @@ pub enum BlockError {
     UnclosedBlock(String),
     /// A low-level regex or parsing failure.
     ParseError(String),
+    /// A `Diagram` block carries no source (empty `source` attribute and empty
+    /// children) — it would render as a broken "Empty mermaid diagram" box.
+    EmptyDiagram(String),
 }
 
 impl std::fmt::Display for BlockError {
@@ -37,6 +40,11 @@ impl std::fmt::Display for BlockError {
                 write!(f, "unclosed <{tag}> block (no closing </{tag}> found)")
             }
             BlockError::ParseError(msg) => write!(f, "block parser error: {msg}"),
+            BlockError::EmptyDiagram(id) => write!(
+                f,
+                "Diagram block `{id}` has no source — provide a non-empty `source` \
+                 (e.g. `source={{`flowchart LR; A-->B`}}`) or block content"
+            ),
         }
     }
 }

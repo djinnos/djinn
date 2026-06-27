@@ -1,11 +1,23 @@
 import { useMemo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { getBlockByTag } from "@/lib/blockRegistry";
 
 import { BlockDepthContext, MAX_BLOCK_DEPTH, useBlockDepth } from "./blockDepth";
 import { parseMdxBody } from "./parseMdxBody";
+
+/** Wide GFM tables (e.g. a multi-column criteria catalog) overflow the proposal
+ *  column and break the layout. Wrap them so they scroll horizontally instead. */
+export const proposalMarkdownComponents: Components = {
+  table({ node: _node, ...props }) {
+    return (
+      <div className="overflow-x-auto">
+        <table {...props} />
+      </div>
+    );
+  },
+};
 
 /**
  * Render an MDX body as plain GitHub-flavoured markdown — the recursion-cap
@@ -15,7 +27,9 @@ import { parseMdxBody } from "./parseMdxBody";
 function MarkdownBody({ text }: { text: string }) {
   return (
     <div className="prose prose-sm max-w-none dark:prose-invert">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={proposalMarkdownComponents}>
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }

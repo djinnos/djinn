@@ -22,9 +22,47 @@ const MermaidDiagram = lazy(() =>
  *   - anything else (e.g. `plantuml`, for which we have no client renderer):
  *     routed to the same graceful copy-source fallback instead of dumping raw.
  */
+/** Unwrap an MDX expression-attribute value that the parser stores verbatim:
+ *  `source={`…`}` / `source={"…"}` arrive here as a template-literal or quoted
+ *  string (delimiters included). Strip a single matching pair so mermaid sees
+ *  the raw source, not a leading backtick. */
+function unwrapExprValue(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2) {
+    const open = t[0];
+    const close = t[t.length - 1];
+    if (
+      (open === "`" && close === "`") ||
+      (open === '"' && close === '"') ||
+      (open === "'" && close === "'")
+    ) {
+      return t.slice(1, -1);
+    }
+  }
+  return s;
+}
+
+/** A diagram's source comes from the `source` schema field (preferred) or the
+ *  block children. The `source` attribute is the form agents author with
+ *  (`<Diagram type="mermaid" source={`…`} />`); reading children only — as this
+ *  did before — dropped that source entirely and rendered an empty diagram. */
+function diagramSource(
+  source: string | undefined,
+  children: BlockProps["children"],
+): string {
+  if (typeof source === "string" && source.trim().length > 0) {
+    return unwrapExprValue(source).trim();
+  }
+  return typeof children === "string" ? children.trim() : "";
+}
+
 export function Diagram({ attributes, children }: BlockProps) {
   const diagramType = attributes.type ?? "mermaid";
-  const content = typeof children === "string" ? children.trim() : "";
+  const content = diagramSource(attributes.source, children);
+
+  // Guard: never render an empty/whitespace-only diagram. An empty source
+  // renders as a broken "Empty mermaid diagram" box — drop the block instead.
+  if (!content) return null;
 
   // De-chromed: a diagram should just BE there — no grey card, no "DIAGRAM"
   // header bar. It reads as a figure inside the document, the same way an image

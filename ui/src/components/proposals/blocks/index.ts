@@ -73,3 +73,5 @@ export type {
   ProposalBlockFieldSchema,
   ProposalBlockRegistry,
 } from "./blockRegistry";
+
+export { proposalMarkdownComponents } from "./ProposalBlocks";

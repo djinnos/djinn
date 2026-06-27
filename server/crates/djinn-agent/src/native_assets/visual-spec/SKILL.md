@@ -35,6 +35,21 @@ Every block in a proposal must be:
 Avoid hollow blocks that exist only for layout.  If a section cannot state
 a concrete claim or criterion, merge it into its parent.
 
+## Diagrams
+
+A `<Diagram>` block MUST carry a non-empty, valid source — an empty or broken
+diagram renders as an "Empty mermaid diagram" / "Syntax error" box and is
+rejected at authoring time.
+
+- Put the diagram text in the `source` attribute as a template literal, e.g.
+  a flowchart with a `flowchart`/`graph` header and ASCII `-->` edges.
+- Keep it small — a handful of nodes beats a dense, unreadable graph.
+- Quote node labels that contain special characters (`(`, `)`, `:`, `-`):
+  write `A["clippy -D warnings"]`, not `A[clippy -D warnings]` — unquoted
+  specials break the Mermaid parser.
+- NEVER emit an empty `<Diagram>`. If you cannot express a concrete diagram,
+  use prose or a list instead.
+
 ## Bare `<` / `>` backtick constraint
 
 When you write literal angle brackets in markdown — for example `<div>`,

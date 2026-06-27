@@ -9,7 +9,10 @@ import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
 import { AcceptanceChecklist } from "@/components/AcceptanceChecklist";
-import { BlockRenderer } from "@/components/proposals/blocks";
+import {
+  BlockRenderer,
+  proposalMarkdownComponents,
+} from "@/components/proposals/blocks";
 import { AcceptanceProgressBadge } from "@/components/AcceptanceProgressBadge";
 import { UserAvatar } from "@/components/UserAvatar";
 import { CopyButton } from "@/components/CopyButton";
@@ -586,7 +589,10 @@ function ProposalDetailView({
             <BlockRenderer body={proposal.body || ""} />
           ) : (
             <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={proposalMarkdownComponents}
+              >
                 {proposal.body || "_No spec body yet._"}
               </ReactMarkdown>
             </div>
