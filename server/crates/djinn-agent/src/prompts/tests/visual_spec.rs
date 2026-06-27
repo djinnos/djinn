@@ -71,8 +71,8 @@ fn planner_prompt_includes_native_visual_spec_with_version_and_guidance() {
         "visual-spec content must mention the bare-angle backtick constraint"
     );
     assert!(
-        lower.contains("progressive"),
-        "visual-spec content must teach progressive markdown-to-MDX enrichment"
+        lower.contains("filetree") && lower.contains("annotatedcode"),
+        "visual-spec content must map content kinds to concrete MDX blocks"
     );
     assert!(
         lower.contains("mdx"),
