@@ -267,7 +267,13 @@ async fn call_skill_read(
         let task_issue_type = if let Some(task_id) = session_task_id {
             let task_repo =
                 djinn_db::TaskRepository::new(state.db.clone(), state.event_bus.clone());
-            match task_repo.get_by_short_id(task_id).await {
+            // `session_task_id` is the task UUID in production (the reply loop
+            // passes `ctx.task_id == task.id`), but callers/tests may pass a
+            // short_id. `resolve` accepts both — using `get_by_short_id` here
+            // silently returned None for the UUID, leaving issue_type empty so
+            // the authoring trigger never fired and `visual-spec` was never
+            // assignable to ANY role in production.
+            match task_repo.resolve(task_id).await {
                 Ok(Some(task)) => task.issue_type,
                 _ => String::new(),
             }

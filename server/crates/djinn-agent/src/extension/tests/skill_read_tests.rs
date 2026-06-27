@@ -293,7 +293,7 @@ async fn skill_read_serves_native_visual_spec_for_authoring_planner_session() {
                 .clone(),
         ),
         tmp.path(),
-        Some(&task.short_id),
+        Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
         None,
     )
@@ -361,7 +361,7 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
                 .clone(),
         ),
         tmp.path(),
-        Some(&task.short_id),
+        Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
         None,
     )
@@ -416,7 +416,7 @@ async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() 
                 .clone(),
         ),
         tmp.path(),
-        Some(&task.short_id),
+        Some(&task.id), // production passes the task UUID, not short_id
         Some("advocate"),
         None,
     )
@@ -470,7 +470,7 @@ async fn skill_read_rejects_visual_spec_for_non_planner_role() {
                 .clone(),
         ),
         tmp.path(),
-        Some(&task.short_id),
+        Some(&task.id), // production passes the task UUID, not short_id
         Some("worker"),
         None,
     )
@@ -531,7 +531,7 @@ async fn skill_read_native_body_not_from_worktree() {
                 .clone(),
         ),
         tmp.path(),
-        Some(&task.short_id),
+        Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
         None,
     )
