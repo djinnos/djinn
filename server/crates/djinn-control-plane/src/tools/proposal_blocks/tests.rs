@@ -278,6 +278,23 @@ graph TD;
 }
 
 #[test]
+fn validate_mdx_blocks_rejects_empty_diagram() {
+    // No source attribute and no children → broken "Empty mermaid diagram" box.
+    let body = r#"<Diagram id="flow" type="mermaid" source="" />"#;
+    let err = validate_mdx_blocks(body).unwrap_err();
+    assert_eq!(err, BlockError::EmptyDiagram("flow".to_string()));
+    assert!(err.to_string().contains("has no source"));
+}
+
+#[test]
+fn validate_mdx_blocks_accepts_diagram_with_source_attribute() {
+    // Source carried in the `source` attribute (the form agents author with).
+    let body = r#"<Diagram id="flow" type="mermaid" source={`flowchart LR
+  A[Start] --> B[End]`} />"#;
+    assert!(validate_mdx_blocks(body).is_ok());
+}
+
+#[test]
 fn validate_mdx_blocks_rejects_unknown_tag() {
     let body = r#"
 <RichText id="intro" />
