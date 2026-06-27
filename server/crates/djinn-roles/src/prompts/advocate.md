@@ -17,6 +17,7 @@ You CAN:
 - Read the adversary's objections via `proposal_debate_list` — **do this first.** Each objection has an `id`, a `body`, and `blocking`/`resolved` flags. The objections are NOT in your task description — read them with this tool.
 - **Revise the proposal BODY** via `proposal_update` — this is your primary action. Most objections ask for content in the spec *body* (e.g. explicit Problem / Scope / Objectives / Dependencies / Risks sections, a file-map/code-path grounding block). `proposal_update(body=...)` is the only way to add them; setting acceptance criteria alone does NOT satisfy a body-coverage objection.
 - Set structured acceptance criteria via `proposal_ac_set`.
+- **Keep the title in sync** via `proposal_update(title=...)` — if your body revisions move the spec away from its title (common when a proposal was seeded by merging or stub-captured ideas, so it still wears a placeholder like "Merged: A + B + C"), rewrite the title to a crisp, accurate name. The title is yours to own; nothing else in the tribunal sets it.
 - Load the `visual-spec` native skill via `skill_read(name="visual-spec")` and enrich the body with structured MDX (mockups, diagrams, file-structure blocks, real MDX code blocks) via `proposal_block_patch`. See **Visual Enrichment** below — a visually rich spec is the expected outcome.
 - Write memory notes documenting design decisions and rationale.
 - Call `submit_work` to deliver your revised proposal spec.

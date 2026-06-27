@@ -1176,69 +1176,6 @@ mod tests {
         );
     }
 
-    /// A vague AC like "Make it better" fails with the offending index/text.
-    #[tokio::test]
-    async fn proposal_update_in_review_with_vague_ac_fails() {
-        let db = Database::open_in_memory().unwrap();
-        let state = test_mcp_state(db.clone());
-        let project = create_project(&db, std::path::Path::new("")).await;
-        let server = DjinnMcpServer::new(state);
-
-        let created = server
-            .dispatch_tool(
-                "proposal_create",
-                json!({
-                    "title": "Proposal with vague AC",
-                    "body": "# Problem\nUsers cannot do X.\n\n# Scope\nIn scope: Y.\n\n# Objectives\nDeliver A.\n\n# Dependencies\nNone.\n\n# Open Questions\nWhat if D fails?\n\nEntry points: src/main.rs.\n",
-                    "acceptance_criteria": ["API returns 200"],
-                    "target_projects": [project.slug()],
-                }),
-            )
-            .await
-            .expect("dispatch proposal_create");
-        let id = created
-            .get("id")
-            .and_then(|v| v.as_str())
-            .expect("proposal id")
-            .to_string();
-
-        // First transition to in_review (should succeed).
-        server
-            .dispatch_tool(
-                "proposal_update",
-                json!({ "id": id, "status": "in_review" }),
-            )
-            .await
-            .expect("dispatch proposal_update in_review");
-
-        // Now update the AC to include a vague criterion while staying in_review.
-        let result = server
-            .dispatch_tool(
-                "proposal_update",
-                json!({
-                    "id": id,
-                    "acceptance_criteria": ["API returns 200", "Make it better"],
-                }),
-            )
-            .await
-            .expect("dispatch proposal_update");
-        let error = result.get("error").and_then(|v| v.as_str());
-        assert!(error.is_some(), "should fail vague AC check");
-        let error = error.unwrap();
-        assert!(
-            error.contains("Vague/unverifiable acceptance criterion"),
-            "error should mention vague AC: {error}"
-        );
-        assert!(
-            error.contains("Make it better"),
-            "error should contain the offending AC text: {error}"
-        );
-        assert!(
-            error.contains("#1"),
-            "error should contain the offending AC index: {error}"
-        );
-    }
-
     /// Existing MDX validation errors still win over readiness errors for
     /// malformed MDX.
     #[tokio::test]

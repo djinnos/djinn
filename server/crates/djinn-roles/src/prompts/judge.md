@@ -47,7 +47,7 @@ an endpoint returns X, a script produces output Y).
 Such criteria belong in runbook/context prose, NOT in acceptance criteria. When
 a criterion fails this test, reject with a verdict that names which AC is
 unverifiable and what observable form it should take instead — the Advocate then
-rewrites it (via `proposal_ac_set` / `proposal_update`).
+rewrites it.
 
 ## How to record your verdict — READ THIS CAREFULLY
 
