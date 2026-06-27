@@ -329,28 +329,25 @@ fn has_grounding(normalized: &str) -> bool {
 
 /// Returns (index, offending_text) for each vague AC found.
 fn find_vague_acs(acs: &[AcceptanceCriterionItem]) -> Vec<(usize, String)> {
+    // Words that almost always signal a vague, unverifiable criterion. This is
+    // a blunt substring match, so the list is deliberately conservative: words
+    // that legitimately appear in precise criteria — `clean` ("clean commit"),
+    // `correctly` ("correctly rejects X"), `fast` ("fast path"), `stable`
+    // ("stable API"), `proper` ("proper subset"), `good`, `effectively`
+    // ("effectively final"), `efficiently`, `smoothly`, `seamlessly` — were
+    // removed because they produced false positives that blocked good specs.
     let banned = [
         "works well",
         "improve",
         "better",
         "easy",
         "robust",
-        "fast",
         "user-friendly",
         "user friendly",
         "performant",
-        "stable",
-        "clean",
         "nice",
-        "good",
         "sufficient",
         "adequate",
-        "proper",
-        "correctly",
-        "smoothly",
-        "seamlessly",
-        "efficiently",
-        "effectively",
     ];
 
     let mut out = Vec::new();
@@ -561,6 +558,33 @@ src/main.rs
             }
             other => panic!("expected VagueAc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn precise_criteria_with_technical_words_are_not_flagged_vague() {
+        // Regression: `clean`, `correctly`, `fast`, `stable`, `proper` appear in
+        // precise, verifiable criteria and must NOT be flagged — they used to
+        // false-positive (e.g. m2z3's "clean commit" / "clean CI sequence").
+        let acs = vec![
+            ac_text("A baseline report is generated at a named clean commit with the full git SHA"),
+            ac_text("The parser correctly rejects malformed input, proven by tests/parse_reject.rs"),
+            ac_text("The fast path returns cached results in under 5ms at p99"),
+            ac_text("The /v1/sessions endpoint exposes a stable v1 API contract"),
+            ac_structured("check produces a proper subset of the manifest entries"),
+        ];
+        assert!(
+            find_vague_acs(&acs).is_empty(),
+            "precise criteria containing technical uses of clean/correctly/fast/stable/proper must not be flagged vague",
+        );
+    }
+
+    #[test]
+    fn genuinely_vague_criteria_still_flagged() {
+        let acs = vec![
+            ac_text("The UI should be user-friendly and nice"),
+            ac_text("Make the system more robust and performant"),
+        ];
+        assert_eq!(find_vague_acs(&acs).len(), 2);
     }
 
     #[test]
