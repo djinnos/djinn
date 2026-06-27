@@ -5,21 +5,41 @@ machines.  The spec below governs how you write proposal markdown, how you
 enrich it toward MDX as the plan hardens, and how you treat the memory layer
 for learned refinements.
 
-## Progressive markdown-to-MDX enrichment
+## Use the right block for each kind of content
 
-Start every proposal in plain markdown.  As the plan stabilises and structural
-precision becomes load-bearing, promote blocks to MDX incrementally:
+Proposals are reviewed by humans. A wall of prose and plain code fences is hard
+to scan. A spec headed for graduation should be **richly visual**: reach for the
+MDX block that matches the content instead of leaving it as prose or a markdown
+fence. Pull the available vocabulary with `get_block_catalog` and map content to
+blocks:
 
-1. **Draft stage** — plain prose, bullet lists, and fenced code blocks.
-2. **Structural stage** — replace prose scaffolding with MDX components
-   (`<Callout>`, `<StepList>`, `<DependencyGraph>`) when the content is stable
-   enough that a malformed component would be worse than prose.
-3. **Spec stage** — every block that downstream tooling consumes (acceptance
-   criteria, task breakdowns, dependency edges) should be a first-class MDX
-   block with typed props.
+| Content | Use this block | Instead of |
+| --- | --- | --- |
+| A file / directory layout | `<FileTree>` | a ```text fence |
+| Code the proposal references | `<AnnotatedCode>` | a bare code fence |
+| Architecture, data flow, sequence, state | `<Diagram>` (mermaid) | prose describing the flow |
+| A request/response or API shape | `<ApiEndpoint>` | prose |
+| A decision with options + trade-offs | `<Decisions>` | a prose paragraph |
+| A key warning, note, or rationale | `<Callout>` | a bolded sentence |
+| Acceptance criteria / steps / tasks | `<Checklist>` | a `- [ ]` list |
+| A side-by-side comparison (before/after, A vs B) | `<Columns>` | stacked prose |
+| A before/after change | `<Diff>` | two code fences |
+| A UI mockup / screen layout | `<Wireframe>` | a prose description |
+| A large JSON example | `<JsonExplorer>` | a ```json fence |
+| Open questions for the team | `<QuestionForm>` | a bullet list |
 
-Never skip stages.  Premature MDX is worse than late MDX because it freezes
-structure before the content has settled.
+Rules of thumb:
+
+- A **file map is ALWAYS a `<FileTree>`**, never a text fence.
+- **Code the proposal references is ALWAYS `<AnnotatedCode>`**, never a bare fence.
+- Every proposal of any complexity should carry at least one `<Diagram>` of its
+  core flow or architecture.
+- **Never invent block tags.** Use only the registered vocabulary returned by
+  `get_block_catalog` — an unknown tag (e.g. a made-up `<ReadinessRemediation>`)
+  is rejected.
+
+Early throwaway notes can be plain markdown, but by the time a spec is being
+refined for graduation it should read like a polished design doc — not prose.
 
 ## Block authoring quality
 
@@ -37,16 +57,25 @@ a concrete claim or criterion, merge it into its parent.
 
 ## Diagrams
 
-A `<Diagram>` block MUST carry a non-empty, valid source — an empty or broken
+A `<Diagram>` MUST carry a non-empty, valid mermaid source — an empty or broken
 diagram renders as an "Empty mermaid diagram" / "Syntax error" box and is
 rejected at authoring time.
 
-- Put the diagram text in the `source` attribute as a template literal, e.g.
-  a flowchart with a `flowchart`/`graph` header and ASCII `-->` edges.
+Put the mermaid as the block's **children** (between the tags):
+
+```
+<Diagram id="flow" type="mermaid">
+flowchart LR
+  A["Start"] --> B["Validate input"] --> C["Done"]
+</Diagram>
+```
+
+- Use valid mermaid: a `flowchart` / `graph` header and ASCII `-->` edges.
+- **ALWAYS quote node labels** — `A["clippy -D warnings"]`, not
+  `A[clippy -D warnings]`. Unquoted `(`, `)`, `:`, `-`, or `/` break the parser.
+  This is the #1 cause of "Syntax error" diagrams. Use `<br/>` for line breaks
+  inside a quoted label.
 - Keep it small — a handful of nodes beats a dense, unreadable graph.
-- Quote node labels that contain special characters (`(`, `)`, `:`, `-`):
-  write `A["clippy -D warnings"]`, not `A[clippy -D warnings]` — unquoted
-  specials break the Mermaid parser.
 - NEVER emit an empty `<Diagram>`. If you cannot express a concrete diagram,
   use prose or a list instead.
 

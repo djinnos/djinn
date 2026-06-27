@@ -18,7 +18,7 @@ use crate::skills::ResolvedSkill;
 /// way that downstream consumers (prompts, telemetry, lazy-loading caches)
 /// should detect.  The value is exposed through [`native_skill_version`] and
 /// embedded in the skill's metadata.
-pub const VISUAL_SPEC_VERSION: &str = "1.1.0";
+pub const VISUAL_SPEC_VERSION: &str = "1.2.0";
 
 // ─── Embedded asset ─────────────────────────────────────────────────────────
 
@@ -85,9 +85,9 @@ impl NativeSkill {
 const NATIVE_SKILLS: &[NativeSkill] = &[NativeSkill {
     name: "visual-spec",
     version: VISUAL_SPEC_VERSION,
-    description: "Proposal and plan authoring conventions: progressive \
-                  markdown-to-MDX enrichment, block quality, bare-angle \
-                  backtick constraint, and memory as the learned layer.",
+    description: "Proposal and plan authoring conventions: choosing the right \
+                  MDX block for each kind of content, diagram/block quality, the \
+                  bare-angle backtick constraint, and memory as the learned layer.",
     trust_level: "platform",
     // `planner` authors proposals during decomposition; `advocate` authors and
     // revises the proposal spec during tribunal refinement. Both produce
@@ -278,17 +278,19 @@ mod tests {
     }
 
     #[test]
-    fn visual_spec_content_includes_progressive_enrichment() {
+    fn visual_spec_content_teaches_block_usage() {
+        // The skill must map content kinds to concrete MDX blocks so the
+        // advocate authors rich specs (FileTree/AnnotatedCode/Diagram) rather
+        // than walls of prose.
         let skill = native_skill("visual-spec").unwrap();
         let lower = skill.content.to_lowercase();
-        assert!(
-            lower.contains("progressive"),
-            "visual-spec content must teach progressive markdown-to-MDX enrichment",
-        );
-        assert!(
-            lower.contains("mdx"),
-            "visual-spec content must mention MDX enrichment",
-        );
+        assert!(lower.contains("mdx"), "visual-spec must mention MDX");
+        for block in ["filetree", "annotatedcode", "diagram", "callout"] {
+            assert!(
+                lower.contains(block),
+                "visual-spec content must guide use of the {block} block",
+            );
+        }
     }
 
     #[test]
