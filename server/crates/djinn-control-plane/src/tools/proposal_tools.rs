@@ -877,10 +877,6 @@ async fn build_gate_status(
                 crate::tools::proposal_readiness::ReadinessFailureDetail::MissingSection {
                     check_name,
                 } => format!("Missing required coverage: {check_name}"),
-                crate::tools::proposal_readiness::ReadinessFailureDetail::VagueAc {
-                    index,
-                    text,
-                } => format!("Vague/unverifiable acceptance criterion #{index}: {text}"),
                 crate::tools::proposal_readiness::ReadinessFailureDetail::Generic { message } => {
                     message.clone()
                 }
@@ -4831,86 +4827,6 @@ What happens if D fails?
         let signoffs = repo.signoffs(&proposal.id).await.unwrap();
         assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
     }
-
-    /// An `in_review` proposal with a vague AC fails technical sign-off with
-    /// the offending AC index/text in the error message.
-    ///
-    /// Uses a direct status update to simulate legacy data that was advanced
-    /// before the readiness gate was in place.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn in_review_proposal_with_vague_ac_fails_signoff() {
-        let (server, db, user_id) = setup_test_server_and_user().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-
-        // Create a proposal with a clean body but vague AC.
-        let proposal = repo
-            .create(ProposalCreateInput {
-                title: "Vague AC Review",
-                body: ready_body(),
-                acceptance_criteria: Some(
-                    r#"[{"criterion":"API returns 200","met":false},{"criterion":"The UI should be user-friendly","met":false}]"#,
-                ),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("svc-review-vague", "test", "svc-review-vague")
-            .await
-            .unwrap();
-        repo.add_target(&proposal.id, &project.id, "primary")
-            .await
-            .unwrap();
-
-        // Directly advance the status to `in_review` to simulate legacy
-        // data that pre-dates the readiness gate.
-        ProposalRepository::new(db.clone(), EventBus::noop())
-            .set_status(&proposal.id, "in_review")
-            .await
-            .unwrap();
-
-        // Attempt the technical sign-off — it should fail because the
-        // vague AC makes the proposal not ready.
-        let response = djinn_core::auth_context::SESSION_USER_ID
-            .scope(Some(user_id), async {
-                server
-                    .dispatch_tool(
-                        "proposal_signoff",
-                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
-                    )
-                    .await
-            })
-            .await
-            .unwrap();
-
-        let error = response.get("error").and_then(|v| v.as_str());
-        assert!(
-            error.is_some(),
-            "expected readiness error, got: {response:?}"
-        );
-        let error = error.unwrap();
-        assert!(
-            error.contains("proposal not ready for review"),
-            "error should mention readiness: {error}"
-        );
-        assert!(
-            error.contains("Vague/unverifiable acceptance criterion"),
-            "error should mention vague AC: {error}"
-        );
-        assert!(
-            error.contains("user-friendly"),
-            "error should include the offending AC text: {error}"
-        );
-
-        // Proposal must still be `in_review` — no new sign-off was recorded.
-        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(stored.status, "in_review");
-
-        // No sign-offs should exist.
-        let signoffs = repo.signoffs(&proposal.id).await.unwrap();
-        assert!(signoffs.is_empty(), "no sign-offs should be recorded");
-    }
 }
 
 // ── Graduation readiness regression tests (task 9fjy) ───────────────────
@@ -4985,88 +4901,6 @@ What happens if D fails?
             .set_status(proposal_id, "approved")
             .await
             .unwrap();
-    }
-
-    /// An approved proposal with vague AC fails graduation; the error
-    /// includes the offending AC index/text and the proposal remains
-    /// `approved` with no breakdown task or build owner.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn approved_vague_ac_fails_graduation_with_details() {
-        let (server, db, user_id) = setup_test_server_and_user().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let project = ProjectRepository::new(db.clone(), EventBus::noop())
-            .create("svc-grad-vague", "test", "svc-grad-vague")
-            .await
-            .unwrap();
-
-        // Create with clean body but vague AC.
-        let proposal = djinn_core::auth_context::SESSION_USER_ID
-            .scope(Some(user_id.clone()), async {
-                repo.create(ProposalCreateInput {
-                    title: "Vague AC Graduation",
-                    body: ready_body(),
-                    acceptance_criteria: Some(
-                        r#"[{"criterion":"API returns 200","met":false},{"criterion":"The UI should be user-friendly","met":false}]"#,
-                    ),
-                    status: None,
-                    body_format: None,
-                })
-                .await
-            })
-            .await
-            .unwrap();
-        repo.add_target(&proposal.id, &project.id, "primary")
-            .await
-            .unwrap();
-
-        // Directly advance to `approved` to simulate legacy data.
-        force_approved(&db, &proposal.id).await;
-
-        // Attempt graduation.
-        let response = djinn_core::auth_context::SESSION_USER_ID
-            .scope(Some(user_id), async {
-                server
-                    .dispatch_tool(
-                        "proposal_graduate",
-                        serde_json::json!({ "id": proposal.id }),
-                    )
-                    .await
-            })
-            .await
-            .unwrap();
-
-        let error = response.get("error").and_then(|v| v.as_str());
-        assert!(
-            error.is_some(),
-            "expected readiness error, got: {response:?}"
-        );
-        let error = error.unwrap();
-        assert!(
-            error.contains("proposal not ready for review"),
-            "error should mention readiness: {error}"
-        );
-        assert!(
-            error.contains("Vague/unverifiable acceptance criterion"),
-            "error should mention vague AC: {error}"
-        );
-        assert!(
-            error.contains("user-friendly"),
-            "error should include the offending AC text: {error}"
-        );
-
-        // Proposal must still be `approved` — graduation was blocked.
-        let stored = repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(stored.status, "approved", "status must remain approved");
-
-        // No breakdown task or build owner should be set.
-        assert!(
-            stored.build_breakdown_task_id.is_none(),
-            "no breakdown task should be created"
-        );
-        assert!(
-            stored.build_owner_user_id.is_none(),
-            "no build owner should be set"
-        );
     }
 
     /// An approved proposal missing required readiness sections fails

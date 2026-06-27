@@ -30,9 +30,6 @@ impl ProposalReadinessResult {
                 ReadinessFailureDetail::MissingSection { check_name } => {
                     format!("Missing required coverage: {check_name}")
                 }
-                ReadinessFailureDetail::VagueAc { index, text } => {
-                    format!("Vague/unverifiable acceptance criterion #{index}: {text}")
-                }
                 ReadinessFailureDetail::Generic { message } => message.clone(),
             })
             .collect();
@@ -56,7 +53,6 @@ pub enum ReadinessCheck {
     ObjectiveCoverage,
     TargetCount,
     AcceptanceCriteriaCount,
-    VagueAcceptanceCriteria,
     Grounding,
     DependenciesCoverage,
     OpenQuestionsRisksCoverage,
@@ -67,7 +63,6 @@ pub enum ReadinessCheck {
 #[serde(rename_all = "snake_case")]
 pub enum ReadinessFailureDetail {
     MissingSection { check_name: String },
-    VagueAc { index: usize, text: String },
     Generic { message: String },
 }
 
@@ -132,13 +127,9 @@ pub fn evaluate_proposal_readiness(
         });
     }
 
-    // 4. Vague / unverifiable AC phrases
-    for (index, vague) in find_vague_acs(acceptance_criteria) {
-        failures.push(ReadinessFailure {
-            check: ReadinessCheck::VagueAcceptanceCriteria,
-            detail: ReadinessFailureDetail::VagueAc { index, text: vague },
-        });
-    }
+    // 4. AC quality (vague / unverifiable / not agent-confirmable) is a
+    //    semantic judgment owned by the tribunal Judge (see judge.md
+    //    "Definition of Done"); this gate only checks structural presence.
 
     // 5. Grounding: file-map/code-path block OR named entry points in prose
     if !has_grounding(&normalized_body) {
@@ -325,48 +316,6 @@ fn has_grounding(normalized: &str) -> bool {
     false
 }
 
-// ── Vague AC heuristic ───────────────────────────────────────────────────────
-
-/// Returns (index, offending_text) for each vague AC found.
-fn find_vague_acs(acs: &[AcceptanceCriterionItem]) -> Vec<(usize, String)> {
-    // Words that almost always signal a vague, unverifiable criterion. This is
-    // a blunt substring match, so the list is deliberately conservative: words
-    // that legitimately appear in precise criteria — `clean` ("clean commit"),
-    // `correctly` ("correctly rejects X"), `fast` ("fast path"), `stable`
-    // ("stable API"), `proper` ("proper subset"), `good`, `effectively`
-    // ("effectively final"), `efficiently`, `smoothly`, `seamlessly` — were
-    // removed because they produced false positives that blocked good specs.
-    let banned = [
-        "works well",
-        "improve",
-        "better",
-        "easy",
-        "robust",
-        "user-friendly",
-        "user friendly",
-        "performant",
-        "nice",
-        "sufficient",
-        "adequate",
-    ];
-
-    let mut out = Vec::new();
-    for (i, ac) in acs.iter().enumerate() {
-        let text = match ac {
-            AcceptanceCriterionItem::Text(t) => t.clone(),
-            AcceptanceCriterionItem::Structured(s) => s.criterion.clone(),
-        };
-        let lower = text.to_lowercase();
-        for phrase in &banned {
-            if lower.contains(phrase) {
-                out.push((i, text.clone()));
-                break; // only report first vague phrase per AC
-            }
-        }
-    }
-    out
-}
-
 // ── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -375,13 +324,6 @@ mod tests {
 
     fn ac_text(text: &str) -> AcceptanceCriterionItem {
         AcceptanceCriterionItem::Text(text.to_string())
-    }
-
-    fn ac_structured(criterion: &str) -> AcceptanceCriterionItem {
-        AcceptanceCriterionItem::Structured(crate::tools::epic_ops::AcceptanceCriterionStatus {
-            criterion: criterion.to_string(),
-            met: false,
-        })
     }
 
     #[test]
@@ -508,107 +450,17 @@ Entry points: src/main.rs and src/lib.rs.
     }
 
     #[test]
-    fn vague_ac_reported_with_index_and_text() {
-        let body = r#"
-# Problem
-Users cannot do X.
-# Scope
-In scope: Y.
-# Objectives
-Deliver A.
-# Dependencies
-None.
-# Open Questions
-What if D fails?
-## File map
-```file-map
-src/main.rs
-```
-"#;
-        let acs = vec![
-            ac_text("API returns 200"),
-            ac_text("The UI should be user-friendly"),
-            ac_structured("Performance should improve"),
-        ];
-        let result = evaluate_proposal_readiness(body, &acs, 1);
-        assert!(!result.ready);
-        let vague_failures: Vec<_> = result
-            .failures
-            .iter()
-            .filter(|f| f.check == ReadinessCheck::VagueAcceptanceCriteria)
-            .collect();
-        assert_eq!(vague_failures.len(), 2);
-
-        // Verify exact index/text for the first vague AC
-        let detail1 = &vague_failures[0].detail;
-        match detail1 {
-            ReadinessFailureDetail::VagueAc { index, text } => {
-                assert_eq!(*index, 1);
-                assert_eq!(text, "The UI should be user-friendly");
-            }
-            other => panic!("expected VagueAc, got {other:?}"),
-        }
-
-        // Verify exact index/text for the second vague AC
-        let detail2 = &vague_failures[1].detail;
-        match detail2 {
-            ReadinessFailureDetail::VagueAc { index, text } => {
-                assert_eq!(*index, 2);
-                assert_eq!(text, "Performance should improve");
-            }
-            other => panic!("expected VagueAc, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn precise_criteria_with_technical_words_are_not_flagged_vague() {
-        // Regression: `clean`, `correctly`, `fast`, `stable`, `proper` appear in
-        // precise, verifiable criteria and must NOT be flagged — they used to
-        // false-positive (e.g. m2z3's "clean commit" / "clean CI sequence").
-        let acs = vec![
-            ac_text("A baseline report is generated at a named clean commit with the full git SHA"),
-            ac_text("The parser correctly rejects malformed input, proven by tests/parse_reject.rs"),
-            ac_text("The fast path returns cached results in under 5ms at p99"),
-            ac_text("The /v1/sessions endpoint exposes a stable v1 API contract"),
-            ac_structured("check produces a proper subset of the manifest entries"),
-        ];
-        assert!(
-            find_vague_acs(&acs).is_empty(),
-            "precise criteria containing technical uses of clean/correctly/fast/stable/proper must not be flagged vague",
-        );
-    }
-
-    #[test]
-    fn genuinely_vague_criteria_still_flagged() {
-        let acs = vec![
-            ac_text("The UI should be user-friendly and nice"),
-            ac_text("Make the system more robust and performant"),
-        ];
-        assert_eq!(find_vague_acs(&acs).len(), 2);
-    }
-
-    #[test]
     fn to_error_string_format() {
         let result = ProposalReadinessResult {
             ready: false,
-            failures: vec![
-                ReadinessFailure {
-                    check: ReadinessCheck::ProblemCoverage,
-                    detail: ReadinessFailureDetail::MissingSection {
-                        check_name: "problem".to_string(),
-                    },
+            failures: vec![ReadinessFailure {
+                check: ReadinessCheck::ProblemCoverage,
+                detail: ReadinessFailureDetail::MissingSection {
+                    check_name: "problem".to_string(),
                 },
-                ReadinessFailure {
-                    check: ReadinessCheck::VagueAcceptanceCriteria,
-                    detail: ReadinessFailureDetail::VagueAc {
-                        index: 0,
-                        text: "Make it better".to_string(),
-                    },
-                },
-            ],
+            }],
         };
         let msg = result.to_error_string().unwrap();
         assert!(msg.contains("Missing required coverage: problem"));
-        assert!(msg.contains("Vague/unverifiable acceptance criterion #0: Make it better"));
     }
 }
