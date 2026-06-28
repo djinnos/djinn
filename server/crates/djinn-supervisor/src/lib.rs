@@ -29,8 +29,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
@@ -455,6 +455,7 @@ where
 pub struct TaskRunSupervisor {
     mirror: Arc<MirrorManager>,
     services: Arc<dyn SupervisorServices>,
+    clock: Arc<dyn Clock>,
 }
 
 impl TaskRunSupervisor {
@@ -468,7 +469,25 @@ impl TaskRunSupervisor {
     /// which has no DB connection — can construct a supervisor and ship
     /// those writes back through the RPC channel.
     pub fn new(mirror: Arc<MirrorManager>, services: Arc<dyn SupervisorServices>) -> Self {
-        Self { mirror, services }
+        Self {
+            mirror,
+            services,
+            clock: Arc::new(SystemClock::new()),
+        }
+    }
+
+    /// Like [`new`](Self::new), but accepts an explicit clock for
+    /// deterministic testing.
+    pub fn with_clock(
+        mirror: Arc<MirrorManager>,
+        services: Arc<dyn SupervisorServices>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            mirror,
+            services,
+            clock,
+        }
     }
 
     /// Drive a task-run from start to terminal state.
@@ -1793,12 +1812,12 @@ impl TaskRunSupervisor {
                      proceeding with Interrupted report"
                 );
             } else {
-                cleanup_cargo_target_run_dir(&run_id).await;
+                cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
                 return Err(SupervisorError::UpdateTaskRunStatus(e));
             }
         }
 
-        cleanup_cargo_target_run_dir(&run_id).await;
+        cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
 
         info!(task_run_id = %run_id, ?outcome, "task-run finished");
         Ok(TaskRunReport {
@@ -1837,7 +1856,7 @@ impl TaskRunSupervisor {
                  host will fall back to Job-status polling"
             );
         }
-        cleanup_cargo_target_run_dir(&run_id).await;
+        cleanup_cargo_target_run_dir(&run_id, &*self.clock).await;
 
         info!(task_run_id = %run_id, "task-run interrupted (early-cancel path)");
         Ok(TaskRunReport {
@@ -1848,14 +1867,14 @@ impl TaskRunSupervisor {
     }
 }
 
-async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
-    let started = Instant::now();
+async fn cleanup_cargo_target_run_dir(task_run_id: &str, clock: &dyn Clock) {
+    let started = clock.now_instant();
     let raw_target_dir = match std::env::var("CARGO_TARGET_DIR") {
         Ok(value) => value,
         Err(e) => {
             debug!(
                 task_run_id = %task_run_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
+                elapsed_ms = clock.now_instant().duration_since(started).as_millis() as u64,
                 error = %e,
                 "supervisor: skipping Cargo target run-dir cleanup; CARGO_TARGET_DIR is not set"
             );
@@ -1867,7 +1886,7 @@ async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
         tracing::warn!(
             task_run_id = %task_run_id,
             target_dir = %raw_target_dir,
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = clock.now_instant().duration_since(started).as_millis() as u64,
             "supervisor: refusing Cargo target run-dir cleanup for unsafe CARGO_TARGET_DIR"
         );
         return;
@@ -1877,19 +1896,19 @@ async fn cleanup_cargo_target_run_dir(task_run_id: &str) {
         Ok(()) => info!(
             task_run_id = %task_run_id,
             target_dir = %target_dir.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = clock.now_instant().duration_since(started).as_millis() as u64,
             "supervisor: removed Cargo target run directory"
         ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => debug!(
             task_run_id = %task_run_id,
             target_dir = %target_dir.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = clock.now_instant().duration_since(started).as_millis() as u64,
             "supervisor: Cargo target run directory already absent"
         ),
         Err(e) => tracing::warn!(
             task_run_id = %task_run_id,
             target_dir = %target_dir.display(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = clock.now_instant().duration_since(started).as_millis() as u64,
             error = %e,
             "supervisor: failed to remove Cargo target run directory; continuing teardown"
         ),
@@ -1904,6 +1923,7 @@ pub fn trigger_as_str(t: TaskRunTrigger) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
