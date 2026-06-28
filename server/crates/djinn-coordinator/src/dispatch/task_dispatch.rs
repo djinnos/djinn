@@ -181,6 +181,7 @@ impl CoordinatorActor {
         };
         self.reconcile_inflight_dispatch_ledger().await;
         overlay_inflight_ledger(&mut running, &self.inflight_dispatches);
+        self.overlay_provisional_admissions(&mut running);
         running
     }
 
@@ -243,23 +244,21 @@ impl CoordinatorActor {
     // The methods below compose the pure primitives in [`super::admission`]
     // with the actor's own DB, in-flight ledger, and durable dispatch-state.
     // They exist so that every dispatch path — normal task dispatch,
-    // planner escalation, AND refinement tribunal dispatch (wired in a
-    // follow-up task) — checks admission and reserves/clears in-flight slots
-    // through one shared API rather than each caller re-implementing the
-    // cap-check + ledger logic.
+    // planner escalation, AND refinement tribunal dispatch — checks admission
+    // and reserves/clears in-flight slots through one shared API rather than
+    // each caller re-implementing the cap-check + ledger logic.
+    //
+    // These methods are used by both `dispatch_ready_tasks` (and
+    // `dispatch_planner_escalation`) and `refinement_dispatch::
+    // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
+    // normal task dispatch go through the exact same cap/ledger code path.
 
-    // NOTE: the three methods below (`resolve_model_caps_for_user`,
-    // `check_user_model_admission`, `clear_inflight_dispatch`) are the shared
-    // admission surface wired up for Task 2 (refinement tribunal dispatch).
-    // They are intentionally pre-extracted and tested in isolation before the
-    // refinement path uses them; `dead_code` is allowed until that wiring lands.
     /// Resolve the configured `max_sessions` cap map for `creator`.
     ///
     /// Returns `model_id → max concurrent sessions`. When the user has no
     /// settings row or `max_sessions` is unset, an empty map is returned —
     /// callers then apply a per-model default (conventionally 1) via
     /// [`model_under_user_cap`].
-    #[allow(dead_code)]
     pub(crate) async fn resolve_model_caps_for_user(
         &self,
         creator: &str,
@@ -283,11 +282,10 @@ impl CoordinatorActor {
     /// session on `model`.
     ///
     /// This is the single shared admission-check for single-model dispatch
-    /// paths (e.g. refinement tribunal dispatch). Multi-model dispatch paths
+    /// paths (refinement tribunal dispatch). Multi-model dispatch paths
     /// (normal task dispatch) seed once per pass and filter with
     /// [`model_under_user_cap`] directly for efficiency, but they use the same
     /// underlying primitives.
-    #[allow(dead_code)]
     pub(crate) async fn check_user_model_admission(
         &mut self,
         user: &str,
@@ -302,10 +300,14 @@ impl CoordinatorActor {
     ///
     /// Called on failure paths where a dispatch was reserved (via
     /// [`record_inflight_dispatch`]) but never produced a running session —
-    /// e.g. pool dispatch failure or task-setup failure. Removes the entry so
-    /// the `(user, model)` slot is immediately available again, and
-    /// persists the clearance to durable dispatch-state.
-    #[allow(dead_code)]
+    /// e.g. pool dispatch failure, task-setup failure, or — for refinement
+    /// tribunal dispatch — spawn-cap rejection after task creation. Removes
+    /// the entry so the `(user, model)` slot is immediately available again,
+    /// and persists the clearance to durable dispatch-state.
+    ///
+    /// The session-start and reconciliation paths in
+    /// `reconcile_inflight_dispatch_ledger` continue to clear started/stale
+    /// entries independently.
     pub(crate) async fn clear_inflight_dispatch(&mut self, task_id: &str) {
         if self.inflight_dispatches.remove(task_id).is_some() {
             record_dispatch_live_state(
@@ -323,6 +325,53 @@ impl CoordinatorActor {
             )
             .await;
         }
+    }
+
+    /// Overlay provisional refinement admissions onto the per-`(user, model)`
+    /// running counts. Called from [`effective_running_by_user_model`] so that
+    /// `check_user_model_admission` accounts for reservations that have not yet
+    /// been re-keyed to a real task id.
+    fn overlay_provisional_admissions(
+        &self,
+        running_by_user_model: &mut HashMap<(String, String), u32>,
+    ) {
+        for (creator, model) in self.provisional_admissions.values() {
+            if let Some(c) = creator {
+                let entry = running_by_user_model
+                    .entry((c.clone(), model.clone()))
+                    .or_insert(0);
+                *entry = (*entry).max(1);
+            }
+        }
+    }
+
+    /// Re-key a provisional refinement admission to the real task id in the
+    /// in-flight dispatch ledger.
+    ///
+    /// Called after a refinement task row has been created so that the
+    /// reservation is now tracked by the durable `inflight_dispatches` ledger
+    /// (visible to reconciliation and session-start cleanup) rather than the
+    /// ephemeral `provisional_admissions` map.
+    pub(crate) async fn rekey_provisional_to_inflight(
+        &mut self,
+        provisional_key: &str,
+        real_task_id: &str,
+        creator: &str,
+        model: &str,
+    ) {
+        self.provisional_admissions.remove(provisional_key);
+        self.inflight_dispatches.remove(provisional_key);
+        self.record_inflight_dispatch(real_task_id, None, Some(creator), model)
+            .await;
+    }
+
+    /// Clear a provisional refinement admission.
+    ///
+    /// Called when the refinement dispatch fails before the real task id is
+    /// known (e.g. task creation failure, at-cap deferral cleanup).
+    pub(crate) fn clear_provisional_admission(&mut self, provisional_key: &str) {
+        self.provisional_admissions.remove(provisional_key);
+        self.inflight_dispatches.remove(provisional_key);
     }
 
     async fn persist_durable_dispatch_state_update(
@@ -1883,6 +1932,7 @@ mod inflight_ledger_tests {
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
