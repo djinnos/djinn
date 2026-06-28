@@ -14,6 +14,9 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::test_helpers;
+use djinn_db::test_support::{
+    UsageTestSessionSeed, UsageTestTaskSeed, seed_project, seed_session_row, seed_task_row,
+};
 use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserRepository};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -103,100 +106,6 @@ async fn get_usage(app: &axum::Router, query: &str, cookie: Option<&str>) -> (St
         .unwrap_or_else(|_| serde_json::json!({ "_raw": String::from_utf8_lossy(&body) }));
 
     (status, json)
-}
-
-struct SessionSeed<'a> {
-    project_id: &'a str,
-    model_id: &'a str,
-    agent_type: &'a str,
-    started_at: &'a str,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    cost_usd: Option<f64>,
-    cost_basis: &'a str,
-    task_id: Option<&'a str>,
-}
-
-struct TaskSeed<'a> {
-    project_id: &'a str,
-    status: &'a str,
-    close_reason: Option<&'a str>,
-    total_reopen_count: i32,
-}
-
-/// Seed a task row directly into the database for integration-level
-/// contract tests. Returns the generated task id.
-async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
-    let id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!("task-{}", &id[..8]);
-    sqlx::query(
-        "INSERT INTO tasks \
-         (id, project_id, short_id, epic_id, title, description, design, \
-          issue_type, status, priority, owner, labels, acceptance_criteria, \
-          reopen_count, continuation_count, verification_failure_count, \
-          total_reopen_count, \
-          intervention_count, created_at, updated_at, closed_at, close_reason, \
-          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
-         VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
-                 'task', $4, 0, '', '[]', '[]', \
-                 0, 0, 0, \
-                 $5, \
-                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
-                 NULL, '[]', NULL, NULL, NULL)",
-    )
-    .bind(&id)
-    .bind(seed.project_id)
-    .bind(&short_id)
-    .bind(seed.status)
-    .bind(seed.total_reopen_count)
-    .bind(seed.close_reason)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed task row");
-    id
-}
-
-/// Seed raw session rows directly into the database for integration-level
-/// contract tests that need actual query results.
-async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
-    let id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO sessions \
-         (id, project_id, task_id, model_id, agent_type, status, \
-          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
-         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
-    )
-    .bind(&id)
-    .bind(seed.project_id)
-    .bind(seed.task_id)
-    .bind(seed.model_id)
-    .bind(seed.agent_type)
-    .bind(seed.started_at)
-    .bind(seed.tokens_in)
-    .bind(seed.tokens_out)
-    .bind(seed.cache_read_tokens)
-    .bind(seed.cache_write_tokens)
-    .bind(seed.cost_usd)
-    .bind(seed.cost_basis)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed session row");
-}
-
-/// Seed a project so that `project_id` FK constraints pass.
-async fn seed_project(db: &djinn_db::Database, project_id: &str, name: &str) {
-    sqlx::query(
-        "INSERT INTO projects (id, name, github_owner, github_repo) \
-         VALUES ($1, $2, 'test', $2) \
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(project_id)
-    .bind(name)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed project");
 }
 
 /// Find a model_effectiveness row by its (renamed) `model` field.
@@ -293,18 +202,89 @@ async fn admin_request_returns_frontend_contract_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kpis_have_label_value_and_delta_fields() {
+async fn split_kpi_reducer_invariant_and_seeded_totals() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-kpi", "kpi-project").await;
+    let task_id = seed_task_row(
+        &db,
+        UsageTestTaskSeed {
+            project_id: "proj-kpi",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+
+    // actual-basis session: $1.25
+    seed_session_row(
+        &db,
+        UsageTestSessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(1.25),
+            cost_basis: "actual",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // projected-basis session: $2.50
+    seed_session_row(
+        &db,
+        UsageTestSessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-12T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(2.50),
+            cost_basis: "projected",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // unpriced-basis session: NULL cost
+    seed_session_row(
+        &db,
+        UsageTestSessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-13T10:00:00Z",
+            tokens_in: 50,
+            tokens_out: 25,
+            cache_read_tokens: 5,
+            cache_write_tokens: 2,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "start=2025-01-01&end=2025-02-01", Some(&admin_cookie)).await;
-
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
     assert_eq!(status, StatusCode::OK);
+
     let kpis = array_field(&body, "kpis");
     assert_eq!(kpis.len(), 5, "expected five KPI cards, got {}", kpis.len());
 
+    // ── Generic shape coverage (label, value, delta_pct, formatted) ──
     let labels: Vec<&str> = kpis
         .iter()
         .filter_map(|k| k.get("label").and_then(Value::as_str))
@@ -320,10 +300,179 @@ async fn kpis_have_label_value_and_delta_fields() {
 
     for kpi in kpis {
         assert!(kpi.get("label").unwrap().is_string());
-        // value and delta_pct may be null but the keys must exist.
         assert!(kpi.get("value").is_some());
         assert!(kpi.get("delta_pct").is_some());
         assert!(kpi.get("formatted").unwrap().is_string());
+    }
+
+    // ── Tokens breakdown must remain intact ──
+    let tokens_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Tokens"))
+        .expect("Tokens KPI");
+    let breakdown = tokens_kpi
+        .get("breakdown")
+        .and_then(Value::as_array)
+        .expect("Tokens KPI must have a breakdown array");
+    assert!(
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Input")),
+        "Tokens breakdown missing Input"
+    );
+    assert!(
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Cached")),
+        "Tokens breakdown missing Cached"
+    );
+    assert!(
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Output")),
+        "Tokens breakdown missing Output"
+    );
+
+    // ── Reducer: sum split fields across KPIs the same way the frontend does ──
+    let sum_actual: f64 = kpis
+        .iter()
+        .filter_map(|k| k.get("actual_spend_usd").and_then(Value::as_f64))
+        .sum();
+    let sum_projected: f64 = kpis
+        .iter()
+        .filter_map(|k| k.get("projected_usd").and_then(Value::as_f64))
+        .sum();
+    let sum_unpriced: i64 = kpis
+        .iter()
+        .filter_map(|k| k.get("unpriced_count").and_then(Value::as_i64))
+        .sum();
+
+    assert_eq!(
+        sum_actual, 1.25,
+        "reduced actual_spend_usd should equal seeded total"
+    );
+    assert_eq!(
+        sum_projected, 2.50,
+        "reduced projected_usd should equal seeded total"
+    );
+    assert_eq!(
+        sum_unpriced, 1,
+        "reduced unpriced_count should equal seeded total"
+    );
+
+    // Top-level unpriced_session_count must repeat the unpriced count.
+    assert_eq!(
+        body.get("unpriced_session_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1),
+        1,
+        "top-level unpriced_session_count should repeat unpriced count"
+    );
+
+    // ── Single-contributor invariant ──
+    let actual_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| {
+            k.get("actual_spend_usd")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
+        .collect();
+    let projected_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| {
+            k.get("projected_usd")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
+        .collect();
+    let unpriced_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| {
+            k.get("unpriced_count")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
+        .collect();
+
+    assert_eq!(
+        actual_contributors.len(),
+        1,
+        "exactly one KPI must carry actual_spend_usd"
+    );
+    assert_eq!(
+        projected_contributors.len(),
+        1,
+        "exactly one KPI must carry projected_usd"
+    );
+    assert_eq!(
+        unpriced_contributors.len(),
+        1,
+        "exactly one KPI must carry unpriced_count"
+    );
+
+    // ── Non-contributor cards must not duplicate aggregate fields ──
+    for kpi in kpis {
+        let label = kpi.get("label").and_then(Value::as_str).unwrap_or("");
+        match label {
+            "Actual API Spend" => {
+                assert!(
+                    kpi.get("actual_spend_usd").is_some(),
+                    "Actual API Spend must carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "Actual API Spend must not carry projected_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "Actual API Spend must not carry unpriced_count"
+                );
+            }
+            "Projected Cost" => {
+                assert!(
+                    kpi.get("projected_usd").is_some(),
+                    "Projected Cost must carry projected_usd"
+                );
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "Projected Cost must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "Projected Cost must not carry unpriced_count"
+                );
+            }
+            "Sessions" => {
+                assert!(
+                    kpi.get("unpriced_count").is_some(),
+                    "Sessions must carry unpriced_count"
+                );
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "Sessions must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "Sessions must not carry projected_usd"
+                );
+            }
+            "Tokens" | "Cache reads" => {
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "{label} must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "{label} must not carry projected_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "{label} must not carry unpriced_count"
+                );
+            }
+            _ => panic!("unexpected KPI label: {label}"),
+        }
     }
 }
 
@@ -366,7 +515,7 @@ async fn weekly_rollup_buckets_to_week_start_and_counts_sessions() {
     ] {
         seed_session_row(
             &db,
-            SessionSeed {
+            UsageTestSessionSeed {
                 project_id: "proj-rollup",
                 model_id: "model-a",
                 agent_type: "worker",
@@ -421,7 +570,7 @@ async fn null_cost_yields_null_spend_kpi_and_series_cost() {
     seed_project(&db, "proj-nullcost", "nullcost-project").await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-nullcost",
             model_id: "unpriced-model",
             agent_type: "worker",
@@ -553,7 +702,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
     seed_project(&db, "proj-eff", "effectiveness-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-eff",
             status: "closed",
             close_reason: Some("completed"),
@@ -563,7 +712,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-eff",
             model_id: "test-model",
             agent_type: "worker",
@@ -625,7 +774,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     seed_project(&db, "proj-null-eff", "null-eff-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-null-eff",
             status: "closed",
             close_reason: Some("completed"),
@@ -635,7 +784,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-null-eff",
             model_id: "unpriced-model",
             agent_type: "worker",
@@ -677,7 +826,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
     seed_project(&db, "proj-bd", "breakdown-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-bd",
             status: "closed",
             close_reason: Some("completed"),
@@ -687,7 +836,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-bd",
             model_id: "model-bd",
             agent_type: "worker",
@@ -770,7 +919,7 @@ async fn split_cost_basis_contract_at_api_level() {
     seed_project(&db, "proj-split", "split-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-split",
             status: "closed",
             close_reason: Some("completed"),
@@ -782,7 +931,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // actual-basis session: $2.00
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",
@@ -801,7 +950,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // projected-basis session: $3.50
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",
@@ -820,7 +969,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // unpriced-basis session: NULL cost
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",

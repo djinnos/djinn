@@ -22,8 +22,8 @@ pub use git_settings::GitSettings;
 pub use org_ai_policy::{LockLevel, OrgAiPolicy, OrgDefaultLanes};
 pub use project::Project;
 pub use proposal::{
-    Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision, ProposalSignoff,
-    ProposalTarget,
+    NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision,
+    ProposalSignoff, ProposalTarget,
 };
 pub use provider::{CustomProvider, Model, Pricing, Provider, SeedModel};
 pub use session::{CostBasis, SessionRecord, SessionStatus};

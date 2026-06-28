@@ -1465,15 +1465,21 @@ mod tests {
             .unwrap();
         let project_id = epic.project_id.clone();
 
-        async fn mk_task(db: &Database, project_id: &str, epic_id: &str, creator: &str) -> String {
+        async fn mk_task(
+            db: &Database,
+            project_id: &str,
+            epic_id: &str,
+            creator: &str,
+            issue_type: &str,
+        ) -> String {
             let id = uuid::Uuid::now_v7().to_string();
             let short_id = format!("t{}{}", &id[..6], &id[id.len() - 6..]);
             sqlx::query!(
                 "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
                                     issue_type, priority, owner, status, continuation_count,
                                     labels, acceptance_criteria, memory_refs, created_by_user_id)
-                 VALUES ($1,$2,$3,$4,'T','','','task',0,'','open',0,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$5)",
-                id, project_id, short_id, epic_id, creator
+                 VALUES ($1,$2,$3,$4,'T','','',$5,0,'','open',0,'[]'::jsonb,'[]'::jsonb,'[]'::jsonb,$6)",
+                id, project_id, short_id, epic_id, issue_type, creator
             )
             .execute(db.pool())
             .await
@@ -1486,7 +1492,7 @@ mod tests {
         // created_by_user_id (no task-local), so the count must come via the
         // task-creator join.
         for model in ["openai/gpt", "openai/gpt", "x/kimi"] {
-            let t = mk_task(&db, &project_id, &epic.id, &user_a).await;
+            let t = mk_task(&db, &project_id, &epic.id, &user_a, "task").await;
             repo.create(CreateSessionParams {
                 project_id: &project_id,
                 task_id: Some(&t),
@@ -1500,7 +1506,7 @@ mod tests {
             .await
             .unwrap();
         }
-        let tb = mk_task(&db, &project_id, &epic.id, &user_b).await;
+        let tb = mk_task(&db, &project_id, &epic.id, &user_b, "task").await;
         repo.create(CreateSessionParams {
             project_id: &project_id,
             task_id: Some(&tb),
@@ -1530,6 +1536,24 @@ mod tests {
         .await
         .unwrap();
 
+        // Non-chat refinement/tribunal sessions (advocate, adversary, judge)
+        // must count toward the same per-user/model cap as normal worker sessions.
+        for agent_type in ["advocate", "adversary", "judge"] {
+            let t = mk_task(&db, &project_id, &epic.id, &user_a, "refinement").await;
+            repo.create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&t),
+                model: "openai/gpt",
+                agent_type,
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        }
+
         let map: std::collections::HashMap<(String, String), i64> = repo
             .count_active_by_user_and_model()
             .await
@@ -1537,10 +1561,10 @@ mod tests {
             .into_iter()
             .filter_map(|(c, m, n)| c.map(|c| ((c, m), n)))
             .collect();
-        // user_a's gpt count stays 2 — the chat session is excluded.
+        // user_a's gpt count is 5 (2 worker + 3 tribunal) — the chat session is excluded.
         assert_eq!(
             map.get(&(user_a.clone(), "openai/gpt".to_string())),
-            Some(&2)
+            Some(&5)
         );
         assert_eq!(map.get(&(user_a.clone(), "x/kimi".to_string())), Some(&1));
         assert_eq!(
