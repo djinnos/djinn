@@ -13,6 +13,8 @@
     "mcp:types": "tsx scripts/generate-mcp-types.ts --source=live",
     "mcp:types:snapshot": "tsx scripts/generate-mcp-types.ts --source=snapshot",
     "mcp:types:check": "pnpm mcp:types:snapshot && git diff --exit-code -- src/api/generated/mcp-tools.gen.ts",
+    "usage:types": "tsx scripts/generate-usage-types.ts",
+    "usage:types:check": "pnpm usage:types && git diff --exit-code -- src/api/generated/usage-analytics.gen.ts",
     "lint": "eslint .",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",

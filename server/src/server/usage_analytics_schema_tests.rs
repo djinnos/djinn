@@ -119,3 +119,42 @@ fn usage_response_json_schema_can_be_written_to_file() {
         "schema JSON should contain unpriced_count"
     );
 }
+
+/// Write the full UsageResponse + UsageQuery JSON Schema to
+/// `server/schemas/usage-analytics.schema.json` so the TypeScript generation
+/// pipeline (`ui/scripts/generate-usage-types.ts`) can consume it.
+///
+/// Run with:
+///   cargo test -p djinn-server usage_analytics_schema_tests::export_schemas_to_file -- --nocapture
+#[test]
+fn export_schemas_to_file() {
+    use std::io::Write;
+
+    let response_schema = schemars::schema_for!(UsageResponse);
+    let query_schema = schemars::schema_for!(UsageQuery);
+
+    let combined = serde_json::json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "UsageAnalyticsApi",
+        "description": "Combined JSON Schema for the /api/admin/usage endpoint query parameters and response body, derived from Rust DTOs via schemars.",
+        "definitions": {
+            "UsageQuery": serde_json::to_value(&query_schema).unwrap(),
+            "UsageResponse": serde_json::to_value(&response_schema).unwrap(),
+        }
+    });
+
+    let json = serde_json::to_string_pretty(&combined).unwrap();
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let out_path = std::path::Path::new(manifest_dir)
+        .join("schemas")
+        .join("usage-analytics.schema.json");
+
+    std::fs::create_dir_all(out_path.parent().unwrap()).unwrap();
+    let mut f = std::fs::File::create(&out_path).unwrap();
+    f.write_all(json.as_bytes()).unwrap();
+    f.write_all(b"\n").unwrap();
+
+    eprintln!("Wrote schema to {}", out_path.display());
+    eprintln!("Schema size: {} bytes", json.len());
+}
