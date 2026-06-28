@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// TODO(70y0): temporary; remove after wall-clock migration
 // Agent-domain code extracted from djinn-server.
 // Covers: commands, agent context/roles/lifecycle, actors.
 //
