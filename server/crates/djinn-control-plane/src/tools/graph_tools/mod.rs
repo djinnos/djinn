@@ -12,7 +12,7 @@ use tracing::Instrument;
 use crate::bridge::{
     ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange,
     ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
-    CrateEdgeEntry, CrateNodeEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    CrateEdgeEntry, CrateGraphResponse, CrateNodeEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
     DetectedChangesResult, EdgeEntry, FileGroupEntry, FlowResult, GraphNeighbor, GraphStatus,
     HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult,
     OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest, QuerySubgraphResult, RankedNode,

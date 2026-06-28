@@ -1,6 +1,9 @@
 #![allow(unused_imports)]
 
-use super::handler_basic_ops::check_impact_check_staleness;
+use super::handler_basic_ops::{
+    CrateIndex, ImpactAggregator, check_impact_check_staleness,
+    derive_safe_slice_and_recommendation,
+};
 use crate::bridge::*;
 use crate::tools::graph_exclusions::GraphExclusions;
 
