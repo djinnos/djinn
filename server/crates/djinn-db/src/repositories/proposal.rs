@@ -3736,7 +3736,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dangling_refinement_ids_track_unmatched_start() {
         let repo = ProposalRepository::new(test_db(), EventBus::noop());
-        let p = repo.create(create_input("Dangling Refinement")).await.unwrap();
+        let p = repo
+            .create(create_input("Dangling Refinement"))
+            .await
+            .unwrap();
 
         // No refinement lifecycle yet → not dangling.
         assert!(

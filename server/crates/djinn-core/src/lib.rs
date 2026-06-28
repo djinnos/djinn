@@ -1,5 +1,6 @@
 pub mod auth_context;
 pub mod cargo_target_runs;
+pub mod clock;
 pub mod commands;
 pub mod doctor;
 pub mod error;
