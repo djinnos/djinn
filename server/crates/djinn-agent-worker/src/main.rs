@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// TODO(70y0): temporary; remove after wall-clock migration
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! `djinn-agent-worker` — the binary the `KubernetesRuntime` launches inside
 //! each per-task-run Pod.
