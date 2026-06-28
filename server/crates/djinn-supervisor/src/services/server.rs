@@ -1207,7 +1207,7 @@ async fn dispatch(
             let result = services
                 .tool_github_search(project_id, arguments)
                 .await
-                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
+                .map(|v| serde_json::to_string(&v).unwrap_or("null".to_string()));
             ServiceRpcResponse::ToolGithubSearch(result)
         }
         ServiceRpcRequest::ToolGithubFetchFile {
@@ -1218,7 +1218,7 @@ async fn dispatch(
             let result = services
                 .tool_github_fetch_file(project_id, arguments)
                 .await
-                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
+                .map(|v| serde_json::to_string(&v).unwrap_or("null".to_string()));
             ServiceRpcResponse::ToolGithubFetchFile(result)
         }
         ServiceRpcRequest::ToolCiJobLog {
@@ -1229,7 +1229,7 @@ async fn dispatch(
             let result = services
                 .tool_ci_job_log(session_task_id, arguments)
                 .await
-                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string()));
+                .map(|v| serde_json::to_string(&v).unwrap_or("null".to_string()));
             ServiceRpcResponse::ToolCiJobLog(result)
         }
         ServiceRpcRequest::TouchActivity { task_id } => {

@@ -1,5 +1,10 @@
 use super::*;
 
+use super::handler_impact_check::{
+    CrateIndex, ImpactAggregator, check_impact_check_staleness,
+    derive_safe_slice_and_recommendation,
+};
+
 impl DjinnMcpServer {
     pub(super) async fn code_graph_neighbors(
         &self,
@@ -779,309 +784,69 @@ impl DjinnMcpServer {
     /// inbound consumer crates. For symbol/file targets, uses
     /// `impact()` with `is_external` already filtered out by the
     /// bridge.
+    ///
+    /// Decomposition (epic uajf, task 1zcr): the original body mixed
+    /// six concerns — request validation, graph freshness, crate
+    /// index building, per-target impact aggregation, slice /
+    /// recommendation derivation, and response formatting. Each
+    /// concern now lives in a named private helper so the top-level
+    /// flow reads as a short orchestrator. Response shape, public
+    /// signature, recommendation strings, stale-graph short-circuit,
+    /// `low_confidence` handling, and the graceful-skip behaviour
+    /// for individual target impact errors are preserved verbatim.
     pub(super) async fn code_graph_impact_check(
         &self,
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        let targets = params.impact_targets.as_ref().ok_or_else(|| {
-            "impact_check requires `impact_targets` — a non-empty list of \
-             symbol keys, file paths, or crate names to analyse"
-                .to_string()
-        })?;
-        if targets.is_empty() {
-            return Err("impact_check requires at least one entry in `impact_targets`".to_string());
-        }
+        // 1. Request validation: extract the non-empty
+        //    `impact_targets` list and the optional `scope_crates`
+        //    set used for the `safe_independent_slice` derivation.
+        let (targets, scope_crates) = self.validate_impact_check_request(params)?;
 
-        let scope_crates: std::collections::HashSet<String> = params
-            .scope_crates
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .cloned()
-            .collect();
-
-        // ── Graph freshness check ────────────────────────────────────────
-        // Use the shared `check_impact_check_staleness` helper so
-        // `impact_check` and `code_graph` ops share the same
-        // `check_impact_staleness` primitive (no duplication, epic z3en/kfgh).
+        // 2. Graph freshness check (shared with `code_graph` ops —
+        //    no duplication, epic z3en/kfgh).
         let caller_head_raw = params.current_head.as_deref().unwrap_or("");
         let staleness_info =
             check_impact_check_staleness(self.state.repo_graph().as_ref(), ctx, caller_head_raw)
                 .await;
-
         if staleness_info.is_stale {
-            let staleness = if !staleness_info.caller_commit.is_empty() {
-                Some(GraphStaleness::compute(
-                    &staleness_info.caller_commit,
-                    staleness_info.cached_commit.as_deref(),
-                ))
-            } else {
-                None
-            };
-            return Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
-                affected_crates: Vec::new(),
-                affected_files: Vec::new(),
-                affected_symbols: Vec::new(),
-                safe_independent_slice: false,
-                recommendation: "needs_spike".to_string(),
-                low_confidence: true,
-                next_step: Some(
-                    "Graph is stale or missing.  Warm the graph for this \
-                     project and retry, or run a tech spike to manually \
-                     verify compile-time consumers."
-                        .to_string(),
-                ),
-                graph_staleness: staleness,
-            }));
+            return Ok(CodeGraphResponse::ImpactCheck(
+                self.build_stale_impact_check_response(&staleness_info),
+            ));
         }
 
-        // ── Build crate graph for crate-level analysis ───────────────────
+        // 3. Build crate indexes (known crates + directory
+        //    prefixes) from the workspace crate graph.
         let crate_result = self.state.repo_graph().crate_graph(ctx).await?;
-        let known_crates: std::collections::HashSet<&str> = crate_result
-            .crates
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
+        let crate_index = CrateIndex::from_crate_graph(&crate_result);
 
-        // Pre-compute crate directory prefixes for file→crate mapping.
-        // Each entry is (crate_name, directory_prefix).
-        let crate_dirs: Vec<(String, String)> = crate_result
-            .crates
-            .iter()
-            .filter_map(|c| {
-                let manifest = std::path::Path::new(&c.manifest_path);
-                let dir = manifest.parent()?.to_string_lossy().into_owned();
-                if c.name == "<external>" {
-                    None
-                } else {
-                    Some((c.name.clone(), dir))
-                }
-            })
-            .collect();
-
-        // ── Analyse each target ──────────────────────────────────────────
-        let mut affected_crates: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut affected_files: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut affected_symbols: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
+        // 4. Aggregate per-target impacts into a small accumulator.
+        let depth = params.limit.unwrap_or(3).max(0) as usize;
+        let mut aggregator = ImpactAggregator::new();
         for target in targets {
-            if known_crates.contains(target.as_str()) {
-                // Crate-level: find inbound edges where the target is
-                // the consumer (edge.target == target).
-                for edge in &crate_result.edges {
-                    if edge.target == *target && edge.source != "<external>" {
-                        affected_crates.insert(edge.source.clone());
-                    }
-                }
-            } else {
-                // Symbol/file: run impact() via the bridge.  The bridge
-                // already filters `is_external` nodes, so every entry
-                // in the result is a workspace-internal consumer.
-                let depth = params.limit.unwrap_or(3).max(0) as usize;
-                match self
-                    .state
-                    .repo_graph()
-                    .impact(
-                        ctx,
-                        params.workspace.as_deref(),
-                        target,
-                        depth,
-                        None,
-                        params.min_confidence,
-                    )
-                    .await
-                {
-                    Ok(ImpactResult::Detailed(entries)) => {
-                        for entry in &entries {
-                            affected_symbols.insert(entry.key.clone());
-                            if let Some(ref fp) = entry.file_path {
-                                affected_files.insert(fp.clone());
-                                // Map file back to its crate.
-                                for (crate_name, dir_prefix) in &crate_dirs {
-                                    if fp.starts_with(dir_prefix) {
-                                        affected_crates.insert(crate_name.clone());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(ImpactResult::Grouped(groups)) => {
-                        // Grouped results only have file paths.
-                        for group in &groups {
-                            affected_files.insert(group.file.clone());
-                            for (crate_name, dir_prefix) in &crate_dirs {
-                                if group.file.starts_with(dir_prefix) {
-                                    affected_crates.insert(crate_name.clone());
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Target not found or bridge error — skip
-                        // gracefully so other targets still contribute.
-                    }
-                }
-            }
+            self.aggregate_target_impact(ctx, params, target, depth, &crate_index, &mut aggregator)
+                .await;
         }
+        let (affected_crates, affected_files, affected_symbols) = aggregator.finalized();
 
-        // Remove synthetic / external crate from the result set.
-        affected_crates.remove("<external>");
+        // 5. Derive the safe-slice boolean and the recommendation
+        //    string.  Pure function of the aggregated sets and the
+        //    caller-supplied scope — no I/O, no bridging.
+        let (safe_independent_slice, recommendation) =
+            derive_safe_slice_and_recommendation(&affected_crates, &scope_crates);
 
-        // ── Determine safe_independent_slice ─────────────────────────────
-        let safe_independent_slice = if affected_crates.is_empty() {
-            // No workspace-internal consumers — nothing to break.
-            true
-        } else if scope_crates.is_empty() {
-            // No scope provided — can't verify consumers are within
-            // scope, so assume not safe.
-            false
-        } else {
-            // Safe only when every affected crate is inside the caller's
-            // proposed slice.
-            affected_crates.iter().all(|c| scope_crates.contains(c))
-        };
-
-        // ── Determine recommendation ─────────────────────────────────────
-        let recommendation = if safe_independent_slice {
-            if affected_crates.is_empty() {
-                // No consumers at all — each task can ship independently.
-                "ok_independent"
-            } else {
-                // Consumers exist but they're all within the proposed
-                // slice — tasks need explicit ordering.
-                "chain_tasks"
-            }
-        } else {
-            // Consumers outside the proposed slice — must be a single
-            // atomic cutover.
-            "atomic_cutover"
-        };
-
-        // Attach staleness metadata for the caller.  Re-uses the
-        // `staleness_info` snapshot from the freshness check above so
-        // `impact_check` and `code_graph` ops share the same
-        // `check_impact_staleness` primitive (no duplication).
-        let staleness = if !staleness_info.caller_commit.is_empty() {
-            Some(GraphStaleness::compute(
-                &staleness_info.caller_commit,
-                staleness_info.cached_commit.as_deref(),
-            ))
-        } else {
-            None
-        };
-
-        Ok(CodeGraphResponse::ImpactCheck(ImpactCheckResponse {
-            affected_crates: affected_crates.into_iter().collect(),
-            affected_files: affected_files.into_iter().collect(),
-            affected_symbols: affected_symbols.into_iter().collect(),
-            safe_independent_slice,
-            recommendation: recommendation.to_string(),
-            low_confidence: false,
-            next_step: None,
-            graph_staleness: staleness,
-        }))
-    }
-}
-
-// ── `impact_check` staleness entry point ────────────────────────────────────
-//
-// kfgh / epic z3en: the planner-facing `impact_check` MCP tool (built in
-// sibling task xkqs) MUST short-circuit with `needs_spike` whenever the
-// canonical graph is stale — a stale consumer set would defeat the entire
-// purpose of preflight. This helper is the single entry point that
-// `impact_check` calls before doing any consumer computation.
-//
-// `code_graph` ops share the same staleness primitive via
-// [`check_impact_staleness`]: that path attaches a [`GraphStaleness`]
-// struct (lenient on missing) to every response, while `impact_check`
-// short-circuits on the same boolean (strict on missing). Both paths
-// read `pinned_commit` via the same bridge call (`RepoGraphOps::status`)
-// so the staleness signal stays anchored to a single source.
-
-/// Snapshot of the canonical graph staleness signal at the moment an
-/// `impact_check` call begins. The boolean is the strict form
-/// (`true` when the graph is missing, un-pinned, or out-of-sync with
-/// the caller's HEAD). The strings are the trimmed echoes so the
-/// `impact_check` response can surface them in `next_step` hints.
-#[derive(Debug, Clone)]
-pub(super) struct ImpactCheckStaleness {
-    /// `true` when `cached_commit` is missing/blank or differs from
-    /// `caller_commit`. Drives the `needs_spike` short-circuit in
-    /// `impact_check`.
-    pub is_stale: bool,
-    /// Trimmed caller-supplied commit, or `""` if the caller omitted
-    /// `current_head` (in which case `is_stale` is `true` because we
-    /// have no anchor for comparison).
-    pub caller_commit: String,
-    /// Trimmed cached graph commit, or `None` when the graph has no
-    /// pinned commit (un-warmed).
-    pub cached_commit: Option<String>,
-}
-
-impl ImpactCheckStaleness {
-    /// `true` when the caller did not supply a `current_head` AND the
-    /// graph has no pinned commit. This is the "completely unanchored"
-    /// case — both sides are missing, so we cannot answer and must
-    /// spike. Distinct from `is_stale` which is the canonical
-    /// missing/blank/mismatch signal.
-    #[allow(dead_code)] // diagnostic tested in unit tests; not consumed by the handler flow yet
-    pub fn is_completely_unanchored(&self) -> bool {
-        self.caller_commit.is_empty() && self.cached_commit.is_none()
-    }
-}
-
-/// Run the staleness check for an `impact_check` call.
-///
-/// Performs the same `RepoGraphOps::status` peek that `attach_graph_staleness`
-/// uses for `code_graph` ops, then funnels both inputs through the shared
-/// [`check_impact_staleness`] primitive so `impact_check` and `code_graph`
-/// never drift on the staleness semantics.
-///
-/// Contract for callers (the `impact_check` handler built by sibling
-/// task xkqs):
-///
-/// 1. Call this helper BEFORE computing any consumers.
-/// 2. If [`ImpactCheckStaleness::is_stale`] is `true`, return
-///    `recommendation = "needs_spike"` and a low-confidence flag without
-///    computing consumers.
-/// 3. Otherwise proceed with the standard `impact_check` flow using
-///    [`ImpactCheckStaleness::caller_commit`] / `cached_commit` to
-///    surface freshness metadata in the response.
-///
-/// `caller_head` is the (raw, pre-trim) caller commit. An empty string
-/// is allowed and yields `is_stale = true` (no anchor on the caller's
-/// side).
-pub(super) async fn check_impact_check_staleness(
-    graph: &dyn crate::bridge::RepoGraphOps,
-    ctx: &crate::bridge::ProjectCtx,
-    caller_head: &str,
-) -> ImpactCheckStaleness {
-    let cached = match graph.status(ctx).await {
-        Ok(status) => status.pinned_commit,
-        Err(e) => {
-            // A failed status lookup is the same as an un-pinned graph
-            // for impact preflight: we have no anchor, so we MUST
-            // surface `is_stale=true` and let the caller decide
-            // whether to spike. We do NOT silently fall through to
-            // the un-stale default — that would defeat the freshness
-            // signal. Logged at debug so we can correlate with
-            // upstream warmer failures without spamming warn logs.
-            tracing::debug!(
-                error = %e,
-                "impact_check staleness: status lookup failed; treating as un-pinned"
-            );
-            None
-        }
-    };
-    let (is_stale, caller_commit, cached_commit) =
-        check_impact_staleness(caller_head, cached.as_deref());
-    ImpactCheckStaleness {
-        is_stale,
-        caller_commit,
-        cached_commit,
+        // 6. Format the final response in one place so the wire
+        //    shape stays in lock-step with the tool contract.
+        Ok(CodeGraphResponse::ImpactCheck(
+            self.build_impact_check_response(
+                affected_crates,
+                affected_files,
+                affected_symbols,
+                safe_independent_slice,
+                recommendation,
+                &staleness_info,
+            ),
+        ))
     }
 }

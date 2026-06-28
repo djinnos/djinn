@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 // djinn-control-plane: MCP tool handler crate
 
 pub mod bridge;
