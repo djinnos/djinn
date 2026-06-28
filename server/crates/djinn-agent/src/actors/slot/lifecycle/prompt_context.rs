@@ -268,6 +268,39 @@ async fn load_sibling_tasks(
     }
 }
 
+/// Append `  - Delivered: <title>` sub-bullets for closed tasks owned by
+/// `blocker`. Logs and silently skips DB errors.
+async fn append_blocker_deliveries(
+    epic_id: &str,
+    blocker: &djinn_db::EpicBlockerRef,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    match task_repo
+        .list_filtered(djinn_db::ListQuery {
+            parent: Some(blocker.epic_id.clone()),
+            status: Some("closed".to_string()),
+            limit: 20,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(closed_tasks) => {
+            for t in &closed_tasks.tasks {
+                ctx_lines.push(format!("  - Delivered: {}", t.title));
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                blocking_epic_id = %blocker.epic_id,
+                error = %e,
+                "Lifecycle: failed to list closed tasks for blocking epic"
+            );
+        }
+    }
+}
+
 /// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
 async fn load_blocking_epics(
     epic_id: &str,
@@ -283,29 +316,7 @@ async fn load_blocking_epics(
                     "- **{}** ({}) — {}",
                     blocker.title, blocker.short_id, blocker.status
                 ));
-                match task_repo
-                    .list_filtered(djinn_db::ListQuery {
-                        parent: Some(blocker.epic_id.clone()),
-                        status: Some("closed".to_string()),
-                        limit: 20,
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(closed_tasks) => {
-                        for t in &closed_tasks.tasks {
-                            ctx_lines.push(format!("  - Delivered: {}", t.title));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            epic_id = %epic_id,
-                            blocking_epic_id = %blocker.epic_id,
-                            error = %e,
-                            "Lifecycle: failed to list closed tasks for blocking epic"
-                        );
-                    }
-                }
+                append_blocker_deliveries(epic_id, blocker, task_repo, ctx_lines).await;
             }
         }
         Ok(_) => {}
