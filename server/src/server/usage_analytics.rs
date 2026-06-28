@@ -258,6 +258,18 @@ struct UsageKpiDto {
     /// row beneath the value. `None` when the card has no breakdown.
     #[serde(skip_serializing_if = "Option::is_none")]
     breakdown: Option<Vec<UsageKpiPartDto>>,
+    /// Actual API spend contributed by this KPI card's aggregate.
+    /// Present only on the "Actual API Spend" card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actual_spend_usd: Option<f64>,
+    /// Projected subscription-equivalent cost contributed by this KPI card's
+    /// aggregate. Present only on the "Projected Cost" card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projected_usd: Option<f64>,
+    /// Unpriced session count contributed by this KPI card's aggregate.
+    /// Present only on the "Sessions" card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unpriced_count: Option<i64>,
 }
 
 /// One labelled component of a KPI's headline value (see
@@ -423,6 +435,10 @@ struct UsageResponse {
     project_model_matrix: Vec<ProjectModelCellDto>,
     /// RFC3339 timestamp when the response was generated.
     generated_at: String,
+    /// Total number of unpriced sessions in the current window, repeated at
+    /// top-level for convenience. The frontend reducer falls back to this when
+    /// no KPI card carries `unpriced_count`.
+    unpriced_session_count: i64,
 }
 
 // ── Derivations ──────────────────────────────────────────────────────────────
@@ -474,6 +490,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                 "Real API-key spend at list rates",
             )),
             breakdown: None,
+            actual_spend_usd: totals.actual_spend_usd,
+            projected_usd: None,
+            unpriced_count: None,
         },
         UsageKpiDto {
             label: "Projected Cost".to_string(),
@@ -485,6 +504,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                 .unwrap_or_default(),
             caption: Some("Subscription / coding-plan list-rate equivalent".to_string()),
             breakdown: None,
+            actual_spend_usd: None,
+            projected_usd: totals.projected_usd,
+            unpriced_count: None,
         },
         UsageKpiDto {
             label: "Tokens".to_string(),
@@ -510,6 +532,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
                     value: totals.tokens_out as f64,
                 },
             ]),
+            actual_spend_usd: None,
+            projected_usd: None,
+            unpriced_count: None,
         },
         UsageKpiDto {
             label: "Sessions".to_string(),
@@ -518,6 +543,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             formatted: String::new(),
             caption: None,
             breakdown: None,
+            actual_spend_usd: None,
+            projected_usd: None,
+            unpriced_count: Some(totals.unpriced_session_count),
         },
         UsageKpiDto {
             label: "Cache reads".to_string(),
@@ -529,6 +557,9 @@ fn build_kpis(totals: &UsageTotals, previous: &UsageTotals) -> Vec<UsageKpiDto> 
             formatted: String::new(),
             caption: None,
             breakdown: None,
+            actual_spend_usd: None,
+            projected_usd: None,
+            unpriced_count: None,
         },
     ]
 }
@@ -755,6 +786,7 @@ async fn usage_handler(
         model_effectiveness: effectiveness_rows.into_iter().map(Into::into).collect(),
         project_model_matrix: matrix_rows.into_iter().map(Into::into).collect(),
         generated_at: now_rfc3339(),
+        unpriced_session_count: totals.unpriced_session_count,
     };
 
     Ok(Json(response))
@@ -1162,6 +1194,7 @@ mod tests {
             model_effectiveness: Vec::new(),
             project_model_matrix: Vec::new(),
             generated_at: "2025-06-20T00:00:00Z".into(),
+            unpriced_session_count: 0,
         };
         let json = serde_json::to_value(&response).unwrap();
         for field in [
@@ -1171,6 +1204,7 @@ mod tests {
             "model_effectiveness",
             "project_model_matrix",
             "generated_at",
+            "unpriced_session_count",
         ] {
             assert!(json.get(field).is_some(), "missing field {field}");
         }
@@ -1178,5 +1212,113 @@ mod tests {
         for field in ["by_user", "by_project", "by_proposal", "by_task"] {
             assert!(breakdowns.get(field).unwrap().is_array(), "missing {field}");
         }
+    }
+
+    #[test]
+    fn build_kpis_split_aggregates_on_exactly_one_contributor_each() {
+        let totals = UsageTotals {
+            session_count: 10,
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 20,
+            cache_write_tokens: 5,
+            actual_spend_usd: Some(12.50),
+            projected_usd: Some(8.75),
+            unpriced_session_count: 3,
+        };
+        let kpis = build_kpis(&totals, &UsageTotals::default());
+
+        // Actual API Spend card carries actual_spend_usd only.
+        let actual_kpi = &kpis[0];
+        assert_eq!(actual_kpi.actual_spend_usd, Some(12.50));
+        assert!(actual_kpi.projected_usd.is_none());
+        assert!(actual_kpi.unpriced_count.is_none());
+
+        // Projected Cost card carries projected_usd only.
+        let projected_kpi = &kpis[1];
+        assert!(projected_kpi.actual_spend_usd.is_none());
+        assert_eq!(projected_kpi.projected_usd, Some(8.75));
+        assert!(projected_kpi.unpriced_count.is_none());
+
+        // Tokens card has no split aggregates.
+        let tokens_kpi = &kpis[2];
+        assert!(tokens_kpi.actual_spend_usd.is_none());
+        assert!(tokens_kpi.projected_usd.is_none());
+        assert!(tokens_kpi.unpriced_count.is_none());
+
+        // Sessions card carries unpriced_count only.
+        let sessions_kpi = &kpis[3];
+        assert_eq!(sessions_kpi.label, "Sessions");
+        assert!(sessions_kpi.actual_spend_usd.is_none());
+        assert!(sessions_kpi.projected_usd.is_none());
+        assert_eq!(sessions_kpi.unpriced_count, Some(3));
+
+        // Cache reads card has no split aggregates.
+        let cache_kpi = &kpis[4];
+        assert_eq!(cache_kpi.label, "Cache reads");
+        assert!(cache_kpi.actual_spend_usd.is_none());
+        assert!(cache_kpi.projected_usd.is_none());
+        assert!(cache_kpi.unpriced_count.is_none());
+    }
+
+    #[test]
+    fn split_aggregates_omit_when_none_and_unpriced_present_at_zero() {
+        let totals = UsageTotals::default(); // all zero/None
+        let kpis = build_kpis(&totals, &UsageTotals::default());
+
+        // Actual/Projected KPIs have None for their split fields — serde omits them.
+        assert!(kpis[0].actual_spend_usd.is_none());
+        assert!(kpis[1].projected_usd.is_none());
+
+        // Sessions KPI carries unpriced_count even when 0 (top-level contract).
+        assert_eq!(kpis[3].unpriced_count, Some(0));
+
+        // Serialize and verify omitted fields don't appear as null.
+        let json = serde_json::to_value(&kpis[0].label.clone()).unwrap();
+        assert!(json.is_string()); // sanity — the KPI serialization is tested below.
+
+        // Serialize the full KPI array and verify structure.
+        let json_arr = serde_json::to_value(&kpis).unwrap();
+        let arr = json_arr.as_array().unwrap();
+        // actual_spend_usd should be absent from the "Actual API Spend" card (None → skip).
+        assert!(arr[0].get("actual_spend_usd").is_none());
+        // projected_usd should be absent from "Projected Cost" card.
+        assert!(arr[1].get("projected_usd").is_none());
+        // unpriced_count should be present on Sessions card as 0.
+        assert_eq!(arr[3].get("unpriced_count").unwrap().as_i64().unwrap(), 0);
+        // unpriced_count absent from non-Sessions KPIs.
+        assert!(arr[0].get("unpriced_count").is_none());
+        assert!(arr[2].get("unpriced_count").is_none());
+        assert!(arr[4].get("unpriced_count").is_none());
+    }
+
+    #[test]
+    fn usage_response_serialises_top_level_unpriced_session_count() {
+        let totals = UsageTotals {
+            unpriced_session_count: 7,
+            ..UsageTotals::default()
+        };
+        let response = UsageResponse {
+            kpis: build_kpis(&totals, &UsageTotals::default()),
+            time_series: Vec::new(),
+            breakdowns: BreakdownsDto {
+                by_user: Vec::new(),
+                by_project: Vec::new(),
+                by_proposal: Vec::new(),
+                by_task: Vec::new(),
+            },
+            model_effectiveness: Vec::new(),
+            project_model_matrix: Vec::new(),
+            generated_at: "2025-06-20T00:00:00Z".into(),
+            unpriced_session_count: totals.unpriced_session_count,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            json.get("unpriced_session_count")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            7
+        );
     }
 }
