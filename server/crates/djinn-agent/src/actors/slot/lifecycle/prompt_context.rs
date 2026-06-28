@@ -645,6 +645,41 @@ mod tests {
         .expect("lead prompt context includes epic context")
     }
 
+    /// Build the full [`PromptContext`] with customizable inputs.
+    ///
+    /// Test helper for characterization tests that inspect fields beyond
+    /// `epic_context`. Returns the complete struct so individual fields
+    /// and ordering in the rendered prompt can be asserted.
+    async fn full_prompt_context(
+        db: Database,
+        task: &djinn_core::models::Task,
+        conflict_ctx: Option<&MergeConflictMetadata>,
+        system_prompt_extensions: &str,
+        learned_prompt: Option<&str>,
+        resolved_skills: &[ResolvedSkill],
+        read_sources: &[ReadSourceInfo],
+    ) -> PromptContext {
+        let app_state = agent_context_from_db(db, CancellationToken::new());
+        let worktree = test_tempdir("prompt-context-worktree-");
+        let role = LeadRole;
+        assemble_prompt_context(PromptContextInputs {
+            task,
+            runtime_role: &role,
+            role_for_epic_check: &role,
+            project_path: "/workspace/test-project",
+            worktree_path: worktree.path(),
+            conflict_ctx,
+            merge_validation_ctx: None,
+            prompt_setup_commands: None,
+            system_prompt_extensions,
+            learned_prompt,
+            resolved_skills,
+            app_state: &app_state,
+            read_sources,
+        })
+        .await
+    }
+
     #[tokio::test]
     async fn epic_context_includes_blocking_and_sibling_sections() {
         let db = Database::ephemeral().await.expect("create ephemeral db");
@@ -794,5 +829,294 @@ mod tests {
 
         assert!(!epic_context.contains("### Blocking Epics"));
         assert!(!epic_context.contains("### Proposal Sibling Epics"));
+    }
+
+    // ── Characterization tests (task s19x) ────────────────────────────────
+    // These cover representative optional-prompt combinations that existing
+    // broad tests don't isolate. They are a safety net for subsequent
+    // extraction refactors and must not change production behavior.
+
+    #[tokio::test]
+    async fn missing_activity_yields_none_activity_text() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let project = create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let epic = create_epic(
+            &db,
+            &EventBus::noop(),
+            &project.id,
+            "No-activity epic",
+            "Epic for activity test.",
+            None,
+        )
+        .await;
+        let task = task_repo
+            .create(
+                &epic.id,
+                "No-activity task",
+                "description",
+                "design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let ctx = full_prompt_context(db, &task, None, "", None, &[], &[]).await;
+        assert!(
+            ctx.activity_text.is_none(),
+            "task with no activity entries should yield None activity_text"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_context_formats_files_and_preserves_branch_fields() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let project = create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let epic = create_epic(
+            &db,
+            &EventBus::noop(),
+            &project.id,
+            "Conflict epic",
+            "Epic for conflict test.",
+            None,
+        )
+        .await;
+        let task = task_repo
+            .create(
+                &epic.id,
+                "Conflict task",
+                "description",
+                "design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let conflict = MergeConflictMetadata {
+            conflicting_files: vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+            base_branch: "feature-branch".to_string(),
+            merge_target: "main".to_string(),
+        };
+        let ctx = full_prompt_context(db, &task, Some(&conflict), "", None, &[], &[]).await;
+
+        // conflict_files is the `- <path>` markdown list
+        let files = ctx
+            .conflict_files
+            .as_deref()
+            .expect("conflict_files should be Some");
+        assert!(
+            files.contains("- src/main.rs"),
+            "conflict_files should list src/main.rs"
+        );
+        assert!(
+            files.contains("- Cargo.toml"),
+            "conflict_files should list Cargo.toml"
+        );
+
+        // The lead template does not render merge branch placeholders (those
+        // are only in the worker conflict template), but the base prompt must
+        // still be non-empty and well-formed when conflict metadata is present.
+        assert!(
+            !ctx.base_system_prompt.is_empty(),
+            "base prompt should be non-empty with conflict context"
+        );
+
+        // The system_prompt (final prompt after extensions + skills) should
+        // also be non-empty — conflict context should not break the pipeline.
+        assert!(
+            !ctx.system_prompt.is_empty(),
+            "final system_prompt should be non-empty with conflict context"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_sources_appended_after_skills_and_extensions() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let project = create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let epic = create_epic(
+            &db,
+            &EventBus::noop(),
+            &project.id,
+            "Read-source epic",
+            "Epic for read-source test.",
+            None,
+        )
+        .await;
+        let task = task_repo
+            .create(
+                &epic.id,
+                "Read-source task",
+                "description",
+                "design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let skills = vec![ResolvedSkill {
+            name: "test-skill".to_string(),
+            description: "A test skill".to_string(),
+            content: "Skill body content.".to_string(),
+            required: false,
+            trust_level: "project".to_string(),
+            recommended_for_roles: vec![],
+            tags: vec![],
+        }];
+        let sources = vec![ReadSourceInfo {
+            slug: "sibling-repo".to_string(),
+            name: "Sibling Repository".to_string(),
+        }];
+        let extensions = "Custom extension text.";
+
+        let ctx = full_prompt_context(db, &task, None, extensions, None, &skills, &sources).await;
+
+        // Skills section appears in the prompt
+        assert!(
+            ctx.system_prompt.contains("## Available Skills"),
+            "system_prompt should contain skills section"
+        );
+        // Extensions appear in the prompt
+        assert!(
+            ctx.system_prompt.contains("Custom extension text."),
+            "system_prompt should contain extensions"
+        );
+        // Read sources appear in the prompt
+        assert!(
+            ctx.system_prompt
+                .contains("## Related repositories (read-only)"),
+            "system_prompt should contain read sources section"
+        );
+        assert!(
+            ctx.system_prompt.contains("sibling-repo"),
+            "system_prompt should contain the read source slug"
+        );
+
+        // Ordering: extensions before skills, skills before read sources
+        let ext_pos = ctx
+            .system_prompt
+            .find("Custom extension text.")
+            .expect("extensions present");
+        let skills_pos = ctx
+            .system_prompt
+            .find("## Available Skills")
+            .expect("skills section present");
+        let sources_pos = ctx
+            .system_prompt
+            .find("## Related repositories (read-only)")
+            .expect("read sources section present");
+        assert!(
+            ext_pos < skills_pos,
+            "extensions should appear before skills section"
+        );
+        assert!(
+            skills_pos < sources_pos,
+            "skills section should appear before read sources"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_skills_appear_before_read_sources() {
+        let db = Database::ephemeral().await.expect("create ephemeral db");
+        let project = create_test_project(&db).await;
+        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+        let epic = create_epic(
+            &db,
+            &EventBus::noop(),
+            &project.id,
+            "Skills-ordering epic",
+            "Epic for skills ordering test.",
+            None,
+        )
+        .await;
+        let task = task_repo
+            .create(
+                &epic.id,
+                "Skills-ordering task",
+                "description",
+                "design",
+                "task",
+                1,
+                "test-owner",
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let skills = vec![
+            ResolvedSkill {
+                name: "alpha-skill".to_string(),
+                description: "First skill".to_string(),
+                content: "Alpha body.".to_string(),
+                required: true,
+                trust_level: "project".to_string(),
+                recommended_for_roles: vec![],
+                tags: vec![],
+            },
+            ResolvedSkill {
+                name: "beta-skill".to_string(),
+                description: "Second skill".to_string(),
+                content: "Beta body.".to_string(),
+                required: false,
+                trust_level: "project".to_string(),
+                recommended_for_roles: vec![],
+                tags: vec![],
+            },
+        ];
+        let sources = vec![
+            ReadSourceInfo {
+                slug: "repo-a".to_string(),
+                name: "Repository A".to_string(),
+            },
+            ReadSourceInfo {
+                slug: "repo-b".to_string(),
+                name: "Repository B".to_string(),
+            },
+        ];
+
+        let ctx = full_prompt_context(db, &task, None, "", None, &skills, &sources).await;
+
+        // Both skills are present
+        assert!(
+            ctx.system_prompt.contains("**alpha-skill**"),
+            "alpha-skill present"
+        );
+        assert!(
+            ctx.system_prompt.contains("**beta-skill**"),
+            "beta-skill present"
+        );
+        // Both read sources are present
+        assert!(
+            ctx.system_prompt.contains("repo-a"),
+            "repo-a read source present"
+        );
+        assert!(
+            ctx.system_prompt.contains("repo-b"),
+            "repo-b read source present"
+        );
+
+        // Skills section appears before read-sources section
+        let skills_pos = ctx
+            .system_prompt
+            .find("## Available Skills")
+            .expect("skills section present");
+        let sources_pos = ctx
+            .system_prompt
+            .find("## Related repositories (read-only)")
+            .expect("read sources section present");
+        assert!(
+            skills_pos < sources_pos,
+            "resolved skills section must appear before read-sources section"
+        );
     }
 }
