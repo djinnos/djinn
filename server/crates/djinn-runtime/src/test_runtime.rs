@@ -216,6 +216,7 @@ impl Default for TestRuntime {
 
 #[async_trait]
 impl SessionRuntime for TestRuntime {
+    #[allow(clippy::disallowed_methods)] // test-only: TestRuntime stamps started_at
     async fn prepare(
         &self,
         spec: &TaskRunSpec,
@@ -398,6 +399,7 @@ impl SessionRuntime for TestRuntime {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real monotonic time for timing assertions
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
