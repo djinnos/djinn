@@ -41,7 +41,7 @@ pub(super) fn router() -> Router<AppState> {
 /// Raw query params deserialised from the request URL.  Mirrors the frontend
 /// `UsageAnalyticsFilters` exactly.  All are optional; defaults and validation
 /// are applied in [`UsageQuery::into_typed`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UsageQuery {
     /// Shorthand date range; mutually exclusive with start/end.
     preset: Option<String>,
@@ -1346,7 +1346,9 @@ mod tests {
         }
 
         // KPI schema must contain the split aggregate fields.
-        let kpi_defs = value["$defs"]["UsageKpiDto"]["properties"].as_object().unwrap();
+        let kpi_defs = value["$defs"]["UsageKpiDto"]["properties"]
+            .as_object()
+            .unwrap();
         for field in ["actual_spend_usd", "projected_usd", "unpriced_count"] {
             assert!(
                 kpi_defs.contains_key(field),
@@ -1358,7 +1360,11 @@ mod tests {
         let row_defs = value["$defs"]["BreakdownRowDto"]["properties"]
             .as_object()
             .unwrap();
-        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+        for field in [
+            "actual_spend_usd",
+            "projected_usd",
+            "unpriced_session_count",
+        ] {
             assert!(
                 row_defs.contains_key(field),
                 "schema missing BreakdownRowDto field {field}"
@@ -1369,7 +1375,11 @@ mod tests {
         let series_defs = value["$defs"]["SeriesPointDto"]["properties"]
             .as_object()
             .unwrap();
-        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+        for field in [
+            "actual_spend_usd",
+            "projected_usd",
+            "unpriced_session_count",
+        ] {
             assert!(
                 series_defs.contains_key(field),
                 "schema missing SeriesPointDto field {field}"
@@ -1380,7 +1390,11 @@ mod tests {
         let eff_defs = value["$defs"]["ModelEffectivenessDto"]["properties"]
             .as_object()
             .unwrap();
-        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+        for field in [
+            "actual_spend_usd",
+            "projected_usd",
+            "unpriced_session_count",
+        ] {
             assert!(
                 eff_defs.contains_key(field),
                 "schema missing ModelEffectivenessDto field {field}"
@@ -1391,7 +1405,11 @@ mod tests {
         let cell_defs = value["$defs"]["ProjectModelCellDto"]["properties"]
             .as_object()
             .unwrap();
-        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+        for field in [
+            "actual_spend_usd",
+            "projected_usd",
+            "unpriced_session_count",
+        ] {
             assert!(
                 cell_defs.contains_key(field),
                 "schema missing ProjectModelCellDto field {field}"
