@@ -1,5 +1,12 @@
 // djinn:allow-oversize — legacy dispatch module over size-guard threshold; split when touched substantively.
 use super::super::*;
+use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+#[cfg(test)]
+use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
+#[cfg(test)]
+use super::admission::{
+    clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
+};
 use super::DispatchOutcome;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
@@ -20,32 +27,6 @@ fn record_dispatch_outcome(outcome: &'static str) {
 fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usize) {
     djinn_telemetry::dispatch::set_cooldowns_active(cooldowns_active);
     djinn_telemetry::dispatch::set_inflight_ledger_size(inflight_ledger_size);
-}
-
-fn record_user_cap_utilization(user: &str, model: &str, used: u32, cap: u32) {
-    djinn_telemetry::dispatch::set_user_cap_utilization(user, model, used, cap);
-}
-
-pub(crate) fn model_under_user_cap(
-    running_by_user_model: &HashMap<(String, String), u32>,
-    creator: &str,
-    model: &str,
-    cap: u32,
-) -> bool {
-    let used = running_by_user_model
-        .get(&(creator.to_string(), model.to_owned()))
-        .copied()
-        .unwrap_or(0);
-    #[cfg(test)]
-    observe_dispatch_cap_count(
-        DispatchCapObservationStage::CapConsidered,
-        creator,
-        model,
-        used,
-    );
-    let cap = cap.max(1);
-    record_user_cap_utilization(creator, model, used, cap);
-    used < cap
 }
 
 /// Env flag allowing operators (and the in-process TestRuntime path) to
@@ -90,117 +71,6 @@ fn task_ownerless_from_creator_lookup<E: std::fmt::Display>(
             );
             true
         }
-    }
-}
-
-/// Overlay the in-flight dispatch ledger onto the DB-seeded per-user running
-/// counts, taking `max(db, ledger)` per `(creator, model)`.
-///
-/// The DB seed counts only sessions that reached `running`, which lags a fresh
-/// dispatch by the worker pod's boot time (20-60s). The ledger holds dispatches
-/// that have not yet produced a `running` row, so overlaying it makes those
-/// count against the per-user cap immediately and prevents re-firing passes from
-/// overshooting it. `max` (not sum) is deliberate: a task present in BOTH the
-/// running rows and the ledger must count once, not twice.
-fn overlay_inflight_ledger(
-    running_by_user_model: &mut HashMap<(String, String), u32>,
-    inflight_dispatches: &HashMap<String, (Option<String>, String)>,
-) {
-    let mut ledger_counts: HashMap<(String, String), u32> = HashMap::new();
-    for (creator, model) in inflight_dispatches.values() {
-        if let Some(c) = creator {
-            *ledger_counts.entry((c.clone(), model.clone())).or_insert(0) += 1;
-        }
-    }
-    for (key, lcount) in ledger_counts {
-        let entry = running_by_user_model.entry(key).or_insert(0);
-        *entry = (*entry).max(lcount);
-    }
-    #[cfg(test)]
-    observe_dispatch_cap_counts(
-        DispatchCapObservationStage::LedgerOverlay,
-        running_by_user_model,
-    );
-}
-
-/// Test-only cap-count instrumentation for wnd1 stress coverage.
-///
-/// Production dispatch behavior is unchanged: in non-test builds the observer
-/// types and recording calls are not compiled. Tests can clear the shared sink,
-/// drive a dispatch pass (or the ledger helper directly), then take the ordered
-/// observations to assert instantaneous per-user/per-model counts.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchCapObservation {
-    pub creator_user_id: String,
-    pub model: String,
-    pub effective_count: u32,
-    pub stage: DispatchCapObservationStage,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DispatchCapObservationStage {
-    /// Count after DB-seeded running rows have been overlaid with the in-flight
-    /// ledger via `max(db_count, ledger_count)`.
-    LedgerOverlay,
-    /// Count consulted by the per-user cap gate for a candidate model.
-    CapConsidered,
-    /// Count immediately after a successful dispatch increments local state and
-    /// records an in-flight ledger entry, before any session row may exist.
-    InflightIncremented,
-}
-
-#[cfg(test)]
-static DISPATCH_CAP_OBSERVATIONS: std::sync::Mutex<Vec<DispatchCapObservation>> =
-    std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(crate) fn clear_dispatch_cap_observations() {
-    DISPATCH_CAP_OBSERVATIONS
-        .lock()
-        .expect("dispatch cap observations mutex poisoned")
-        .clear();
-}
-
-#[cfg(test)]
-pub(crate) fn take_dispatch_cap_observations() -> Vec<DispatchCapObservation> {
-    std::mem::take(
-        &mut *DISPATCH_CAP_OBSERVATIONS
-            .lock()
-            .expect("dispatch cap observations mutex poisoned"),
-    )
-}
-
-#[cfg(test)]
-fn observe_dispatch_cap_count(
-    stage: DispatchCapObservationStage,
-    creator_user_id: &str,
-    model: &str,
-    effective_count: u32,
-) {
-    DISPATCH_CAP_OBSERVATIONS
-        .lock()
-        .expect("dispatch cap observations mutex poisoned")
-        .push(DispatchCapObservation {
-            creator_user_id: creator_user_id.to_owned(),
-            model: model.to_owned(),
-            effective_count,
-            stage,
-        });
-}
-
-#[cfg(test)]
-fn observe_dispatch_cap_counts(
-    stage: DispatchCapObservationStage,
-    running_by_user_model: &HashMap<(String, String), u32>,
-) {
-    let mut counts: Vec<_> = running_by_user_model.iter().collect();
-    counts.sort_by(|((creator_a, model_a), _), ((creator_b, model_b), _)| {
-        creator_a.cmp(creator_b).then_with(|| model_a.cmp(model_b))
-    });
-    for ((creator, model), count) in counts {
-        observe_dispatch_cap_count(stage, creator, model, *count);
     }
 }
 
@@ -361,6 +231,93 @@ impl CoordinatorActor {
                 "inflight_ledger_insert",
                 DurableDispatchStateUpdate {
                     inflight: Some(Some((Some(c.to_string()), model.to_string()))),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    }
+
+    // ─── Shared per-(user, model) admission surface ────────────────────────
+    //
+    // The methods below compose the pure primitives in [`super::admission`]
+    // with the actor's own DB, in-flight ledger, and durable dispatch-state.
+    // They exist so that every dispatch path — normal task dispatch,
+    // planner escalation, AND refinement tribunal dispatch (wired in a
+    // follow-up task) — checks admission and reserves/clears in-flight slots
+    // through one shared API rather than each caller re-implementing the
+    // cap-check + ledger logic.
+
+    // NOTE: the three methods below (`resolve_model_caps_for_user`,
+    // `check_user_model_admission`, `clear_inflight_dispatch`) are the shared
+    // admission surface wired up for Task 2 (refinement tribunal dispatch).
+    // They are intentionally pre-extracted and tested in isolation before the
+    // refinement path uses them; `dead_code` is allowed until that wiring lands.
+    /// Resolve the configured `max_sessions` cap map for `creator`.
+    ///
+    /// Returns `model_id → max concurrent sessions`. When the user has no
+    /// settings row or `max_sessions` is unset, an empty map is returned —
+    /// callers then apply a per-model default (conventionally 1) via
+    /// [`model_under_user_cap`].
+    #[allow(dead_code)]
+    pub(crate) async fn resolve_model_caps_for_user(
+        &self,
+        creator: &str,
+    ) -> std::collections::HashMap<String, u32> {
+        djinn_db::UserSettingsRepository::new(self.db.clone())
+            .get(creator)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.max_sessions)
+            .unwrap_or_default()
+    }
+
+    /// Check whether a single `(user, model)` is admissible under the
+    /// configured per-user concurrency cap.
+    ///
+    /// This re-reads the DB active-session counts plus the in-flight ledger
+    /// overlay on each call (via [`effective_running_by_user_model`]), so it
+    /// always reflects the latest state — including a just-recorded admission
+    /// in the same tick. Returns `true` when the user has room for one more
+    /// session on `model`.
+    ///
+    /// This is the single shared admission-check for single-model dispatch
+    /// paths (e.g. refinement tribunal dispatch). Multi-model dispatch paths
+    /// (normal task dispatch) seed once per pass and filter with
+    /// [`model_under_user_cap`] directly for efficiency, but they use the same
+    /// underlying primitives.
+    #[allow(dead_code)]
+    pub(crate) async fn check_user_model_admission(
+        &mut self,
+        user: &str,
+        model: &str,
+        cap: u32,
+    ) -> bool {
+        let running = self.effective_running_by_user_model().await;
+        model_under_user_cap(&running, user, model, cap)
+    }
+
+    /// Clear an in-flight dispatch reservation from the ledger.
+    ///
+    /// Called on failure paths where a dispatch was reserved (via
+    /// [`record_inflight_dispatch`]) but never produced a running session —
+    /// e.g. pool dispatch failure or task-setup failure. Removes the entry so
+    /// the `(user, model)` slot is immediately available again, and
+    /// persists the clearance to durable dispatch-state.
+    #[allow(dead_code)]
+    pub(crate) async fn clear_inflight_dispatch(&mut self, task_id: &str) {
+        if self.inflight_dispatches.remove(task_id).is_some() {
+            record_dispatch_live_state(
+                self.dispatch_cooldowns.len(),
+                self.inflight_dispatches.len(),
+            );
+            self.persist_durable_dispatch_state_update(
+                task_id,
+                None,
+                "inflight_ledger_clear",
+                DurableDispatchStateUpdate {
+                    inflight: Some(None),
                     ..Default::default()
                 },
             )
