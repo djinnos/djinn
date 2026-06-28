@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision,
-    ProposalSignoff, ProposalTarget,
+    EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
+    ProposalRevision, ProposalSignoff, ProposalTarget,
 };
 
 use crate::database::Database;
@@ -125,12 +125,12 @@ pub struct ProposalFeedbackCreateInput<'a> {
 
 pub struct ProposalDebateTrailCreateInput<'a> {
     pub proposal_id: &'a str,
-    /// `objection` | `rebuttal` | `verdict`.
+    /// `objection` | `rebuttal` | `verdict` | `needs_evidence` | `evidence_findings`.
     pub kind: &'a str,
     pub body: &'a str,
     /// When true, this entry blocks proposal readiness.
     pub blocking: bool,
-    /// Agent role (e.g. "advocate", "adversary", "judge").
+    /// Agent role (e.g. "advocate", "adversary", "judge", "spike").
     pub agent_role: &'a str,
     /// `agent` (default) or `user`.
     pub author_kind: &'a str,
@@ -141,6 +141,13 @@ pub struct ProposalDebateTrailCreateInput<'a> {
     pub against_revision_seq: i32,
     /// Debate round (1-based).
     pub round: i32,
+    /// Optional structured metadata persisted as JSONB in
+    /// `proposal_debate_trail.body_metadata`. Required for `needs_evidence`
+    /// (linkage to proposal/Judge task/spike task/round/revision) and for
+    /// `evidence_findings` (the structured findings payload). Optional and
+    /// ignored for `objection`/`rebuttal`/`verdict`, which only need the
+    /// `body` text.
+    pub body_metadata: Option<&'a serde_json::Value>,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -187,6 +194,239 @@ struct ProposalRevisionSnapshot<'a> {
     /// need to attribute the revision to a specific source (e.g. a planner
     /// targeted block-patch attached to the active native-skill version).
     event_metadata: Option<&'a serde_json::Value>,
+}
+
+/// Linkage payload attached to a `needs_evidence` debate-trail entry's
+/// `body_metadata`. Persists the structured linkage so the Judge/spike/
+/// coordinator can recover the demand's identity from a debate row alone,
+/// without needing to read `proposals.needs_evidence_claim`.
+///
+/// Fields are intentionally the same identifiers the proposal substrate
+/// already uses (proposal id, Judge task id, spike task id, round, revision
+/// sequence) plus a marker `kind = "needs_evidence_link_v1"` so future
+/// schema versions can be distinguished.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct NeedsEvidenceClaimLink {
+    /// Schema marker; `needs_evidence_link_v1`.
+    pub kind: String,
+    /// Proposal id (UUID) the demand was issued against. Required.
+    pub proposal_id: String,
+    /// Judge task id (UUID) that issued the demand. Required.
+    pub judge_task_id: String,
+    /// Spike task id (UUID) created (or to be created) to satisfy the
+    /// demand. Required.
+    pub spike_task_id: String,
+    /// Refinement debate round when the demand was issued. Required.
+    pub round: i32,
+    /// Proposal revision sequence the demand targets. Required.
+    pub against_revision_seq: i32,
+}
+
+impl NeedsEvidenceClaimLink {
+    pub const KIND_MARKER: &'static str = "needs_evidence_link_v1";
+
+    /// Build the structured payload from a `NeedsEvidenceClaim` (the typed
+    /// claim produced by the Judge demand tool) plus the proposal id and
+    /// spike task id the substrate already knows about.
+    pub fn from_claim(
+        proposal_id: &str,
+        spike_task_id: &str,
+        claim: &NeedsEvidenceClaim,
+    ) -> Self {
+        Self {
+            kind: Self::KIND_MARKER.to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            judge_task_id: claim.created_by_task_id.clone(),
+            spike_task_id: spike_task_id.to_owned(),
+            round: claim.round,
+            against_revision_seq: claim.against_revision_seq,
+        }
+    }
+
+    /// Serialize this link to JSON for storage in `body_metadata`.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("NeedsEvidenceClaimLink is always serializable")
+    }
+
+    /// Parse + validate the linkage payload out of a `body_metadata` JSONB
+    /// value. Returns `Err(String)` on schema mismatch or missing required
+    /// fields so callers can surface a clear error message.
+    pub fn from_metadata(meta: &serde_json::Value) -> std::result::Result<Self, String> {
+        // First reject obvious shape problems up front.
+        let obj = meta.as_object().ok_or_else(|| {
+            "needs_evidence body_metadata must be a JSON object".to_owned()
+        })?;
+        let kind = obj
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "needs_evidence body_metadata missing required field \"kind\"".to_owned())?;
+        if kind != Self::KIND_MARKER {
+            return Err(format!(
+                "needs_evidence body_metadata kind mismatch: expected {:?}, got {:?}",
+                Self::KIND_MARKER,
+                kind
+            ));
+        }
+        // Then serde-deserialize to enforce the typed schema (this is what
+        // catches missing required string/int fields).
+        let link: Self = serde_json::from_value(meta.clone()).map_err(|e| {
+            format!("needs_evidence body_metadata failed to parse NeedsEvidenceClaimLink: {e}")
+        })?;
+        if link.proposal_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.proposal_id must be non-empty".to_owned());
+        }
+        if link.judge_task_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.judge_task_id must be non-empty".to_owned());
+        }
+        if link.spike_task_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.spike_task_id must be non-empty".to_owned());
+        }
+        if link.round <= 0 {
+            return Err("needs_evidence body_metadata.round must be >= 1".to_owned());
+        }
+        if link.against_revision_seq <= 0 {
+            return Err(
+                "needs_evidence body_metadata.against_revision_seq must be >= 1".to_owned(),
+            );
+        }
+        Ok(link)
+    }
+}
+
+/// Lifecycle event kinds for the evidence pipeline that build on
+/// `record_refinement_lifecycle`. Centralized so sibling code can pattern-
+/// match a single source of truth instead of stringly-typing the kinds at
+/// every call site.
+pub mod evidence_lifecycle_kind {
+    /// Refinement has been parked waiting for an evidence spike to close.
+    pub const AWAITING_EVIDENCE_STARTED: &str = "refinement_awaiting_evidence_started";
+    /// The spike returned structured findings and the substrate has accepted
+    /// the result; refinement resumes.
+    pub const EVIDENCE_RECEIVED: &str = "refinement_evidence_received";
+    /// The spike failed (cancelled, errored, or force-closed without
+    /// findings). Refinement resumes without the spike answer.
+    pub const EVIDENCE_FAILED: &str = "refinement_evidence_failed";
+}
+
+/// Builder for the structured `event_metadata` JSON used by the three
+/// evidence lifecycle events. Field names match the convention the
+/// `record_refinement_lifecycle` row already documents (round, revision,
+/// source task ids, etc.) and stay stable across sibling tasks.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct EvidenceLifecycleMetadata {
+    /// Discriminant field — values: `"awaiting_started"`, `"received"`,
+    /// `"failed"`. Stored under `event_metadata.phase` so downstream
+    /// readers don't need to know the lifecycle `event_kind` to interpret
+    /// the metadata.
+    pub phase: String,
+    /// Proposal id the lifecycle event applies to. Required.
+    pub proposal_id: String,
+    /// Spike task id this event is about (the spike that produced or
+    /// failed to produce evidence). Required.
+    pub spike_task_id: String,
+    /// Judge task id that originally issued the needs-evidence demand.
+    /// Required for `awaiting_started` and `received`; may be omitted for
+    /// `failed` if the Judge task was hard-deleted before this event.
+    pub judge_task_id: String,
+    /// Refinement round this event belongs to. Required.
+    pub round: i32,
+    /// Proposal revision sequence the spike was working against. Required.
+    pub against_revision_seq: i32,
+    /// For `evidence_failed`, the reason (`spike_cancelled`,
+    /// `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+    /// `None` for the other phases.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub failure_reason: Option<String>,
+}
+
+impl EvidenceLifecycleMetadata {
+    /// Build the metadata for `refinement_awaiting_evidence_started`.
+    pub fn awaiting_started(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Self {
+        Self {
+            phase: "awaiting_started".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: None,
+        }
+    }
+
+    /// Build the metadata for `refinement_evidence_received`.
+    pub fn received(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Self {
+        Self {
+            phase: "received".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: None,
+        }
+    }
+
+    /// Build the metadata for `refinement_evidence_failed`.
+    pub fn failed(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        failure_reason: &str,
+    ) -> Self {
+        Self {
+            phase: "failed".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: Some(failure_reason.to_owned()),
+        }
+    }
+
+    /// Serialize to the `serde_json::Value` shape `record_refinement_lifecycle`
+    /// expects, wrapped under the documented `metadata` key so reviewers can
+    /// see at a glance what the row carries.
+    pub fn to_event_metadata(&self) -> serde_json::Value {
+        serde_json::json!({"metadata": self})
+    }
+
+    /// Parse the `event_metadata` JSON back out of a stored lifecycle row.
+    /// Accepts both the legacy unwrapped shape (when `metadata` is the
+    /// object itself) and the new wrapped shape; returns the inner metadata.
+    pub fn parse_event_metadata(raw: Option<&str>) -> std::result::Result<Option<Self>, String> {
+        match raw {
+            None | Some("") => Ok(None),
+            Some(s) => {
+                let v: serde_json::Value = serde_json::from_str(s)
+                    .map_err(|e| format!("invalid lifecycle metadata JSON: {e}"))?;
+                // Try wrapped form first: `{"metadata": {...}}`.
+                if let Some(inner) = v.get("metadata") {
+                    return serde_json::from_value::<Self>(inner.clone())
+                        .map(Some)
+                        .map_err(|e| format!("invalid EvidenceLifecycleMetadata (wrapped): {e}"));
+                }
+                // Legacy unwrapped form: the metadata IS the object.
+                serde_json::from_value::<Self>(v)
+                    .map(Some)
+                    .map_err(|e| format!("invalid EvidenceLifecycleMetadata (unwrapped): {e}"))
+            }
+        }
+    }
 }
 
 pub struct ProposalRepository {
@@ -615,17 +855,91 @@ impl ProposalRepository {
 
     /// Append a debate-trail entry. Validates that the proposal exists and that
     /// `kind` is one of the allowed values. Emits a `proposal_debate_trail_created` event.
+    ///
+    /// Allowed kinds:
+    /// - `objection` | `rebuttal` | `verdict` — human-readable debate rows
+    ///   with `body` text; `body_metadata` is optional and ignored when set.
+    /// - `needs_evidence` — Judge's structured demand that refinement be
+    ///   parked for a spike. Requires `agent_role = "judge"`, `blocking =
+    ///   true` (so it participates in the open-blocking partial index used
+    ///   by readiness queries), and `body_metadata` containing the
+    ///   [`NeedsEvidenceClaimLink`] linkage payload (proposal id, Judge
+    ///   task id, spike task id, round, revision). The `body` field holds
+    ///   the human-readable question summary.
+    /// - `evidence_findings` — Spike's structured answer. Requires
+    ///   `agent_role = "spike"`, `blocking = false`, and `body_metadata`
+    ///   containing a well-formed [`EvidenceFindings`] payload (per the
+    ///   schema in the proposal acceptance criteria). Malformed findings
+    ///   are rejected with a clear error.
     pub async fn add_debate_trail_entry(
         &self,
         input: ProposalDebateTrailCreateInput<'_>,
     ) -> Result<ProposalDebateTrail> {
         self.db.ensure_initialized().await?;
-        // Validate kind.
+        // Validate kind + per-kind invariants.
         match input.kind {
-            "objection" | "rebuttal" | "verdict" => {}
+            "objection" | "rebuttal" | "verdict" => {
+                // No metadata required for the legacy kinds; `body_metadata`
+                // is silently ignored.
+            }
+            "needs_evidence" => {
+                if input.agent_role != "judge" {
+                    return Err(Error::InvalidData(format!(
+                        "needs_evidence debate entry requires agent_role = \"judge\", got {:?}",
+                        input.agent_role
+                    )));
+                }
+                if !input.blocking {
+                    return Err(Error::InvalidData(
+                        "needs_evidence debate entry must be blocking = true (it gates \
+                         refinement until the spike closes)"
+                            .to_owned(),
+                    ));
+                }
+                let meta = input.body_metadata.ok_or_else(|| {
+                    Error::InvalidData(
+                        "needs_evidence debate entry requires body_metadata with linkage \
+                         (proposal id, Judge task id, spike task id, round, revision)"
+                            .to_owned(),
+                    )
+                })?;
+                NeedsEvidenceClaimLink::from_metadata(meta).map_err(Error::InvalidData)?;
+            }
+            "evidence_findings" => {
+                if input.agent_role != "spike" {
+                    return Err(Error::InvalidData(format!(
+                        "evidence_findings debate entry requires agent_role = \"spike\", got {:?}",
+                        input.agent_role
+                    )));
+                }
+                if input.blocking {
+                    return Err(Error::InvalidData(
+                        "evidence_findings debate entry must be blocking = false (the spike \
+                         answer resolves the demand rather than blocking readiness)"
+                            .to_owned(),
+                    ));
+                }
+                let meta = input.body_metadata.ok_or_else(|| {
+                    Error::InvalidData(
+                        "evidence_findings debate entry requires body_metadata containing the \
+                         structured findings payload"
+                            .to_owned(),
+                    )
+                })?;
+                let findings = EvidenceFindings::parse_stored(Some(&meta.to_string()))
+                    .map_err(Error::InvalidData)?
+                    .ok_or_else(|| {
+                        Error::InvalidData(
+                            "evidence_findings body_metadata must contain a non-empty \
+                                 structured findings payload"
+                                .to_owned(),
+                        )
+                    })?;
+                findings.validate().map_err(Error::InvalidData)?;
+            }
             other => {
                 return Err(Error::InvalidData(format!(
-                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, or verdict"
+                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, verdict, needs_evidence, or evidence_findings"
                 )));
             }
         }
@@ -655,8 +969,8 @@ impl ProposalRepository {
             "INSERT INTO proposal_debate_trail
                 (id, proposal_id, kind, body, blocking, agent_role, author_kind,
                  author_user_id, author_model, source_task_id,
-                 against_revision_seq, round)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 against_revision_seq, round, body_metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             id,
             input.proposal_id,
             input.kind,
@@ -669,6 +983,7 @@ impl ProposalRepository {
             input.source_task_id,
             input.against_revision_seq,
             input.round,
+            input.body_metadata,
         )
         .execute(self.db.pool())
         .await?;
@@ -745,6 +1060,63 @@ impl ProposalRepository {
                 &entry,
             ));
         Ok(entry)
+    }
+
+    /// Return the unresolved blocking debate-trail entries for a proposal,
+    /// ordered by creation time. An entry is "unresolved blocking" when
+    /// `blocking = true` AND `resolved_at IS NULL`. Used by readiness gates
+    /// and the per-run needs-evidence cap (sibling task `g442`) to count
+    /// pending demands without scanning the full trail.
+    pub async fn unresolved_blocking_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND blocking = true
+               AND resolved_at IS NULL
+             ORDER BY created_at, id"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the `needs_evidence` debate-trail entries for a proposal
+    /// (resolved or not), ordered by creation time. Used by the per-run cap
+    /// accounting to count accepted Judge demands; malformed/rejected
+    /// demands never reach this list because `add_debate_trail_entry`
+    /// refuses to persist them.
+    pub async fn needs_evidence_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND kind = 'needs_evidence'
+             ORDER BY created_at, id"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     // ── Listing ──────────────────────────────────────────────────────────────
@@ -904,6 +1276,92 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         Ok(())
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_awaiting_evidence_started` row with the structured
+    /// `EvidenceLifecycleMetadata` already shaped. Returns the JSON that was
+    /// persisted so callers can echo it in tool responses / logs.
+    pub async fn record_awaiting_evidence_started(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::awaiting_started(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_evidence_received` row with the structured metadata.
+    pub async fn record_evidence_received(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::received(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_evidence_failed` row with the structured metadata,
+    /// including the failure reason.
+    pub async fn record_evidence_failed(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        failure_reason: &str,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::failed(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+            failure_reason,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::EVIDENCE_FAILED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
     }
 
     /// Return the proposal IDs whose refinement is currently dangling — i.e.
