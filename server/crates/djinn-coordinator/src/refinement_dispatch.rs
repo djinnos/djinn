@@ -210,6 +210,13 @@ impl CoordinatorActor {
     /// At each round boundary the deterministic P1 DoR evaluator is consulted
     /// so that readiness findings are available to the dispatched agent and
     /// included in stop metadata.
+    ///
+    /// Admission gate (proposal j479 / epic xofs): attribution is resolved and
+    /// validated, the per-user/model cap is checked, and an in-flight
+    /// reservation is recorded — all **before** task creation, spawn-budget
+    /// consumption, or `pool.dispatch()`. At-cap phases defer non-terminally
+    /// so the state machine retries on the next tick. Failed paths clear the
+    /// reservation so no slot leaks.
     async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
         let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
             return;
@@ -245,11 +252,36 @@ impl CoordinatorActor {
             return;
         }
 
-        // The user this run is attributed to (task owner + model scope).
-        // Falls back to the proposal author when not explicitly set.
+        // ── Step 1: Resolve and validate attribution before any side effect ──
+        //
+        // The attributed user determines the per-user cap scope and model
+        // resolution. Missing, empty, dangling, or otherwise unresolvable
+        // attribution fails closed with an operator-visible trace/status
+        // reason, and NO refinement task row, spawn-budget consumption, or
+        // pool dispatch occurs.
         let attributed_user_id = self
             .resolve_refinement_attributed_user(proposal_id, state.attributed_user_id.clone())
             .await;
+
+        let Some(ref user_id) = attributed_user_id else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                phase = ?phase,
+                "Refinement dispatch FAIL-CLOSED: no attributed user could be resolved \
+                 (no explicit attributed_user_id and no proposal author). \
+                 Refusing to dispatch without a real user identity."
+            );
+            self.terminate_refinement(
+                proposal_id,
+                StopReason::AgentFailure {
+                    role: format!("{:?}", phase),
+                    error: "attribution unresolvable: no user identity for refinement dispatch"
+                        .into(),
+                },
+            )
+            .await;
+            return;
+        };
 
         // Read diverse_refinement setting at the round boundary.
         let diverse_refinement = self.read_diverse_refinement_setting(proposal_id).await;
@@ -278,6 +310,41 @@ impl CoordinatorActor {
             )
             .await;
 
+        // ── Step 2: Per-user/model cap admission (check + reserve atomically) ──
+        //
+        // Use the shared admission surface to check whether the attributed
+        // user has room for one more session on the selected model. If at-cap,
+        // defer non-terminally — no task row, no spawn-budget consumption, no
+        // pool dispatch. The state machine retries on the next tick.
+        let user_caps = self.resolve_model_caps_for_user(user_id).await;
+        let cap = user_caps.get(&model_id).copied().unwrap_or(1);
+
+        if !self
+            .check_user_model_admission(user_id, &model_id, cap)
+            .await
+        {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                phase = ?phase,
+                user_id = %user_id,
+                model_id = %model_id,
+                cap,
+                "Refinement dispatch deferred: user at per-model concurrency cap \
+                 (retryable — no task row, no spawn-budget, no pool dispatch)"
+            );
+            return;
+        }
+
+        // Record a provisional in-flight reservation so the per-user cap
+        // reflects this admission immediately — before the task row exists.
+        // This closes the check-reserve race window where another candidate
+        // could pass admission for the same (user, model).
+        let provisional_key = format!("refinement:{proposal_id}");
+        self.provisional_admissions.insert(
+            provisional_key.clone(),
+            (Some(user_id.clone()), model_id.clone()),
+        );
+
         // Build a readiness-enriched task description so the agent sees
         // current DoR findings.
         let readiness_context = readiness
@@ -285,7 +352,10 @@ impl CoordinatorActor {
             .and_then(|r| r.to_error_string())
             .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
 
-        // Create a refinement task in the DB.
+        // ── Step 3: Create the refinement task (first DB side effect) ────────
+        //
+        // The task row is created only AFTER the cap reservation exists. On
+        // failure, the provisional reservation is cleared immediately.
         let task_id = match self
             .create_refinement_task_with_context(
                 proposal_id,
@@ -299,6 +369,7 @@ impl CoordinatorActor {
         {
             Some(id) => id,
             None => {
+                self.clear_provisional_admission(&provisional_key);
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     phase = ?phase,
@@ -316,7 +387,17 @@ impl CoordinatorActor {
             }
         };
 
-        // Record spawn in the state machine.
+        // Re-key the provisional reservation to the real task id so that
+        // existing reconciliation (pool liveness check) and session-start
+        // cleanup can clear it, and so subsequent candidates for the same
+        // (user, model) see the reservation under the durable key.
+        self.rekey_provisional_to_inflight(&provisional_key, &task_id, user_id, &model_id)
+            .await;
+
+        // ── Step 4: Consume spawn budget ────────────────────────────────────
+        //
+        // On spawn-cap overflow, clear the in-flight reservation (the real
+        // task id) before terminating so the slot is immediately available.
         {
             let state = self.active_refinements.get_mut(proposal_id).unwrap();
             if let Err(reason) = state.record_spawn() {
@@ -325,6 +406,12 @@ impl CoordinatorActor {
                     ?reason,
                     "Refinement spawn cap reached"
                 );
+                self.clear_inflight_dispatch(&task_id).await;
+                self.close_refinement_task(
+                    &task_id,
+                    "refinement spawn cap reached — task will not be dispatched",
+                )
+                .await;
                 self.persist_refinement_stop(proposal_id, &reason).await;
                 self.refinement_sessions.remove(proposal_id);
                 return;
@@ -333,7 +420,10 @@ impl CoordinatorActor {
 
         let project_path = self.resolve_refinement_project_path(proposal_id).await;
 
-        // Dispatch through the slot pool.
+        // ── Step 5: Dispatch through the slot pool (last side effect) ───────
+        //
+        // On pool dispatch failure, clear the in-flight reservation so the
+        // slot is immediately available and terminate the refinement.
         match self.pool.dispatch(&task_id, &project_path, &model_id).await {
             Ok(()) => {
                 tracing::info!(
@@ -355,6 +445,9 @@ impl CoordinatorActor {
                 );
             }
             Err(e) => {
+                self.clear_inflight_dispatch(&task_id).await;
+                self.close_refinement_task(&task_id, "refinement dispatch failed (pool error)")
+                    .await;
                 tracing::warn!(
                     proposal_id = %proposal_id,
                     task_id = %task_id,
