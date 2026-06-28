@@ -345,7 +345,7 @@ describe("ProposalRefinement", () => {
     ).toBeInTheDocument();
   });
 
-  it("falls back to a default summary when judge_summary is empty", () => {
+  it("renders judge_summary markdown semantically", () => {
     const status: ProposalRefinementStatus = {
       active: true,
       current_round: 4,
@@ -353,7 +353,34 @@ describe("ProposalRefinement", () => {
       total_entries: 12,
       stop_reason: null,
       awaiting_review: true,
-      judge_summary: "",
+      judge_summary:
+        "**Approved** changes:\n\n- Tightened scope\n- Resolved ambiguity",
+    };
+    const { container } = render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Approved").tagName).toBe("STRONG");
+    expect(screen.getByRole("list")).toBeInTheDocument();
+    expect(screen.getByText("Tightened scope").tagName).toBe("LI");
+    expect(screen.getByText("Resolved ambiguity").tagName).toBe("LI");
+    expect(container.querySelector(".prose")).toBeInTheDocument();
+  });
+
+  it("falls back to a default summary when judge_summary is blank", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: " \n\t ",
     };
     render(
       <ProposalRefinement
