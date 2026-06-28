@@ -1,0 +1,4 @@
+disallowed-methods = [
+    "std::time::SystemTime::now",
+    "std::time::Instant::now",
+]

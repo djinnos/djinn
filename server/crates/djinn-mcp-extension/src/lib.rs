@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)]
+// TODO(70y0): temporary; remove after wall-clock migration
 // The `tool_code_graph()` schema uses `serde_json::json!` via the local
 // `object!` macro. After Phase 2 added seven new ops, the macro
 // expansion outgrew the default 128 recursion budget.
