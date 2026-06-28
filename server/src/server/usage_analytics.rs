@@ -1274,7 +1274,7 @@ mod tests {
         assert_eq!(kpis[3].unpriced_count, Some(0));
 
         // Serialize and verify omitted fields don't appear as null.
-        let json = serde_json::to_value(&kpis[0].label.clone()).unwrap();
+        let json = serde_json::to_value(kpis[0].label.clone()).unwrap();
         assert!(json.is_string()); // sanity — the KPI serialization is tested below.
 
         // Serialize the full KPI array and verify structure.
