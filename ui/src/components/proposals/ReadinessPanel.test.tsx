@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@/test/test-utils";
+import { render, screen, userEvent, waitFor } from "@/test/test-utils";
 import type {
   ProposalGateStatus,
   ProposalRefinementStatus,
@@ -158,7 +158,29 @@ describe("ReadinessPanel", () => {
       />,
     );
     expect(screen.getByText("Judge verdict")).toBeInTheDocument();
-    expect(screen.getByText("Needs-work")).toBeInTheDocument();
+    expect(screen.getAllByText("Needs-work").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders judge verdict body as markdown reasoning", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          judge_verdict_body:
+            "## Verdict\n\nNeeds **scope** before graduation.\n\n- Add target services",
+          judge_verdict_id: "v-3",
+          judge_needs_work: true,
+          ready: false,
+        })}
+        refinement={refinement()}
+      />,
+    );
+
+    expect(screen.getByText("Judge reasoning")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Verdict", level: 2 }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("scope").tagName).toBe("STRONG");
+    expect(screen.getByText("Add target services")).toBeInTheDocument();
   });
 
   // ── Adversary dry count ─────────────────────────────────────────────────
@@ -240,14 +262,65 @@ describe("ReadinessPanel", () => {
 
   // ── Human override badge ────────────────────────────────────────────────
 
-  it("renders Human override badge when human_override_active is true", () => {
+  it("renders Human override badge and active state when human_override_active is true", () => {
     render(
       <ReadinessPanel
-        gateStatus={gateStatus({ human_override_active: true })}
+        proposalId="p-1"
+        gateStatus={gateStatus({
+          ready: false,
+          human_override_active: true,
+          blocked_explanations: ["Judge returned needs-work"],
+        })}
         refinement={refinement()}
       />,
     );
     expect(screen.getByText("Human override")).toBeInTheDocument();
+    expect(screen.getByText(/A human override is active/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Override DoR and proceed/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("records a human override with an audit reason and refreshes", async () => {
+    const onChanged = vi.fn();
+    vi.mocked(callMcpTool).mockResolvedValue({ overridden: true } as never);
+    const user = userEvent.setup();
+
+    render(
+      <ReadinessPanel
+        proposalId="proposal-123"
+        gateStatus={gateStatus({
+          ready: false,
+          judge_verdict_id: "v-override",
+          judge_needs_work: true,
+          blocked_explanations: ["Judge returned needs-work"],
+        })}
+        refinement={refinement()}
+        onChanged={onChanged}
+      />,
+    );
+
+    const button = screen.getByRole("button", {
+      name: /Override DoR and proceed/,
+    });
+    expect(button).toBeDisabled();
+
+    await user.type(
+      screen.getByLabelText("Human override audit reason"),
+      "Judge is wrong because the missing DoR is covered by linked evidence.",
+    );
+    await user.click(button);
+
+    await waitFor(() => {
+      expect(callMcpTool).toHaveBeenCalledWith("proposal_verdict_override", {
+        proposal_id: "proposal-123",
+        overridden_verdict_entry_id: "v-override",
+        reason:
+          "Judge is wrong because the missing DoR is covered by linked evidence.",
+      });
+    });
+    expect(showToast.success).toHaveBeenCalledWith("Human override recorded");
+    expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
   it("does not render Human override badge when human_override_active is false", () => {

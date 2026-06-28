@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { showToast } from "@/lib/toast";
 import type { ProposalRefinementStatus } from "@/api/types";
+import { BlockMarkdown } from "./blocks/BlockShell";
 
 /**
  * Human-readable label for the stop reason.
@@ -36,6 +37,10 @@ function stopReasonLabel(reason: string): string {
     default:
       return reason;
   }
+}
+
+function judgeSummaryText(summary: string | null | undefined): string {
+  return summary && summary.trim() ? summary : "The tribunal converged.";
 }
 
 /**
@@ -207,10 +212,8 @@ export function ProposalRefinement({
             <Label className="text-sm font-medium">
               Tribunal converged — review the result
             </Label>
-            <div className="whitespace-pre-wrap rounded-md bg-muted/40 p-2 text-sm text-foreground">
-              {status.judge_summary && status.judge_summary.trim()
-                ? status.judge_summary
-                : "The tribunal converged."}
+            <div className="rounded-md bg-muted/40 p-2 text-sm text-foreground">
+              <BlockMarkdown>{judgeSummaryText(status.judge_summary)}</BlockMarkdown>
             </div>
             <p className="text-xs text-muted-foreground">
               The full refined spec is shown in the proposal above; the diff from

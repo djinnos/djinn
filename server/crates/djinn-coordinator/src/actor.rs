@@ -82,6 +82,16 @@ pub(super) struct CoordinatorActor {
     /// `max(db_count, ledger_count)` keeps the seed correct across restarts too.
     // Persisted in dispatch_state — see epic n6xw and proposal 8ipw
     pub(super) inflight_dispatches: HashMap<String, (Option<String>, String)>,
+    /// Provisional admission reservations for refinement dispatch.
+    ///
+    /// Before a refinement task row exists, the dispatch path reserves an
+    /// in-memory slot keyed by `proposal_id → (creator, model)` so that the
+    /// per-user cap is enforced atomically (check + reserve) before any
+    /// side-effecting work. Once the task row is created, the reservation is
+    /// re-keyed to the real task id via `inflight_dispatches` and removed from
+    /// here. This map is ephemeral (restart-safe-to-lose); reconciliation
+    /// against the live pool handles orphaned entries.
+    pub(super) provisional_admissions: HashMap<String, (Option<String>, String)>,
     /// Durable dispatch-state: task UUID → cooldown EXPIRY instant. Persisted as
     /// a wall-clock timestamp and converted to a process-local `StdInstant` on
     /// startup; expired persisted cooldowns are intentionally not reloaded.
@@ -389,6 +399,7 @@ impl CoordinatorActor {
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker,

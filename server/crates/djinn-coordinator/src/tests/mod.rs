@@ -449,6 +449,7 @@ fn coordinator_actor_for_tests(
         pr_errors: HashMap::new(),
         last_dispatched: HashMap::new(),
         inflight_dispatches: HashMap::new(),
+        provisional_admissions: HashMap::new(),
         dispatch_cooldowns: HashMap::new(),
         dispatch_failure_streak: HashMap::new(),
         background_work_tracker: BackgroundWorkTracker::default(),

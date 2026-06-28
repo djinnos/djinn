@@ -21,7 +21,7 @@ mod org_sync;
 mod project_tools;
 mod state;
 mod static_ui;
-mod usage_analytics;
+pub mod usage_analytics;
 mod users;
 pub use auth::{AuthenticatedUser, authenticate, require_admin};
 pub use org_sync::{SyncReport, start_org_member_sync, sync_once};
