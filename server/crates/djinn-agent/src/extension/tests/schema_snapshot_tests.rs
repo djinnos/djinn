@@ -86,8 +86,14 @@ fn assert_tool_references_registered(agent_type: AgentType, references: &[ToolRe
 fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
     let prompt_sources: &[(&str, &str)] = match agent_type {
         AgentType::Worker => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
-            ("prompts/dev.md", include_str!("../../../../djinn-roles/src/prompts/dev.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
+            (
+                "prompts/dev.md",
+                include_str!("../../../../djinn-roles/src/prompts/dev.md"),
+            ),
             (
                 "prompts/worker/research.md",
                 include_str!("../../../../djinn-roles/src/prompts/worker/research.md"),
@@ -98,18 +104,30 @@ fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
             ),
         ],
         AgentType::Reviewer => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
             (
                 "prompts/task-reviewer.md",
                 include_str!("../../../../djinn-roles/src/prompts/task-reviewer.md"),
             ),
         ],
         AgentType::Lead => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
-            ("prompts/lead.md", include_str!("../../../../djinn-roles/src/prompts/lead.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
+            (
+                "prompts/lead.md",
+                include_str!("../../../../djinn-roles/src/prompts/lead.md"),
+            ),
         ],
         AgentType::Planner => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
             (
                 "prompts/planner.md",
                 include_str!("../../../../djinn-roles/src/prompts/planner.md"),
@@ -132,29 +150,44 @@ fn prompt_references_for_agent(agent_type: AgentType) -> Vec<ToolReference> {
             ),
         ],
         AgentType::Architect => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
             (
                 "prompts/architect.md",
                 include_str!("../../../../djinn-roles/src/prompts/architect.md"),
             ),
         ],
         AgentType::Advocate => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
             (
                 "prompts/advocate.md",
                 include_str!("../../../../djinn-roles/src/prompts/advocate.md"),
             ),
         ],
         AgentType::Adversary => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
             (
                 "prompts/adversary.md",
                 include_str!("../../../../djinn-roles/src/prompts/adversary.md"),
             ),
         ],
         AgentType::Judge => &[
-            ("prompts/base.md", include_str!("../../../../djinn-roles/src/prompts/base.md")),
-            ("prompts/judge.md", include_str!("../../../../djinn-roles/src/prompts/judge.md")),
+            (
+                "prompts/base.md",
+                include_str!("../../../../djinn-roles/src/prompts/base.md"),
+            ),
+            (
+                "prompts/judge.md",
+                include_str!("../../../../djinn-roles/src/prompts/judge.md"),
+            ),
         ],
     };
 
