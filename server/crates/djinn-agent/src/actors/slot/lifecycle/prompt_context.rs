@@ -151,51 +151,31 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
 }
 
-/// Build the full prompt context (all `TaskContext` fields, base +
-/// extensions + skills prompts) for one role session.
-///
-/// Reads activity log, epic row (when the role needs it), knowledge notes
-/// scoped to the task's paths. Non-fatal: every
-/// DB query falls back to `None` on error, mirroring the original inline
-/// block.
-///
-/// Called from `supervisor_impl::stage::execute_stage` which is only
-/// reachable through the host callback dispatch path
-/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
-/// `dispatch_task_runtime` → supervisor → stage).
-pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
-    let PromptContextInputs {
-        task,
-        runtime_role,
-        role_for_epic_check,
-        project_path,
-        worktree_path,
-        conflict_ctx,
-        merge_validation_ctx,
-        prompt_setup_commands,
-        system_prompt_extensions,
-        learned_prompt,
-        resolved_skills,
-        app_state,
-        read_sources,
-    } = inputs;
-
-    let conflict_files = conflict_ctx.map(|m| {
+/// Format conflicting files from merge-conflict metadata as a `- <path>`
+/// markdown list. Returns `None` when there is no conflict context.
+fn format_conflict_files(conflict_ctx: Option<&MergeConflictMetadata>) -> Option<String> {
+    conflict_ctx.map(|m| {
         m.conflicting_files
             .iter()
             .map(|f| format!("- {f}"))
             .collect::<Vec<_>>()
             .join("\n")
-    });
+    })
+}
 
-    // Fetch activity log for the prompt: last 3 high-signal comments plus a
-    // summary of total counts by role so the agent knows what to look up.
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity_entries = task_repo.list_activity(&task.id).await.ok();
-    let activity_text = match &activity_entries {
+/// Build the pre-formatted activity-log digest from the raw activity
+/// entries. Returns `None` when the entries are empty or absent.
+///
+/// Output includes the last `max_feedback` high-signal comments and a
+/// per-role comment-count summary line.
+fn format_activity_text(
+    activity_entries: &Option<Vec<djinn_core::models::ActivityEntry>>,
+    max_feedback: usize,
+) -> Option<String> {
+    match activity_entries {
         Some(entries) if !entries.is_empty() => {
-            // Last 3 high-signal comments (lead, reviewer, verification)
-            let feedback = recent_feedback(entries, 3);
+            // Last N high-signal comments (lead, reviewer, verification)
+            let feedback = recent_feedback(entries, max_feedback);
 
             // Count comments by role for the summary line
             let mut counts: std::collections::BTreeMap<&str, usize> =
@@ -231,7 +211,67 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             }
         }
         _ => None,
-    };
+    }
+}
+
+/// Apply role extensions, skills, and read-source sections to the base
+/// prompt in the canonical order:
+///
+/// 1. Role-level `system_prompt_extensions` + `learned_prompt`
+/// 2. Resolved skills section
+/// 3. Read-only multi-repo sources section (last so it survives all
+///    other appends)
+///
+/// Returns the final `system_prompt` string.
+fn apply_prompt_sections(
+    base_system_prompt: &str,
+    system_prompt_extensions: &str,
+    learned_prompt: Option<&str>,
+    resolved_skills: &[ResolvedSkill],
+    read_sources: &[ReadSourceInfo],
+) -> String {
+    let with_extensions =
+        apply_role_extensions(base_system_prompt, system_prompt_extensions, learned_prompt);
+    let with_skills = apply_skills(&with_extensions, resolved_skills);
+    append_read_sources_prompt(&with_skills, read_sources)
+}
+
+/// Build the full prompt context (all `TaskContext` fields, base +
+/// extensions + skills prompts) for one role session.
+///
+/// Reads activity log, epic row (when the role needs it), knowledge notes
+/// scoped to the task's paths. Non-fatal: every
+/// DB query falls back to `None` on error, mirroring the original inline
+/// block.
+///
+/// Called from `supervisor_impl::stage::execute_stage` which is only
+/// reachable through the host callback dispatch path
+/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
+/// `dispatch_task_runtime` → supervisor → stage).
+pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
+    let PromptContextInputs {
+        task,
+        runtime_role,
+        role_for_epic_check,
+        project_path,
+        worktree_path,
+        conflict_ctx,
+        merge_validation_ctx,
+        prompt_setup_commands,
+        system_prompt_extensions,
+        learned_prompt,
+        resolved_skills,
+        app_state,
+        read_sources,
+    } = inputs;
+
+    // ── Conflict metadata ────────────────────────────────────────────────
+    let conflict_files = format_conflict_files(conflict_ctx);
+
+    // ── Activity log ─────────────────────────────────────────────────────
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let activity_entries = task_repo.list_activity(&task.id).await.ok();
+    let activity_text = format_activity_text(&activity_entries, 3);
 
     // Extract worker submission summary/concerns from the activity log so the
     // reviewer can see why certain changes were made.
@@ -486,17 +526,19 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             reviewer_diff_context: reviewer_diff_context.clone(),
         },
     );
-    // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
+    // ── Final prompt: extensions → skills → read sources (canonical order) ──
     let system_prompt_with_extensions = apply_role_extensions(
         &base_system_prompt,
         system_prompt_extensions,
         learned_prompt,
     );
-    // Append skills section after all other extensions.
-    let system_prompt = apply_skills(&system_prompt_with_extensions, resolved_skills);
-    // Read-only multi-repo: advertise the epic's read-source projects last
-    // so the section survives all other extension/skill appends.
-    let system_prompt = append_read_sources_prompt(&system_prompt, read_sources);
+    let system_prompt = apply_prompt_sections(
+        &base_system_prompt,
+        system_prompt_extensions,
+        learned_prompt,
+        resolved_skills,
+        read_sources,
+    );
 
     PromptContext {
         conflict_files,
@@ -579,544 +621,5 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use djinn_core::events::EventBus;
-    use djinn_core::models::Epic;
-    use djinn_db::{
-        Database, EpicCreateInput, EpicRepository, ProposalCreateInput, ProposalRepository,
-        TaskRepository,
-    };
-    use tokio_util::sync::CancellationToken;
-
-    use crate::roles::LeadRole;
-    use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
-
-    async fn create_epic(
-        db: &Database,
-        events: &EventBus,
-        project_id: &str,
-        title: &str,
-        description: &str,
-        status: Option<&str>,
-    ) -> Epic {
-        EpicRepository::new(db.clone(), events.clone())
-            .create_for_project(
-                project_id,
-                EpicCreateInput {
-                    title,
-                    description,
-                    emoji: "🧪",
-                    color: "blue",
-                    owner: "test-owner",
-                    memory_refs: None,
-                    status,
-                    auto_breakdown: None,
-                    originating_adr_id: None,
-                    blocked_by: None,
-                },
-            )
-            .await
-            .expect("create test epic")
-    }
-
-    async fn prompt_context_for_task(db: Database, task: &djinn_core::models::Task) -> String {
-        let app_state = agent_context_from_db(db, CancellationToken::new());
-        let worktree = test_tempdir("prompt-context-worktree-");
-        let role = LeadRole;
-        assemble_prompt_context(PromptContextInputs {
-            task,
-            runtime_role: &role,
-            role_for_epic_check: &role,
-            project_path: "/workspace/test-project",
-            worktree_path: worktree.path(),
-            conflict_ctx: None,
-            merge_validation_ctx: None,
-            prompt_setup_commands: None,
-            system_prompt_extensions: "",
-            learned_prompt: None,
-            resolved_skills: &[],
-            app_state: &app_state,
-            read_sources: &[],
-        })
-        .await
-        .epic_context
-        .expect("lead prompt context includes epic context")
-    }
-
-    /// Build the full [`PromptContext`] with customizable inputs.
-    ///
-    /// Test helper for characterization tests that inspect fields beyond
-    /// `epic_context`. Returns the complete struct so individual fields
-    /// and ordering in the rendered prompt can be asserted.
-    async fn full_prompt_context(
-        db: Database,
-        task: &djinn_core::models::Task,
-        conflict_ctx: Option<&MergeConflictMetadata>,
-        system_prompt_extensions: &str,
-        learned_prompt: Option<&str>,
-        resolved_skills: &[ResolvedSkill],
-        read_sources: &[ReadSourceInfo],
-    ) -> PromptContext {
-        let app_state = agent_context_from_db(db, CancellationToken::new());
-        let worktree = test_tempdir("prompt-context-worktree-");
-        let role = LeadRole;
-        assemble_prompt_context(PromptContextInputs {
-            task,
-            runtime_role: &role,
-            role_for_epic_check: &role,
-            project_path: "/workspace/test-project",
-            worktree_path: worktree.path(),
-            conflict_ctx,
-            merge_validation_ctx: None,
-            prompt_setup_commands: None,
-            system_prompt_extensions,
-            learned_prompt,
-            resolved_skills,
-            app_state: &app_state,
-            read_sources,
-        })
-        .await
-    }
-
-    #[tokio::test]
-    async fn epic_context_includes_blocking_and_sibling_sections() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let events = EventBus::noop();
-        let project = create_test_project(&db).await;
-        let epic_repo = EpicRepository::new(db.clone(), events.clone());
-        let task_repo = TaskRepository::new(db.clone(), events.clone());
-        let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
-
-        let subject_epic = create_epic(
-            &db,
-            &events,
-            &project.id,
-            "Subject decomposition epic",
-            "Build on dependency foundations without duplicating them.",
-            None,
-        )
-        .await;
-        let blocking_epic = create_epic(
-            &db,
-            &events,
-            &project.id,
-            "Foundation blocking epic",
-            "Owns the schema and migration foundation.",
-            Some("closed"),
-        )
-        .await;
-
-        task_repo
-            .create(
-                &blocking_epic.id,
-                "Ship shared migration",
-                "migration delivered",
-                "migration design",
-                "task",
-                1,
-                "test-owner",
-                Some("closed"),
-            )
-            .await
-            .expect("create first closed blocker task");
-        task_repo
-            .create(
-                &blocking_epic.id,
-                "Ship shared schema module",
-                "schema module delivered",
-                "schema module design",
-                "task",
-                1,
-                "test-owner",
-                Some("closed"),
-            )
-            .await
-            .expect("create second closed blocker task");
-
-        epic_repo
-            .update_blockers_atomic(
-                &subject_epic.id,
-                std::slice::from_ref(&blocking_epic.id),
-                &[],
-            )
-            .await
-            .expect("wire epic blocker relationship");
-
-        let sibling_epic = create_epic(
-            &db,
-            &events,
-            &project.id,
-            "Sibling proposal epic",
-            "Owns a later proposal phase.",
-            None,
-        )
-        .await;
-        let proposal = proposal_repo
-            .create(ProposalCreateInput {
-                title: "Dependency-aware decomposition proposal",
-                body: "Proposal body",
-                acceptance_criteria: None,
-                status: Some("building"),
-                body_format: None,
-            })
-            .await
-            .expect("create proposal");
-        proposal_repo
-            .link_epic(&proposal.id, &subject_epic.id, &project.id)
-            .await
-            .expect("link subject epic to proposal");
-        proposal_repo
-            .link_epic(&proposal.id, &sibling_epic.id, &project.id)
-            .await
-            .expect("link sibling epic to proposal");
-
-        let task = task_repo
-            .create(
-                &subject_epic.id,
-                "Decompose subject epic",
-                "task description",
-                "task design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create subject task");
-
-        let epic_context = prompt_context_for_task(db, &task).await;
-
-        assert!(epic_context.contains("### Blocking Epics"));
-        assert!(epic_context.contains("Foundation blocking epic"));
-        assert!(epic_context.contains("Ship shared migration"));
-        assert!(epic_context.contains("Ship shared schema module"));
-        assert!(epic_context.contains("### Proposal Sibling Epics"));
-        assert!(epic_context.contains("Sibling proposal epic"));
-    }
-
-    #[tokio::test]
-    async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let events = EventBus::noop();
-        let project = create_test_project(&db).await;
-        let task_repo = TaskRepository::new(db.clone(), events.clone());
-        let standalone_epic = create_epic(
-            &db,
-            &events,
-            &project.id,
-            "Standalone epic",
-            "No blockers and no proposal link.",
-            None,
-        )
-        .await;
-        let task = task_repo
-            .create(
-                &standalone_epic.id,
-                "Standalone task",
-                "task description",
-                "task design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create standalone task");
-
-        let epic_context = prompt_context_for_task(db, &task).await;
-
-        assert!(!epic_context.contains("### Blocking Epics"));
-        assert!(!epic_context.contains("### Proposal Sibling Epics"));
-    }
-
-    // ── Characterization tests (task s19x) ────────────────────────────────
-    // These cover representative optional-prompt combinations that existing
-    // broad tests don't isolate. They are a safety net for subsequent
-    // extraction refactors and must not change production behavior.
-
-    #[tokio::test]
-    async fn missing_activity_yields_none_activity_text() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let project = create_test_project(&db).await;
-        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let epic = create_epic(
-            &db,
-            &EventBus::noop(),
-            &project.id,
-            "No-activity epic",
-            "Epic for activity test.",
-            None,
-        )
-        .await;
-        let task = task_repo
-            .create(
-                &epic.id,
-                "No-activity task",
-                "description",
-                "design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create task");
-
-        let ctx = full_prompt_context(db, &task, None, "", None, &[], &[]).await;
-        assert!(
-            ctx.activity_text.is_none(),
-            "task with no activity entries should yield None activity_text"
-        );
-    }
-
-    #[tokio::test]
-    async fn conflict_context_formats_files_and_preserves_branch_fields() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let project = create_test_project(&db).await;
-        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let epic = create_epic(
-            &db,
-            &EventBus::noop(),
-            &project.id,
-            "Conflict epic",
-            "Epic for conflict test.",
-            None,
-        )
-        .await;
-        let task = task_repo
-            .create(
-                &epic.id,
-                "Conflict task",
-                "description",
-                "design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create task");
-
-        let conflict = MergeConflictMetadata {
-            conflicting_files: vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
-            base_branch: "feature-branch".to_string(),
-            merge_target: "main".to_string(),
-        };
-        let ctx = full_prompt_context(db, &task, Some(&conflict), "", None, &[], &[]).await;
-
-        // conflict_files is the `- <path>` markdown list
-        let files = ctx
-            .conflict_files
-            .as_deref()
-            .expect("conflict_files should be Some");
-        assert!(
-            files.contains("- src/main.rs"),
-            "conflict_files should list src/main.rs"
-        );
-        assert!(
-            files.contains("- Cargo.toml"),
-            "conflict_files should list Cargo.toml"
-        );
-
-        // The lead template does not render merge branch placeholders (those
-        // are only in the worker conflict template), but the base prompt must
-        // still be non-empty and well-formed when conflict metadata is present.
-        assert!(
-            !ctx.base_system_prompt.is_empty(),
-            "base prompt should be non-empty with conflict context"
-        );
-
-        // The system_prompt (final prompt after extensions + skills) should
-        // also be non-empty — conflict context should not break the pipeline.
-        assert!(
-            !ctx.system_prompt.is_empty(),
-            "final system_prompt should be non-empty with conflict context"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_sources_appended_after_skills_and_extensions() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let project = create_test_project(&db).await;
-        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let epic = create_epic(
-            &db,
-            &EventBus::noop(),
-            &project.id,
-            "Read-source epic",
-            "Epic for read-source test.",
-            None,
-        )
-        .await;
-        let task = task_repo
-            .create(
-                &epic.id,
-                "Read-source task",
-                "description",
-                "design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create task");
-
-        let skills = vec![ResolvedSkill {
-            name: "test-skill".to_string(),
-            description: "A test skill".to_string(),
-            content: "Skill body content.".to_string(),
-            required: false,
-            trust_level: "project".to_string(),
-            recommended_for_roles: vec![],
-            tags: vec![],
-        }];
-        let sources = vec![ReadSourceInfo {
-            slug: "sibling-repo".to_string(),
-            name: "Sibling Repository".to_string(),
-        }];
-        let extensions = "Custom extension text.";
-
-        let ctx = full_prompt_context(db, &task, None, extensions, None, &skills, &sources).await;
-
-        // Skills section appears in the prompt
-        assert!(
-            ctx.system_prompt.contains("## Available Skills"),
-            "system_prompt should contain skills section"
-        );
-        // Extensions appear in the prompt
-        assert!(
-            ctx.system_prompt.contains("Custom extension text."),
-            "system_prompt should contain extensions"
-        );
-        // Read sources appear in the prompt
-        assert!(
-            ctx.system_prompt
-                .contains("## Related repositories (read-only)"),
-            "system_prompt should contain read sources section"
-        );
-        assert!(
-            ctx.system_prompt.contains("sibling-repo"),
-            "system_prompt should contain the read source slug"
-        );
-
-        // Ordering: extensions before skills, skills before read sources
-        let ext_pos = ctx
-            .system_prompt
-            .find("Custom extension text.")
-            .expect("extensions present");
-        let skills_pos = ctx
-            .system_prompt
-            .find("## Available Skills")
-            .expect("skills section present");
-        let sources_pos = ctx
-            .system_prompt
-            .find("## Related repositories (read-only)")
-            .expect("read sources section present");
-        assert!(
-            ext_pos < skills_pos,
-            "extensions should appear before skills section"
-        );
-        assert!(
-            skills_pos < sources_pos,
-            "skills section should appear before read sources"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolved_skills_appear_before_read_sources() {
-        let db = Database::ephemeral().await.expect("create ephemeral db");
-        let project = create_test_project(&db).await;
-        let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
-        let epic = create_epic(
-            &db,
-            &EventBus::noop(),
-            &project.id,
-            "Skills-ordering epic",
-            "Epic for skills ordering test.",
-            None,
-        )
-        .await;
-        let task = task_repo
-            .create(
-                &epic.id,
-                "Skills-ordering task",
-                "description",
-                "design",
-                "task",
-                1,
-                "test-owner",
-                None,
-            )
-            .await
-            .expect("create task");
-
-        let skills = vec![
-            ResolvedSkill {
-                name: "alpha-skill".to_string(),
-                description: "First skill".to_string(),
-                content: "Alpha body.".to_string(),
-                required: true,
-                trust_level: "project".to_string(),
-                recommended_for_roles: vec![],
-                tags: vec![],
-            },
-            ResolvedSkill {
-                name: "beta-skill".to_string(),
-                description: "Second skill".to_string(),
-                content: "Beta body.".to_string(),
-                required: false,
-                trust_level: "project".to_string(),
-                recommended_for_roles: vec![],
-                tags: vec![],
-            },
-        ];
-        let sources = vec![
-            ReadSourceInfo {
-                slug: "repo-a".to_string(),
-                name: "Repository A".to_string(),
-            },
-            ReadSourceInfo {
-                slug: "repo-b".to_string(),
-                name: "Repository B".to_string(),
-            },
-        ];
-
-        let ctx = full_prompt_context(db, &task, None, "", None, &skills, &sources).await;
-
-        // Both skills are present
-        assert!(
-            ctx.system_prompt.contains("**alpha-skill**"),
-            "alpha-skill present"
-        );
-        assert!(
-            ctx.system_prompt.contains("**beta-skill**"),
-            "beta-skill present"
-        );
-        // Both read sources are present
-        assert!(
-            ctx.system_prompt.contains("repo-a"),
-            "repo-a read source present"
-        );
-        assert!(
-            ctx.system_prompt.contains("repo-b"),
-            "repo-b read source present"
-        );
-
-        // Skills section appears before read-sources section
-        let skills_pos = ctx
-            .system_prompt
-            .find("## Available Skills")
-            .expect("skills section present");
-        let sources_pos = ctx
-            .system_prompt
-            .find("## Related repositories (read-only)")
-            .expect("read sources section present");
-        assert!(
-            skills_pos < sources_pos,
-            "resolved skills section must appear before read-sources section"
-        );
-    }
-}
+#[path = "prompt_context_tests.rs"]
+mod tests;
