@@ -152,7 +152,7 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
 /// Maps the shared service-handle fields and provides a no-op
 /// `SlotHostCallbacks` implementation (extraction backfill never
 /// invokes host callbacks).
-fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
+pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
     djinn_slot::host::SlotContext {
         db: agent.db.clone(),
         event_bus: agent.event_bus.clone(),
