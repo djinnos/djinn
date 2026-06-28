@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use super::handler_basic_ops::{
+use super::handler_impact_check::{
     CrateIndex, ImpactAggregator, check_impact_check_staleness,
     derive_safe_slice_and_recommendation,
 };

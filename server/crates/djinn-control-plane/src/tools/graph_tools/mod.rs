@@ -29,6 +29,7 @@ mod handler;
 mod handler_basic_ops;
 mod handler_change_ops;
 mod handler_coupling_ops;
+mod handler_impact_check;
 mod next_step_hints;
 pub(crate) mod operation_registry;
 mod request_types;
