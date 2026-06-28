@@ -208,7 +208,7 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let op = params.operation.as_str();
 
-        // Registry-derived dispatch for the converted basic vertical slice.
+        // Registry-derived dispatch for the converted vertical slice.
         // If the operation is registered, we dispatch through the registry path
         // so that the conversion is exercised at runtime.  Unconverted ops fall
         // through to the legacy handwritten match below.
@@ -217,7 +217,7 @@ impl DjinnMcpServer {
                 "neighbors" => return self.code_graph_neighbors(ctx, params).await,
                 "impact" => return self.code_graph_impact(ctx, params).await,
                 "context" => return self.code_graph_context(ctx, params).await,
-                // coupling_hotspots is intentionally left for the next task (4lij).
+                "coupling_hotspots" => return self.code_graph_coupling_hotspots(ctx, params).await,
                 _ => {}
             }
         }
