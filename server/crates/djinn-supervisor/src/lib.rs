@@ -1904,6 +1904,7 @@ pub fn trigger_as_str(t: TaskRunTrigger) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
