@@ -113,6 +113,7 @@ impl Clock for TestClock {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Tests use real time for TestClock construction
 mod tests {
     use super::*;
 

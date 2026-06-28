@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 use std::path::{Path, PathBuf};
 
 /// Lower CPU and I/O priority for a child process so djinn operations do not

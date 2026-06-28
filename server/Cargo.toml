@@ -6,11 +6,20 @@ resolver = "2"
 workspace-hack = { version = "0.1.0", path = "crates/workspace-hack" }
 globset = "0.4"
 
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+disallowed_methods = "deny"
+
 [package]
 publish = false
 name = "djinn-server"
 version = "0.1.0"
 edition = "2024"
+
+[lints]
+workspace = true
 
 [lib]
 doctest = false
