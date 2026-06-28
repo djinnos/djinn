@@ -139,6 +139,7 @@ impl DjinnMcpServer {
                 source_task_id: p.source_task_id.as_deref(),
                 against_revision_seq: p.against_revision_seq,
                 round: p.round,
+                body_metadata: None,
             })
             .await
         {

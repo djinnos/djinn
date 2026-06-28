@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id FROM user_settings WHERE auto_approve_prs = TRUE ORDER BY updated_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0d74d29f345db04988eb4234eda459cf9564f7a41aaf96ef04167e013802d04a"
+}

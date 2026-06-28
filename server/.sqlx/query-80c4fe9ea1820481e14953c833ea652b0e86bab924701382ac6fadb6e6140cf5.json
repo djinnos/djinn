@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE task_runs\n                 SET status = $1,\n                     ended_at = NULL\n                 WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "80c4fe9ea1820481e14953c833ea652b0e86bab924701382ac6fadb6e6140cf5"
+}

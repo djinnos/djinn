@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT note_id, session_id, created_at\n             FROM consolidated_note_provenance\n             WHERE note_id = $1 AND session_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "note_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "session_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3788c591ee8942db3357b45f02de0a8d9bffa40d90283b90f590e7082e634fdc"
+}

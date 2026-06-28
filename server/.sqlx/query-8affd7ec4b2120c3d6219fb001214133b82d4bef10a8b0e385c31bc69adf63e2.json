@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT model_id FROM sessions\n               WHERE task_id = $1 AND agent_type = $2\n               ORDER BY started_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_id",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8affd7ec4b2120c3d6219fb001214133b82d4bef10a8b0e385c31bc69adf63e2"
+}

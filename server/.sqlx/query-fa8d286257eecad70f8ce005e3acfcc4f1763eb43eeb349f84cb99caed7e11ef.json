@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM user_auth_sessions WHERE user_fk = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fa8d286257eecad70f8ce005e3acfcc4f1763eb43eeb349f84cb99caed7e11ef"
+}
