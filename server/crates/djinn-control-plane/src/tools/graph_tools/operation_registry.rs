@@ -9,8 +9,11 @@
 //! Until those land the items below are only exercised by this module's
 //! unit tests, so we suppress `dead_code` at the module boundary to keep
 //! `-D warnings` green.
+//! NOTE: `hw2d` has now wired the registry into `handler.rs` for the
+//! basic vertical slice (`neighbors`, `impact`, `context`).  The
+//! `dead_code` allow is retained because `coupling_hotspots` and the
+//! smoke exemplars are still only exercised by unit tests here.
 #![allow(dead_code)]
-//!
 //! The registry is purely data — no build scripts, no runtime graph
 //! cache access, no database or network dependencies.  Each entry is
 //! a `const`-compatible [`OpEntry`] struct collected into the
