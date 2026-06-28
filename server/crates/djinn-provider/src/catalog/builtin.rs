@@ -1045,6 +1045,81 @@ mod tests {
         );
     }
 
+    /// Regression: governable_subscription_for_model correctly identifies
+    /// Codex OAuth models on the openai namespace, which drives the
+    /// `SubscriptionPlan` → `"projected"` cost-basis path in stage.rs.
+    #[test]
+    fn governable_subscription_codex_variants_all_recognized() {
+        // Various codex model-id patterns that should match.
+        for model in [
+            "gpt-5.3-codex",
+            "openai/gpt-5.3-codex",
+            "gpt-5.5-codex",
+            "codex-mini",
+            "openai/codex-1",
+        ] {
+            assert_eq!(
+                governable_subscription_for_model("openai", model).as_deref(),
+                Some("chatgpt_codex"),
+                "openai/{model} should be recognized as Codex subscription"
+            );
+        }
+    }
+
+    /// Regression: plain openai models without a codex marker must NOT
+    /// resolve to a governable subscription — they are API-key models.
+    #[test]
+    fn governable_subscription_plain_openai_not_codex() {
+        for model in ["gpt-5.5", "openai/gpt-5.5", "gpt-4o", "o3", "gpt-5.4-turbo"] {
+            assert_eq!(
+                governable_subscription_for_model("openai", model),
+                None,
+                "openai/{model} should NOT be classified as a subscription"
+            );
+        }
+    }
+
+    /// Regression: coding-plan / token-plan provider ids always resolve to a
+    /// governable subscription for any model, driving `SubscriptionPlan` →
+    /// `"projected"`.
+    #[test]
+    fn governable_subscription_coding_plan_providers() {
+        for pid in [
+            "xiaomi-token-plan-sgp",
+            "xiaomi-token-plan-cn",
+            "minimax-coding-plan",
+            "kimi-for-coding",
+            "zai-coding-plan",
+            "zhipuai-coding-plan",
+            "alibaba-qwen-coding-plan",
+            "moonshotai-coding-plan",
+        ] {
+            assert_eq!(
+                governable_subscription_for_model(pid, "any-model").as_deref(),
+                Some(pid),
+                "{pid} should resolve to its own governable subscription"
+            );
+        }
+    }
+
+    /// Uncatalogued / non-subscription providers must return None, so they
+    /// never trigger the subscription path even when OAuth transport is used.
+    #[test]
+    fn governable_subscription_non_subscription_providers() {
+        for pid in [
+            "anthropic",
+            "fireworks-ai",
+            "custom-oauth-provider",
+            "google",
+        ] {
+            assert_eq!(
+                governable_subscription_for_model(pid, "any-model"),
+                None,
+                "{pid} should not be a governable subscription"
+            );
+        }
+    }
+
     #[test]
     fn generic_long_tail_defaults_to_api_key() {
         for id in [
