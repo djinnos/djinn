@@ -19,6 +19,7 @@ use axum::{
 };
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
@@ -59,7 +60,7 @@ struct UsageQuery {
 
 /// Time-series bucket granularity. Repository rows are daily; week/month
 /// variants are rolled up in this handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum Granularity {
     Day,
@@ -237,7 +238,7 @@ impl UsageQuery {
 // ── Response DTOs ────────────────────────────────────────────────────────────
 
 /// A single KPI card derived from the current vs previous window totals.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageKpiDto {
     label: String,
     /// Numeric value; `null` when unavailable (e.g. unpriced spend).
@@ -274,7 +275,7 @@ struct UsageKpiDto {
 
 /// One labelled component of a KPI's headline value (see
 /// [`UsageKpiDto::breakdown`]). The UI formats `value` as a compact number.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageKpiPartDto {
     label: String,
     value: f64,
@@ -282,7 +283,7 @@ struct UsageKpiPartDto {
 
 /// A point in the multi-dimensional time series.  Carries the model / project /
 /// agent dimensions so the Overview tab can group spend client-side.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct SeriesPointDto {
     date: String,
     /// Actual API spend in USD for this bucket; `null` when no actual sessions.
@@ -303,7 +304,7 @@ struct SeriesPointDto {
 }
 
 /// A breakdown row for one entity (user / project / proposal / task).
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct BreakdownRowDto {
     id: String,
     name: String,
@@ -327,7 +328,7 @@ struct BreakdownRowDto {
     proposal_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct BreakdownsDto {
     by_user: Vec<BreakdownRowDto>,
     by_project: Vec<BreakdownRowDto>,
@@ -336,7 +337,7 @@ struct BreakdownsDto {
 }
 
 /// Per-model effectiveness, renamed to the frontend contract.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct ModelEffectivenessDto {
     model: String,
     task_count: i64,
@@ -383,7 +384,7 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
 }
 
 /// Project × model matrix cell, renamed to the frontend contract.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct ProjectModelCellDto {
     project_id: String,
     project_name: String,
@@ -426,7 +427,7 @@ impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageResponse {
     kpis: Vec<UsageKpiDto>,
     time_series: Vec<SeriesPointDto>,
@@ -1319,6 +1320,108 @@ mod tests {
                 .as_i64()
                 .unwrap(),
             7
+        );
+    }
+
+    #[test]
+    fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
+        let schema = schemars::schema_for!(UsageResponse);
+        let value = serde_json::to_value(&schema).unwrap();
+
+        // Top-level fields must be present in the schema.
+        let props = value["properties"].as_object().unwrap();
+        for field in [
+            "kpis",
+            "time_series",
+            "breakdowns",
+            "model_effectiveness",
+            "project_model_matrix",
+            "generated_at",
+            "unpriced_session_count",
+        ] {
+            assert!(
+                props.contains_key(field),
+                "schema missing top-level field {field}"
+            );
+        }
+
+        // KPI schema must contain the split aggregate fields.
+        let kpi_defs = value["$defs"]["UsageKpiDto"]["properties"].as_object().unwrap();
+        for field in ["actual_spend_usd", "projected_usd", "unpriced_count"] {
+            assert!(
+                kpi_defs.contains_key(field),
+                "schema missing UsageKpiDto field {field}"
+            );
+        }
+
+        // Breakdown schema must contain split fields.
+        let row_defs = value["$defs"]["BreakdownRowDto"]["properties"]
+            .as_object()
+            .unwrap();
+        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+            assert!(
+                row_defs.contains_key(field),
+                "schema missing BreakdownRowDto field {field}"
+            );
+        }
+
+        // SeriesPoint schema must contain split fields.
+        let series_defs = value["$defs"]["SeriesPointDto"]["properties"]
+            .as_object()
+            .unwrap();
+        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+            assert!(
+                series_defs.contains_key(field),
+                "schema missing SeriesPointDto field {field}"
+            );
+        }
+
+        // ModelEffectiveness schema must contain split fields.
+        let eff_defs = value["$defs"]["ModelEffectivenessDto"]["properties"]
+            .as_object()
+            .unwrap();
+        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+            assert!(
+                eff_defs.contains_key(field),
+                "schema missing ModelEffectivenessDto field {field}"
+            );
+        }
+
+        // ProjectModelCell schema must contain split fields.
+        let cell_defs = value["$defs"]["ProjectModelCellDto"]["properties"]
+            .as_object()
+            .unwrap();
+        for field in ["actual_spend_usd", "projected_usd", "unpriced_session_count"] {
+            assert!(
+                cell_defs.contains_key(field),
+                "schema missing ProjectModelCellDto field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_response_json_schema_can_be_written_to_file() {
+        let schema = schemars::schema_for!(UsageResponse);
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(
+            json.contains("UsageResponse"),
+            "schema JSON should reference UsageResponse"
+        );
+        assert!(
+            json.contains("actual_spend_usd"),
+            "schema JSON should contain actual_spend_usd"
+        );
+        assert!(
+            json.contains("projected_usd"),
+            "schema JSON should contain projected_usd"
+        );
+        assert!(
+            json.contains("unpriced_session_count"),
+            "schema JSON should contain unpriced_session_count"
+        );
+        assert!(
+            json.contains("unpriced_count"),
+            "schema JSON should contain unpriced_count"
         );
     }
 }
