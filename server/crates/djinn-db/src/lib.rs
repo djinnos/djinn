@@ -11,8 +11,9 @@ pub mod short_id;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        backdate_task_updated_at, build_multi_project_housekeeping_fixture, drop_table_for_test,
-        event_bus_for, make_project,
+        UsageTestSessionSeed, UsageTestTaskSeed, backdate_task_updated_at,
+        build_multi_project_housekeeping_fixture, drop_table_for_test, event_bus_for, make_project,
+        seed_project, seed_session_row, seed_task_row,
     };
 }
 

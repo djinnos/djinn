@@ -1137,6 +1137,7 @@ impl SupervisorServices for UnimplementedRpcServices {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1610,6 +1611,7 @@ mod tests {
             agent_type: "planner".into(),
             metadata_json: None,
             task_run_id: Some("run-1".into()),
+            cost_basis_hint: None,
         };
         let got = services
             .create_session(params)

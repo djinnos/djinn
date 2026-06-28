@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision, ProposalSignoff,
-    ProposalTarget,
+    NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision,
+    ProposalSignoff, ProposalTarget,
 };
 
 use crate::database::Database;
@@ -1407,6 +1407,27 @@ impl ProposalRepository {
         self.events
             .send(DjinnEventEnvelope::proposal_updated(&proposal));
         Ok(proposal)
+    }
+
+    /// Structured counterpart of [`Self::set_needs_evidence_spike`]: persists
+    /// a typed [`NeedsEvidenceClaim`] as JSON in `needs_evidence_claim` and
+    /// sets `linked_spike_task_id` in the same atomic UPDATE. The proposal
+    /// status is moved back to `draft` and a `proposal_updated` event fires.
+    ///
+    /// Callers that only have an opaque string claim should keep using
+    /// [`Self::set_needs_evidence_spike`]; both methods write the same columns
+    /// and emit the same event.
+    pub async fn set_structured_needs_evidence_spike(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        claim: &NeedsEvidenceClaim,
+    ) -> Result<Proposal> {
+        let json = serde_json::to_string(claim).map_err(|e| {
+            Error::InvalidData(format!("failed to serialize NeedsEvidenceClaim: {e}"))
+        })?;
+        self.set_needs_evidence_spike(proposal_id, spike_task_id, &json)
+            .await
     }
 
     /// Clear the needs-evidence spike linkage after the spike closes and
@@ -4132,5 +4153,152 @@ mod tests {
         let trail = repo.debate_trail(&p.id).await.unwrap();
         assert_eq!(trail.len(), 1);
         assert_eq!(trail[0].body, "ai objection");
+    }
+
+    // ── Needs-evidence structured claim tests ──────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_structured_needs_evidence_spike_round_trips_claim_json() {
+        let (bus, captured) = capturing_bus();
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), bus);
+        let p = repo.create(create_input("Structured Claim")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let proj = insert_project(&db, "svc-spike").await;
+        let epic = insert_epic(&db, &proj, "sp01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "spike-01").await;
+
+        let claim = NeedsEvidenceClaim {
+            question: "Can X handle 10k rps?".to_owned(),
+            target_subsystem: "svc-payment".to_owned(),
+            spec_unknown_anchor: "section 3.2 throughput".to_owned(),
+            insufficient_in_session_research: "only checked config, not runtime".to_owned(),
+            expected_findings: "load test results or queue depth proof".to_owned(),
+            round: 2,
+            against_revision_seq: 3,
+            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+        };
+
+        let updated = repo
+            .set_structured_needs_evidence_spike(&p.id, &spike_id, &claim)
+            .await
+            .unwrap();
+
+        // Status moved to draft and spike is linked.
+        assert_eq!(updated.status, "draft");
+        assert_eq!(
+            updated.linked_spike_task_id.as_deref(),
+            Some(spike_id.as_str())
+        );
+
+        // The stored JSON round-trips back to the typed struct.
+        let stored_json = updated
+            .needs_evidence_claim
+            .as_deref()
+            .expect("needs_evidence_claim must be set");
+        let parsed: NeedsEvidenceClaim =
+            serde_json::from_str(stored_json).expect("stored claim must be valid JSON");
+        assert_eq!(parsed, claim);
+
+        // The parse_stored helper also works.
+        let via_helper = NeedsEvidenceClaim::parse_stored(Some(stored_json))
+            .expect("parse_stored must succeed")
+            .expect("parse_stored must return Some");
+        assert_eq!(via_helper, claim);
+
+        // find_by_linked_spike resolves.
+        let found = repo
+            .find_by_linked_spike(&spike_id)
+            .await
+            .unwrap()
+            .expect("must find by linked spike");
+        assert_eq!(found.id, p.id);
+
+        // has_open_needs_evidence_spike returns true.
+        assert!(repo.has_open_needs_evidence_spike(&p.id).await.unwrap());
+
+        // Events fired.
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "proposal");
+        assert_eq!(events[0].action, "updated");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_structured_needs_evidence_spike_clear_and_reparse() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo.create(create_input("Clear Claim")).await.unwrap();
+        let proj = insert_project(&db, "svc-clear").await;
+        let epic = insert_epic(&db, &proj, "cl01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "clear-01").await;
+
+        let claim = NeedsEvidenceClaim {
+            question: "Is Y thread-safe?".to_owned(),
+            target_subsystem: "core-cache".to_owned(),
+            spec_unknown_anchor: "section 5.1 concurrency".to_owned(),
+            insufficient_in_session_research: "grep found no mutex usage".to_owned(),
+            expected_findings: "lock-ordering analysis".to_owned(),
+            round: 1,
+            against_revision_seq: 1,
+            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+        };
+
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_id, &claim)
+            .await
+            .unwrap();
+
+        // Confirm claim is populated.
+        let stored = repo.get(&p.id).await.unwrap().unwrap();
+        assert!(stored.needs_evidence_claim.is_some());
+        assert!(stored.linked_spike_task_id.is_some());
+
+        // Clear it.
+        let cleared = repo.clear_needs_evidence_spike(&p.id).await.unwrap();
+        assert!(cleared.needs_evidence_claim.is_none());
+        assert!(cleared.linked_spike_task_id.is_none());
+        assert!(!repo.has_open_needs_evidence_spike(&p.id).await.unwrap());
+
+        // parse_stored on None returns None.
+        assert!(NeedsEvidenceClaim::parse_stored(None).unwrap().is_none());
+        assert!(
+            NeedsEvidenceClaim::parse_stored(Some(""))
+                .unwrap()
+                .is_none()
+        );
+
+        // parse_stored on invalid JSON returns Err.
+        assert!(NeedsEvidenceClaim::parse_stored(Some("{bad")).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_string_set_needs_evidence_spike_still_works() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo.create(create_input("Legacy")).await.unwrap();
+        let proj = insert_project(&db, "svc-legacy").await;
+        let epic = insert_epic(&db, &proj, "lg01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "legacy-01").await;
+
+        // The opaque-string path still works.
+        let updated = repo
+            .set_needs_evidence_spike(&p.id, &spike_id, "X is load-bearing")
+            .await
+            .unwrap();
+        assert_eq!(updated.status, "draft");
+        assert_eq!(
+            updated.needs_evidence_claim.as_deref(),
+            Some("X is load-bearing")
+        );
+        assert_eq!(
+            updated.linked_spike_task_id.as_deref(),
+            Some(spike_id.as_str())
+        );
+
+        // It's not parseable as a NeedsEvidenceClaim (it's a plain string),
+        // but parse_stored returns an Err (not a panic).
+        let result = NeedsEvidenceClaim::parse_stored(updated.needs_evidence_claim.as_deref());
+        assert!(result.is_err(), "opaque string must fail structured parse");
     }
 }
