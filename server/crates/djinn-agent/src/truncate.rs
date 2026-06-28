@@ -103,6 +103,7 @@ pub(crate) fn smart_truncate(text: &str, max_bytes: usize) -> String {
 
 /// Smart-truncate with a line count limit as well as byte limit.
 /// Used for shell output where both dimensions matter.
+#[allow(dead_code)]
 pub(crate) fn smart_truncate_lines(text: &str, max_bytes: usize, max_lines: usize) -> String {
     let line_count = text.split('\n').count();
     if text.len() <= max_bytes && line_count <= max_lines {
