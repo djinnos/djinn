@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::print_stderr, clippy::print_stdout)] // TODO(70y0/mz04): temporary; remove after cleanup
 //! CI boundary checker — loads `boundary_rules.toml`, builds the crate-level
 //! dependency graph from the warmed canonical graph, and exits non-zero if any
 //! rule-set edge is violated.

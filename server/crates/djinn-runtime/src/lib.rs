@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! `djinn-runtime` — narrow crate for the runtime boundary that the
 //! supervisor speaks to.
 //!

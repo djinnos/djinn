@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! # djinn-coordinator
 //!
 //! Production coordinator, doctor, and coordinator-owned supervisor
