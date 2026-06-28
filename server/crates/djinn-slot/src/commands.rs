@@ -6,7 +6,7 @@ use djinn_core::commands::{CommandResult, CommandSpec};
 use djinn_db::TaskRepository;
 
 #[derive(Debug)]
-pub(crate) enum SlotCommand {
+pub enum SlotCommand {
     /// Run a task lifecycle in this slot.
     RunTask {
         task_id: String,
@@ -44,7 +44,7 @@ fn truncate_output(s: &str) -> String {
     crate::truncate::smart_truncate_lines(s, 10_000, 100)
 }
 
-pub(crate) async fn log_commands_run_event(
+pub async fn log_commands_run_event(
     task_id: &str,
     phase: &str,
     specs: &[CommandSpec],
