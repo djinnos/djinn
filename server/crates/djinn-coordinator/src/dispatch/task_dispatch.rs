@@ -181,6 +181,7 @@ impl CoordinatorActor {
         };
         self.reconcile_inflight_dispatch_ledger().await;
         overlay_inflight_ledger(&mut running, &self.inflight_dispatches);
+        self.overlay_provisional_admissions(&mut running);
         running
     }
 
@@ -324,6 +325,53 @@ impl CoordinatorActor {
             )
             .await;
         }
+    }
+
+    /// Overlay provisional refinement admissions onto the per-`(user, model)`
+    /// running counts. Called from [`effective_running_by_user_model`] so that
+    /// `check_user_model_admission` accounts for reservations that have not yet
+    /// been re-keyed to a real task id.
+    fn overlay_provisional_admissions(
+        &self,
+        running_by_user_model: &mut HashMap<(String, String), u32>,
+    ) {
+        for (creator, model) in self.provisional_admissions.values() {
+            if let Some(c) = creator {
+                let entry = running_by_user_model
+                    .entry((c.clone(), model.clone()))
+                    .or_insert(0);
+                *entry = (*entry).max(1);
+            }
+        }
+    }
+
+    /// Re-key a provisional refinement admission to the real task id in the
+    /// in-flight dispatch ledger.
+    ///
+    /// Called after a refinement task row has been created so that the
+    /// reservation is now tracked by the durable `inflight_dispatches` ledger
+    /// (visible to reconciliation and session-start cleanup) rather than the
+    /// ephemeral `provisional_admissions` map.
+    pub(crate) async fn rekey_provisional_to_inflight(
+        &mut self,
+        provisional_key: &str,
+        real_task_id: &str,
+        creator: &str,
+        model: &str,
+    ) {
+        self.provisional_admissions.remove(provisional_key);
+        self.inflight_dispatches.remove(provisional_key);
+        self.record_inflight_dispatch(real_task_id, None, Some(creator), model)
+            .await;
+    }
+
+    /// Clear a provisional refinement admission.
+    ///
+    /// Called when the refinement dispatch fails before the real task id is
+    /// known (e.g. task creation failure, at-cap deferral cleanup).
+    pub(crate) fn clear_provisional_admission(&mut self, provisional_key: &str) {
+        self.provisional_admissions.remove(provisional_key);
+        self.inflight_dispatches.remove(provisional_key);
     }
 
     async fn persist_durable_dispatch_state_update(
@@ -1884,6 +1932,7 @@ mod inflight_ledger_tests {
             pr_errors: HashMap::new(),
             last_dispatched: HashMap::new(),
             inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
