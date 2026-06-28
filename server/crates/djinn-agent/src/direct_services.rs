@@ -198,29 +198,11 @@ impl SupervisorServices for DirectServices {
         // available (forward-fix for Codex OAuth + coding-plan credentials
         // surfacing under plain API-key provider namespaces), otherwise fall
         // back to provider/model subscription rules + pricing availability.
-        let cost_basis = match params.cost_basis_hint {
-            Some(CostBasisHint::SubscriptionPlan) => "projected",
-            Some(CostBasisHint::MeteredApi) => {
-                if pricing.is_some() {
-                    "actual"
-                } else {
-                    "unpriced"
-                }
-            }
-            None => {
-                // Legacy path: classify by provider id alone.
-                match &catalog_model {
-                    Some(model) if pricing.is_some() => {
-                        if classify_provider(&model.provider_id).is_subscription() {
-                            "projected"
-                        } else {
-                            "actual"
-                        }
-                    }
-                    _ => "unpriced",
-                }
-            }
-        };
+        let cost_basis = determine_cost_basis(
+            params.cost_basis_hint,
+            pricing.as_ref(),
+            catalog_model.as_ref().map(|m| m.provider_id.as_str()),
+        );
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
             task_id: params.task_id.as_deref(),
@@ -525,9 +507,158 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
     })
 }
 
+/// Determine the session `cost_basis` value from the explicit credential
+/// billing hint, catalog pricing availability, and (for the legacy fallback
+/// path) provider classification.
+///
+/// Precedence:
+/// 1. `SubscriptionPlan` hint → `"projected"`
+/// 2. `MeteredApi` hint → priced `"actual"` / unpriced `"unpriced"`
+/// 3. No hint → legacy `classify_provider` + pricing availability
+///
+/// This is extracted as a pure function so the decision logic can be tested
+/// without instantiating a `DirectServices` / database.
+pub(crate) fn determine_cost_basis(
+    hint: Option<CostBasisHint>,
+    pricing: Option<&djinn_core::models::Pricing>,
+    provider_id: Option<&str>,
+) -> &'static str {
+    match hint {
+        Some(CostBasisHint::SubscriptionPlan) => "projected",
+        Some(CostBasisHint::MeteredApi) => {
+            if pricing.is_some() {
+                "actual"
+            } else {
+                "unpriced"
+            }
+        }
+        None => {
+            // Legacy path: classify by provider id alone.
+            match (provider_id, pricing) {
+                (Some(pid), Some(_)) => {
+                    if classify_provider(pid).is_subscription() {
+                        "projected"
+                    } else {
+                        "actual"
+                    }
+                }
+                _ => "unpriced",
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SerializableDjinnEvent, intern_envelope};
+    use super::{CostBasisHint, SerializableDjinnEvent, determine_cost_basis, intern_envelope};
+    use djinn_core::models::Pricing;
+
+    /// Helper: a non-zero pricing snapshot (used to represent a priced model).
+    fn priced() -> Pricing {
+        Pricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 0.0,
+        }
+    }
+
+    // ── CostBasisHint precedence tests ──────────────────────────────────
+
+    /// Codex OAuth model on the openai namespace → `SubscriptionPlan` hint →
+    /// `"projected"` even though `openai` is an API-key provider.
+    /// This is the core forward-fix regression.
+    #[test]
+    fn cost_basis_codex_oauth_on_openai_gives_projected() {
+        let hint = Some(CostBasisHint::SubscriptionPlan);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&priced()), Some("openai")),
+            "projected"
+        );
+    }
+
+    /// Coding-plan / token-plan provider id pattern → `SubscriptionPlan` →
+    /// `"projected"`.
+    #[test]
+    fn cost_basis_coding_plan_provider_gives_projected() {
+        let hint = Some(CostBasisHint::SubscriptionPlan);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&priced()), Some("xiaomi-token-plan-sgp")),
+            "projected"
+        );
+    }
+
+    /// Priced metered API-key provider → `MeteredApi` + pricing present →
+    /// `"actual"`.
+    #[test]
+    fn cost_basis_metered_api_key_priced_gives_actual() {
+        let hint = Some(CostBasisHint::MeteredApi);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&priced()), Some("anthropic")),
+            "actual"
+        );
+    }
+
+    /// Uncatalogued or missing-pricing model with metered hint → `"unpriced"`.
+    #[test]
+    fn cost_basis_metered_unpriced_gives_unpriced() {
+        let hint = Some(CostBasisHint::MeteredApi);
+        assert_eq!(
+            determine_cost_basis(hint, None, Some("unknown-provider")),
+            "unpriced"
+        );
+        // Also covers the case where no provider_id is present at all.
+        assert_eq!(determine_cost_basis(hint, None, None), "unpriced");
+    }
+
+    /// OAuth transport alone (without subscription evidence) must NOT blanket
+    /// produce `"projected"`.  When stage.rs sees a non-subscription provider
+    /// and no Codex marker, it emits `MeteredApi`.  A priced metered session
+    /// stays `"actual"`.
+    #[test]
+    fn cost_basis_oauth_transport_alone_does_not_cause_projected() {
+        // Simulates a hypothetical OAuth-backed metered provider that is NOT
+        // Codex / subscription / coding-plan. The stage hint is MeteredApi.
+        let hint = Some(CostBasisHint::MeteredApi);
+        assert_eq!(
+            determine_cost_basis(hint, Some(&priced()), Some("openai")),
+            "actual"
+        );
+        // Uncatalogued variant — still not projected.
+        assert_eq!(
+            determine_cost_basis(hint, None, Some("custom-oauth-provider")),
+            "unpriced"
+        );
+    }
+
+    // ── Legacy fallback (no hint) ───────────────────────────────────────
+
+    /// No hint + subscription provider + pricing → `"projected"`.
+    #[test]
+    fn cost_basis_legacy_subscription_provider_with_pricing() {
+        assert_eq!(
+            determine_cost_basis(None, Some(&priced()), Some("minimax-coding-plan")),
+            "projected"
+        );
+    }
+
+    /// No hint + API-key provider + pricing → `"actual"`.
+    #[test]
+    fn cost_basis_legacy_api_key_provider_with_pricing() {
+        assert_eq!(
+            determine_cost_basis(None, Some(&priced()), Some("openai")),
+            "actual"
+        );
+    }
+
+    /// No hint + no model/pricing → `"unpriced"`.
+    #[test]
+    fn cost_basis_legacy_no_model_is_unpriced() {
+        assert_eq!(determine_cost_basis(None, None, None), "unpriced");
+        assert_eq!(determine_cost_basis(None, None, Some("openai")), "unpriced");
+    }
+
+    // ── Existing intern_envelope tests (unchanged) ─────────────────────
 
     #[test]
     fn intern_envelope_forwards_worker_epic_events() {
