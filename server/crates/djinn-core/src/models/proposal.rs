@@ -200,12 +200,12 @@ pub struct ProposalFeedback {
 pub struct ProposalDebateTrail {
     pub id: String,
     pub proposal_id: String,
-    /// `objection` | `rebuttal` | `verdict`.
+    /// `objection` | `rebuttal` | `verdict` | `needs_evidence` | `evidence_findings`.
     pub kind: String,
     pub body: String,
     /// When true, this entry blocks proposal readiness.
     pub blocking: bool,
-    /// Agent role (e.g. "advocate", "adversary", "judge").
+    /// Agent role (e.g. "advocate", "adversary", "judge", "spike").
     pub agent_role: String,
     /// `agent` or `user`.
     pub author_kind: String,
@@ -218,6 +218,10 @@ pub struct ProposalDebateTrail {
     pub against_revision_seq: i32,
     /// Debate round (1-based).
     pub round: i32,
+    /// Optional structured JSONB metadata. Required for `needs_evidence`
+    /// (linkage payload) and `evidence_findings` (structured findings);
+    /// `None` or ignored for `objection`/`rebuttal`/`verdict`.
+    pub body_metadata: Option<String>,
     /// When set, the entry has been resolved. `None` while open.
     pub resolved_at: Option<String>,
     /// User who resolved it (`None` for system/agent resolution).
