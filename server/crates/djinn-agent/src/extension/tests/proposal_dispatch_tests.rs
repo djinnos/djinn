@@ -29,8 +29,7 @@ async fn call_tool_dispatches_proposal_update_revises_body() {
         .expect("create proposal");
     let state = agent_context_from_db(db.clone(), CancellationToken::new());
 
-    let new_body =
-        "## Problem\n\nThe gap.\n\n## Scope\n\nIn and out.\n\n## Objectives\n\nMeasurable outcomes.";
+    let new_body = "## Problem\n\nThe gap.\n\n## Scope\n\nIn and out.\n\n## Objectives\n\nMeasurable outcomes.";
     let response = call_tool(
         &state,
         &crate::test_helpers::test_services(),
@@ -55,7 +54,10 @@ async fn call_tool_dispatches_proposal_update_revises_body() {
         .await
         .expect("resolve")
         .expect("proposal exists");
-    assert_eq!(reloaded.body, new_body, "advocate body revision must persist");
+    assert_eq!(
+        reloaded.body, new_body,
+        "advocate body revision must persist"
+    );
     assert!(
         reloaded.latest_revision_seq > proposal.latest_revision_seq,
         "a material body revision must bump latest_revision_seq"

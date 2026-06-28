@@ -558,7 +558,9 @@ pub fn apply_block_patch(
         "wrap" => {
             let selected = &existing_body[range.start..range.end];
             let mut body = String::with_capacity(
-                existing_body.len() - (range.end - range.start) + p.block_mdx.len() + selected.len(),
+                existing_body.len() - (range.end - range.start)
+                    + p.block_mdx.len()
+                    + selected.len(),
             );
             body.push_str(&existing_body[..range.start]);
             body.push_str(&p.block_mdx);

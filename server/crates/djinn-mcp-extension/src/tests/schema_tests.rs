@@ -83,7 +83,10 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "agent_metrics"
         | "pr_review_context" => Some(read_only),
         "code_search" | "github_search" | "code_graph" => Some(open_world_read_only),
-        "task_update" | "epic_update" | "epic_close" | "proposal_ac_set"
+        "task_update"
+        | "epic_update"
+        | "epic_close"
+        | "proposal_ac_set"
         | "proposal_debate_resolve" => Some(idempotent_mutation),
         "task_create"
         | "epic_create"

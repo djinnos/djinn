@@ -128,8 +128,7 @@ impl CoordinatorActor {
             // them apart by whether any session row exists for the task.
             let session_ran = {
                 let event_bus = crate::events::event_bus_for(&self.events_tx);
-                let session_repo =
-                    djinn_db::SessionRepository::new(self.db.clone(), event_bus);
+                let session_repo = djinn_db::SessionRepository::new(self.db.clone(), event_bus);
                 match session_repo.list_for_task(&session.task_id).await {
                     Ok(sessions) => !sessions.is_empty(),
                     // On a DB read error, fail safe toward "it ran" so we don't
