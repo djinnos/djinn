@@ -293,18 +293,89 @@ async fn admin_request_returns_frontend_contract_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kpis_have_label_value_and_delta_fields() {
+async fn split_kpi_reducer_invariant_and_seeded_totals() {
     let db = test_helpers::create_test_db();
     let admin_cookie = seed_admin_session(&db).await;
+
+    seed_project(&db, "proj-kpi", "kpi-project").await;
+    let task_id = seed_task_row(
+        &db,
+        TaskSeed {
+            project_id: "proj-kpi",
+            status: "closed",
+            close_reason: Some("completed"),
+            total_reopen_count: 0,
+        },
+    )
+    .await;
+
+    // actual-basis session: $1.25
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-11T10:00:00Z",
+            tokens_in: 100,
+            tokens_out: 50,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+            cost_usd: Some(1.25),
+            cost_basis: "actual",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // projected-basis session: $2.50
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-12T10:00:00Z",
+            tokens_in: 200,
+            tokens_out: 100,
+            cache_read_tokens: 20,
+            cache_write_tokens: 10,
+            cost_usd: Some(2.50),
+            cost_basis: "projected",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
+    // unpriced-basis session: NULL cost
+    seed_session_row(
+        &db,
+        SessionSeed {
+            project_id: "proj-kpi",
+            model_id: "model-kpi",
+            agent_type: "worker",
+            started_at: "2025-03-13T10:00:00Z",
+            tokens_in: 50,
+            tokens_out: 25,
+            cache_read_tokens: 5,
+            cache_write_tokens: 2,
+            cost_usd: None,
+            cost_basis: "unpriced",
+            task_id: Some(&task_id),
+        },
+    )
+    .await;
+
     let app = test_helpers::create_test_app_with_db(db);
 
     let (status, body) =
-        get_usage(&app, "start=2025-01-01&end=2025-02-01", Some(&admin_cookie)).await;
-
+        get_usage(&app, "start=2025-03-01&end=2025-04-01", Some(&admin_cookie)).await;
     assert_eq!(status, StatusCode::OK);
+
     let kpis = array_field(&body, "kpis");
     assert_eq!(kpis.len(), 5, "expected five KPI cards, got {}", kpis.len());
 
+    // ── Generic shape coverage (label, value, delta_pct, formatted) ──
     let labels: Vec<&str> = kpis
         .iter()
         .filter_map(|k| k.get("label").and_then(Value::as_str))
@@ -320,10 +391,161 @@ async fn kpis_have_label_value_and_delta_fields() {
 
     for kpi in kpis {
         assert!(kpi.get("label").unwrap().is_string());
-        // value and delta_pct may be null but the keys must exist.
         assert!(kpi.get("value").is_some());
         assert!(kpi.get("delta_pct").is_some());
         assert!(kpi.get("formatted").unwrap().is_string());
+    }
+
+    // ── Tokens breakdown must remain intact ──
+    let tokens_kpi = kpis
+        .iter()
+        .find(|k| k.get("label").and_then(Value::as_str) == Some("Tokens"))
+        .expect("Tokens KPI");
+    let breakdown = tokens_kpi
+        .get("breakdown")
+        .and_then(Value::as_array)
+        .expect("Tokens KPI must have a breakdown array");
+    assert!(
+        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Input")),
+        "Tokens breakdown missing Input"
+    );
+    assert!(
+        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Cached")),
+        "Tokens breakdown missing Cached"
+    );
+    assert!(
+        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Output")),
+        "Tokens breakdown missing Output"
+    );
+
+    // ── Reducer: sum split fields across KPIs the same way the frontend does ──
+    let sum_actual: f64 = kpis
+        .iter()
+        .filter_map(|k| k.get("actual_spend_usd").and_then(Value::as_f64))
+        .sum();
+    let sum_projected: f64 = kpis
+        .iter()
+        .filter_map(|k| k.get("projected_usd").and_then(Value::as_f64))
+        .sum();
+    let sum_unpriced: i64 = kpis
+        .iter()
+        .filter_map(|k| k.get("unpriced_count").and_then(Value::as_i64))
+        .sum();
+
+    assert_eq!(
+        sum_actual, 1.25,
+        "reduced actual_spend_usd should equal seeded total"
+    );
+    assert_eq!(
+        sum_projected, 2.50,
+        "reduced projected_usd should equal seeded total"
+    );
+    assert_eq!(
+        sum_unpriced, 1,
+        "reduced unpriced_count should equal seeded total"
+    );
+
+    // Top-level unpriced_session_count must repeat the unpriced count.
+    assert_eq!(
+        body.get("unpriced_session_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1),
+        1,
+        "top-level unpriced_session_count should repeat unpriced count"
+    );
+
+    // ── Single-contributor invariant ──
+    let actual_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| k.get("actual_spend_usd").map(|v| !v.is_null()).unwrap_or(false))
+        .collect();
+    let projected_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| k.get("projected_usd").map(|v| !v.is_null()).unwrap_or(false))
+        .collect();
+    let unpriced_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| k.get("unpriced_count").map(|v| !v.is_null()).unwrap_or(false))
+        .collect();
+
+    assert_eq!(
+        actual_contributors.len(),
+        1,
+        "exactly one KPI must carry actual_spend_usd"
+    );
+    assert_eq!(
+        projected_contributors.len(),
+        1,
+        "exactly one KPI must carry projected_usd"
+    );
+    assert_eq!(
+        unpriced_contributors.len(),
+        1,
+        "exactly one KPI must carry unpriced_count"
+    );
+
+    // ── Non-contributor cards must not duplicate aggregate fields ──
+    for kpi in kpis {
+        let label = kpi.get("label").and_then(Value::as_str).unwrap_or("");
+        match label {
+            "Actual API Spend" => {
+                assert!(
+                    kpi.get("actual_spend_usd").is_some(),
+                    "Actual API Spend must carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "Actual API Spend must not carry projected_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "Actual API Spend must not carry unpriced_count"
+                );
+            }
+            "Projected Cost" => {
+                assert!(
+                    kpi.get("projected_usd").is_some(),
+                    "Projected Cost must carry projected_usd"
+                );
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "Projected Cost must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "Projected Cost must not carry unpriced_count"
+                );
+            }
+            "Sessions" => {
+                assert!(
+                    kpi.get("unpriced_count").is_some(),
+                    "Sessions must carry unpriced_count"
+                );
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "Sessions must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "Sessions must not carry projected_usd"
+                );
+            }
+            "Tokens" | "Cache reads" => {
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "{label} must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "{label} must not carry projected_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "{label} must not carry unpriced_count"
+                );
+            }
+            _ => panic!("unexpected KPI label: {label}"),
+        }
     }
 }
 
