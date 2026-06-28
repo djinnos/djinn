@@ -26,6 +26,11 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
 [dev-dependencies]
 bincode = "1.3"
 tempfile = "3"
