@@ -304,6 +304,76 @@ impl OAuthConfigWire {
 /// window — tracked as a follow-up.)
 static CODEX_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Attempt a host-side silent OAuth token refresh after a mid-run 401.
+///
+/// The worker pod is dispatched with a *static* OAuth access-token snapshot and
+/// no refresh capability of its own (the wire format carries only the bearer
+/// token — see [`OAuthConfigWire`], which has no `refresh_token`/`expires_at`).
+/// A task-run that outlives the access token's TTL therefore 401s mid-run even
+/// though the refresh token is still valid. That 401 surfaces as
+/// `ProviderFailureClass::AuthInvalid`, which the terminal-failure handler would
+/// otherwise treat as a *revoked* credential (escalating breaker trip +
+/// `mark_revoked` + a "reconnect required" prompt) — a false positive when the
+/// credential merely needed refreshing.
+///
+/// This mirrors the expired-token refresh branch of [`load_provider_credential`]
+/// — same single-flight [`CODEX_REFRESH_LOCK`], same load/refresh/save — but is
+/// callable from the failure handler so the refreshed token is persisted for the
+/// next dispatch to pick up.
+///
+/// Returns `true` when the model is OAuth-backed and the token is now live
+/// (refresh succeeded, or a peer dispatch already refreshed it) — i.e. the 401
+/// was a recoverable expiry, not a dead credential. Returns `false` for
+/// non-OAuth (API-key) providers and for a refresh that itself fails
+/// (`invalid_grant` = genuinely revoked refresh token), in which case the caller
+/// should fall back to marking the credential revoked.
+pub async fn refresh_oauth_credential_after_401(model_id: &str, app_state: &AgentContext) -> bool {
+    let Ok((provider_id, _model_name)) = parse_model_id(model_id) else {
+        return false;
+    };
+    let effective_oauth_id = match provider_id.as_str() {
+        "chatgpt_codex" | "githubcopilot" => provider_id.as_str(),
+        other => djinn_provider::catalog::builtin::resolve_oauth_provider(other).unwrap_or(other),
+    };
+    let credential_repo =
+        CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match effective_oauth_id {
+        "chatgpt_codex" => {
+            // Single-flight with the dispatch refresh path so we never race the
+            // single-use refresh token (see CODEX_REFRESH_LOCK).
+            let _guard = CODEX_REFRESH_LOCK.lock().await;
+            let Some(current) =
+                crate::oauth::codex::CodexTokens::load_from_db(&credential_repo).await
+            else {
+                return false;
+            };
+            // A peer dispatch may have already refreshed while we waited on the
+            // lock — if the stored token is live again, the 401 is already
+            // resolved; don't burn (and rotate) another single-use refresh.
+            if !current.is_expired() {
+                return true;
+            }
+            crate::oauth::codex::refresh_cached_token(&current, &credential_repo)
+                .await
+                .is_ok()
+        }
+        "githubcopilot" => {
+            let Some(current) =
+                crate::oauth::copilot::CopilotTokens::load_from_db(&credential_repo).await
+            else {
+                return false;
+            };
+            if !current.is_expired() {
+                return true;
+            }
+            crate::oauth::copilot::refresh_copilot_token(&current, &credential_repo)
+                .await
+                .is_ok()
+        }
+        _ => false,
+    }
+}
+
 pub async fn load_provider_credential(
     provider_id: &str,
     app_state: &AgentContext,

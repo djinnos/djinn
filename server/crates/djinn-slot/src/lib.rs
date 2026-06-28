@@ -41,8 +41,8 @@ pub use djinn_orchestration_types::slot::{
 // ─── Slot modules ───────────────────────────────────────────────────────────
 
 mod actor;
-mod commands;
-pub(crate) mod finalize_handlers;
+pub mod commands;
+pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
 pub(crate) mod lifecycle;
@@ -72,7 +72,13 @@ pub(crate) mod test_helpers;
 // ─── Public re-exports ──────────────────────────────────────────────────────
 
 pub use actor::*;
-pub(crate) use commands::*;
+// Public re-exports from `commands` so callers can use
+// `djinn_slot::SlotCommand`, `djinn_slot::SlotError`, `djinn_slot::log_commands_run_event`.
+pub use commands::{SlotCommand, SlotError, log_commands_run_event};
+// Public re-exports from `finalize_handlers` so callers can use
+// `djinn_slot::process_finalize_payload`, `djinn_slot::handle_budget_park`,
+// `djinn_slot::apply_ac_verdicts`.
+pub use finalize_handlers::{apply_ac_verdicts, handle_budget_park, process_finalize_payload};
 pub use helpers::*;
 pub use pool::*;
 
