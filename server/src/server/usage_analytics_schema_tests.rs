@@ -126,6 +126,7 @@ fn usage_response_json_schema_can_be_written_to_file() {
 ///
 /// Run with:
 ///   cargo test -p djinn-server usage_analytics_schema_tests::export_schemas_to_file -- --nocapture
+#[allow(clippy::print_stderr)]
 #[test]
 fn export_schemas_to_file() {
     use std::io::Write;

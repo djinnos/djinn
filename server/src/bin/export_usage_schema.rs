@@ -10,6 +10,7 @@
 
 use djinn_server::server::usage_analytics::{usage_query_json_schema, usage_response_json_schema};
 
+#[allow(clippy::print_stdout)]
 fn main() {
     let combined = serde_json::json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
