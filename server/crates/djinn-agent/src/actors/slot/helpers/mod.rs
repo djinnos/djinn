@@ -90,6 +90,7 @@ pub use provider_resolution::{
     OAuthAuthMethodWire, OAuthCapabilitiesWire, OAuthConfigWire, OAuthFormatFamilyWire,
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, load_provider_credential, parse_model_id,
+    refresh_oauth_credential_after_401,
 };
 #[allow(unused_imports)]
 pub(crate) use provider_resolution::{
