@@ -244,16 +244,15 @@ impl CoordinatorActor {
     // The methods below compose the pure primitives in [`super::admission`]
     // with the actor's own DB, in-flight ledger, and durable dispatch-state.
     // They exist so that every dispatch path — normal task dispatch,
-    // planner escalation, AND refinement tribunal dispatch (wired in a
-    // follow-up task) — checks admission and reserves/clears in-flight slots
-    // through one shared API rather than each caller re-implementing the
-    // cap-check + ledger logic.
+    // planner escalation, AND refinement tribunal dispatch — checks admission
+    // and reserves/clears in-flight slots through one shared API rather than
+    // each caller re-implementing the cap-check + ledger logic.
+    //
+    // These methods are used by both `dispatch_ready_tasks` (and
+    // `dispatch_planner_escalation`) and `refinement_dispatch::
+    // dispatch_next_refinement_phase`, so refinement tribunal dispatch and
+    // normal task dispatch go through the exact same cap/ledger code path.
 
-    // NOTE: the three methods below (`resolve_model_caps_for_user`,
-    // `check_user_model_admission`, `clear_inflight_dispatch`) are the shared
-    // admission surface wired up for Task 2 (refinement tribunal dispatch).
-    // They are intentionally pre-extracted and tested in isolation before the
-    // refinement path uses them; `dead_code` is allowed until that wiring lands.
     /// Resolve the configured `max_sessions` cap map for `creator`.
     ///
     /// Returns `model_id → max concurrent sessions`. When the user has no
@@ -283,7 +282,7 @@ impl CoordinatorActor {
     /// session on `model`.
     ///
     /// This is the single shared admission-check for single-model dispatch
-    /// paths (e.g. refinement tribunal dispatch). Multi-model dispatch paths
+    /// paths (refinement tribunal dispatch). Multi-model dispatch paths
     /// (normal task dispatch) seed once per pass and filter with
     /// [`model_under_user_cap`] directly for efficiency, but they use the same
     /// underlying primitives.
@@ -301,9 +300,14 @@ impl CoordinatorActor {
     ///
     /// Called on failure paths where a dispatch was reserved (via
     /// [`record_inflight_dispatch`]) but never produced a running session —
-    /// e.g. pool dispatch failure or task-setup failure. Removes the entry so
-    /// the `(user, model)` slot is immediately available again, and
-    /// persists the clearance to durable dispatch-state.
+    /// e.g. pool dispatch failure, task-setup failure, or — for refinement
+    /// tribunal dispatch — spawn-cap rejection after task creation. Removes
+    /// the entry so the `(user, model)` slot is immediately available again,
+    /// and persists the clearance to durable dispatch-state.
+    ///
+    /// The session-start and reconciliation paths in
+    /// `reconcile_inflight_dispatch_ledger` continue to clear started/stale
+    /// entries independently.
     pub(crate) async fn clear_inflight_dispatch(&mut self, task_id: &str) {
         if self.inflight_dispatches.remove(task_id).is_some() {
             record_dispatch_live_state(

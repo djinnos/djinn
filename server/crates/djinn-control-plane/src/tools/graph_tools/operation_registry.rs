@@ -4,15 +4,10 @@
 //! Follow-up tasks will derive dispatch and pre-resolve tables from here
 //! instead of maintaining separate handwritten match arms.
 //!
-//! Intentionally not yet wired into runtime dispatch — see sibling tasks
-//! `hw2d` (route basic ops) and `4lij` (coupling route + bridge coverage).
-//! Until those land the items below are only exercised by this module's
-//! unit tests, so we suppress `dead_code` at the module boundary to keep
-//! `-D warnings` green.
-//! NOTE: `hw2d` has now wired the registry into `handler.rs` for the
-//! basic vertical slice (`neighbors`, `impact`, `context`).  The
-//! `dead_code` allow is retained because `coupling_hotspots` and the
-//! smoke exemplars are still only exercised by unit tests here.
+//! The registry is wired into runtime dispatch in `handler.rs` for the
+//! vertical slice (`neighbors`, `impact`, `context`, `coupling_hotspots`).
+//! Smoke exemplars and bridge coverage helpers are still only exercised
+//! by unit tests, so `dead_code` is suppressed at the module boundary.
 #![allow(dead_code)]
 //! The registry is purely data — no build scripts, no runtime graph
 //! cache access, no database or network dependencies.  Each entry is
@@ -43,7 +38,7 @@ use std::fmt;
 /// Classifies how a `code_graph` operation participates in the
 /// pre-resolve step (`pre_resolve_key` in `handler.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreResolveCategory {
+pub enum PreResolveCategory {
     /// No pre-resolve — the op's input key is a query/glob, not a
     /// node identifier (e.g. `search`, `cycles`, `hotspots`).
     None,
@@ -69,7 +64,7 @@ impl fmt::Display for PreResolveCategory {
 /// Values are stringly typed so the registry doesn't depend on the
 /// `validation` module's concrete function signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValidationCategory {
+pub enum ValidationCategory {
     /// `require_key` + direction/kind_filter/group_by validators.
     KeyWithEdgeFilters,
     /// `require_key` + group_by + min_confidence range check.
@@ -99,7 +94,7 @@ impl fmt::Display for ValidationCategory {
 /// traversal ops (workspace scopes seed resolution only, the walk
 /// stays unconstrained).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkspaceBehavior {
+pub enum WorkspaceBehavior {
     /// Operation does not consult `workspace` at all.
     Ignored,
     /// Workspace is resolved via `resolve_workspace_scope` for seed
@@ -126,7 +121,7 @@ impl fmt::Display for WorkspaceBehavior {
 /// fills in `project` / `project_id` / `project_path` at dispatch
 /// time regardless).
 #[derive(Debug)]
-pub(crate) struct SmokeExemplar {
+pub struct SmokeExemplar {
     /// The `operation` string (redundant with `OpEntry::name` but
     /// explicit so the test generator can build a full
     /// `CodeGraphParams` without cross-referencing).
@@ -152,7 +147,7 @@ pub(crate) struct SmokeExemplar {
 /// internals.  Future PRs may tighten selected fields to typed
 /// enums once the full operation set is stable.
 #[derive(Debug)]
-pub(crate) struct OpEntry {
+pub struct OpEntry {
     /// Canonical operation string that appears on the wire
     /// (`params.operation`).
     pub name: &'static str,
@@ -186,7 +181,7 @@ pub(crate) struct OpEntry {
 /// **Lookup helpers** — [`lookup_by_name`] performs a linear scan
 /// (the table is small; a `HashMap` would cost more in `lazy_static`
 /// machinery than it saves in lookup time).
-pub(crate) const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
+pub const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
     // ── neighbors ────────────────────────────────────────────────────
     //
     // Handler  : code_graph_neighbors  (handler_basic_ops.rs)
@@ -299,7 +294,7 @@ pub(crate) const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
 /// Returns `None` if the operation string doesn't match any entry
 /// (including operations that exist in `dispatch_code_graph_op` but
 /// haven't been registered yet).
-pub(crate) fn lookup_by_name(op: &str) -> Option<&'static OpEntry> {
+pub fn lookup_by_name(op: &str) -> Option<&'static OpEntry> {
     CODE_GRAPH_REGISTRY
         .iter()
         .find(|e| e.name == op || e.aliases.contains(&op))
@@ -308,9 +303,66 @@ pub(crate) fn lookup_by_name(op: &str) -> Option<&'static OpEntry> {
 /// Return the list of all registered canonical operation names.
 ///
 /// Useful for error messages and test assertions.
-pub(crate) fn registered_names() -> Vec<&'static str> {
+pub fn registered_names() -> Vec<&'static str> {
     CODE_GRAPH_REGISTRY.iter().map(|e| e.name).collect()
 }
+
+// ── Bridge coverage ──────────────────────────────────────────────────────────
+
+/// Known `RepoGraphOps` trait method names that correspond to converted
+/// registry entries.  The bridge coverage tests and the compile-time
+/// `const _` guard below verify that every registered `bridge_method`
+/// appears here and vice-versa.
+///
+/// This is the canonical mapping between registry metadata and the
+/// `RepoGraphOps` trait surface in
+/// `server/crates/djinn-control-plane/src/bridge/graph_bridge.rs`.
+/// When a new operation is registered, its `bridge_method` **must**
+/// appear here and have a corresponding `async fn` on `RepoGraphOps`
+/// plus a forwarding stub on `RepoGraphBridge` in the server crate.
+pub const KNOWN_BRIDGE_METHODS: &[&str] = &["neighbors", "impact", "context", "coupling_hotspots"];
+
+/// Byte-equality helper usable in `const`-context.
+const fn str_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a.as_bytes()[i] != b.as_bytes()[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Compile-time bridge coverage guard.
+///
+/// For each entry in `KNOWN_BRIDGE_METHODS`, walk the registry and
+/// confirm at least one `OpEntry` references it.  This catches
+/// stale entries in `KNOWN_BRIDGE_METHODS` (method removed from
+/// registry) at compile time.
+const _: () = {
+    let mut mi = 0;
+    while mi < KNOWN_BRIDGE_METHODS.len() {
+        let method = KNOWN_BRIDGE_METHODS[mi];
+        let mut found = false;
+        let mut ri = 0;
+        while ri < CODE_GRAPH_REGISTRY.len() {
+            if str_eq(CODE_GRAPH_REGISTRY[ri].bridge_method, method) {
+                found = true;
+                break;
+            }
+            ri += 1;
+        }
+        // If this fails to compile: KNOWN_BRIDGE_METHODS has an entry
+        // not referenced by any registry OpEntry.  Either add the
+        // entry to the registry or remove it from the known list.
+        assert!(found);
+        mi += 1;
+    }
+};
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -399,5 +451,38 @@ mod tests {
         // coupling_hotspots is NOT in single_key_ops
         let ch = lookup_by_name("coupling_hotspots").unwrap();
         assert_eq!(ch.pre_resolve, PreResolveCategory::None);
+    }
+
+    /// Every converted registry entry's `bridge_method` must appear
+    /// in `KNOWN_BRIDGE_METHODS`.  This is the dynamic counterpart
+    /// of the compile-time `const _` guard — it catches forward
+    /// additions to the registry that forgot to extend the
+    /// known-methods list.
+    #[test]
+    fn all_registered_bridge_methods_are_known() {
+        for entry in CODE_GRAPH_REGISTRY {
+            assert!(
+                KNOWN_BRIDGE_METHODS.contains(&entry.bridge_method),
+                "registry entry '{}' has bridge_method '{}' not in KNOWN_BRIDGE_METHODS",
+                entry.name,
+                entry.bridge_method,
+            );
+        }
+    }
+
+    /// Every `KNOWN_BRIDGE_METHODS` entry is referenced by at least
+    /// one registry entry (guards against stale entries in the list).
+    #[test]
+    fn no_orphaned_known_bridge_methods() {
+        let registry_methods: Vec<&str> = CODE_GRAPH_REGISTRY
+            .iter()
+            .map(|e| e.bridge_method)
+            .collect();
+        for method in KNOWN_BRIDGE_METHODS {
+            assert!(
+                registry_methods.contains(method),
+                "KNOWN_BRIDGE_METHODS has '{method}' not referenced by any registry entry",
+            );
+        }
     }
 }
