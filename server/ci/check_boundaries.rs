@@ -17,6 +17,7 @@
 //!   1 — one or more violations found (human-readable report on stderr)
 //!   2 — operational error (graph not warmed, unreadable rules file, DB error)
 
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,13 +71,170 @@ struct BoundaryMeta {
 /// A single rule as written in the TOML file. Unlike the wire-protocol
 /// `BoundaryRule` (which omits `name`), this struct captures the `name`
 /// field so the CI report can cite it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TomlRule {
     name: String,
     from_glob: String,
     to_glob: String,
     #[serde(default)]
     description: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Validation / compilation helpers
+// ---------------------------------------------------------------------------
+
+/// Structured error returned when a rule fails validation.
+#[derive(Debug, PartialEq)]
+struct RuleValidationError {
+    index: usize,
+    name: String,
+    field: String,
+    message: String,
+}
+
+impl fmt::Display for RuleValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rule[{index}] '{name}' — {field}: {message}",
+            index = self.index,
+            name = self.name,
+            field = self.field,
+            message = self.message
+        )
+    }
+}
+
+/// Returns a list of validation errors for every rule that is semantically
+/// invalid.  If the returned list is empty, every rule is well-formed.
+fn validate_rules(rules: &[TomlRule]) -> Vec<RuleValidationError> {
+    let mut errors = Vec::new();
+    for (i, rule) in rules.iter().enumerate() {
+        let display_name = if rule.name.trim().is_empty() {
+            "<unnamed>"
+        } else {
+            rule.name.trim()
+        };
+
+        if rule.name.trim().is_empty() {
+            errors.push(RuleValidationError {
+                index: i,
+                name: display_name.to_string(),
+                field: "name".to_string(),
+                message: "must be nonblank".to_string(),
+            });
+        }
+
+        if rule.from_glob.trim().is_empty() {
+            errors.push(RuleValidationError {
+                index: i,
+                name: display_name.to_string(),
+                field: "from_glob".to_string(),
+                message: "must be nonblank".to_string(),
+            });
+        }
+
+        if rule.to_glob.trim().is_empty() {
+            errors.push(RuleValidationError {
+                index: i,
+                name: display_name.to_string(),
+                field: "to_glob".to_string(),
+                message: "must be nonblank".to_string(),
+            });
+        }
+
+        let desc = rule.description.as_deref().unwrap_or("").trim();
+        if desc.is_empty() {
+            errors.push(RuleValidationError {
+                index: i,
+                name: display_name.to_string(),
+                field: "description".to_string(),
+                message: "must be present and nonblank".to_string(),
+            });
+        } else if is_boilerplate_description(desc) {
+            errors.push(RuleValidationError {
+                index: i,
+                name: display_name.to_string(),
+                field: "description".to_string(),
+                message: "must be meaningful (not boilerplate)".to_string(),
+            });
+        }
+    }
+    errors
+}
+
+fn is_boilerplate_description(desc: &str) -> bool {
+    let lower = desc.to_lowercase();
+    let boilerplates = [
+        "todo",
+        "fixme",
+        "placeholder",
+        "tbd",
+        "no description",
+        "description here",
+        "insert description",
+    ];
+    boilerplates.iter().any(|b| lower.contains(b))
+}
+
+/// Compiled rule: index, reference to the original rule, and compiled matchers.
+#[derive(Debug)]
+struct CompiledRule<'a> {
+    index: usize,
+    rule: &'a TomlRule,
+    from_matcher: globset::GlobMatcher,
+    to_matcher: globset::GlobMatcher,
+}
+
+/// Compile every rule into a pair of `GlobMatcher`s.  Returns a structured
+/// error list on failure so the CLI can fail closed.
+fn compile_rules(
+    rules: &[TomlRule],
+) -> Result<Vec<CompiledRule<'_>>, Vec<RuleValidationError>> {
+    let mut errors = Vec::new();
+    let mut compiled = Vec::with_capacity(rules.len());
+
+    for (i, rule) in rules.iter().enumerate() {
+        let from_norm = normalise_crate_glob(&rule.from_glob);
+        let from_glob = match Glob::new(&from_norm) {
+            Ok(g) => g,
+            Err(e) => {
+                errors.push(RuleValidationError {
+                    index: i,
+                    name: rule.name.clone(),
+                    field: "from_glob".to_string(),
+                    message: format!("invalid glob: {e}"),
+                });
+                continue;
+            }
+        };
+        let to_norm = normalise_crate_glob(&rule.to_glob);
+        let to_glob = match Glob::new(&to_norm) {
+            Ok(g) => g,
+            Err(e) => {
+                errors.push(RuleValidationError {
+                    index: i,
+                    name: rule.name.clone(),
+                    field: "to_glob".to_string(),
+                    message: format!("invalid glob: {e}"),
+                });
+                continue;
+            }
+        };
+        compiled.push(CompiledRule {
+            index: i,
+            rule,
+            from_matcher: from_glob.compile_matcher(),
+            to_matcher: to_glob.compile_matcher(),
+        });
+    }
+
+    if !errors.is_empty() {
+        Err(errors)
+    } else {
+        Ok(compiled)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,11 +321,21 @@ async fn main() {
     };
 
     if config.rules.is_empty() {
-        println!(
-            "No boundary rules defined in '{}' — nothing to check.",
+        eprintln!(
+            "Error: no boundary rules defined in '{}'.",
             cli.rules.display()
         );
-        std::process::exit(0);
+        std::process::exit(2);
+    }
+
+    // 1b. Semantic validation of every rule (fail-closed).
+    let validation_errors = validate_rules(&config.rules);
+    if !validation_errors.is_empty() {
+        eprintln!("Error: boundary rule validation failed:");
+        for err in &validation_errors {
+            eprintln!("  {err}");
+        }
+        std::process::exit(2);
     }
 
     // 2. Connect to the database so we can load the warmed graph blob.
@@ -237,40 +405,22 @@ async fn main() {
     let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, &crate_map);
 
     // 6. Compile rules (normalise globs to crate-name patterns) and match edges.
-    let compiled: Vec<(usize, &TomlRule, globset::GlobMatcher, globset::GlobMatcher)> = config
-        .rules
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            let from = Glob::new(&normalise_crate_glob(&r.from_glob))
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: rule[{}] '{}' has invalid from_glob '{}': {e}",
-                        i, r.name, r.from_glob
-                    );
-                    e
-                })
-                .ok()?
-                .compile_matcher();
-            let to = Glob::new(&normalise_crate_glob(&r.to_glob))
-                .map_err(|e| {
-                    eprintln!(
-                        "Warning: rule[{}] '{}' has invalid to_glob '{}': {e}",
-                        i, r.name, r.to_glob
-                    );
-                    e
-                })
-                .ok()?
-                .compile_matcher();
-            Some((i, r, from, to))
-        })
-        .collect();
+    let compiled = match compile_rules(&config.rules) {
+        Ok(c) => c,
+        Err(errors) => {
+            eprintln!("Error: boundary rule compilation failed:");
+            for err in &errors {
+                eprintln!("  {err}");
+            }
+            std::process::exit(2);
+        }
+    };
 
     let mut violations: Vec<(usize, &TomlRule, &str, &str)> = Vec::new();
     for edge in &crate_graph.edges {
-        for &(i, rule, ref from_m, ref to_m) in &compiled {
-            if from_m.is_match(&edge.source) && to_m.is_match(&edge.target) {
-                violations.push((i, rule, &edge.source, &edge.target));
+        for cr in &compiled {
+            if cr.from_matcher.is_match(&edge.source) && cr.to_matcher.is_match(&edge.target) {
+                violations.push((cr.index, cr.rule, &edge.source, &edge.target));
             }
         }
     }
@@ -314,5 +464,209 @@ mod tests {
         assert_eq!(normalise_crate_glob("*"), "*");
         assert_eq!(normalise_crate_glob("**"), "**");
         assert_eq!(normalise_crate_glob("*/djinn-agent"), "djinn-agent");
+    }
+
+    // ------------------------------------------------------------------
+    // Empty rule set
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn empty_rules_list_is_reported_as_empty() {
+        let rules: Vec<TomlRule> = Vec::new();
+        let errors = validate_rules(&rules);
+        assert!(errors.is_empty());
+        // The CLI path must separately reject an empty list and exit 2.
+    }
+
+    // ------------------------------------------------------------------
+    // Blank required fields
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn blank_name_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "   ".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "name");
+        assert_eq!(errors[0].message, "must be nonblank");
+    }
+
+    #[test]
+    fn blank_from_glob_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "   ".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "from_glob");
+        assert_eq!(errors[0].message, "must be nonblank");
+    }
+
+    #[test]
+    fn blank_to_glob_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "   ".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "to_glob");
+        assert_eq!(errors[0].message, "must be nonblank");
+    }
+
+    // ------------------------------------------------------------------
+    // Description validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn missing_description_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: None,
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "description");
+        assert_eq!(errors[0].message, "must be present and nonblank");
+    }
+
+    #[test]
+    fn blank_description_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("    ".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "description");
+        assert_eq!(errors[0].message, "must be present and nonblank");
+    }
+
+    #[test]
+    fn boilerplate_description_is_rejected() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("TODO: write a real description".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "description");
+        assert_eq!(errors[0].message, "must be meaningful (not boilerplate)");
+    }
+
+    #[test]
+    fn meaningful_description_is_accepted() {
+        let rules = vec![TomlRule {
+            name: "rule".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("Agent must not import control-plane.".to_string()),
+        }];
+        let errors = validate_rules(&rules);
+        assert!(errors.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Invalid globs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn invalid_from_glob_fails_compilation() {
+        let rules = vec![TomlRule {
+            name: "bad-from".to_string(),
+            from_glob: "[unclosed".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let result = compile_rules(&rules);
+        assert!(result.is_err());
+        let errs = result.unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].field, "from_glob");
+        assert!(errs[0].message.contains("invalid glob"));
+    }
+
+    #[test]
+    fn invalid_to_glob_fails_compilation() {
+        let rules = vec![TomlRule {
+            name: "bad-to".to_string(),
+            from_glob: "**/a/**".to_string(),
+            to_glob: "[unclosed".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let result = compile_rules(&rules);
+        assert!(result.is_err());
+        let errs = result.unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].field, "to_glob");
+        assert!(errs[0].message.contains("invalid glob"));
+    }
+
+    #[test]
+    fn multiple_invalid_globs_collect_all_errors() {
+        let rules = vec![
+            TomlRule {
+                name: "bad-from".to_string(),
+                from_glob: "[unclosed".to_string(),
+                to_glob: "**/b/**".to_string(),
+                description: Some("Valid description.".to_string()),
+            },
+            TomlRule {
+                name: "bad-to".to_string(),
+                from_glob: "**/a/**".to_string(),
+                to_glob: "[unclosed".to_string(),
+                description: Some("Valid description.".to_string()),
+            },
+        ];
+        let result = compile_rules(&rules);
+        assert!(result.is_err());
+        let errs = result.unwrap_err();
+        assert_eq!(errs.len(), 2);
+    }
+
+    #[test]
+    fn valid_globs_compile_successfully() {
+        let rules = vec![TomlRule {
+            name: "good".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some("Agent must not import control-plane.".to_string()),
+        }];
+        let result = compile_rules(&rules);
+        assert!(result.is_ok());
+        let compiled = result.unwrap();
+        assert_eq!(compiled.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Display formatting
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn rule_validation_error_display_format() {
+        let err = RuleValidationError {
+            index: 3,
+            name: "my-rule".to_string(),
+            field: "from_glob".to_string(),
+            message: "must be nonblank".to_string(),
+        };
+        let s = format!("{err}");
+        assert_eq!(s, "rule[3] 'my-rule' — from_glob: must be nonblank");
     }
 }
