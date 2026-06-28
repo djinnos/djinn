@@ -308,19 +308,12 @@ pub(super) async fn dispatch_task_runtime(
     // the `SESSION_USER_ID` task-local (migration 28) — a task uses ITS
     // CREATOR's credential, falling back to the org-shared one when the column
     // is NULL (background / pre-multiuser tasks); and (2) the commit-author
-    // identity. The `Task` model doesn't surface this column, so read it
-    // directly. A lookup error or missing column is non-fatal: we just resolve
-    // org-shared / fall back to the bot identity, preserving historical
-    // behaviour.
-    let created_by_user_id: Option<String> = sqlx::query_scalar!(
-        "SELECT created_by_user_id FROM tasks WHERE id = $1",
-        task.id
-    )
-    .fetch_optional(app_state.db.pool())
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    // identity. The `Task` model doesn't surface this column, so read it through
+    // the djinn-db repository layer. A lookup error or missing column is
+    // non-fatal: we just resolve org-shared / fall back to the bot identity,
+    // preserving historical behaviour.
+    let created_by_user_id: Option<String> =
+        task_repo.created_by_user_id(&task.id).await.ok().flatten();
 
     // ── Resolve the commit-author identity (Vercel-friendly attribution) ──
     //
