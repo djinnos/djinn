@@ -618,8 +618,10 @@ function ProposalDetailView({
         {/* Readiness panel: DoR status, tribunal metrics, blocked explanations,
             and needs-evidence spike parking. */}
         <ReadinessPanel
+          proposalId={proposal.id}
           gateStatus={detail.gate_status}
           refinement={detail.refinement}
+          onChanged={onChanged}
         />
 
         <ProposalKickoff detail={detail} onChanged={onChanged} />

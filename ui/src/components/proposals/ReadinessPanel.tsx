@@ -1,3 +1,4 @@
+import { useCallback, useState } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   Alert02Icon,
@@ -7,12 +8,17 @@ import {
   Shield01Icon,
 } from "@hugeicons/core-free-icons";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { callMcpTool } from "@/api/mcpClient";
+import { showToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import type {
   ProposalGateStatus,
   ProposalRefinementStatus,
 } from "@/api/types";
+import { BlockMarkdown } from "./blocks/BlockShell";
 
 /**
  * Human-readable label for a DoR check name.
@@ -44,18 +50,53 @@ function checkLabel(check: string): string {
  * the single human accept/reject review live in `ProposalRefinement`.
  */
 export function ReadinessPanel({
+  proposalId,
   gateStatus,
   refinement,
+  onChanged,
 }: {
+  proposalId?: string;
   gateStatus: ProposalGateStatus | null;
   refinement: ProposalRefinementStatus | null;
+  onChanged?: () => void;
 }) {
-  // If there's no gate status and no refinement, don't render anything.
-  if (!gateStatus && !refinement) return null;
+  const [overrideReason, setOverrideReason] = useState("");
+  const [overrideBusy, setOverrideBusy] = useState(false);
 
   const isReady = gateStatus?.ready ?? true;
   const hasBlockedReasons =
     gateStatus && gateStatus.blocked_explanations.length > 0;
+  const judgeVerdictBody = gateStatus?.judge_verdict_body?.trim();
+  const showOverrideControls = Boolean(
+    proposalId && gateStatus && !gateStatus.ready && !gateStatus.human_override_active,
+  );
+
+  const handleOverride = useCallback(async () => {
+    const reason = overrideReason.trim();
+    if (!proposalId || !gateStatus || !reason) return;
+
+    setOverrideBusy(true);
+    try {
+      const res = await callMcpTool("proposal_verdict_override", {
+        proposal_id: proposalId,
+        overridden_verdict_entry_id: gateStatus.judge_verdict_id ?? undefined,
+        reason,
+      });
+      if (res.error) throw new Error(res.error);
+      showToast.success("Human override recorded");
+      setOverrideReason("");
+      onChanged?.();
+    } catch (e) {
+      showToast.error("Failed to record human override", {
+        description: (e as Error).message,
+      });
+    } finally {
+      setOverrideBusy(false);
+    }
+  }, [gateStatus, proposalId, overrideReason, onChanged]);
+
+  // If there's no gate status and no refinement, don't render anything.
+  if (!gateStatus && !refinement) return null;
 
   return (
     <div className="space-y-3 rounded-md border p-3">
@@ -127,7 +168,7 @@ export function ReadinessPanel({
       {/* Tribunal metrics */}
       {gateStatus && (
         <div className="flex flex-wrap gap-3 text-sm">
-          {gateStatus.judge_verdict_body && (
+          {judgeVerdictBody && (
             <div className="space-y-0.5">
               <span className="text-muted-foreground">Judge verdict</span>
               <Badge
@@ -156,6 +197,73 @@ export function ReadinessPanel({
               </span>
             </span>
           )}
+        </div>
+      )}
+
+      {judgeVerdictBody && (
+        <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Label className="text-xs uppercase text-muted-foreground">
+              Judge reasoning
+            </Label>
+            <Badge
+              variant={gateStatus?.judge_needs_work ? "destructive" : "default"}
+              className="text-xs"
+            >
+              {gateStatus?.judge_needs_work ? "Needs-work" : "Ready"}
+            </Badge>
+          </div>
+          <BlockMarkdown>{judgeVerdictBody}</BlockMarkdown>
+        </div>
+      )}
+
+      {gateStatus?.human_override_active && (
+        <div className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 p-2">
+          <HugeiconsIcon
+            icon={Shield01Icon}
+            size={14}
+            className="mt-0.5 shrink-0 text-primary"
+          />
+          <p className="text-xs text-muted-foreground">
+            A human override is active for this proposal revision, so the current
+            DoR or Judge block has already been audited and does not need another
+            override.
+          </p>
+        </div>
+      )}
+
+      {showOverrideControls && (
+        <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30">
+          <div className="space-y-1">
+            <Label
+              htmlFor="readiness-override-reason"
+              className="text-xs uppercase text-muted-foreground"
+            >
+              Record human override
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Use this audited action only for DoR or tribunal false positives.
+              The backend records the reason and decides whether the override is
+              allowed for this proposal revision.
+            </p>
+          </div>
+          <Textarea
+            id="readiness-override-reason"
+            value={overrideReason}
+            onChange={(e) => setOverrideReason(e.target.value)}
+            placeholder="Why is it safe to override this readiness block?"
+            aria-label="Human override audit reason"
+            disabled={overrideBusy}
+            className="min-h-[72px] bg-background"
+          />
+          <Button
+            size="sm"
+            variant="destructive"
+            disabled={overrideBusy || !overrideReason.trim()}
+            onClick={handleOverride}
+          >
+            {overrideBusy ? "Recording…" : "Override DoR and proceed"}
+          </Button>
         </div>
       )}
 
