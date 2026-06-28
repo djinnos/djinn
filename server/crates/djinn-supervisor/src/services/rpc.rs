@@ -273,7 +273,7 @@ impl RpcServices {
                 accepted: false,
                 error,
             }) => {
-                let reason = error.unwrap_or_else(|| "token rejected".into());
+                let reason = error.unwrap_or("token rejected".into());
                 return Err(ConnectTcpError::Rejected(reason));
             }
             other => {
@@ -545,7 +545,7 @@ impl SupervisorServices for RpcServices {
     ) -> Result<(), String> {
         // Opaque JSON encode for bincode safety — `serde_json::Value`'s
         // untagged-enum internals trip `DeserializeAnyNotSupported`.
-        let message = serde_json::to_string(&message).unwrap_or_else(|_| "null".to_string());
+        let message = serde_json::to_string(&message).unwrap_or("null".to_string());
         match self
             .roundtrip(ServiceRpcRequest::PublishSessionMessage {
                 session_id,
@@ -693,7 +693,7 @@ impl SupervisorServices for RpcServices {
     ) -> Result<serde_json::Value, String> {
         // Opaque JSON encode — `serde_json::Map` contains `Value`s whose
         // untagged-enum internals trip bincode.
-        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+        let arguments = serde_json::to_string(&arguments).unwrap_or("{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolGithubSearch {
                 project_id,
@@ -717,7 +717,7 @@ impl SupervisorServices for RpcServices {
         project_id: Option<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
-        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+        let arguments = serde_json::to_string(&arguments).unwrap_or("{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolGithubFetchFile {
                 project_id,
@@ -741,7 +741,7 @@ impl SupervisorServices for RpcServices {
         session_task_id: Option<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
-        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+        let arguments = serde_json::to_string(&arguments).unwrap_or("{}".to_string());
         match self
             .roundtrip(ServiceRpcRequest::ToolCiJobLog {
                 session_task_id,

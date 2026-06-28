@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 // Touch to advance main HEAD and trigger a warm job (verification warm-base
 // cargo cache validation, 2026-06-16). No behavior change.
 //
