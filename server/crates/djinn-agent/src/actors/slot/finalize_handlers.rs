@@ -1,328 +1,65 @@
-use crate::context::AgentContext;
-use crate::roles::finalize::{AcVerdict, SubmitDecision, SubmitGrooming, SubmitReview, SubmitWork};
-use djinn_db::TaskRepository;
+// ─── hfhw cutover: finalize_handlers delegated to djinn-slot ────────────
+//
+// The canonical finalize handler implementations now live in
+// `djinn_slot::finalize_handlers`.  This module re-exports the finalize
+// types and `apply_ac_verdicts` pure function, and provides thin
+// `AgentContext → SlotContext` adapter wrappers for the two async entry
+// points (`process_finalize_payload`, `handle_budget_park`) so existing
+// agent-side callers continue to compile without changes.
 
-/// Process the structured finalize tool payload captured by the reply loop (ADR-036).
+// Re-export finalize types from djinn-slot so `AcVerdict` resolves through the
+// agent module path for the test module below.  These types are byte-identical
+// to the old `crate::roles::finalize` definitions.
+#[cfg(test)]
+pub(crate) use djinn_slot::finalize_types::AcVerdict;
+
+// Re-export the pure `apply_ac_verdicts` function from djinn-slot for tests.
+#[cfg(test)]
+pub(crate) use djinn_slot::finalize_handlers::apply_ac_verdicts;
+
+use crate::context::AgentContext;
+
+/// Agent-compatible wrapper around
+/// `djinn_slot::finalize_handlers::process_finalize_payload`.
 ///
-/// Called from the task lifecycle after the reply loop exits cleanly. Logs structured
-/// activity entries and performs side effects specific to each finalize tool:
-/// - `submit_work`: logs work summary and files changed
-/// - `submit_review`: atomically sets AC met/unmet state, logs verdict
-/// - `submit_decision`: logs lead decision and rationale
-/// - `submit_grooming`: logs per-task grooming entries
-///
-/// Silently no-ops if `payload` is `None` (session ended without a finalize tool call).
-/// Malformed payloads are logged as warnings and do not crash the lifecycle.
+/// Converts `AgentContext` → `SlotContext` and delegates to the canonical
+/// djinn-slot implementation.
 pub(crate) async fn process_finalize_payload(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
     task_id: &str,
     app_state: &AgentContext,
 ) {
-    let Some(payload) = payload else { return };
-
-    match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state).await,
-        "submit_review" => handle_submit_review(payload, task_id, app_state).await,
-        "submit_decision" => handle_submit_decision(payload, task_id, app_state).await,
-        "submit_grooming" => handle_submit_grooming(payload, app_state).await,
-        other => {
-            tracing::debug!(
-                finalize_tool = %other,
-                "finalize_handlers: unrecognized finalize tool; skipping"
-            );
-        }
-    }
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::finalize_handlers::process_finalize_payload(
+        payload,
+        finalize_tool_name,
+        task_id,
+        &slot_ctx,
+    )
+    .await;
 }
 
-/// Persist a budget-park handoff summary using the same payload shape as
-/// `submit_work`, so `extract_worker_context` can surface it unchanged.
+/// Agent-compatible wrapper around
+/// `djinn_slot::finalize_handlers::handle_budget_park`.
+///
+/// Converts `AgentContext` → `SlotContext` and delegates to the canonical
+/// djinn-slot implementation.
 pub(crate) async fn handle_budget_park(
     summary: &str,
     details: &str,
     task_id: &str,
     app_state: &AgentContext,
 ) {
-    let summary = summary.trim();
-    if summary.is_empty() {
-        return;
-    }
-
-    let activity_payload = serde_json::json!({
-        "summary": summary,
-        "remaining_concerns": format!("budget-parked: {details}"),
-    })
-    .to_string();
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo
-        .log_activity(
-            Some(task_id),
-            "agent-supervisor",
-            "worker",
-            "work_submitted",
-            &activity_payload,
-        )
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %e,
-            "finalize_handlers: failed to log budget-park work_submitted activity"
-        );
-    }
-}
-
-/// Log structured work-submission activity for a worker session.
-async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_state: &AgentContext) {
-    let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "finalize_handlers: malformed submit_work payload"
-            );
-            return;
-        }
-    };
-
-    let activity_payload = serde_json::json!({
-        "commit_title": work.commit_title,
-        "summary": work.summary,
-        "files_changed": work.files_changed,
-        "remaining_concerns": work.remaining_concerns,
-    })
-    .to_string();
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo
-        .log_activity(
-            Some(task_id),
-            "agent-supervisor",
-            "worker",
-            "work_submitted",
-            &activity_payload,
-        )
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %e,
-            "finalize_handlers: failed to log submit_work activity"
-        );
-    }
-}
-
-/// Atomically set AC met/unmet on the task from the criteria array, then log the verdict.
-async fn handle_submit_review(
-    payload: &serde_json::Value,
-    task_id: &str,
-    app_state: &AgentContext,
-) {
-    let review = match serde_json::from_value::<SubmitReview>(payload.clone()) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "finalize_handlers: malformed submit_review payload"
-            );
-            return;
-        }
-    };
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-    // Atomically set AC met/unmet state from the criteria array.
-    if !review.acceptance_criteria.is_empty() {
-        match repo.get(task_id).await {
-            Ok(Some(task)) => {
-                let ac_json =
-                    apply_ac_verdicts(&task.acceptance_criteria, &review.acceptance_criteria);
-                if let Err(e) = repo
-                    .update(
-                        task_id,
-                        &task.title,
-                        &task.description,
-                        &task.design,
-                        task.priority,
-                        &task.owner,
-                        &task.labels,
-                        &ac_json,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %e,
-                        "finalize_handlers: failed to update AC from submit_review"
-                    );
-                }
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    "finalize_handlers: task not found for AC update"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "finalize_handlers: failed to load task for AC update"
-                );
-            }
-        }
-    }
-
-    // Log verdict and feedback as structured activity.
-    let activity_payload = serde_json::json!({
-        "verdict": review.verdict,
-        "feedback": review.feedback,
-    })
-    .to_string();
-
-    if let Err(e) = repo
-        .log_activity(
-            Some(task_id),
-            "agent-supervisor",
-            "reviewer",
-            "review_submitted",
-            &activity_payload,
-        )
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %e,
-            "finalize_handlers: failed to log submit_review activity"
-        );
-    }
-}
-
-/// Merge incoming per-criterion verdicts into the task's existing AC JSON.
-///
-/// Uses index-based matching. If an incoming verdict is missing `criterion` text,
-/// the existing criterion text at that index is preserved.
-fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
-    let existing: Vec<serde_json::Value> = serde_json::from_str(existing_json).unwrap_or_default();
-
-    let merged: Vec<serde_json::Value> = verdicts
-        .iter()
-        .enumerate()
-        .map(|(i, verdict)| {
-            let criterion_text = if !verdict.criterion.is_empty() {
-                verdict.criterion.clone()
-            } else {
-                existing
-                    .get(i)
-                    .and_then(|e| e.get("criterion"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            };
-            serde_json::json!({
-                "criterion": criterion_text,
-                "met": verdict.met,
-            })
-        })
-        .collect();
-
-    serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
-}
-
-/// Log lead decision as a structured activity entry.
-async fn handle_submit_decision(
-    payload: &serde_json::Value,
-    task_id: &str,
-    app_state: &AgentContext,
-) {
-    let decision = match serde_json::from_value::<SubmitDecision>(payload.clone()) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "finalize_handlers: malformed submit_decision payload"
-            );
-            return;
-        }
-    };
-
-    let activity_payload = serde_json::json!({
-        "decision": decision.decision,
-        "rationale": decision.rationale,
-        "created_tasks": decision.created_tasks,
-    })
-    .to_string();
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = repo
-        .log_activity(
-            Some(task_id),
-            "agent-supervisor",
-            "lead",
-            "decision_submitted",
-            &activity_payload,
-        )
-        .await
-    {
-        tracing::warn!(
-            task_id = %task_id,
-            error = %e,
-            "finalize_handlers: failed to log submit_decision activity"
-        );
-    }
-}
-
-/// Log per-task planning activity entries.
-///
-/// The planner is project-scoped, so `task_id` is a synthetic project identifier.
-/// Each `tasks_reviewed` entry references a real task by its own `task_id` field.
-async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &AgentContext) {
-    let grooming = match serde_json::from_value::<SubmitGrooming>(payload.clone()) {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "finalize_handlers: malformed submit_grooming payload"
-            );
-            return;
-        }
-    };
-
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    for entry in &grooming.tasks_reviewed {
-        let activity_payload = serde_json::json!({
-            "action": entry.action,
-            "changes": entry.changes,
-        })
-        .to_string();
-
-        if let Err(e) = repo
-            .log_activity(
-                Some(&entry.task_id),
-                "agent-supervisor",
-                "planner",
-                "planning_entry",
-                &activity_payload,
-            )
-            .await
-        {
-            tracing::warn!(
-                task_id = %entry.task_id,
-                error = %e,
-                "finalize_handlers: failed to log planning_entry activity"
-            );
-        }
-    }
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::finalize_handlers::handle_budget_park(summary, details, task_id, &slot_ctx).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_helpers;
+    use djinn_db::TaskRepository;
 
     // ── apply_ac_verdicts ────────────────────────────────────────────────────
 
