@@ -1,5 +1,44 @@
 use serde::{Deserialize, Serialize};
 
+/// A structured needs-evidence claim that the Judge identifies as requiring
+/// a read-only investigation spike. Persisted as JSON in the
+/// `proposals.needs_evidence_claim` column alongside the linked spike task id.
+///
+/// Fields:
+/// - `question`: the feasibility question the spike must answer.
+/// - `target_subsystem`: the subsystem or module under investigation.
+/// - `spec_unknown_anchor`: what in the spec is unknown/unverified.
+/// - `insufficient_in_session_research`: why in-session research was not enough.
+/// - `expected_findings`: what the spike should produce to resolve the claim.
+/// - `round`: the debate round when the demand was issued.
+/// - `against_revision_seq`: the proposal revision the demand targets.
+/// - `created_by_task_id`: the Judge task id that issued the demand.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeedsEvidenceClaim {
+    pub question: String,
+    pub target_subsystem: String,
+    pub spec_unknown_anchor: String,
+    pub insufficient_in_session_research: String,
+    pub expected_findings: String,
+    pub round: i32,
+    pub against_revision_seq: i32,
+    pub created_by_task_id: String,
+}
+
+impl NeedsEvidenceClaim {
+    /// Attempt to parse a stored `needs_evidence_claim` JSON string back into
+    /// the typed struct. Returns `None` when the input is `None` or empty, and
+    /// `Err` when the JSON is present but does not match the expected shape.
+    pub fn parse_stored(json: Option<&str>) -> Result<Option<Self>, String> {
+        match json {
+            None | Some("") => Ok(None),
+            Some(s) => serde_json::from_str(s)
+                .map(Some)
+                .map_err(|e| format!("invalid NeedsEvidenceClaim JSON: {e}")),
+        }
+    }
+}
+
 /// A global, project-independent proposal: the collaborative "why/what/scope"
 /// artifact that precedes (and is decoupled from) the project-scoped epic/task
 /// execution engine. Has NO `project_id` — it targets projects via
