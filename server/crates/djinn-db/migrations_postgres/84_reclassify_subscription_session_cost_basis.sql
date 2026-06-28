@@ -53,12 +53,7 @@
 --       `openai` namespace and are recognised by the `codex` model marker.
 --
 --   The sibling task sswh adds a Rust/SQL predicate drift guard to keep these
---   in sync as the builtin list evolves:
---     • Rust tests in `djinn-provider/src/catalog/builtin.rs::tests`
---       (drift_guard_sql_predicates_match_rust_classification,
---        drift_guard_builtin_subscription_ids_covered,
---        drift_guard_id_pattern_constants_match_migration).
---     • Migration-adjacent matrix: `djinn-db/docs/84-cost-basis-predicate-drift-guard.md`.
+--   in sync as the builtin list evolves.
 -- ──────────────────────────────────────────────────────────────────────────────
 
 

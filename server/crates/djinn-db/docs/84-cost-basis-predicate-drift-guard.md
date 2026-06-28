@@ -22,8 +22,8 @@ alignment at a glance.
 
 ## Automated drift guard
 
-The drift is also enforced by Rust tests in
-`djinn-provider/src/catalog/builtin.rs` (`catalog::builtin::tests`):
+The drift is also enforced by integration tests in
+`djinn-provider/tests/cost_basis_drift_guard.rs`:
 
 - `drift_guard_sql_predicates_match_rust_classification` — reproduces each SQL
   predicate family as a Rust helper (`migration_predicates_subscription_evidence`)
@@ -95,9 +95,10 @@ When changing subscription rules:
    (`BUILTIN_PROVIDERS`, `is_subscription_id`, `governable_subscription_for_model`).
 2. Update the SQL predicates in
    `84_reclassify_subscription_session_cost_basis.sql` (Families A/B/C).
-3. Update `covered_by_migration_family_a` / the representative matrix in the
-   drift-guard tests if a builtin id was added/removed.
-4. Run `cargo test -p djinn-provider --lib catalog::builtin::tests` — the drift
+3. Update `covered_by_migration_family_a` / the representative matrix in
+   `djinn-provider/tests/cost_basis_drift_guard.rs` if a builtin id was
+   added/removed.
+4. Run `cargo test -p djinn-provider --test cost_basis_drift_guard` — the drift
    guard tests must pass before the change merges.
 
 No acceptance criterion for this work depends on live credentials, production
