@@ -12,7 +12,7 @@ use tracing::Instrument;
 use crate::bridge::{
     ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, Candidate, ChangedRange,
     ChurnEntry, ComplexityResult, CoupledPairEntry, CouplingEntry, CouplingHubEntry,
-    CrateEdgeEntry, CrateNodeEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
+    CrateEdgeEntry, CrateGraphResponse, CrateNodeEntry, CycleGroup, DeadSymbolEntry, DeprecatedHit,
     DetectedChangesResult, EdgeEntry, FileGroupEntry, FlowResult, GraphNeighbor, GraphStatus,
     HotPathHit, HotspotEntry, ImpactEntry, ImpactResult, MetricsAtResult, NeighborsResult,
     OrphanEntry, PathResult, ProjectCtx, QuerySubgraphRequest, QuerySubgraphResult, RankedNode,
@@ -29,6 +29,7 @@ mod handler;
 mod handler_basic_ops;
 mod handler_change_ops;
 mod handler_coupling_ops;
+mod handler_impact_check;
 mod next_step_hints;
 pub(crate) mod operation_registry;
 mod request_types;
