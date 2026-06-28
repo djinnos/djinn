@@ -19,9 +19,9 @@ mod epic_extension_tests;
 mod lsp_dispatch_tests;
 mod lsp_tool_boundary_tests;
 mod memory_dispatch_tests;
+mod proposal_dispatch_tests;
 mod schema_snapshot_tests;
 mod skill_read_tests;
-mod proposal_dispatch_tests;
 mod task_kill_session_tests;
 mod tool_dispatch_tests;
 
