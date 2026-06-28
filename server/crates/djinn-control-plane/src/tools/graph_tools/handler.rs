@@ -205,7 +205,23 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &CodeGraphParams,
     ) -> Result<CodeGraphResponse, String> {
-        match params.operation.as_str() {
+        let op = params.operation.as_str();
+
+        // Registry-derived dispatch for the converted basic vertical slice.
+        // If the operation is registered, we dispatch through the registry path
+        // so that the conversion is exercised at runtime.  Unconverted ops fall
+        // through to the legacy handwritten match below.
+        if let Some(entry) = operation_registry::lookup_by_name(op) {
+            match entry.name {
+                "neighbors" => return self.code_graph_neighbors(ctx, params).await,
+                "impact" => return self.code_graph_impact(ctx, params).await,
+                "context" => return self.code_graph_context(ctx, params).await,
+                // coupling_hotspots is intentionally left for the next task (4lij).
+                _ => {}
+            }
+        }
+
+        match op {
             "neighbors" => self.code_graph_neighbors(ctx, params).await,
             "ranked" => self.code_graph_ranked(ctx, params).await,
             "implementations" => self.code_graph_implementations(ctx, params).await,
@@ -280,16 +296,27 @@ impl DjinnMcpServer {
         // Operations that take a single `key`. `search`/`ranked`/
         // `cycles`/`orphans`/`hotspots`/etc. don't go through
         // resolution — their `key` is a query/glob.
-        let single_key_ops = [
-            "neighbors",
-            "impact",
-            "implementations",
-            "describe",
-            // PR C1: `context` shares the same key-resolution path so a
-            // short identifier like `User` short-circuits to Ambiguous /
-            // NotFound instead of failing inside the graph backend.
-            "context",
-        ];
+        //
+        // Derive the list from registry metadata so the converted basic
+        // ops (`neighbors`, `impact`, `context`) are mechanically checked
+        // against the single source of truth.  Unconverted ops that
+        // still need single-key resolution (`implementations`,
+        // `describe`) remain in the handwritten fallback until they are
+        // registered.
+        let single_key_ops: Vec<&str> = {
+            let mut registered: Vec<&str> = operation_registry::CODE_GRAPH_REGISTRY
+                .iter()
+                .filter(|e| e.pre_resolve == operation_registry::PreResolveCategory::SingleKey)
+                .map(|e| e.name)
+                .collect();
+            // Fallback for unconverted ops that still require single-key resolution
+            for unconverted in &["implementations", "describe"] {
+                if !registered.contains(unconverted) {
+                    registered.push(unconverted);
+                }
+            }
+            registered
+        };
         if single_key_ops.contains(&params.operation.as_str())
             && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty())
         {
