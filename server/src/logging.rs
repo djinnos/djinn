@@ -12,7 +12,11 @@ pub fn logs_dir() -> PathBuf {
         .join("logs")
 }
 
-#[allow(clippy::print_stderr, clippy::disallowed_methods)] // TODO(mz04): migrate to tracing
+/// Errors here are emitted via `eprintln!` deliberately: this function runs
+/// *before* the tracing subscriber is initialised in `init_logging`, so
+/// `tracing::error!` would silently drop the message. stderr is the only
+/// reliable channel for pre-subscriber diagnostics.
+#[allow(clippy::print_stderr)]
 pub fn setup_log_dir_and_retention() {
     let dir = logs_dir();
     if let Err(e) = fs::create_dir_all(&dir) {
