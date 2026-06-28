@@ -21,7 +21,8 @@ pub mod server;
 pub mod wire;
 
 pub use wire::{
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableDjinnEvent,
 };
 
 /// Dependencies shared across every stage in a task-run.

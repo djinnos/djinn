@@ -581,6 +581,24 @@ pub(crate) async fn execute_stage(
     // Phase 6c routes session creation through `SupervisorServices` so the
     // in-Pod worker never opens its own DB connection.  Host-side
     // `DirectServices` delegates to `SessionRepository::create` verbatim.
+    //
+    // Derive a billing classification hint from the resolved credential and
+    // catalog/provider context so `DirectServices::create_session` can choose
+    // `sessions.cost_basis` using explicit signal rather than only
+    // `classify_provider(provider_id)` (which misses Codex OAuth credentials
+    // surfacing under the `openai` namespace).
+    let cost_basis_hint = resolved.as_ref().map(|r| {
+        use djinn_provider::catalog::builtin::{
+            governable_subscription_for_model, is_subscription_provider,
+        };
+        if is_subscription_provider(&r.catalog_provider_id)
+            || governable_subscription_for_model(&r.catalog_provider_id, &r.model_name).is_some()
+        {
+            djinn_supervisor::services::CostBasisHint::SubscriptionPlan
+        } else {
+            djinn_supervisor::services::CostBasisHint::MeteredApi
+        }
+    });
     let session_record = services
         .create_session(
             djinn_supervisor::services::SerializableCreateSessionParams {
@@ -590,6 +608,7 @@ pub(crate) async fn execute_stage(
                 agent_type: runtime_role_name.to_string(),
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
+                cost_basis_hint,
             },
         )
         .await
