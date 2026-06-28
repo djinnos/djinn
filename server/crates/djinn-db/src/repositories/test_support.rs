@@ -7,6 +7,110 @@ use tokio::sync::broadcast;
 use crate::database::Database;
 use crate::repositories::note::NoteRepository;
 
+// ── Seed helpers for usage-analytics route tests ─────────────────────────
+// These insert rows directly via raw SQL so integration tests outside
+// djinn-db can seed deterministic fixture data without going through the
+// full service-layer code paths.
+
+/// Parameters for [`seed_session_row`].
+pub struct UsageTestSessionSeed<'a> {
+    pub project_id: &'a str,
+    pub model_id: &'a str,
+    pub agent_type: &'a str,
+    pub started_at: &'a str,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub cost_usd: Option<f64>,
+    pub cost_basis: &'a str,
+    pub task_id: Option<&'a str>,
+}
+
+/// Parameters for [`seed_task_row`].
+pub struct UsageTestTaskSeed<'a> {
+    pub project_id: &'a str,
+    pub status: &'a str,
+    pub close_reason: Option<&'a str>,
+    pub total_reopen_count: i32,
+}
+
+/// Seed a task row directly into the database for integration-level
+/// contract tests. Returns the generated task id.
+pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String {
+    db.ensure_initialized().await.unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let short_id = format!("task-{}", &id[..8]);
+    sqlx::query(
+        "INSERT INTO tasks \
+         (id, project_id, short_id, epic_id, title, description, design, \
+          issue_type, status, priority, owner, labels, acceptance_criteria, \
+          reopen_count, continuation_count, verification_failure_count, \
+          total_reopen_count, \
+          intervention_count, created_at, updated_at, closed_at, close_reason, \
+          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
+         VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
+                 'task', $4, 0, '', '[]', '[]', \
+                 0, 0, 0, \
+                 $5, \
+                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
+                 NULL, '[]', NULL, NULL, NULL)",
+    )
+    .bind(&id)
+    .bind(seed.project_id)
+    .bind(&short_id)
+    .bind(seed.status)
+    .bind(seed.total_reopen_count)
+    .bind(seed.close_reason)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed task row");
+    id
+}
+
+/// Seed raw session rows directly into the database for integration-level
+/// contract tests that need actual query results.
+pub async fn seed_session_row(db: &Database, seed: UsageTestSessionSeed<'_>) {
+    db.ensure_initialized().await.unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, project_id, task_id, model_id, agent_type, status, \
+          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(&id)
+    .bind(seed.project_id)
+    .bind(seed.task_id)
+    .bind(seed.model_id)
+    .bind(seed.agent_type)
+    .bind(seed.started_at)
+    .bind(seed.tokens_in)
+    .bind(seed.tokens_out)
+    .bind(seed.cache_read_tokens)
+    .bind(seed.cache_write_tokens)
+    .bind(seed.cost_usd)
+    .bind(seed.cost_basis)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed session row");
+}
+
+/// Seed a project so that `project_id` FK constraints pass.
+pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO projects (id, name, github_owner, github_repo) \
+         VALUES ($1, $2, 'test', $2) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(name)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed project");
+}
+
 /// Drop a database table if it exists.  Test-fixture helper for
 /// failure-injection tests that need to simulate a missing-table error
 /// (e.g. the coordinator reentrance `blocker_lookup_error` test).
