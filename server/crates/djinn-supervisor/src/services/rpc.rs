@@ -1610,6 +1610,7 @@ mod tests {
             agent_type: "planner".into(),
             metadata_json: None,
             task_run_id: Some("run-1".into()),
+            cost_basis_hint: None,
         };
         let got = services
             .create_session(params)

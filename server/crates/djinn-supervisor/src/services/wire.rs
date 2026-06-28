@@ -191,6 +191,39 @@ pub struct SerializableCreateSessionParams {
     pub agent_type: String,
     pub metadata_json: Option<String>,
     pub task_run_id: Option<String>,
+    /// Explicit billing classification derived from the resolved credential +
+    /// catalog/provider context at model-resolution time. When present,
+    /// [`DirectServices::create_session`] uses this as the primary signal for
+    /// `sessions.cost_basis` instead of falling back to
+    /// `classify_provider(provider_id)`.
+    #[serde(default)]
+    pub cost_basis_hint: Option<CostBasisHint>,
+}
+
+/// Billing classification hint derived from the resolved credential and
+/// provider catalog context.
+///
+/// Passed through [`SerializableCreateSessionParams`] so the host-side
+/// `DirectServices::create_session` can choose `sessions.cost_basis` by
+/// precedence:
+///
+/// 1. Explicit subscription hint → `"projected"`
+/// 2. Explicit metered hint → priced `"actual"` / unpriced `"unpriced"`
+/// 3. Unknown → fall back to `governable_subscription_for_model` /
+///    `classify_provider` + pricing availability
+///
+/// This replaces the previous single-level `classify_provider` check which
+/// missed Codex/OAuth credentials surfacing under the `openai` namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostBasisHint {
+    /// The credential is a personal subscription plan (e.g. Codex OAuth,
+    /// coding-plan provider). Sessions should use `"projected"` cost basis.
+    SubscriptionPlan,
+    /// The credential is a metered API key with standard per-token billing.
+    /// Sessions should use `"actual"` when pricing exists, `"unpriced"` when
+    /// not.
+    MeteredApi,
 }
 
 /// Contents of an [`FramePayload::AuthResult`] handshake reply.
@@ -921,6 +954,7 @@ mod tests {
             agent_type: "planner".into(),
             metadata_json: None,
             task_run_id: Some("run-1".into()),
+            cost_basis_hint: None,
         };
         let f = Frame {
             correlation_id: 31,
