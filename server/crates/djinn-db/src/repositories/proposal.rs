@@ -4160,11 +4160,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_structured_needs_evidence_spike_round_trips_claim_json() {
         let (bus, captured) = capturing_bus();
-        let repo = ProposalRepository::new(test_db(), bus);
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), bus);
         let p = repo.create(create_input("Structured Claim")).await.unwrap();
         captured.lock().unwrap().clear();
 
-        let spike_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-spike").await;
+        let epic = insert_epic(&db, &proj, "sp01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "spike-01").await;
 
         let claim = NeedsEvidenceClaim {
             question: "Can X handle 10k rps?".to_owned(),
@@ -4224,9 +4227,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn set_structured_needs_evidence_spike_clear_and_reparse() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo.create(create_input("Clear Claim")).await.unwrap();
-        let spike_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-clear").await;
+        let epic = insert_epic(&db, &proj, "cl01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "clear-01").await;
 
         let claim = NeedsEvidenceClaim {
             question: "Is Y thread-safe?".to_owned(),
@@ -4268,9 +4274,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn legacy_string_set_needs_evidence_spike_still_works() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo.create(create_input("Legacy")).await.unwrap();
-        let spike_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-legacy").await;
+        let epic = insert_epic(&db, &proj, "lg01").await;
+        let spike_id = insert_task(&db, &proj, &epic, "legacy-01").await;
 
         // The opaque-string path still works.
         let updated = repo
