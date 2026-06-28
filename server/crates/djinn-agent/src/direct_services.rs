@@ -25,7 +25,8 @@ use djinn_db::repositories::session::CreateSessionParams;
 use djinn_db::repositories::task_run::CreateTaskRunParams;
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
-    SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,
+    CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    SerializableDjinnEvent,
 };
 use djinn_supervisor::{
     RoleKind, StageError, StageOutcome, SupervisorServices, TaskRunOutcome, TaskRunSpec,
@@ -193,19 +194,32 @@ impl SupervisorServices for DirectServices {
         // produce `None` — all snapshot columns and `cost_usd` stay NULL.
         let catalog_model = ctx.catalog.find_model(params.model.as_str());
         let pricing = catalog_model.as_ref().map(|m| m.pricing.clone());
-        // Derive cost basis from pricing availability and provider credential
-        // class: subscription/coding-plan providers → "projected"; ordinary
-        // API-key providers with pricing → "actual"; uncatalogued or
-        // missing-price sessions → "unpriced".
-        let cost_basis = match &catalog_model {
-            Some(model) if pricing.is_some() => {
-                if classify_provider(&model.provider_id).is_subscription() {
-                    "projected"
-                } else {
+        // Derive cost basis using the explicit credential billing hint when
+        // available (forward-fix for Codex OAuth + coding-plan credentials
+        // surfacing under plain API-key provider namespaces), otherwise fall
+        // back to provider/model subscription rules + pricing availability.
+        let cost_basis = match params.cost_basis_hint {
+            Some(CostBasisHint::SubscriptionPlan) => "projected",
+            Some(CostBasisHint::MeteredApi) => {
+                if pricing.is_some() {
                     "actual"
+                } else {
+                    "unpriced"
                 }
             }
-            _ => "unpriced",
+            None => {
+                // Legacy path: classify by provider id alone.
+                match &catalog_model {
+                    Some(model) if pricing.is_some() => {
+                        if classify_provider(&model.provider_id).is_subscription() {
+                            "projected"
+                        } else {
+                            "actual"
+                        }
+                    }
+                    _ => "unpriced",
+                }
+            }
         };
         repo.create(CreateSessionParams {
             project_id: params.project_id.as_str(),
