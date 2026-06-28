@@ -189,9 +189,7 @@ struct CompiledRule<'a> {
 
 /// Compile every rule into a pair of `GlobMatcher`s.  Returns a structured
 /// error list on failure so the CLI can fail closed.
-fn compile_rules(
-    rules: &[TomlRule],
-) -> Result<Vec<CompiledRule<'_>>, Vec<RuleValidationError>> {
+fn compile_rules(rules: &[TomlRule]) -> Result<Vec<CompiledRule<'_>>, Vec<RuleValidationError>> {
     let mut errors = Vec::new();
     let mut compiled = Vec::with_capacity(rules.len());
 
@@ -286,9 +284,51 @@ fn normalise_crate_glob(glob: &str) -> String {
     s
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+/// Run `git rev-parse HEAD` in `repo_root` and return the trimmed commit
+/// hash, or `None` if git is not available or the command fails.
+fn resolve_current_head(project_root: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(project_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Validate that a loaded `RepoDependencyGraph` is structurally non-empty.
+/// Returns `Err` with a human-readable message when the graph has zero
+/// nodes or zero edges.
+fn check_graph_sanity(graph: &djinn_graph::repo_graph::RepoDependencyGraph) -> Result<(), String> {
+    if graph.node_count() == 0 {
+        return Err("loaded graph has zero nodes".to_string());
+    }
+    if graph.edge_count() == 0 {
+        return Err("loaded graph has zero edges".to_string());
+    }
+    Ok(())
+}
+
+/// Validate that the derived `CrateGraph` is usable for boundary checking.
+/// Returns `Err` with a human-readable message when the crate graph has
+/// no usable crate nodes or edges for a nontrivial workspace.
+fn check_crate_graph_usable(
+    crate_graph: &djinn_graph::repo_graph::CrateGraph,
+) -> Result<(), String> {
+    // A nontrivial workspace should have at least some crate nodes.
+    if crate_graph.crates.is_empty() {
+        return Err("derived crate graph has no crate nodes".to_string());
+    }
+    // We need at least one cross-crate edge to meaningfully check boundaries.
+    if crate_graph.edges.is_empty() {
+        return Err("derived crate graph has no cross-crate edges".to_string());
+    }
+    Ok(())
+}
 
 // All output in `main` goes to stdout/stderr by design — this is a CLI
 // diagnostic tool that reports results directly to the terminal.
@@ -387,9 +427,51 @@ async fn main() {
         }
     };
 
-    // 4. Derive the crate map from the index-tree checkout (where Cargo.toml lives).
+    // 3a. Verify the loaded graph is structurally non-empty.
+    if let Err(e) = check_graph_sanity(&graph) {
+        eprintln!("Error: loaded graph is unusable: {e}");
+        eprintln!(
+            "Hint: the graph may be corrupted or incompletely warmed. Run the warm-graph job first."
+        );
+        std::process::exit(2);
+    }
+
+    // 3b. Verify the cached graph is pinned to the current checkout HEAD.
     let (_project_root, index_tree_path) =
         djinn_graph::canonical_graph::normalize_graph_query_paths(&cli.project_path);
+    let pinned_commit =
+        djinn_graph::canonical_graph::canonical_graph_cache_pinned_commit_for(&index_tree_path)
+            .await;
+
+    let current_head = resolve_current_head(&index_tree_path);
+    match (current_head.as_deref(), pinned_commit.as_deref()) {
+        (None, _) => {
+            eprintln!(
+                "Error: unable to determine current git HEAD for '{}'.",
+                index_tree_path.display()
+            );
+            eprintln!("Hint: ensure --project-path points to a valid git checkout.");
+            std::process::exit(2);
+        }
+        (_, None) => {
+            eprintln!("Error: warmed graph has no pinned commit.");
+            eprintln!(
+                "Hint: the graph must be warmed before this CI step. Run the warm-graph job first."
+            );
+            std::process::exit(2);
+        }
+        (Some(head), Some(pinned)) => {
+            if djinn_graph::canonical_graph::git_head_is_strictly_stale(head, pinned) {
+                eprintln!("Error: warmed graph is stale (pinned: {pinned}, current HEAD: {head}).");
+                eprintln!(
+                    "Hint: re-run the warm-graph step for the current checkout before make check-boundaries."
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // 4. Derive the crate map from the index-tree checkout (where Cargo.toml lives).
     let crate_map = djinn_graph::canonical_graph::derive_crate_map(&index_tree_path);
 
     if crate_map.is_empty() {
@@ -403,6 +485,15 @@ async fn main() {
 
     // 5. Build the crate-level aggregated graph.
     let crate_graph = djinn_graph::repo_graph::build_crate_graph(&graph, &crate_map);
+
+    // 5a. Verify the derived crate graph is usable for boundary checking.
+    if let Err(e) = check_crate_graph_usable(&crate_graph) {
+        eprintln!("Error: derived crate graph is unusable: {e}");
+        eprintln!(
+            "Hint: the workspace may have no cross-crate dependencies, or the graph warm may have failed. Run the warm-graph job first."
+        );
+        std::process::exit(2);
+    }
 
     // 6. Compile rules (normalise globs to crate-name patterns) and match edges.
     let compiled = match compile_rules(&config.rules) {
@@ -452,7 +543,14 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+    use djinn_graph::repo_graph::{CrateEdge, CrateGraph, CrateNode, RepoDependencyGraph};
+    use djinn_graph::scip_parser::{
+        ParsedScipIndex, ScipFile, ScipMetadata, ScipOccurrence, ScipRange, ScipSymbol,
+        ScipSymbolKind, ScipSymbolRole,
+    };
 
     #[test]
     fn normalise_crate_glob_strips_path_wildcards() {
@@ -652,6 +750,244 @@ mod tests {
         assert!(result.is_ok());
         let compiled = result.unwrap();
         assert_eq!(compiled.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Graph sanity helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn check_graph_sanity_rejects_zero_nodes() {
+        let graph = RepoDependencyGraph::build(&[]);
+        assert_eq!(graph.node_count(), 0);
+        let result = check_graph_sanity(&graph);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("zero nodes"));
+    }
+
+    #[test]
+    fn check_graph_sanity_accepts_nonempty_graph() {
+        // Build a minimal index with a reference edge so the graph has
+        // both nodes and edges.
+        use std::collections::BTreeSet;
+        let main_symbol = "scip-rust pkg src/app.rs `main`().".to_string();
+        let helper_symbol = "scip-rust pkg src/helper.rs `helper`().".to_string();
+        let index = ParsedScipIndex {
+            workspace_slug: "root".to_string(),
+            metadata: ScipMetadata {
+                project_root: Some("file:///workspace/repo".to_string()),
+                tool_name: Some("rust-analyzer".to_string()),
+                tool_version: Some("1.0.0".to_string()),
+            },
+            files: vec![
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/helper.rs"),
+                    definitions: vec![ScipOccurrence {
+                        symbol: helper_symbol.clone(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 5,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    references: vec![],
+                    occurrences: vec![ScipOccurrence {
+                        symbol: helper_symbol.clone(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 5,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    symbols: vec![ScipSymbol {
+                        symbol: helper_symbol.clone(),
+                        kind: Some(ScipSymbolKind::Function),
+                        display_name: Some("helper".to_string()),
+                        signature: Some("fn helper()".to_string()),
+                        documentation: vec![],
+                        relationships: vec![],
+                        visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+                        signature_parts: None,
+                    }],
+                },
+                ScipFile {
+                    language: "rust".to_string(),
+                    relative_path: PathBuf::from("src/app.rs"),
+                    definitions: vec![ScipOccurrence {
+                        symbol: main_symbol.clone(),
+                        range: ScipRange {
+                            start_line: 0,
+                            start_character: 0,
+                            end_line: 0,
+                            end_character: 5,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    references: vec![ScipOccurrence {
+                        symbol: helper_symbol.clone(),
+                        range: ScipRange {
+                            start_line: 1,
+                            start_character: 0,
+                            end_line: 1,
+                            end_character: 5,
+                        },
+                        enclosing_range: None,
+                        roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                        syntax_kind: None,
+                        override_documentation: vec![],
+                    }],
+                    occurrences: vec![
+                        ScipOccurrence {
+                            symbol: main_symbol.clone(),
+                            range: ScipRange {
+                                start_line: 0,
+                                start_character: 0,
+                                end_line: 0,
+                                end_character: 5,
+                            },
+                            enclosing_range: None,
+                            roles: BTreeSet::from([ScipSymbolRole::Definition]),
+                            syntax_kind: None,
+                            override_documentation: vec![],
+                        },
+                        ScipOccurrence {
+                            symbol: helper_symbol.clone(),
+                            range: ScipRange {
+                                start_line: 1,
+                                start_character: 0,
+                                end_line: 1,
+                                end_character: 5,
+                            },
+                            enclosing_range: None,
+                            roles: BTreeSet::from([ScipSymbolRole::ReadAccess]),
+                            syntax_kind: None,
+                            override_documentation: vec![],
+                        },
+                    ],
+                    symbols: vec![ScipSymbol {
+                        symbol: main_symbol.clone(),
+                        kind: Some(ScipSymbolKind::Function),
+                        display_name: Some("main".to_string()),
+                        signature: Some("fn main()".to_string()),
+                        documentation: vec![],
+                        relationships: vec![],
+                        visibility: Some(djinn_graph::scip_parser::ScipVisibility::Public),
+                        signature_parts: None,
+                    }],
+                },
+            ],
+            external_symbols: vec![],
+        };
+        let graph = RepoDependencyGraph::build(&[index]);
+        assert!(graph.node_count() > 0);
+        assert!(graph.edge_count() > 0);
+        let result = check_graph_sanity(&graph);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_crate_graph_usable_rejects_empty_crates() {
+        let crate_graph = CrateGraph {
+            crates: vec![],
+            edges: vec![],
+        };
+        let result = check_crate_graph_usable(&crate_graph);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no crate nodes"));
+    }
+
+    #[test]
+    fn check_crate_graph_usable_rejects_empty_edges() {
+        let crate_graph = CrateGraph {
+            crates: vec![CrateNode {
+                name: "a".to_string(),
+                manifest_path: PathBuf::from("a/Cargo.toml"),
+                loc: 1,
+                node_count: 1,
+                fan_in: 0.0,
+                fan_out: 0.0,
+                inbound_weight: 0.0,
+                outbound_weight: 0.0,
+            }],
+            edges: vec![],
+        };
+        let result = check_crate_graph_usable(&crate_graph);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no cross-crate edges"));
+    }
+
+    #[test]
+    fn check_crate_graph_usable_accepts_nonempty() {
+        let crate_graph = CrateGraph {
+            crates: vec![
+                CrateNode {
+                    name: "a".to_string(),
+                    manifest_path: PathBuf::from("a/Cargo.toml"),
+                    loc: 1,
+                    node_count: 1,
+                    fan_in: 0.0,
+                    fan_out: 1.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 1.0,
+                },
+                CrateNode {
+                    name: "b".to_string(),
+                    manifest_path: PathBuf::from("b/Cargo.toml"),
+                    loc: 1,
+                    node_count: 1,
+                    fan_in: 1.0,
+                    fan_out: 0.0,
+                    inbound_weight: 1.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: vec![CrateEdge {
+                source: "a".to_string(),
+                target: "b".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            }],
+        };
+        let result = check_crate_graph_usable(&crate_graph);
+        assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_current_head
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_current_head_returns_some_in_git_repo() {
+        // The workspace itself is a git repo.
+        let head = resolve_current_head(Path::new("."));
+        assert!(
+            head.is_some(),
+            "expected to resolve HEAD in the current git repo"
+        );
+        let head = head.unwrap();
+        assert_eq!(head.len(), 40, "expected full SHA-1 hex string");
+        assert!(head.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn resolve_current_head_returns_none_outside_git() {
+        let tmp = std::env::temp_dir();
+        let head = resolve_current_head(&tmp);
+        assert!(head.is_none(), "expected no HEAD outside a git repo");
     }
 
     // ------------------------------------------------------------------
