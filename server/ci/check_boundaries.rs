@@ -1,4 +1,4 @@
-#![allow(clippy::disallowed_methods, clippy::print_stderr, clippy::print_stdout)] // TODO(70y0/mz04): temporary; remove after cleanup
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! CI boundary checker — loads `boundary_rules.toml`, builds the crate-level
 //! dependency graph from the warmed canonical graph, and exits non-zero if any
 //! rule-set edge is violated.
@@ -132,6 +132,9 @@ fn normalise_crate_glob(glob: &str) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
+// All output in `main` goes to stdout/stderr by design — this is a CLI
+// diagnostic tool that reports results directly to the terminal.
+#[allow(clippy::print_stderr, clippy::print_stdout)]
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
