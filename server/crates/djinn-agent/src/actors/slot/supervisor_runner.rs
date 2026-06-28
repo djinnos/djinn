@@ -48,6 +48,7 @@ use crate::supervisor::{RoleKind, SupervisorFlow, TaskRunSpec, services_for_agen
 
 use super::helpers::{
     conflict_context_for_dispatch, default_target_branch, load_provider_credential, parse_model_id,
+    refresh_oauth_credential_after_401,
 };
 
 fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tracing::Span {
@@ -775,32 +776,58 @@ pub(super) async fn dispatch_task_runtime(
                         (false, None)
                     }
                     djinn_runtime::ProviderFailureClass::AuthInvalid => {
-                        // A 401/revoked credential is deterministic — trip the
-                        // breaker IMMEDIATELY (like a throttle) so dispatch fails
-                        // over to the user's next model at once, and persist +
-                        // surface the revocation so the owner is told to
-                        // reconnect (F5-safe row + live event). Escalate the
-                        // cooldown cap: unlike a quota throttle, a dead credential
-                        // is a genuine model-health problem that should stay
-                        // demoted longer the more it keeps failing.
-                        app_state.health_tracker.record_stall(
-                            creator_scope.as_deref(),
-                            &model_id,
-                            true,
-                        );
-                        surface_credential_revocation(
-                            &app_state,
-                            creator_scope.as_deref(),
-                            &model_id,
-                        )
-                        .await;
-                        // Throttle-like for the per-task redispatch ladder: a dead
-                        // credential must never march the task to terminal
-                        // force-close. With a healthy fallback the breaker hold
-                        // makes dispatch fail over; with none the task parks until
-                        // the owner reconnects (which clears the breaker via the
-                        // credential-updated event).
-                        (true, None)
+                        // A 401 on an OAuth-backed credential (chatgpt_codex /
+                        // githubcopilot) is usually a mid-run ACCESS-TOKEN
+                        // EXPIRY, not a dead credential: the worker pod holds a
+                        // static token snapshot with no in-pod refresh (the wire
+                        // format carries only the bearer token), so a run that
+                        // outlives the access token's TTL 401s even though the
+                        // refresh token is still valid. Try a host-side silent
+                        // refresh FIRST — only a refresh that itself fails
+                        // (`invalid_grant`) or a non-OAuth API key is a true
+                        // revocation.
+                        if refresh_oauth_credential_after_401(&model_id, &app_state).await {
+                            // Recovered: the refreshed token is persisted, so the
+                            // next dispatch resumes on it. Fail this run over
+                            // WITHOUT escalating the cooldown cap and WITHOUT
+                            // marking the credential revoked — `escalate = false`
+                            // keeps `disable_ttl_trips` from ratcheting, while the
+                            // stall floor still prevents an instant re-select of
+                            // the just-failed pod before the new token is live.
+                            app_state.health_tracker.record_stall(
+                                creator_scope.as_deref(),
+                                &model_id,
+                                false,
+                            );
+                            (true, None)
+                        } else {
+                            // Genuinely dead credential — trip the breaker
+                            // IMMEDIATELY (like a throttle) so dispatch fails over
+                            // to the user's next model at once, and persist +
+                            // surface the revocation so the owner is told to
+                            // reconnect (F5-safe row + live event). Escalate the
+                            // cooldown cap: unlike a quota throttle, a dead
+                            // credential is a genuine model-health problem that
+                            // should stay demoted longer the more it keeps failing.
+                            app_state.health_tracker.record_stall(
+                                creator_scope.as_deref(),
+                                &model_id,
+                                true,
+                            );
+                            surface_credential_revocation(
+                                &app_state,
+                                creator_scope.as_deref(),
+                                &model_id,
+                            )
+                            .await;
+                            // Throttle-like for the per-task redispatch ladder: a
+                            // dead credential must never march the task to terminal
+                            // force-close. With a healthy fallback the breaker hold
+                            // makes dispatch fail over; with none the task parks
+                            // until the owner reconnects (which clears the breaker
+                            // via the credential-updated event).
+                            (true, None)
+                        }
                     }
                 };
                 // Side-channel for the coordinator's per-task redispatch logic
