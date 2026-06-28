@@ -12,6 +12,7 @@ pub fn logs_dir() -> PathBuf {
         .join("logs")
 }
 
+#[allow(clippy::print_stderr, clippy::disallowed_methods)] // TODO(mz04): migrate to tracing
 pub fn setup_log_dir_and_retention() {
     let dir = logs_dir();
     if let Err(e) = fs::create_dir_all(&dir) {

@@ -1292,3 +1292,294 @@
             "empty current_head must normalize to None"
         );
     }
+
+    // ── epic uajf / task 1zcr: focused unit tests for the helpers
+    //    extracted from `code_graph_impact_check`.  Each helper is
+    //    exercised directly with no I/O, so the tests are O(few) and
+    //    pin the pre-refactor contract on the error strings, the
+    //    recommendation vocabulary, the `<external>` exclusion, and
+    //    the file→crate mapping.
+
+    /// AC#2: `validate_impact_check_request` must reject a request
+    /// missing `impact_targets` with the pre-refactor error string
+    /// verbatim.
+    #[tokio::test]
+    async fn validate_impact_check_request_rejects_missing_targets() {
+        let (server, _ops) = fixture_server(WorkspaceFixtureOps::new(None));
+        let params = test_params("impact_check");
+        let err = server
+            .validate_impact_check_request(&params)
+            .expect_err("missing impact_targets must error");
+        assert!(
+            err.contains("impact_check requires `impact_targets`"),
+            "missing-targets error must keep the pre-refactor wording, got {err}"
+        );
+    }
+
+    /// AC#2: an empty `impact_targets` list must error with the
+    /// pre-refactor "at least one entry" string.
+    #[tokio::test]
+    async fn validate_impact_check_request_rejects_empty_targets() {
+        let (server, _ops) = fixture_server(WorkspaceFixtureOps::new(None));
+        let mut params = test_params("impact_check");
+        params.impact_targets = Some(Vec::new());
+        let err = server
+            .validate_impact_check_request(&params)
+            .expect_err("empty impact_targets must error");
+        assert!(
+            err.contains("at least one entry"),
+            "empty-targets error must keep the pre-refactor wording, got {err}"
+        );
+    }
+
+    /// AC#2: a valid request returns the targets slice and the
+    /// `scope_crates` set.  `scope_crates` is preserved exactly (the
+    /// handler relies on set membership for the
+    /// `safe_independent_slice` derivation).
+    #[tokio::test]
+    async fn validate_impact_check_request_passes_through() {
+        let (server, _ops) = fixture_server(WorkspaceFixtureOps::new(None));
+        let mut params = test_params("impact_check");
+        params.impact_targets = Some(vec!["alpha".to_string(), "beta".to_string()]);
+        params.scope_crates = Some(vec!["alpha".to_string(), "gamma".to_string()]);
+        let (targets, scope) = server
+            .validate_impact_check_request(&params)
+            .expect("valid request must succeed");
+        assert_eq!(targets, &["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(scope.len(), 2);
+        assert!(scope.contains("alpha"));
+        assert!(scope.contains("gamma"));
+    }
+
+    /// AC#3: `CrateIndex::from_crate_graph` excludes the synthetic
+    /// `<external>` crate from `crate_dirs` (file→crate mapping must
+    /// not produce a phantom mapping for a path outside any real
+    /// crate) but keeps it in `known_crates` so the dispatch loop
+    /// still routes it to the symbol/file path consistently.
+    #[test]
+    fn crate_index_excludes_external_from_dirs() {
+        let resp = CrateGraphResponse {
+            crates: vec![
+                CrateNodeEntry {
+                    name: "alpha".to_string(),
+                    manifest_path: "/workspace/server/crates/alpha/Cargo.toml".to_string(),
+                    loc: 0,
+                    node_count: 0,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+                CrateNodeEntry {
+                    name: "<external>".to_string(),
+                    manifest_path: "/dev/null/Cargo.toml".to_string(),
+                    loc: 0,
+                    node_count: 0,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: Vec::new(),
+            message: None,
+        };
+        let idx = CrateIndex::from_crate_graph(&resp);
+        assert!(
+            idx.is_known_crate("alpha"),
+            "real crate must be in the known set"
+        );
+        assert!(
+            idx.is_known_crate("<external>"),
+            "<external> stays in the known set so callers see it explicitly"
+        );
+        let alpha_hits: Vec<&String> = idx
+            .crates_for_file("/workspace/server/crates/alpha/src/lib.rs")
+            .collect();
+        assert_eq!(alpha_hits, vec![&"alpha".to_string()]);
+        let external_hits: Vec<&String> = idx.crates_for_file("/dev/null").collect();
+        assert!(
+            external_hits.is_empty(),
+            "<external> must not contribute a directory mapping"
+        );
+    }
+
+    /// AC#3: `ImpactAggregator::add_crate_consumers` mirrors the
+    /// pre-refactor inlined edge walk — only edges whose source is
+    /// not `<external>` contribute.  The synthetic crate is later
+    /// dropped in `finalized()` so the inlined-equivalence is exact.
+    #[test]
+    fn aggregator_add_crate_consumers_skips_external_source() {
+        let mut agg = ImpactAggregator::new();
+        let edges = vec![
+            CrateEdgeEntry {
+                source: "beta".to_string(),
+                target: "alpha".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            },
+            CrateEdgeEntry {
+                source: "<external>".to_string(),
+                target: "alpha".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            },
+        ];
+        agg.add_crate_consumers(&edges, "alpha");
+        // Direct: only beta is added (the `<external>` source is skipped).
+        assert_eq!(
+            agg.affected_crates.iter().collect::<Vec<_>>(),
+            vec![&"beta".to_string()]
+        );
+
+        // finalized() must also drop `<external>` if it ever leaks in.
+        agg.affected_crates.insert("<external>".to_string());
+        let (crates, _, _) = agg.finalized();
+        assert!(
+            !crates.contains(&"<external>".to_string()),
+            "finalized() must drop the synthetic <external> crate"
+        );
+    }
+
+    /// AC#3: `ImpactAggregator::add_detailed_entries` collects
+    /// every symbol key and every file_path, then maps the file
+    /// paths back to the owning crate via the `CrateIndex`.  A file
+    /// with no `file_path` contributes no crate mapping.
+    #[test]
+    fn aggregator_add_detailed_entries_maps_files_to_crates() {
+        let resp = CrateGraphResponse {
+            crates: vec![CrateNodeEntry {
+                name: "alpha".to_string(),
+                manifest_path: "/workspace/server/crates/alpha/Cargo.toml".to_string(),
+                loc: 0,
+                node_count: 0,
+                fan_in: 0.0,
+                fan_out: 0.0,
+                inbound_weight: 0.0,
+                outbound_weight: 0.0,
+            }],
+            edges: Vec::new(),
+            message: None,
+        };
+        let idx = CrateIndex::from_crate_graph(&resp);
+        let mut agg = ImpactAggregator::new();
+        agg.add_detailed_entries(
+            &[
+                ImpactEntry {
+                    key: "symbol:foo".to_string(),
+                    uid: String::new(),
+                    depth: 1,
+                    file_path: Some(
+                        "/workspace/server/crates/alpha/src/lib.rs".to_string(),
+                    ),
+                    confidence_tier: None,
+                    exclusion_reason: None,
+                },
+                ImpactEntry {
+                    key: "symbol:bar".to_string(),
+                    uid: String::new(),
+                    depth: 2,
+                    file_path: None,
+                    confidence_tier: None,
+                    exclusion_reason: None,
+                },
+            ],
+            &idx,
+        );
+        let (crates, files, symbols) = agg.finalized();
+        assert!(symbols.contains(&"symbol:foo".to_string()));
+        assert!(symbols.contains(&"symbol:bar".to_string()));
+        assert!(files.iter().any(|f| f.ends_with("alpha/src/lib.rs")));
+        assert_eq!(
+            crates,
+            vec!["alpha".to_string()],
+            "file_path → crate mapping must surface alpha"
+        );
+    }
+
+    /// AC#3: `ImpactAggregator::add_grouped_files` collects every
+    /// group file path and maps it to the owning crate.  A path
+    /// that doesn't fall under any crate contributes no mapping.
+    #[test]
+    fn aggregator_add_grouped_files_maps_files_to_crates() {
+        let resp = CrateGraphResponse {
+            crates: vec![CrateNodeEntry {
+                name: "alpha".to_string(),
+                manifest_path: "/workspace/server/crates/alpha/Cargo.toml".to_string(),
+                loc: 0,
+                node_count: 0,
+                fan_in: 0.0,
+                fan_out: 0.0,
+                inbound_weight: 0.0,
+                outbound_weight: 0.0,
+            }],
+            edges: Vec::new(),
+            message: None,
+        };
+        let idx = CrateIndex::from_crate_graph(&resp);
+        let mut agg = ImpactAggregator::new();
+        agg.add_grouped_files(
+            &[FileGroupEntry {
+                file: "/workspace/server/crates/alpha/src/g.rs".to_string(),
+                occurrence_count: 3,
+                max_depth: 2,
+                sample_keys: vec!["s1".to_string()],
+            }],
+            &idx,
+        );
+        let (crates, files, symbols) = agg.finalized();
+        assert!(files.iter().any(|f| f.ends_with("alpha/src/g.rs")));
+        assert_eq!(crates, vec!["alpha".to_string()]);
+        assert!(symbols.is_empty());
+    }
+
+    /// AC#2 / AC#3: `derive_safe_slice_and_recommendation` keeps the
+    /// pre-refactor exact strings for every branch — `ok_independent`,
+    /// `chain_tasks`, `atomic_cutover` — and the `safe_independent_slice`
+    /// contract.
+    #[test]
+    fn derive_safe_slice_and_recommendation_no_consumers_yields_ok_independent() {
+        let (safe, rec) =
+            derive_safe_slice_and_recommendation(&[], &std::collections::HashSet::new());
+        assert!(safe, "no consumers must always be safe");
+        assert_eq!(rec, "ok_independent");
+    }
+
+    /// AC#3: consumers exist but caller supplied no `scope_crates` —
+    /// `safe_independent_slice` is `false` and the recommendation is
+    /// `atomic_cutover` (matches the pre-refactor branch ordering).
+    #[test]
+    fn derive_safe_slice_and_recommendation_consumers_no_scope_yields_atomic_cutover() {
+        let affected = vec!["alpha".to_string(), "beta".to_string()];
+        let scope = std::collections::HashSet::new();
+        let (safe, rec) = derive_safe_slice_and_recommendation(&affected, &scope);
+        assert!(!safe, "missing scope must be unsafe when consumers exist");
+        assert_eq!(rec, "atomic_cutover");
+    }
+
+    /// AC#3: every consumer is inside the supplied scope — the
+    /// recommendation is `chain_tasks` (consumers exist but are
+    /// within the slice, so explicit ordering suffices).
+    #[test]
+    fn derive_safe_slice_and_recommendation_consumers_in_scope_yields_chain_tasks() {
+        let affected = vec!["alpha".to_string(), "beta".to_string()];
+        let mut scope = std::collections::HashSet::new();
+        scope.insert("alpha".to_string());
+        scope.insert("beta".to_string());
+        let (safe, rec) = derive_safe_slice_and_recommendation(&affected, &scope);
+        assert!(safe, "all consumers within scope must be safe");
+        assert_eq!(rec, "chain_tasks");
+    }
+
+    /// AC#3: some consumers are outside the supplied scope — the
+    /// recommendation is `atomic_cutover`.
+    #[test]
+    fn derive_safe_slice_and_recommendation_consumers_outside_scope_yields_atomic_cutover() {
+        let affected = vec!["alpha".to_string(), "gamma".to_string()];
+        let mut scope = std::collections::HashSet::new();
+        scope.insert("alpha".to_string());
+        let (safe, rec) = derive_safe_slice_and_recommendation(&affected, &scope);
+        assert!(!safe, "any consumer outside scope must be unsafe");
+        assert_eq!(rec, "atomic_cutover");
+    }
+

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! # djinn-slot
 //!
 //! Production slot management crate extracted from `djinn-agent`.
