@@ -78,6 +78,7 @@ pub async fn load_environment_config(path: &Path) -> Result<Option<EnvironmentCo
 /// `${containerWorkspaceFolder}` substitution resolves to this path, and
 /// each command runs with its CWD set here. Callers derived it from
 /// `DJINN_PROJECT_ROOT` or the hard-coded `/workspace` fallback.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub async fn run_phase(
     project_root: &Path,
     phase_name: &str,

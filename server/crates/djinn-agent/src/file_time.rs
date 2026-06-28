@@ -25,6 +25,7 @@ impl FileTime {
         Self::default()
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn read(&self, session_id: &str, path: &Path) -> Result<(), String> {
         let normalized = normalize(path);
         let now = SystemTime::now();

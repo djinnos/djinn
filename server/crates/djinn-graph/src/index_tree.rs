@@ -124,6 +124,7 @@ impl IndexTreeHandle {
     /// Run `git fetch origin main` against the project root unless a fetch
     /// already happened within `cooldown`.  Tracks the last-fetch timestamp
     /// per project in a process-wide map.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn fetch_if_stale(&self, cooldown: Duration) -> Result<bool> {
         {
             let map = last_fetch_map().lock().expect("poisoned fetch map");

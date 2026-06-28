@@ -151,6 +151,7 @@ pub(super) fn resolve_node_or_err_for_workspace_seed(
 /// (`YYYY-MM-DDTHH:MM:SSZ`). Stored `committed_at` timestamps use the
 /// same fixed-width format, so a lexicographic string comparison on
 /// the SQL side resolves the window correctly — no chrono dependency.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) fn since_days_to_cutoff(since_days: Option<u32>) -> Option<String> {
     since_days.map(|d| {
         let clamped = d.clamp(1, 3650) as u64;

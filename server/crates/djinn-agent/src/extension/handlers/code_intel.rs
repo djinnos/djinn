@@ -251,6 +251,7 @@ pub(crate) async fn call_lsp(
     }
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn call_code_graph(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,

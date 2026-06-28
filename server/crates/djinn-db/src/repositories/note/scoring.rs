@@ -157,6 +157,7 @@ impl NoteRepository {
         Ok(query.fetch_all(self.db.pool()).await?.into_iter().collect())
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn temporal_scores(
         &self,
         project_id: &str,

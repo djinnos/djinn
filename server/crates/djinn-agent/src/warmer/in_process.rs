@@ -106,6 +106,7 @@ impl GraphWarmerService for InProcessGraphWarmer {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn await_fresh(
         &self,
         project_id: &str,
@@ -151,6 +152,7 @@ impl GraphWarmerService for InProcessGraphWarmer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

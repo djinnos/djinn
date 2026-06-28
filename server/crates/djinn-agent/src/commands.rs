@@ -16,6 +16,7 @@ async fn spawn_command(mut cmd: Command, timeout: Duration) -> io::Result<Output
     crate::process::output_with_kill(cmd, timeout).await
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub async fn run_commands(
     commands: &[CommandSpec],
     working_dir: &Path,

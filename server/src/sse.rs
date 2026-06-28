@@ -74,6 +74,7 @@ impl BatchAccumulator {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     fn push(&mut self, envelope: DjinnEventEnvelope) -> Vec<DjinnEventEnvelope> {
         match Self::classify(&envelope) {
             EventTier::Immediate => vec![envelope],
@@ -98,6 +99,7 @@ impl BatchAccumulator {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     fn flush(&mut self) -> Vec<DjinnEventEnvelope> {
         let mut out = Vec::new();
 
@@ -310,6 +312,7 @@ fn is_wsl() -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
     use serde_json::json;

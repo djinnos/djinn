@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 // LSP module — Language Server Protocol client management.
 //
 // Extracted from djinn-agent as a focused leaf crate. Provides LSP server

@@ -69,6 +69,7 @@ fn cache_get(id: u64) -> Option<InstallationToken> {
     Some(entry.token.clone())
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn cache_put(id: u64, token: InstallationToken) {
     // Parse expires_at → TTL. Fall back to 1h (GitHub's documented lifetime).
     let ttl = rfc3339_duration_until(&token.expires_at).unwrap_or(Duration::from_secs(55 * 60));

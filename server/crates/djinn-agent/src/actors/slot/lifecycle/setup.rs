@@ -43,6 +43,7 @@ pub(crate) struct SetupError {
 ///
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,

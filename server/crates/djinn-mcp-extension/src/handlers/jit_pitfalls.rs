@@ -193,6 +193,7 @@ fn record_outcome(
 }
 
 /// Build the `<relevant-pitfalls>…</relevant-pitfalls>` hint block.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn maybe_pitfall_hint(
     ctx: &dyn ExtensionContext,
     session_id: &str,

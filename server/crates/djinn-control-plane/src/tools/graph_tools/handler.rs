@@ -108,6 +108,7 @@ impl DjinnMcpServer {
     /// Both the MCP tool entry (`code_graph` below) and the chat
     /// extension (`djinn_agent::extension::handlers::code_intel`) call
     /// this method. Keep the per-op match here; do not duplicate it.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn dispatch_code_graph(
         &self,
         ctx: &ProjectCtx,

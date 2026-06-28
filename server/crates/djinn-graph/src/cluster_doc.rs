@@ -329,6 +329,7 @@ pub async fn generate_for_all(
 ///
 /// This is what `ensure_canonical_graph` calls at the end of the warm
 /// pipeline.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub fn spawn_generate_for_all(
     db: Database,
     event_bus: EventBus,

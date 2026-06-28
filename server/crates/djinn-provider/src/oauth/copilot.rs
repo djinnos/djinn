@@ -58,6 +58,7 @@ pub struct CopilotTokens {
 
 impl CopilotTokens {
     /// Returns true if the Copilot token has expired (with a 60-second buffer).
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub fn is_expired(&self) -> bool {
         let Some(exp) = self.expires_at else {
             return false; // unknown — assume valid
@@ -391,6 +392,7 @@ pub async fn exchange_for_copilot_token(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
 

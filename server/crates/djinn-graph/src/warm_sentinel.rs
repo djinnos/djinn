@@ -220,6 +220,7 @@ fn cleanup_tmp_files_recursive(dir: &Path) {
 
 /// Produce a simple UTC timestamp string. Uses `SystemTime` directly to
 /// avoid pulling in a `chrono` dependency.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn chrono_timestamp() -> String {
     use std::time::SystemTime;
     let dur = SystemTime::now()

@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -241,6 +240,7 @@ async fn async_main() {
 
 /// Parse a postgres URL of the form `postgres://<user>[:<pw>]@<host>:<port>/<db>`
 /// and block until a TCP connection to host:port succeeds (up to ~60s).
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn wait_for_database_reachable(target: &str) {
     let host_port = target
         .strip_prefix("postgres://")

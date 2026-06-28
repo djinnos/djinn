@@ -81,6 +81,7 @@ fn read_cached(key: &str) -> Option<Vec<SearchHit>> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn write_cache(key: String, hits: Vec<SearchHit>) {
     if let Ok(mut guard) = cache().write() {
         // Opportunistic GC: drop expired entries on every write so the

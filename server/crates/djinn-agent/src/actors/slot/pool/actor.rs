@@ -292,6 +292,7 @@ impl SlotPool {
         skip(self, project_path),
         fields(slot_id = tracing::field::Empty, model_id = %model_id, task_id = %task_id)
     )]
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn dispatch(
         &mut self,
         task_id: String,
@@ -954,6 +955,7 @@ impl SlotPool {
         self.retired_slots.insert(slot_id);
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn shutdown(&mut self) {
         let active_ids: Vec<usize> = self
             .slot_models

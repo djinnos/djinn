@@ -209,6 +209,7 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn record_outcome(
     outcome: JitPitfallOutcome,
     rollout_mode: JitPitfallRolloutMode,
@@ -238,6 +239,7 @@ fn record_outcome(
 /// `session_id` is the per-session key (the worktree path string).
 /// `project_id` scopes the note search. `touched_paths` are repo-relative
 /// paths of the files this modification touched.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) async fn maybe_pitfall_hint(
     state: &AgentContext,
     session_id: &str,

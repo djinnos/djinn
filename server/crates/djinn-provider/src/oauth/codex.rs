@@ -308,6 +308,7 @@ fn token_response_to_tokens(tr: TokenResponse, account_id: Option<String>) -> Co
     }
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -536,6 +537,7 @@ pub async fn start_codex_device_auth(
     Ok(Some(session))
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 async fn poll_codex_device_auth(
     device_auth_id: &str,
     user_code: &str,

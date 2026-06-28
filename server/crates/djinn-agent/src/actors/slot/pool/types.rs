@@ -150,6 +150,7 @@ pub enum PoolMessage {
     },
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) fn now_unix_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

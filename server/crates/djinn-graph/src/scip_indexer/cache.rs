@@ -555,6 +555,7 @@ fn atomic_replace(final_path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn unique_temp_path(dir: &Path, file_name: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

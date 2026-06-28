@@ -530,6 +530,7 @@ impl NoteRepository {
     }
 
     /// Get temporal scores for all notes in project.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn temporal_scores_all(&self, project_id: &str) -> Result<Vec<(String, f64)>> {
         let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "SELECT id, access_count, created_at, updated_at

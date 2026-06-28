@@ -243,6 +243,7 @@ mod tests {
     /// the regression it guards is the old unbounded `child.wait()` that hung
     /// FOREVER on a child that would not die (e.g. a `git` in uninterruptible
     /// IO), wedging the worker and masking it from the stall reapers.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_returns_promptly_even_when_sigterm_ignored() {
         let mut cmd = Command::new("sh");

@@ -76,6 +76,7 @@ pub fn private_key_pem() -> Result<String, AppJwtError> {
 
 /// Mint a short-lived RS256 JWT authenticating as the GitHub App itself
 /// (`iss = <app_id>`). Valid for ~9 minutes, backdated 60s for clock skew.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub fn mint_app_jwt() -> Result<String, AppJwtError> {
     let app_id = app_id()?;
     let pem = private_key_pem()?;

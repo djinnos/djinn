@@ -237,6 +237,7 @@ impl EmbeddingService {
         }
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn runtime(&self) -> Result<Arc<dyn EmbeddingRuntime>, String> {
         if let Some(runtime) = self.inner.runtime.get() {
             return Ok(runtime.clone());

@@ -123,6 +123,7 @@ const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
 /// the teardown `update_session_status` remains the authoritative total.
 const TOKEN_FLUSH_INTERVAL_SECS: u64 = 30;
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) async fn consume_provider_stream(
     mut ctx: StreamLoopContext<'_>,
 ) -> anyhow::Result<StreamTurnState> {

@@ -47,6 +47,7 @@ pub fn code_chunks_backend_enabled() -> bool {
 /// Skips when:
 /// * `DJINN_CODE_CHUNKS_BACKEND` isn't `qdrant`.
 /// * Another pass for the same project is already in flight (coalesced).
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub fn spawn_chunk_and_embed_pass(
     db: Database,
     embeddings: Arc<dyn CodeChunkEmbeddingProvider>,

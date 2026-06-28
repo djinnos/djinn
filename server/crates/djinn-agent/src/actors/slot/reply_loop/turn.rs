@@ -322,6 +322,7 @@ pub(crate) struct ReplyLoopContext<'a> {
 ///
 /// Context-length-exceeded errors trigger reactive compaction and retry
 /// (up to `MAX_COMPACTION_RETRIES` times) before failing the session.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn run_reply_loop(
     ctx: ReplyLoopContext<'_>,
     conversation: &mut Conversation,

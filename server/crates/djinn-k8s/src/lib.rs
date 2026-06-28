@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! Kubernetes-backed `SessionRuntime` — PR 1 scaffold.
 //!
 //! The crate delivers `KubernetesRuntime`, a `SessionRuntime` impl that

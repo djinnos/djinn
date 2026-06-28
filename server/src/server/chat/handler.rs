@@ -767,6 +767,7 @@ struct ChatLoopContext {
 /// Sends `tool_call` and `tool_result` SSE events.  Handles stash tools,
 /// chat-extension dispatch, allowed MCP dispatch (global + proposal-scoped),
 /// gated unavailable tools, timeout wrapping, and result rendering/stashing.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_tool_call(
     id: String,

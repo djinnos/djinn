@@ -1,3 +1,6 @@
+// Test-only: SystemTime::now is used to build synthetic token timestamps in
+// these unit-test helpers.
+#![allow(clippy::disallowed_methods)]
 //! Test helpers for the `GitHubApiClient` unit tests.
 //!
 //! Post GitHub-App migration, all client flows authenticate via installation

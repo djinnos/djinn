@@ -222,6 +222,7 @@ fn lookup_cache(key: &(String, String)) -> Option<String> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn insert_cache(key: (String, String), text: String) {
     if let Ok(mut guard) = header_cache().write() {
         // Opportunistic eviction: drop expired entries while we hold

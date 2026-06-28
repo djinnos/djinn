@@ -155,6 +155,7 @@ pub fn seed_cargo_target_dir(
 /// Missing, invalid, or safely-detected clone failures return `Ok` with a
 /// fallback reason so dispatch can proceed with a cold private target dir. The
 /// only hard error is inability to prepare the destination directory itself.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub fn seed_cargo_target_dir_with_options(
     base_dir: impl AsRef<Path>,
     run_dir: impl AsRef<Path>,

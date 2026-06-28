@@ -85,6 +85,7 @@ impl LspManager {
         killed
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn touch_file(&self, worktree: &Path, path: &Path, wait_for_diagnostics: bool) {
         let Some(server) = server_for_path(path) else {
             tracing::debug!(path = %path.display(), "lsp: no server configured for file extension");
