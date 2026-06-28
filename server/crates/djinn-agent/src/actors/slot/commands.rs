@@ -1,49 +1,25 @@
-use thiserror::Error;
-use tokio::sync::oneshot;
+// ─── hfhw cutover: commands delegated to djinn-slot ─────────────────────
+//
+// The canonical `SlotCommand` enum, `SlotError` type, and
+// `log_commands_run_event` helper now live in `djinn_slot::commands`.
+//
+// This module re-exports those canonical types and provides a thin
+// `AgentContext → SlotContext` adapter wrapper for
+// `log_commands_run_event` so existing agent-side callers continue to
+// compile without changes.
+
+// Re-export canonical types from djinn-slot so `super::commands::SlotCommand`,
+// `super::commands::SlotError`, etc. continue to resolve for agent-internal
+// callers (actor.rs, pool/actor.rs, supervisor_runner.rs, etc.).
+pub use djinn_slot::commands::{SlotCommand, SlotError};
 
 use crate::context::AgentContext;
 use djinn_core::commands::{CommandResult, CommandSpec};
-use djinn_db::TaskRepository;
 
-#[derive(Debug)]
-pub(crate) enum SlotCommand {
-    /// Run a task lifecycle in this slot.
-    RunTask {
-        task_id: String,
-        project_path: String,
-        respond_to: oneshot::Sender<Result<(), SlotError>>,
-    },
-    /// Kill the currently running task.
-    Kill,
-    /// Pause the currently running task (commit WIP, preserve worktree).
-    Pause,
-    /// Finish current task then shut down (for capacity reduction).
-    Drain,
-}
-
-#[derive(Debug, Error, Clone)]
-pub enum SlotError {
-    #[error("slot is busy")]
-    SlotBusy,
-    #[error("session failed: {0}")]
-    SessionFailed(String),
-    #[error("setup failed: {0}")]
-    SetupFailed(String),
-    #[error("worktree failed: {0}")]
-    WorktreeFailed(String),
-    #[error("agent error: {0}")]
-    AgentError(String),
-    #[error("task not found: {0}")]
-    TaskNotFound(String),
-    #[error("cancelled")]
-    Cancelled,
-}
-
-fn truncate_output(s: &str) -> String {
-    // 10KB / 100 lines — enough for diagnosis of setup command failures.
-    crate::truncate::smart_truncate_lines(s, 10_000, 100)
-}
-
+/// Agent-compatible wrapper around `djinn_slot::commands::log_commands_run_event`.
+///
+/// Converts `AgentContext` → `SlotContext` and delegates to the canonical
+/// djinn-slot implementation.
 pub(crate) async fn log_commands_run_event(
     task_id: &str,
     phase: &str,
@@ -51,39 +27,6 @@ pub(crate) async fn log_commands_run_event(
     results: &[CommandResult],
     app_state: &AgentContext,
 ) {
-    let success = results.last().map(|r| r.exit_code == 0).unwrap_or(true);
-    let commands = results
-        .iter()
-        .zip(specs.iter())
-        .map(|(r, spec)| {
-            let failed = r.exit_code != 0;
-            serde_json::json!({
-                "name": r.name,
-                "command": spec.command,
-                "exit_code": r.exit_code,
-                "duration_ms": r.duration_ms,
-                "stdout": if failed { serde_json::Value::String(truncate_output(&r.stdout)) } else { serde_json::Value::Null },
-                "stderr": if failed { serde_json::Value::String(truncate_output(&r.stderr)) } else { serde_json::Value::Null },
-            })
-        })
-        .collect::<Vec<_>>();
-    let payload = serde_json::json!({
-        "phase": phase,
-        "success": success,
-        "commands": commands,
-    });
-
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    if let Err(e) = task_repo
-        .log_activity(
-            Some(task_id),
-            "system",
-            "system",
-            "commands_run",
-            &payload.to_string(),
-        )
-        .await
-    {
-        tracing::warn!(task_id = %task_id, phase = %phase, error = %e, "Lifecycle: failed to log commands_run activity");
-    }
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::commands::log_commands_run_event(task_id, phase, specs, results, &slot_ctx).await;
 }

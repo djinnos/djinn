@@ -1,0 +1,579 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UsageAnalyticsApi",
+  "description": "Combined JSON Schema for the /api/admin/usage endpoint query parameters and response body, derived from Rust DTOs via schemars.",
+  "definitions": {
+    "UsageQuery": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "UsageQuery",
+      "description": "Raw query params deserialised from the request URL.  Mirrors the frontend\n`UsageAnalyticsFilters` exactly.  All are optional; defaults and validation\nare applied in [`UsageQuery::into_typed`].",
+      "type": "object",
+      "properties": {
+        "preset": {
+          "description": "Shorthand date range; mutually exclusive with start/end.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "ISO start date (inclusive); used only when `preset` is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end": {
+          "description": "ISO end date (exclusive); used only when `preset` is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "granularity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "Model identifier filter.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_id": {
+          "description": "User identifier filter (session creator, falling back to task creator).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "UsageResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "UsageResponse",
+      "type": "object",
+      "properties": {
+        "kpis": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UsageKpiDto"
+          }
+        },
+        "time_series": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SeriesPointDto"
+          }
+        },
+        "breakdowns": {
+          "$ref": "#/$defs/BreakdownsDto"
+        },
+        "model_effectiveness": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelEffectivenessDto"
+          }
+        },
+        "project_model_matrix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectModelCellDto"
+          }
+        },
+        "generated_at": {
+          "description": "RFC3339 timestamp when the response was generated.",
+          "type": "string"
+        },
+        "unpriced_session_count": {
+          "description": "Total number of unpriced sessions in the current window, repeated at\ntop-level for convenience. The frontend reducer falls back to this when\nno KPI card carries `unpriced_count`.",
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "kpis",
+        "time_series",
+        "breakdowns",
+        "model_effectiveness",
+        "project_model_matrix",
+        "generated_at",
+        "unpriced_session_count"
+      ],
+      "$defs": {
+        "UsageKpiDto": {
+          "description": "A single KPI card derived from the current vs previous window totals.",
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "value": {
+              "description": "Numeric value; `null` when unavailable (e.g. unpriced spend).",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "delta_pct": {
+              "description": "Period-over-period change as a fraction (0.12 == +12%); `null` when the\nprevious window was empty.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "formatted": {
+              "description": "Pre-formatted display value (currency); empty string lets the UI fall\nback to compact-number formatting of `value`.",
+              "type": "string"
+            },
+            "caption": {
+              "description": "Optional qualifier shown under the value (e.g. that spend is an\nestimate at API rates, and how many sessions were unpriced). `None`\nwhen the card needs no caption.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "breakdown": {
+              "description": "Optional composition of the headline value (e.g. the Tokens card split\ninto input / cached / output). The UI renders these as a small inline\nrow beneath the value. `None` when the card has no breakdown.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/$defs/UsageKpiPartDto"
+              }
+            },
+            "actual_spend_usd": {
+              "description": "Actual API spend contributed by this KPI card's aggregate.\nPresent only on the \"Actual API Spend\" card.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "projected_usd": {
+              "description": "Projected subscription-equivalent cost contributed by this KPI card's\naggregate. Present only on the \"Projected Cost\" card.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "unpriced_count": {
+              "description": "Unpriced session count contributed by this KPI card's aggregate.\nPresent only on the \"Sessions\" card.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          "required": [
+            "label",
+            "formatted"
+          ]
+        },
+        "UsageKpiPartDto": {
+          "description": "One labelled component of a KPI's headline value (see\n[`UsageKpiDto::breakdown`]). The UI formats `value` as a compact number.",
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "value": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          "required": [
+            "label",
+            "value"
+          ]
+        },
+        "SeriesPointDto": {
+          "description": "A point in the multi-dimensional time series.  Carries the model / project /\nagent dimensions so the Overview tab can group spend client-side.",
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string"
+            },
+            "actual_spend_usd": {
+              "description": "Actual API spend in USD for this bucket; `null` when no actual sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "projected_usd": {
+              "description": "Projected subscription-equivalent cost; `null` when no projected sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "tokens_in": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_out": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_cached": {
+              "description": "Cache-read (cached input) tokens — priced separately from fresh input.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "task_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "model": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "project_name": {
+              "type": "string"
+            },
+            "agent_type": {
+              "type": "string"
+            },
+            "unpriced_session_count": {
+              "description": "Count of unpriced sessions in this bucket.",
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "date",
+            "tokens_in",
+            "tokens_out",
+            "tokens_cached",
+            "task_count",
+            "model",
+            "project_id",
+            "project_name",
+            "agent_type",
+            "unpriced_session_count"
+          ]
+        },
+        "BreakdownsDto": {
+          "type": "object",
+          "properties": {
+            "by_user": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BreakdownRowDto"
+              }
+            },
+            "by_project": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BreakdownRowDto"
+              }
+            },
+            "by_proposal": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BreakdownRowDto"
+              }
+            },
+            "by_task": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BreakdownRowDto"
+              }
+            }
+          },
+          "required": [
+            "by_user",
+            "by_project",
+            "by_proposal",
+            "by_task"
+          ]
+        },
+        "BreakdownRowDto": {
+          "description": "A breakdown row for one entity (user / project / proposal / task).",
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "actual_spend_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "projected_usd": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "unpriced_session_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_in": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_out": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_cached": {
+              "description": "Cache-read (cached input) tokens — priced separately from fresh input.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "task_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "success_rate": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "avg_reopens": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actual_cost_per_task": {
+              "description": "Actual API spend per task. `None` when no actual-basis sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "task_id": {
+              "description": "Present only for the by_task breakdown; lets the UI build a task link.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "proposal_id": {
+              "description": "Present only for the by_proposal breakdown.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "unpriced_session_count",
+            "tokens_in",
+            "tokens_out",
+            "tokens_cached",
+            "task_count"
+          ]
+        },
+        "ModelEffectivenessDto": {
+          "description": "Per-model effectiveness, renamed to the frontend contract.",
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "task_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "success_rate": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "avg_reopens": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actual_cost_per_task": {
+              "description": "Actual API spend per completed task.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actual_spend_usd": {
+              "description": "Actual API spend total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "projected_usd": {
+              "description": "Projected subscription-equivalent cost total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "unpriced_session_count": {
+              "description": "Sessions excluded from both dollar figures.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "total_tokens": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_in": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_out": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_cached": {
+              "description": "Cache-read (cached input) tokens — priced separately from fresh input.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "session_count": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "completed_task_count": {
+              "description": "Shared-credit completed-task count (== task_count); surfaced separately\nso the UI can label the attribution semantics.",
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "model",
+            "task_count",
+            "unpriced_session_count",
+            "total_tokens",
+            "tokens_in",
+            "tokens_out",
+            "tokens_cached",
+            "session_count",
+            "completed_task_count"
+          ]
+        },
+        "ProjectModelCellDto": {
+          "description": "Project × model matrix cell, renamed to the frontend contract.",
+          "type": "object",
+          "properties": {
+            "project_id": {
+              "type": "string"
+            },
+            "project_name": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            },
+            "actual_cost_per_task": {
+              "description": "Actual API spend per task.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "success_rate": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "avg_reopens": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "actual_spend_usd": {
+              "description": "Actual API spend total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "projected_usd": {
+              "description": "Projected subscription-equivalent cost total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "unpriced_session_count": {
+              "description": "Sessions excluded from both dollar figures.",
+              "type": "integer",
+              "format": "int64"
+            },
+            "total_tokens": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "tokens_cached": {
+              "description": "Cache-read (cached input) tokens — priced separately from fresh input.",
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "required": [
+            "project_id",
+            "project_name",
+            "model",
+            "unpriced_session_count",
+            "total_tokens",
+            "tokens_cached"
+          ]
+        }
+      }
+    }
+  }
+}

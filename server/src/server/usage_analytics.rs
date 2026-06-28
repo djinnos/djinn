@@ -793,6 +793,25 @@ async fn usage_handler(
     Ok(Json(response))
 }
 
+// ── Schema export ────────────────────────────────────────────────────────────
+
+/// Returns the JSON Schema for the `/api/admin/usage` response DTOs.
+///
+/// Used by `scripts/export-usage-schema` and the `ui/scripts/generate-usage-types.ts`
+/// pipeline to produce the checked-in TypeScript contract artifact
+/// `ui/src/api/generated/usage-analytics.gen.ts`.  Prefer running
+/// `pnpm usage:types` from the `ui/` directory to regenerate.
+pub fn usage_response_json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(UsageResponse))
+        .expect("UsageResponse schema is always valid JSON")
+}
+
+/// Returns the JSON Schema for the `/api/admin/usage` query/filter parameters.
+pub fn usage_query_json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(UsageQuery))
+        .expect("UsageQuery schema is always valid JSON")
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
