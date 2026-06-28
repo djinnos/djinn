@@ -796,6 +796,10 @@ async fn usage_handler(
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[path = "usage_analytics_schema_tests.rs"]
+mod usage_analytics_schema_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
