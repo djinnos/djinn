@@ -33,7 +33,7 @@ use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
-use djinn_db::{ProposalRepository, TaskRepository};
+use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 
 /// Fully-assembled prompt context for a single role session.
 ///
@@ -236,6 +236,222 @@ fn apply_prompt_sections(
     append_read_sources_prompt(&with_skills, read_sources)
 }
 
+// ── Async context loaders ──────────────────────────────────────────────
+
+/// Append sibling task summary lines to `ctx_lines` for the given epic.
+async fn load_sibling_tasks(
+    epic_id: &str,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    if let Ok(result) = task_repo
+        .list_filtered(djinn_db::ListQuery {
+            parent: Some(epic_id.to_string()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+    {
+        let open = result.tasks.iter().filter(|t| t.status != "closed").count();
+        let closed = result.tasks.iter().filter(|t| t.status == "closed").count();
+        ctx_lines.push(format!(
+            "\n### Sibling Tasks ({open} open, {closed} closed)"
+        ));
+        for t in &result.tasks {
+            let status_marker = if t.status == "closed" {
+                "closed"
+            } else {
+                &t.status
+            };
+            ctx_lines.push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
+        }
+    }
+}
+
+/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
+async fn load_blocking_epics(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    match epic_repo.list_blockers(epic_id).await {
+        Ok(blockers) if !blockers.is_empty() => {
+            ctx_lines.push("\n### Blocking Epics".to_string());
+            for blocker in &blockers {
+                ctx_lines.push(format!(
+                    "- **{}** ({}) — {}",
+                    blocker.title, blocker.short_id, blocker.status
+                ));
+                match task_repo
+                    .list_filtered(djinn_db::ListQuery {
+                        parent: Some(blocker.epic_id.clone()),
+                        status: Some("closed".to_string()),
+                        limit: 20,
+                        ..Default::default()
+                    })
+                    .await
+                {
+                    Ok(closed_tasks) => {
+                        for t in &closed_tasks.tasks {
+                            ctx_lines.push(format!("  - Delivered: {}", t.title));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            epic_id = %epic_id,
+                            blocking_epic_id = %blocker.epic_id,
+                            error = %e,
+                            "Lifecycle: failed to list closed tasks for blocking epic"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                error = %e,
+                "Lifecycle: failed to list blocking epics for prompt context"
+            );
+        }
+    }
+}
+
+/// Append proposal-sibling-epic lines to `ctx_lines` if the epic belongs
+/// to a proposal that also graduated other epics.
+async fn load_proposal_sibling_epics(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    proposal_repo: &ProposalRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    match proposal_repo.proposal_for_epic(epic_id).await {
+        Ok(Some(proposal)) => match proposal_repo.graduated_epics(&proposal.id).await {
+            Ok(siblings) => {
+                let sibling_ids: Vec<_> = siblings
+                    .into_iter()
+                    .filter(|(sid, _)| sid != epic_id)
+                    .collect();
+                if !sibling_ids.is_empty() {
+                    ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal.title));
+                    for (sid, _) in &sibling_ids {
+                        match epic_repo.get(sid).await {
+                            Ok(Some(sibling_epic)) => {
+                                ctx_lines.push(format!(
+                                    "- **{}** ({}) — {}",
+                                    sibling_epic.title, sibling_epic.short_id, sibling_epic.status
+                                ));
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::debug!(
+                                    epic_id = %epic_id,
+                                    sibling_epic_id = %sid,
+                                    error = %e,
+                                    "Lifecycle: failed to load proposal sibling epic for prompt context"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    epic_id = %epic_id,
+                    proposal_id = %proposal.id,
+                    error = %e,
+                    "Lifecycle: failed to list proposal sibling epics for prompt context"
+                );
+            }
+        },
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                error = %e,
+                "Lifecycle: failed to find parent proposal for prompt context"
+            );
+        }
+    }
+}
+
+/// Load the epic context block for roles that need it.
+///
+/// Returns `None` when `needs_epic_context` is false, when the task has
+/// no `epic_id`, when the epic row is missing, when the DB returns an
+/// error, or when no context lines were produced.
+async fn load_epic_context(
+    task: &Task,
+    needs_epic_context: bool,
+    app_state: &AgentContext,
+) -> Option<String> {
+    if !needs_epic_context {
+        return None;
+    }
+    let epic_id = task.epic_id.as_deref()?;
+    let epic_repo =
+        djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let epic = epic_repo.get(epic_id).await.ok()??;
+
+    let mut ctx_lines = vec![
+        format!("**Epic:** {} ({})", epic.title, epic.short_id),
+        format!("**Description:** {}", epic.description),
+        format!(
+            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — memory notes live in Dolt, not on disk.",
+            epic.short_id
+        ),
+    ];
+
+    load_sibling_tasks(epic_id, &task_repo, &mut ctx_lines).await;
+    load_blocking_epics(epic_id, &epic_repo, &task_repo, &mut ctx_lines).await;
+
+    let proposal_repo = ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    load_proposal_sibling_epics(epic_id, &epic_repo, &proposal_repo, &mut ctx_lines).await;
+
+    Some(ctx_lines.join("\n"))
+}
+
+/// Load the knowledge-context block from scope-matched memory notes.
+///
+/// Derives scope paths from the task's description, design, and epic
+/// context text, then queries `NoteRepository` for overlapping
+/// pattern/pitfall/case notes.
+///
+/// Returns `None` on empty result set, DB error, or when no scope paths
+/// could be derived.
+async fn load_knowledge_context(
+    task: &Task,
+    epic_context: Option<&str>,
+    app_state: &AgentContext,
+) -> Option<String> {
+    let note_repo = NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task_paths = derive_task_scope_paths(task, epic_context);
+    match note_repo
+        .query_by_scope_overlap(
+            &task.project_id,
+            &task_paths,
+            &["pattern", "pitfall", "case"],
+            0.3,
+            10,
+        )
+        .await
+    {
+        Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                error = %e,
+                "Lifecycle: failed to query knowledge context"
+            );
+            None
+        }
+    }
+}
+
 /// Build the full prompt context (all `TaskContext` fields, base +
 /// extensions + skills prompts) for one role session.
 ///
@@ -278,187 +494,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
 
     // ── Build epic context for roles that need it (e.g. lead) ─────────────────
-    let epic_context = if role_for_epic_check.needs_epic_context() {
-        if let Some(ref epic_id) = task.epic_id {
-            let epic_repo =
-                djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            let task_repo_ctx =
-                TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-            match epic_repo.get(epic_id).await {
-                Ok(Some(epic)) => {
-                    let mut ctx_lines = vec![
-                        format!("**Epic:** {} ({})", epic.title, epic.short_id),
-                        format!("**Description:** {}", epic.description),
-                        format!(
-                            "**Memory refs:** call `epic_show({})` then `memory_read(identifier=<ref>)` for each — memory notes live in Dolt, not on disk.",
-                            epic.short_id
-                        ),
-                    ];
-                    // Load sibling tasks
-                    if let Ok(result) = task_repo_ctx
-                        .list_filtered(djinn_db::ListQuery {
-                            parent: Some(epic_id.clone()),
-                            limit: 50,
-                            ..Default::default()
-                        })
-                        .await
-                    {
-                        let open = result.tasks.iter().filter(|t| t.status != "closed").count();
-                        let closed = result.tasks.iter().filter(|t| t.status == "closed").count();
-                        ctx_lines.push(format!(
-                            "\n### Sibling Tasks ({open} open, {closed} closed)"
-                        ));
-                        for t in &result.tasks {
-                            let status_marker = if t.status == "closed" {
-                                "closed"
-                            } else {
-                                &t.status
-                            };
-                            ctx_lines
-                                .push(format!("- [{}] {}: {}", status_marker, t.short_id, t.title));
-                        }
-                    }
-
-                    match epic_repo.list_blockers(epic_id).await {
-                        Ok(blockers) if !blockers.is_empty() => {
-                            ctx_lines.push("\n### Blocking Epics".to_string());
-                            for blocker in &blockers {
-                                ctx_lines.push(format!(
-                                    "- **{}** ({}) — {}",
-                                    blocker.title, blocker.short_id, blocker.status
-                                ));
-                                match task_repo_ctx
-                                    .list_filtered(djinn_db::ListQuery {
-                                        parent: Some(blocker.epic_id.clone()),
-                                        status: Some("closed".to_string()),
-                                        limit: 20,
-                                        ..Default::default()
-                                    })
-                                    .await
-                                {
-                                    Ok(closed_tasks) => {
-                                        for t in &closed_tasks.tasks {
-                                            ctx_lines.push(format!("  - Delivered: {}", t.title));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            epic_id = %epic_id,
-                                            blocking_epic_id = %blocker.epic_id,
-                                            error = %e,
-                                            "Lifecycle: failed to list closed tasks for blocking epic"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::debug!(
-                                epic_id = %epic_id,
-                                error = %e,
-                                "Lifecycle: failed to list blocking epics for prompt context"
-                            );
-                        }
-                    }
-
-                    let proposal_repo =
-                        ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-                    match proposal_repo.proposal_for_epic(epic_id).await {
-                        Ok(Some(proposal)) => {
-                            match proposal_repo.graduated_epics(&proposal.id).await {
-                                Ok(siblings) => {
-                                    let sibling_ids: Vec<_> = siblings
-                                        .into_iter()
-                                        .filter(|(sid, _)| sid != epic_id)
-                                        .collect();
-                                    if !sibling_ids.is_empty() {
-                                        ctx_lines.push(format!(
-                                            "\n### Proposal Sibling Epics ({})",
-                                            proposal.title
-                                        ));
-                                        for (sid, _) in &sibling_ids {
-                                            match epic_repo.get(sid).await {
-                                                Ok(Some(sibling_epic)) => {
-                                                    ctx_lines.push(format!(
-                                                        "- **{}** ({}) — {}",
-                                                        sibling_epic.title,
-                                                        sibling_epic.short_id,
-                                                        sibling_epic.status
-                                                    ));
-                                                }
-                                                Ok(None) => {}
-                                                Err(e) => {
-                                                    tracing::debug!(
-                                                        epic_id = %epic_id,
-                                                        sibling_epic_id = %sid,
-                                                        error = %e,
-                                                        "Lifecycle: failed to load proposal sibling epic for prompt context"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        epic_id = %epic_id,
-                                        proposal_id = %proposal.id,
-                                        error = %e,
-                                        "Lifecycle: failed to list proposal sibling epics for prompt context"
-                                    );
-                                }
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::debug!(
-                                epic_id = %epic_id,
-                                error = %e,
-                                "Lifecycle: failed to find parent proposal for prompt context"
-                            );
-                        }
-                    }
-                    Some(ctx_lines.join("\n"))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let epic_context =
+        load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state).await;
 
     // ── Build knowledge context from scope-matched notes ─────────────
-    let knowledge_context = {
-        let note_repo =
-            djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-        let task_paths = derive_task_scope_paths(task, epic_context.as_deref());
-
-        match note_repo
-            .query_by_scope_overlap(
-                &task.project_id,
-                &task_paths,
-                &["pattern", "pitfall", "case"],
-                0.3,
-                10,
-            )
-            .await
-        {
-            Ok(notes) if !notes.is_empty() => Some(format_knowledge_notes(&notes, 2000)),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::debug!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "Lifecycle: failed to query knowledge context"
-                );
-                None
-            }
-        }
-    };
+    let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
 
     // PR E2: auto-include `code_graph context` for worker / reviewer roles
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
