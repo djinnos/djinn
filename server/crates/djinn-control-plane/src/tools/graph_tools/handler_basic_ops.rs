@@ -1,4 +1,4 @@
-use super::*;
+// djinn:allow-oversize
 
 impl DjinnMcpServer {
     pub(super) async fn code_graph_neighbors(
