@@ -1,5 +1,5 @@
-// HTTP handler for the `/api/admin/usage` REST endpoint consumed by the
-// admin analytics UI.
+// Usage analytics handler for /api/admin/usage — returns aggregate KPIs,
+// time-series, and multi-dimensional breakdowns for the admin analytics UI.
 //
 // Emits exactly the shape the dashboard consumes:
 //   `kpis`, `time_series`, `breakdowns` (by_user/by_project/by_proposal/by_task),
@@ -19,6 +19,7 @@ use axum::{
 };
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
@@ -40,7 +41,7 @@ pub(super) fn router() -> Router<AppState> {
 /// Raw query params deserialised from the request URL.  Mirrors the frontend
 /// `UsageAnalyticsFilters` exactly.  All are optional; defaults and validation
 /// are applied in [`UsageQuery::into_typed`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UsageQuery {
     /// Shorthand date range; mutually exclusive with start/end.
     preset: Option<String>,
@@ -59,7 +60,7 @@ struct UsageQuery {
 
 /// Time-series bucket granularity. Repository rows are daily; week/month
 /// variants are rolled up in this handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum Granularity {
     Day,
@@ -237,7 +238,7 @@ impl UsageQuery {
 // ── Response DTOs ────────────────────────────────────────────────────────────
 
 /// A single KPI card derived from the current vs previous window totals.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageKpiDto {
     label: String,
     /// Numeric value; `null` when unavailable (e.g. unpriced spend).
@@ -274,7 +275,7 @@ struct UsageKpiDto {
 
 /// One labelled component of a KPI's headline value (see
 /// [`UsageKpiDto::breakdown`]). The UI formats `value` as a compact number.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageKpiPartDto {
     label: String,
     value: f64,
@@ -282,7 +283,7 @@ struct UsageKpiPartDto {
 
 /// A point in the multi-dimensional time series.  Carries the model / project /
 /// agent dimensions so the Overview tab can group spend client-side.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct SeriesPointDto {
     date: String,
     /// Actual API spend in USD for this bucket; `null` when no actual sessions.
@@ -303,7 +304,7 @@ struct SeriesPointDto {
 }
 
 /// A breakdown row for one entity (user / project / proposal / task).
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct BreakdownRowDto {
     id: String,
     name: String,
@@ -327,7 +328,7 @@ struct BreakdownRowDto {
     proposal_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct BreakdownsDto {
     by_user: Vec<BreakdownRowDto>,
     by_project: Vec<BreakdownRowDto>,
@@ -336,7 +337,7 @@ struct BreakdownsDto {
 }
 
 /// Per-model effectiveness, renamed to the frontend contract.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct ModelEffectivenessDto {
     model: String,
     task_count: i64,
@@ -383,7 +384,7 @@ impl From<ModelEffectivenessRow> for ModelEffectivenessDto {
 }
 
 /// Project × model matrix cell, renamed to the frontend contract.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct ProjectModelCellDto {
     project_id: String,
     project_name: String,
@@ -426,7 +427,7 @@ impl From<ProjectModelMatrixRow> for ProjectModelCellDto {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct UsageResponse {
     kpis: Vec<UsageKpiDto>,
     time_series: Vec<SeriesPointDto>,
@@ -793,6 +794,10 @@ async fn usage_handler(
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "usage_analytics_schema_tests.rs"]
+mod usage_analytics_schema_tests;
 
 #[cfg(test)]
 mod tests {
