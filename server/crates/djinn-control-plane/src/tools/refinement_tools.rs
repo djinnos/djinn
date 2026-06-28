@@ -285,8 +285,25 @@ impl DjinnMcpServer {
             });
         };
 
-        // Only allow demanding a round for proposals in draft or in_review.
-        if !matches!(proposal.status.as_str(), "draft" | "in_review") {
+        let current_refinement = match build_refinement_status(&repo, &proposal.id).await {
+            Ok(status) => status,
+            Err(e) => {
+                return Json(DemandRoundResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    refinement: None,
+                    error: Some(e),
+                });
+            }
+        };
+
+        // Only allow demanding a round for proposals in draft or in_review,
+        // except for the explicit human-review path: a converged tribunal parks
+        // in `awaiting_review` while the latest start remains lifecycle-active,
+        // and a human may demand another round from that parked state.
+        if !matches!(proposal.status.as_str(), "draft" | "in_review")
+            && !current_refinement.awaiting_review
+        {
             return Json(DemandRoundResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
@@ -298,10 +315,25 @@ impl DjinnMcpServer {
             });
         }
 
+        // Protect against true duplicate active loops. Parked awaiting-review
+        // refinements are intentionally allowed: the fresh refinement_start
+        // below transitions the lifecycle back into an active rerun and the
+        // coordinator demand path is invoked exactly once.
+        if current_refinement.active && !current_refinement.awaiting_review {
+            return Json(DemandRoundResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                refinement: Some(current_refinement),
+                error: Some("refinement is already active for this proposal".to_string()),
+            });
+        }
+
         // Record the demand-round action as a lifecycle event.
+        let reviewer_feedback = p.reason.clone();
         let demand_metadata = serde_json::json!({
             "source": "human_demand_round",
-            "reason": p.reason,
+            "reason": reviewer_feedback,
+            "reviewer_feedback": reviewer_feedback,
         });
         if let Err(e) = repo
             .record_refinement_lifecycle(&proposal.id, "refinement_start", Some(&demand_metadata))
@@ -577,9 +609,11 @@ pub async fn build_refinement_status(
         .iter()
         .rev()
         .find(|r| r.event_kind == "refinement_awaiting_review");
-    let awaiting_review = match (&latest_awaiting, &stop_after) {
-        (Some(aw), Some(stop)) => stop.created_at < aw.created_at,
-        (Some(_), None) => true,
+    let awaiting_review = match (&latest_awaiting, &stop_after, &latest_start) {
+        (Some(aw), Some(stop), Some(start)) => {
+            start.created_at <= aw.created_at && stop.created_at < aw.created_at
+        }
+        (Some(aw), None, Some(start)) => start.created_at <= aw.created_at,
         _ => false,
     };
     let (judge_summary, snapshot_revision_seq) = if awaiting_review {
