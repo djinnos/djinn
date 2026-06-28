@@ -28,12 +28,23 @@
 -- `blocking = true` so they participate in that index, while
 -- `evidence_findings` are written with `blocking = false`.
 
+-- Widen `kind` from VARCHAR(16) to VARCHAR(32) so `evidence_findings` (17
+-- chars) fits.  The CHECK constraint is replaced in the same migration.
+ALTER TABLE proposal_debate_trail
+    ALTER COLUMN kind TYPE VARCHAR(32);
+
 ALTER TABLE proposal_debate_trail
     DROP CONSTRAINT proposal_debate_trail_kind_check;
 
 ALTER TABLE proposal_debate_trail
     ADD CONSTRAINT proposal_debate_trail_kind_check
         CHECK (kind IN ('objection', 'rebuttal', 'verdict', 'needs_evidence', 'evidence_findings'));
+
+-- Widen `event_kind` on `proposal_revisions` from VARCHAR(32) to VARCHAR(64)
+-- so evidence lifecycle event kinds like `refinement_awaiting_evidence_started`
+-- (38 chars) fit without truncation.
+ALTER TABLE proposal_revisions
+    ALTER COLUMN event_kind TYPE VARCHAR(64);
 
 ALTER TABLE proposal_debate_trail
     ADD COLUMN body_metadata JSONB NULL;
