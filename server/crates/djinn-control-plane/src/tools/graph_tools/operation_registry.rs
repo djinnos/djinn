@@ -4,6 +4,13 @@
 //! Follow-up tasks will derive dispatch and pre-resolve tables from here
 //! instead of maintaining separate handwritten match arms.
 //!
+//! Intentionally not yet wired into runtime dispatch — see sibling tasks
+//! `hw2d` (route basic ops) and `4lij` (coupling route + bridge coverage).
+//! Until those land the items below are only exercised by this module's
+//! unit tests, so we suppress `dead_code` at the module boundary to keep
+//! `-D warnings` green.
+#![allow(dead_code)]
+//!
 //! The registry is purely data — no build scripts, no runtime graph
 //! cache access, no database or network dependencies.  Each entry is
 //! a `const`-compatible [`OpEntry`] struct collected into the
