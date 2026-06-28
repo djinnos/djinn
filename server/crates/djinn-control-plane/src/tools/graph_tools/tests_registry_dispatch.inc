@@ -1289,3 +1289,40 @@
             }
         }
     }
+
+    /// Regression witness for the MCP schema contract: converting the
+    /// vxmw dispatch path to a registry must not change the public
+    /// `code_graph` tool wire shape. The authoritative snapshot is still
+    /// owned by the server crate's `tool_schemas` insta test; this local
+    /// smoke assertion pins the two schema details this task is most
+    /// likely to accidentally disturb while adding registry metadata:
+    /// the public schema remains `CodeGraphParams`, and `operation` is
+    /// still a plain required string field rather than a generated enum
+    /// from the partial registry slice.
+    #[test]
+    fn registry_dispatch_keeps_code_graph_schema_snapshot_wire_shape() {
+        let snapshot = include_str!(
+            "../../../../../src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap"
+        );
+        let code_graph_start = snapshot
+            .find("\"name\": \"code_graph\"")
+            .expect("MCP tool schema snapshot should contain code_graph tool");
+        let code_graph_snapshot = &snapshot[code_graph_start..];
+
+        assert!(
+            code_graph_snapshot.contains("\"title\": \"CodeGraphParams\""),
+            "code_graph tool schema must remain backed by CodeGraphParams"
+        );
+        assert!(
+            code_graph_snapshot.contains("\"operation\": {"),
+            "code_graph schema must still expose an operation property"
+        );
+        assert!(
+            code_graph_snapshot.contains("\"operation\",\n        \"project\""),
+            "operation/project should remain required fields in the MCP schema snapshot"
+        );
+        assert!(
+            code_graph_snapshot.contains("\"type\": \"string\"\n        },\n        \"page_limit\""),
+            "operation should remain a string field; the partial vxmw registry must not emit an enum"
+        );
+    }
