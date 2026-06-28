@@ -62,6 +62,7 @@ mod reentrance;
 #[allow(dead_code)]
 pub(crate) mod refinement;
 mod refinement_dispatch;
+mod refinement_outcome;
 pub mod rules;
 mod types;
 mod wave;
