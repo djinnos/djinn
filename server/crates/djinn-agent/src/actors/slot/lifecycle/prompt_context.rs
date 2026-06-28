@@ -151,51 +151,31 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
 }
 
-/// Build the full prompt context (all `TaskContext` fields, base +
-/// extensions + skills prompts) for one role session.
-///
-/// Reads activity log, epic row (when the role needs it), knowledge notes
-/// scoped to the task's paths. Non-fatal: every
-/// DB query falls back to `None` on error, mirroring the original inline
-/// block.
-///
-/// Called from `supervisor_impl::stage::execute_stage` which is only
-/// reachable through the host callback dispatch path
-/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
-/// `dispatch_task_runtime` → supervisor → stage).
-pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
-    let PromptContextInputs {
-        task,
-        runtime_role,
-        role_for_epic_check,
-        project_path,
-        worktree_path,
-        conflict_ctx,
-        merge_validation_ctx,
-        prompt_setup_commands,
-        system_prompt_extensions,
-        learned_prompt,
-        resolved_skills,
-        app_state,
-        read_sources,
-    } = inputs;
-
-    let conflict_files = conflict_ctx.map(|m| {
+/// Format conflicting files from merge-conflict metadata as a `- <path>`
+/// markdown list. Returns `None` when there is no conflict context.
+fn format_conflict_files(conflict_ctx: Option<&MergeConflictMetadata>) -> Option<String> {
+    conflict_ctx.map(|m| {
         m.conflicting_files
             .iter()
             .map(|f| format!("- {f}"))
             .collect::<Vec<_>>()
             .join("\n")
-    });
+    })
+}
 
-    // Fetch activity log for the prompt: last 3 high-signal comments plus a
-    // summary of total counts by role so the agent knows what to look up.
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity_entries = task_repo.list_activity(&task.id).await.ok();
-    let activity_text = match &activity_entries {
+/// Build the pre-formatted activity-log digest from the raw activity
+/// entries. Returns `None` when the entries are empty or absent.
+///
+/// Output includes the last `max_feedback` high-signal comments and a
+/// per-role comment-count summary line.
+fn format_activity_text(
+    activity_entries: &Option<Vec<djinn_core::models::ActivityEntry>>,
+    max_feedback: usize,
+) -> Option<String> {
+    match activity_entries {
         Some(entries) if !entries.is_empty() => {
-            // Last 3 high-signal comments (lead, reviewer, verification)
-            let feedback = recent_feedback(entries, 3);
+            // Last N high-signal comments (lead, reviewer, verification)
+            let feedback = recent_feedback(entries, max_feedback);
 
             // Count comments by role for the summary line
             let mut counts: std::collections::BTreeMap<&str, usize> =
@@ -231,7 +211,67 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             }
         }
         _ => None,
-    };
+    }
+}
+
+/// Apply role extensions, skills, and read-source sections to the base
+/// prompt in the canonical order:
+///
+/// 1. Role-level `system_prompt_extensions` + `learned_prompt`
+/// 2. Resolved skills section
+/// 3. Read-only multi-repo sources section (last so it survives all
+///    other appends)
+///
+/// Returns the final `system_prompt` string.
+fn apply_prompt_sections(
+    base_system_prompt: &str,
+    system_prompt_extensions: &str,
+    learned_prompt: Option<&str>,
+    resolved_skills: &[ResolvedSkill],
+    read_sources: &[ReadSourceInfo],
+) -> String {
+    let with_extensions =
+        apply_role_extensions(base_system_prompt, system_prompt_extensions, learned_prompt);
+    let with_skills = apply_skills(&with_extensions, resolved_skills);
+    append_read_sources_prompt(&with_skills, read_sources)
+}
+
+/// Build the full prompt context (all `TaskContext` fields, base +
+/// extensions + skills prompts) for one role session.
+///
+/// Reads activity log, epic row (when the role needs it), knowledge notes
+/// scoped to the task's paths. Non-fatal: every
+/// DB query falls back to `None` on error, mirroring the original inline
+/// block.
+///
+/// Called from `supervisor_impl::stage::execute_stage` which is only
+/// reachable through the host callback dispatch path
+/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
+/// `dispatch_task_runtime` → supervisor → stage).
+pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
+    let PromptContextInputs {
+        task,
+        runtime_role,
+        role_for_epic_check,
+        project_path,
+        worktree_path,
+        conflict_ctx,
+        merge_validation_ctx,
+        prompt_setup_commands,
+        system_prompt_extensions,
+        learned_prompt,
+        resolved_skills,
+        app_state,
+        read_sources,
+    } = inputs;
+
+    // ── Conflict metadata ────────────────────────────────────────────────
+    let conflict_files = format_conflict_files(conflict_ctx);
+
+    // ── Activity log ─────────────────────────────────────────────────────
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let activity_entries = task_repo.list_activity(&task.id).await.ok();
+    let activity_text = format_activity_text(&activity_entries, 3);
 
     // Extract worker submission summary/concerns from the activity log so the
     // reviewer can see why certain changes were made.
@@ -486,17 +526,19 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             reviewer_diff_context: reviewer_diff_context.clone(),
         },
     );
-    // Apply role-level prompt extensions from DB (system_prompt_extensions + learned_prompt).
+    // ── Final prompt: extensions → skills → read sources (canonical order) ──
     let system_prompt_with_extensions = apply_role_extensions(
         &base_system_prompt,
         system_prompt_extensions,
         learned_prompt,
     );
-    // Append skills section after all other extensions.
-    let system_prompt = apply_skills(&system_prompt_with_extensions, resolved_skills);
-    // Read-only multi-repo: advertise the epic's read-source projects last
-    // so the section survives all other extension/skill appends.
-    let system_prompt = append_read_sources_prompt(&system_prompt, read_sources);
+    let system_prompt = apply_prompt_sections(
+        &base_system_prompt,
+        system_prompt_extensions,
+        learned_prompt,
+        resolved_skills,
+        read_sources,
+    );
 
     PromptContext {
         conflict_files,
@@ -583,7 +625,7 @@ mod tests {
     use super::*;
 
     use djinn_core::events::EventBus;
-    use djinn_core::models::Epic;
+    use djinn_core::models::{ActivityEntry, Epic};
     use djinn_db::{
         Database, EpicCreateInput, EpicRepository, ProposalCreateInput, ProposalRepository,
         TaskRepository,
@@ -1117,6 +1159,180 @@ mod tests {
         assert!(
             skills_pos < sources_pos,
             "resolved skills section must appear before read-sources section"
+        );
+    }
+
+    // ── Focused unit tests for extracted pure helpers ────────────────────
+
+    #[test]
+    fn format_conflict_files_none_when_no_conflict() {
+        assert!(
+            format_conflict_files(None).is_none(),
+            "no conflict context should yield None"
+        );
+    }
+
+    #[test]
+    fn format_conflict_files_produces_markdown_list() {
+        let ctx = MergeConflictMetadata {
+            conflicting_files: vec![
+                "src/main.rs".to_string(),
+                "Cargo.toml".to_string(),
+                "tests/integration.rs".to_string(),
+            ],
+            base_branch: "feature".to_string(),
+            merge_target: "main".to_string(),
+        };
+        let result = format_conflict_files(Some(&ctx)).expect("should produce Some");
+        assert!(result.contains("- src/main.rs"));
+        assert!(result.contains("- Cargo.toml"));
+        assert!(result.contains("- tests/integration.rs"));
+        // Newline-separated list
+        assert!(result.contains("\n"));
+    }
+
+    #[test]
+    fn format_conflict_files_empty_list_when_no_files() {
+        let ctx = MergeConflictMetadata {
+            conflicting_files: vec![],
+            base_branch: "feature".to_string(),
+            merge_target: "main".to_string(),
+        };
+        let result = format_conflict_files(Some(&ctx)).expect("should produce Some");
+        assert!(
+            result.is_empty(),
+            "empty conflicting_files should produce empty string"
+        );
+    }
+
+    #[test]
+    fn format_activity_text_none_when_absent() {
+        assert!(
+            format_activity_text(&None, 3).is_none(),
+            "absent activity entries should yield None"
+        );
+    }
+
+    #[test]
+    fn format_activity_text_none_when_empty() {
+        let entries: Option<Vec<ActivityEntry>> = Some(vec![]);
+        assert!(
+            format_activity_text(&entries, 3).is_none(),
+            "empty activity entries should yield None"
+        );
+    }
+
+    #[test]
+    fn format_activity_text_includes_comment_counts() {
+        let entries = Some(vec![
+            ActivityEntry {
+                id: "1".to_string(),
+                task_id: Some("t1".to_string()),
+                actor_id: "user-1".to_string(),
+                actor_role: "lead".to_string(),
+                event_type: "comment".to_string(),
+                payload: r#"{"body":"Good work"}"#.to_string(),
+                created_at: "2025-01-01T00:00:00Z".to_string(),
+            },
+            ActivityEntry {
+                id: "2".to_string(),
+                task_id: Some("t1".to_string()),
+                actor_id: "user-2".to_string(),
+                actor_role: "reviewer".to_string(),
+                event_type: "comment".to_string(),
+                payload: r#"{"body":"Looks good"}"#.to_string(),
+                created_at: "2025-01-01T01:00:00Z".to_string(),
+            },
+            ActivityEntry {
+                id: "3".to_string(),
+                task_id: Some("t1".to_string()),
+                actor_id: "user-3".to_string(),
+                actor_role: "lead".to_string(),
+                event_type: "comment".to_string(),
+                payload: r#"{"body":"Approved"}"#.to_string(),
+                created_at: "2025-01-01T02:00:00Z".to_string(),
+            },
+            ActivityEntry {
+                id: "4".to_string(),
+                task_id: Some("t1".to_string()),
+                actor_id: "system".to_string(),
+                actor_role: "system".to_string(),
+                event_type: "status_changed".to_string(),
+                payload: "{}".to_string(),
+                created_at: "2025-01-01T03:00:00Z".to_string(),
+            },
+        ]);
+
+        let result = format_activity_text(&entries, 3).expect("should produce Some");
+        // Should include activity totals with role counts
+        assert!(
+            result.contains("Activity totals:"),
+            "should include activity totals: {result}"
+        );
+        assert!(
+            result.contains("1 reviewer"),
+            "should count reviewer comments: {result}"
+        );
+        assert!(
+            result.contains("2 lead"),
+            "should count lead comments: {result}"
+        );
+        // status_changed should NOT be counted
+        assert!(
+            !result.contains("system"),
+            "non-comment events should not be counted: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_prompt_sections_preserves_canonical_order() {
+        let base = "Base system prompt content.";
+        let extensions = "Custom extension text.";
+        let skills = vec![ResolvedSkill {
+            name: "test-skill".to_string(),
+            description: "A test skill".to_string(),
+            content: "Skill body.".to_string(),
+            required: false,
+            trust_level: "project".to_string(),
+            recommended_for_roles: vec![],
+            tags: vec![],
+        }];
+        let sources = vec![ReadSourceInfo {
+            slug: "sibling-repo".to_string(),
+            name: "Sibling".to_string(),
+        }];
+
+        let result = apply_prompt_sections(base, extensions, None, &skills, &sources);
+
+        // All sections present
+        assert!(result.contains("Base system prompt content."));
+        assert!(result.contains("Custom extension text."));
+        assert!(result.contains("## Available Skills"));
+        assert!(result.contains("## Related repositories (read-only)"));
+        assert!(result.contains("sibling-repo"));
+
+        // Canonical ordering: extensions → skills → read sources
+        let ext_pos = result
+            .find("Custom extension text.")
+            .expect("extensions present");
+        let skills_pos = result.find("## Available Skills").expect("skills present");
+        let sources_pos = result
+            .find("## Related repositories (read-only)")
+            .expect("sources present");
+        assert!(ext_pos < skills_pos, "extensions must appear before skills");
+        assert!(
+            skills_pos < sources_pos,
+            "skills must appear before read sources"
+        );
+    }
+
+    #[test]
+    fn apply_prompt_sections_noop_when_all_empty() {
+        let base = "Base prompt.";
+        let result = apply_prompt_sections(base, "", None, &[], &[]);
+        assert_eq!(
+            result, "Base prompt.",
+            "no extensions/skills/sources should leave base unchanged"
         );
     }
 }
