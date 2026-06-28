@@ -13,7 +13,7 @@ use djinn_db::TaskRepository;
 ///
 /// Silently no-ops if `payload` is `None` (session ended without a finalize tool call).
 /// Malformed payloads are logged as warnings and do not crash the lifecycle.
-pub(crate) async fn process_finalize_payload(
+pub async fn process_finalize_payload(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
     task_id: &str,
@@ -37,7 +37,7 @@ pub(crate) async fn process_finalize_payload(
 
 /// Persist a budget-park handoff summary using the same payload shape as
 /// `submit_work`, so `extract_worker_context` can surface it unchanged.
-pub(crate) async fn handle_budget_park(
+pub async fn handle_budget_park(
     summary: &str,
     details: &str,
     task_id: &str,
@@ -201,7 +201,7 @@ async fn handle_submit_review(payload: &serde_json::Value, task_id: &str, app_st
 ///
 /// Uses index-based matching. If an incoming verdict is missing `criterion` text,
 /// the existing criterion text at that index is preserved.
-fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
+pub fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
     let existing: Vec<serde_json::Value> = serde_json::from_str(existing_json).unwrap_or_default();
 
     let merged: Vec<serde_json::Value> = verdicts

@@ -544,7 +544,7 @@ jobs:
         run: sqlx migrate run --source migrations_postgres
 
       - name: Verify .sqlx offline cache is up to date
-        run: cargo sqlx prepare --check --workspace
+        run: cargo sqlx prepare --check --workspace -- --all-targets
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI (PR + merge queue)                                           ║
