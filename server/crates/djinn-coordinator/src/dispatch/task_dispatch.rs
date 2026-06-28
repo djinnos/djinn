@@ -1,13 +1,13 @@
 // djinn:allow-oversize — legacy dispatch module over size-guard threshold; split when touched substantively.
 use super::super::*;
-use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+use super::DispatchOutcome;
 #[cfg(test)]
 use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
 #[cfg(test)]
 use super::admission::{
     clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
 };
-use super::DispatchOutcome;
+use super::admission::{model_under_user_cap, overlay_inflight_ledger};
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
