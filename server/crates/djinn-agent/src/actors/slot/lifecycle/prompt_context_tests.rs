@@ -711,3 +711,356 @@ fn apply_prompt_sections_noop_when_all_empty() {
         "no extensions/skills/sources should leave base unchanged"
     );
 }
+
+// ── Focused tests for extracted async helpers ─────────────────────────
+
+/// Mock role that returns `false` for `needs_epic_context()`.
+struct NoEpicRole;
+
+impl std::fmt::Debug for NoEpicRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NoEpicRole").finish()
+    }
+}
+
+impl AgentRole for NoEpicRole {
+    fn config(&self) -> &crate::roles::RoleConfig {
+        &NO_EPIC_CONFIG
+    }
+
+    fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
+        crate::prompts::render_prompt_for_role(self.config(), task, ctx)
+    }
+
+    fn needs_epic_context(&self) -> bool {
+        false
+    }
+}
+
+static NO_EPIC_CONFIG: crate::roles::RoleConfig = crate::roles::RoleConfig {
+    name: "no-epic-test",
+    display_name: "No Epic Test",
+    dispatch_role: "no-epic-test",
+    initial_message: "Test role without epic context.",
+    finalize_tool_names: &["submit_work"],
+    mode_section: None,
+};
+
+#[tokio::test]
+async fn load_epic_context_returns_none_when_role_does_not_need_it() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let project = create_test_project(&db).await;
+    let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let epic = create_epic(&db, &EventBus::noop(), &project.id, "Epic", "Desc", None).await;
+    let task = task_repo
+        .create(
+            &epic.id,
+            "Task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create task");
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let result = load_epic_context(&task, false, &app_state).await;
+    assert!(
+        result.is_none(),
+        "should return None when needs_epic_context is false"
+    );
+}
+
+#[tokio::test]
+async fn epic_context_none_when_role_does_not_need_epic_context() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let project = create_test_project(&db).await;
+    let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let epic = create_epic(
+        &db,
+        &EventBus::noop(),
+        &project.id,
+        "Epic for no-epic role test",
+        "Should not appear when role doesn't need epic context.",
+        None,
+    )
+    .await;
+    let task = task_repo
+        .create(
+            &epic.id,
+            "Task for no-epic role",
+            "desc",
+            "design",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create task");
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    let role = NoEpicRole;
+    let ctx = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+    })
+    .await;
+
+    assert!(
+        ctx.epic_context.is_none(),
+        "role with needs_epic_context() == false should get None epic_context"
+    );
+    // Knowledge context still attempted (empty DB, so None)
+    assert!(
+        ctx.knowledge_context.is_none(),
+        "empty ephemeral DB should yield None knowledge_context"
+    );
+}
+
+#[tokio::test]
+async fn load_epic_context_returns_context_when_epic_exists() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let project = create_test_project(&db).await;
+    let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let epic = create_epic(
+        &db,
+        &events,
+        &project.id,
+        "Test Epic Title",
+        "Test epic description.",
+        None,
+    )
+    .await;
+    let task = task_repo
+        .create(
+            &epic.id,
+            "Test task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create task");
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let result = load_epic_context(&task, true, &app_state)
+        .await
+        .expect("should return Some");
+
+    assert!(
+        result.contains("Test Epic Title"),
+        "should include epic title: {result}"
+    );
+    assert!(
+        result.contains("Test epic description"),
+        "should include epic description: {result}"
+    );
+    assert!(
+        result.contains("### Sibling Tasks"),
+        "should include sibling tasks section: {result}"
+    );
+    assert!(
+        result.contains("memory_read"),
+        "should include memory ref instructions: {result}"
+    );
+}
+
+#[tokio::test]
+async fn load_knowledge_context_returns_none_when_no_notes() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let project = create_test_project(&db).await;
+    let task_repo = TaskRepository::new(db.clone(), EventBus::noop());
+    let epic = create_epic(
+        &db,
+        &EventBus::noop(),
+        &project.id,
+        "Knowledge test epic",
+        "Epic for knowledge context test.",
+        None,
+    )
+    .await;
+    let task = task_repo
+        .create(
+            &epic.id,
+            "Knowledge test task",
+            "search for crates/djinn-agent patterns",
+            "design doc for crates/djinn-agent refactoring",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create task");
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    // Empty ephemeral DB has no notes → should return None
+    let result = load_knowledge_context(&task, None, &app_state).await;
+    assert!(
+        result.is_none(),
+        "empty DB with no notes should yield None knowledge_context"
+    );
+}
+
+#[tokio::test]
+async fn load_epic_context_includes_blocker_and_sibling_sections() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let project = create_test_project(&db).await;
+    let epic_repo = EpicRepository::new(db.clone(), events.clone());
+    let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
+
+    let subject_epic = create_epic(
+        &db,
+        &events,
+        &project.id,
+        "Subject epic for direct helper test",
+        "Direct test of load_epic_context.",
+        None,
+    )
+    .await;
+    let blocking_epic = create_epic(
+        &db,
+        &events,
+        &project.id,
+        "Blocking epic for helper test",
+        "Blocks the subject.",
+        Some("closed"),
+    )
+    .await;
+
+    // Create a closed task under the blocking epic
+    task_repo
+        .create(
+            &blocking_epic.id,
+            "Delivered blocker task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "test-owner",
+            Some("closed"),
+        )
+        .await
+        .expect("create blocker task");
+
+    // Wire blocker relationship
+    epic_repo
+        .update_blockers_atomic(
+            &subject_epic.id,
+            std::slice::from_ref(&blocking_epic.id),
+            &[],
+        )
+        .await
+        .expect("wire blocker");
+
+    // Create proposal with sibling epic
+    let sibling_epic = create_epic(
+        &db,
+        &events,
+        &project.id,
+        "Proposal sibling epic for helper test",
+        "Sibling.",
+        None,
+    )
+    .await;
+    let proposal = proposal_repo
+        .create(ProposalCreateInput {
+            title: "Test proposal for helper",
+            body: "body",
+            acceptance_criteria: None,
+            status: Some("building"),
+            body_format: None,
+        })
+        .await
+        .expect("create proposal");
+    proposal_repo
+        .link_epic(&proposal.id, &subject_epic.id, &project.id)
+        .await
+        .expect("link subject");
+    proposal_repo
+        .link_epic(&proposal.id, &sibling_epic.id, &project.id)
+        .await
+        .expect("link sibling");
+
+    let task = task_repo
+        .create(
+            &subject_epic.id,
+            "Subject task for helper test",
+            "desc",
+            "design",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create subject task");
+
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let result = load_epic_context(&task, true, &app_state)
+        .await
+        .expect("should return Some");
+
+    // Verify all sections present
+    assert!(
+        result.contains("### Sibling Tasks"),
+        "should include sibling tasks: {result}"
+    );
+    assert!(
+        result.contains("### Blocking Epics"),
+        "should include blocking epics: {result}"
+    );
+    assert!(
+        result.contains("Delivered blocker task"),
+        "should include delivered tasks under blockers: {result}"
+    );
+    assert!(
+        result.contains("### Proposal Sibling Epics"),
+        "should include proposal sibling epics: {result}"
+    );
+    assert!(
+        result.contains("Proposal sibling epic for helper test"),
+        "should include the sibling epic: {result}"
+    );
+
+    // Verify ordering: Sibling Tasks before Blocking Epics before Proposal Sibling Epics
+    let siblings_pos = result
+        .find("### Sibling Tasks")
+        .expect("siblings section present");
+    let blockers_pos = result
+        .find("### Blocking Epics")
+        .expect("blockers section present");
+    let proposal_pos = result
+        .find("### Proposal Sibling Epics")
+        .expect("proposal section present");
+    assert!(
+        siblings_pos < blockers_pos,
+        "sibling tasks should appear before blocking epics"
+    );
+    assert!(
+        blockers_pos < proposal_pos,
+        "blocking epics should appear before proposal sibling epics"
+    );
+}
