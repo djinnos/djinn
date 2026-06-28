@@ -14,6 +14,9 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 use crate::test_helpers;
+use djinn_db::test_support::{
+    UsageTestSessionSeed, UsageTestTaskSeed, seed_project, seed_session_row, seed_task_row,
+};
 use djinn_db::{CreateUserAuthSession, SessionAuthRepository, UserRepository};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -103,100 +106,6 @@ async fn get_usage(app: &axum::Router, query: &str, cookie: Option<&str>) -> (St
         .unwrap_or_else(|_| serde_json::json!({ "_raw": String::from_utf8_lossy(&body) }));
 
     (status, json)
-}
-
-struct SessionSeed<'a> {
-    project_id: &'a str,
-    model_id: &'a str,
-    agent_type: &'a str,
-    started_at: &'a str,
-    tokens_in: i64,
-    tokens_out: i64,
-    cache_read_tokens: i64,
-    cache_write_tokens: i64,
-    cost_usd: Option<f64>,
-    cost_basis: &'a str,
-    task_id: Option<&'a str>,
-}
-
-struct TaskSeed<'a> {
-    project_id: &'a str,
-    status: &'a str,
-    close_reason: Option<&'a str>,
-    total_reopen_count: i32,
-}
-
-/// Seed a task row directly into the database for integration-level
-/// contract tests. Returns the generated task id.
-async fn seed_task_row(db: &djinn_db::Database, seed: TaskSeed<'_>) -> String {
-    let id = uuid::Uuid::now_v7().to_string();
-    let short_id = format!("task-{}", &id[..8]);
-    sqlx::query(
-        "INSERT INTO tasks \
-         (id, project_id, short_id, epic_id, title, description, design, \
-          issue_type, status, priority, owner, labels, acceptance_criteria, \
-          reopen_count, continuation_count, verification_failure_count, \
-          total_reopen_count, \
-          intervention_count, created_at, updated_at, closed_at, close_reason, \
-          merge_commit_sha, memory_refs, merge_conflict_metadata, agent_type, pr_url) \
-         VALUES ($1, $2, $3, NULL, 'test title', 'test desc', 'test design', \
-                 'task', $4, 0, '', '[]', '[]', \
-                 0, 0, 0, \
-                 $5, \
-                 0, '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', NULL, $6, \
-                 NULL, '[]', NULL, NULL, NULL)",
-    )
-    .bind(&id)
-    .bind(seed.project_id)
-    .bind(&short_id)
-    .bind(seed.status)
-    .bind(seed.total_reopen_count)
-    .bind(seed.close_reason)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed task row");
-    id
-}
-
-/// Seed raw session rows directly into the database for integration-level
-/// contract tests that need actual query results.
-async fn seed_session_row(db: &djinn_db::Database, seed: SessionSeed<'_>) {
-    let id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO sessions \
-         (id, project_id, task_id, model_id, agent_type, status, \
-          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
-         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
-    )
-    .bind(&id)
-    .bind(seed.project_id)
-    .bind(seed.task_id)
-    .bind(seed.model_id)
-    .bind(seed.agent_type)
-    .bind(seed.started_at)
-    .bind(seed.tokens_in)
-    .bind(seed.tokens_out)
-    .bind(seed.cache_read_tokens)
-    .bind(seed.cache_write_tokens)
-    .bind(seed.cost_usd)
-    .bind(seed.cost_basis)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed session row");
-}
-
-/// Seed a project so that `project_id` FK constraints pass.
-async fn seed_project(db: &djinn_db::Database, project_id: &str, name: &str) {
-    sqlx::query(
-        "INSERT INTO projects (id, name, github_owner, github_repo) \
-         VALUES ($1, $2, 'test', $2) \
-         ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(project_id)
-    .bind(name)
-    .execute(db.pool())
-    .await
-    .expect("failed to seed project");
 }
 
 /// Find a model_effectiveness row by its (renamed) `model` field.
@@ -300,7 +209,7 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     seed_project(&db, "proj-kpi", "kpi-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-kpi",
             status: "closed",
             close_reason: Some("completed"),
@@ -312,7 +221,7 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     // actual-basis session: $1.25
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-kpi",
             model_id: "model-kpi",
             agent_type: "worker",
@@ -331,7 +240,7 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     // projected-basis session: $2.50
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-kpi",
             model_id: "model-kpi",
             agent_type: "worker",
@@ -350,7 +259,7 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     // unpriced-basis session: NULL cost
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-kpi",
             model_id: "model-kpi",
             agent_type: "worker",
@@ -406,15 +315,21 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
         .and_then(Value::as_array)
         .expect("Tokens KPI must have a breakdown array");
     assert!(
-        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Input")),
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Input")),
         "Tokens breakdown missing Input"
     );
     assert!(
-        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Cached")),
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Cached")),
         "Tokens breakdown missing Cached"
     );
     assert!(
-        breakdown.iter().any(|b| b.get("label").and_then(Value::as_str) == Some("Output")),
+        breakdown
+            .iter()
+            .any(|b| b.get("label").and_then(Value::as_str) == Some("Output")),
         "Tokens breakdown missing Output"
     );
 
@@ -457,15 +372,27 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     // ── Single-contributor invariant ──
     let actual_contributors: Vec<&Value> = kpis
         .iter()
-        .filter(|k| k.get("actual_spend_usd").map(|v| !v.is_null()).unwrap_or(false))
+        .filter(|k| {
+            k.get("actual_spend_usd")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
         .collect();
     let projected_contributors: Vec<&Value> = kpis
         .iter()
-        .filter(|k| k.get("projected_usd").map(|v| !v.is_null()).unwrap_or(false))
+        .filter(|k| {
+            k.get("projected_usd")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
         .collect();
     let unpriced_contributors: Vec<&Value> = kpis
         .iter()
-        .filter(|k| k.get("unpriced_count").map(|v| !v.is_null()).unwrap_or(false))
+        .filter(|k| {
+            k.get("unpriced_count")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
         .collect();
 
     assert_eq!(
@@ -588,7 +515,7 @@ async fn weekly_rollup_buckets_to_week_start_and_counts_sessions() {
     ] {
         seed_session_row(
             &db,
-            SessionSeed {
+            UsageTestSessionSeed {
                 project_id: "proj-rollup",
                 model_id: "model-a",
                 agent_type: "worker",
@@ -643,7 +570,7 @@ async fn null_cost_yields_null_spend_kpi_and_series_cost() {
     seed_project(&db, "proj-nullcost", "nullcost-project").await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-nullcost",
             model_id: "unpriced-model",
             agent_type: "worker",
@@ -775,7 +702,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
     seed_project(&db, "proj-eff", "effectiveness-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-eff",
             status: "closed",
             close_reason: Some("completed"),
@@ -785,7 +712,7 @@ async fn model_effectiveness_uses_frontend_field_names() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-eff",
             model_id: "test-model",
             agent_type: "worker",
@@ -847,7 +774,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     seed_project(&db, "proj-null-eff", "null-eff-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-null-eff",
             status: "closed",
             close_reason: Some("completed"),
@@ -857,7 +784,7 @@ async fn model_effectiveness_null_cost_serializes_total_cost_null() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-null-eff",
             model_id: "unpriced-model",
             agent_type: "worker",
@@ -899,7 +826,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
     seed_project(&db, "proj-bd", "breakdown-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-bd",
             status: "closed",
             close_reason: Some("completed"),
@@ -909,7 +836,7 @@ async fn breakdowns_and_matrix_populate_from_seeded_session() {
     .await;
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-bd",
             model_id: "model-bd",
             agent_type: "worker",
@@ -992,7 +919,7 @@ async fn split_cost_basis_contract_at_api_level() {
     seed_project(&db, "proj-split", "split-project").await;
     let task_id = seed_task_row(
         &db,
-        TaskSeed {
+        UsageTestTaskSeed {
             project_id: "proj-split",
             status: "closed",
             close_reason: Some("completed"),
@@ -1004,7 +931,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // actual-basis session: $2.00
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",
@@ -1023,7 +950,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // projected-basis session: $3.50
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",
@@ -1042,7 +969,7 @@ async fn split_cost_basis_contract_at_api_level() {
     // unpriced-basis session: NULL cost
     seed_session_row(
         &db,
-        SessionSeed {
+        UsageTestSessionSeed {
             project_id: "proj-split",
             model_id: "model-split",
             agent_type: "worker",
