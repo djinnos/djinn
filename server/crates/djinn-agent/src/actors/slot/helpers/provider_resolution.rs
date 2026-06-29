@@ -1,96 +1,32 @@
 use super::*;
 
+// `djinn-slot` is the canonical home for pure provider identification helpers.
+// Keep these agent-side functions as compatibility adapters so host-only OAuth
+// refresh, direct credential-repository access, and worker Secret serialization
+// can remain in this file without forking shared provider-routing behavior.
+
 pub fn format_family_for_provider(
     provider_id: &str,
     model_id: &str,
 ) -> djinn_provider::provider::FormatFamily {
-    use djinn_provider::provider::FormatFamily;
-    let lower = provider_id.to_lowercase();
-    // MiniMax (incl. the coding-plan providers) only exposes an
-    // Anthropic-compatible endpoint (`https://api.minimax.io/anthropic/v1`).
-    // Kimi for Coding (`kimi-for-coding`) speaks the Anthropic wire format via
-    // the Kimi Code subscription endpoint; `kimi` catches the provider id.
-    // (Xiaomi `xiaomi-token-plan-sgp` is OpenAI-compatible — it falls through to
-    // the default OpenAI arm, NOT here.)
-    if lower.contains("anthropic") || lower.contains("minimax") || lower.contains("kimi") {
-        FormatFamily::Anthropic
-    } else if lower.contains("google") || lower.contains("gemini") || lower.contains("vertex") {
-        FormatFamily::Google
-    } else if lower.contains("codex")
-        || model_id.contains("codex")
-        || (is_openai_responses_model(model_id) && is_native_openai_provider(&lower))
-    {
-        FormatFamily::OpenAIResponses
-    } else {
-        FormatFamily::OpenAI
-    }
-}
-
-/// Returns true for OpenAI models that support the Responses API (GPT-5.x,
-/// o-series reasoning models).  These get better quality and reasoning
-/// summaries when routed through `/responses` instead of `/chat/completions`.
-fn is_openai_responses_model(model_id: &str) -> bool {
-    let lower = model_id.to_lowercase();
-    lower.starts_with("gpt-5")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-}
-
-/// Returns true for provider IDs that point to OpenAI's own API (not
-/// third-party OpenAI-compatible endpoints like Fireworks, Together, etc.).
-fn is_native_openai_provider(provider_id_lower: &str) -> bool {
-    provider_id_lower == "openai"
-        || provider_id_lower.starts_with("openai")
-        || provider_id_lower.contains("chatgpt")
+    djinn_slot::helpers::provider_resolution::format_family_for_provider(provider_id, model_id)
 }
 
 pub fn capabilities_for_provider(
     provider_id: &str,
 ) -> djinn_provider::provider::ProviderCapabilities {
-    use djinn_provider::provider::ProviderCapabilities;
-    let lower = provider_id.to_lowercase();
-    if lower.contains("synthetic") || lower.contains("local") {
-        ProviderCapabilities {
-            streaming: false,
-            max_tokens_default: None,
-        }
-    } else if lower.contains("anthropic") || lower.contains("kimi") {
-        // Kimi for Coding (`kimi-for-coding`) speaks the Anthropic wire format,
-        // which requires a default `max_tokens`; mirror the Anthropic caps.
-        ProviderCapabilities {
-            streaming: true,
-            max_tokens_default: Some(64_000),
-        }
-    } else {
-        ProviderCapabilities::default()
-    }
+    djinn_slot::helpers::provider_resolution::capabilities_for_provider(provider_id)
 }
 
 pub fn auth_method_for_provider(
     provider_id: &str,
     api_key: &str,
 ) -> djinn_provider::provider::AuthMethod {
-    use djinn_provider::provider::AuthMethod;
-    if provider_id.to_lowercase().contains("anthropic") {
-        AuthMethod::ApiKeyHeader {
-            header: "x-api-key".to_string(),
-            key: api_key.to_string(),
-        }
-    } else {
-        AuthMethod::BearerToken(api_key.to_string())
-    }
+    djinn_slot::helpers::provider_resolution::auth_method_for_provider(provider_id, api_key)
 }
 
 pub fn default_base_url(provider_id: &str) -> String {
-    let lower = provider_id.to_lowercase();
-    if lower.contains("anthropic") {
-        "https://api.anthropic.com".to_string()
-    } else if lower.contains("google") || lower.contains("gemini") {
-        "https://generativelanguage.googleapis.com".to_string()
-    } else {
-        "https://api.openai.com".to_string()
-    }
+    djinn_slot::helpers::provider_resolution::default_base_url(provider_id)
 }
 
 /// Resolved provider credentials — either an API key from the vault or an
@@ -478,12 +414,7 @@ pub async fn load_provider_credential(
 }
 
 pub fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)> {
-    let Some((provider_id, model_name)) = model_id.split_once('/') else {
-        return Err(anyhow::anyhow!(
-            "invalid model id '{model_id}', expected provider/model"
-        ));
-    };
-    Ok((provider_id.to_owned(), model_name.to_owned()))
+    djinn_slot::helpers::provider_resolution::parse_model_id(model_id)
 }
 
 /// Build telemetry metadata for OTel span instrumentation.
