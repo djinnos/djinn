@@ -201,6 +201,12 @@ impl DjinnMcpServer {
     /// Inner op-string match. Lives here so [`Self::dispatch_code_graph`]
     /// can wrap it uniformly in timeout + tracing without each per-op
     /// handler having to know about either.
+    ///
+    /// Dispatch is registry-derived: the operation string is looked up
+    /// in [`operation_registry::CODE_GRAPH_REGISTRY`] and the matching
+    /// entry's canonical name drives the handler match.  Unknown
+    /// operations produce an error whose expected-ops list is
+    /// auto-generated from the registry so it never goes stale.
     async fn dispatch_code_graph_op(
         &self,
         ctx: &ProjectCtx,
@@ -208,21 +214,18 @@ impl DjinnMcpServer {
     ) -> Result<CodeGraphResponse, String> {
         let op = params.operation.as_str();
 
-        // Registry-derived dispatch for the converted vertical slice.
-        // If the operation is registered, we dispatch through the registry path
-        // so that the conversion is exercised at runtime.  Unconverted ops fall
-        // through to the legacy handwritten match below.
-        if let Some(entry) = operation_registry::lookup_by_name(op) {
-            match entry.name {
-                "neighbors" => return self.code_graph_neighbors(ctx, params).await,
-                "impact" => return self.code_graph_impact(ctx, params).await,
-                "context" => return self.code_graph_context(ctx, params).await,
-                "coupling_hotspots" => return self.code_graph_coupling_hotspots(ctx, params).await,
-                _ => {}
-            }
-        }
+        // Registry is the gatekeeper — unregistered ops fail early
+        // with an auto-generated expected-ops list.
+        let entry = operation_registry::lookup_by_name(op).ok_or_else(|| {
+            let names = operation_registry::registered_names().join(", ");
+            format!("unknown code_graph operation '{op}': expected one of {names}")
+        })?;
 
-        match op {
+        // Dispatch on the registry entry's canonical name.  Every
+        // entry in CODE_GRAPH_REGISTRY has a handler arm here.  Adding
+        // a new operation requires one registry entry plus the handler
+        // function — no independent stale operation-name list.
+        match entry.name {
             "neighbors" => self.code_graph_neighbors(ctx, params).await,
             "ranked" => self.code_graph_ranked(ctx, params).await,
             "implementations" => self.code_graph_implementations(ctx, params).await,
@@ -254,34 +257,31 @@ impl DjinnMcpServer {
             "deprecated_callers" => self.code_graph_deprecated_callers(ctx, params).await,
             "touches_hot_path" => self.code_graph_touches_hot_path(ctx, params).await,
             "coupling" => self.code_graph_coupling(ctx, params).await,
-            "churn" => self.code_graph_churn(ctx, params).await,
             "coupling_hotspots" => self.code_graph_coupling_hotspots(ctx, params).await,
             "coupling_hubs" => self.code_graph_coupling_hubs(ctx, params).await,
+            "churn" => self.code_graph_churn(ctx, params).await,
+            "snapshot" => self.code_graph_snapshot(ctx, params).await,
             "crate_graph" => self.code_graph_crate_graph(ctx, params).await,
             "impact_check" => self.code_graph_impact_check(ctx, params).await,
-            "snapshot" => self.code_graph_snapshot(ctx, params).await,
+            // Every registry entry is handled above.  This arm is
+            // unreachable because `lookup_by_name` already rejected
+            // unknown ops, but the compiler needs a wildcard.
             other => Err(format!(
-                "unknown code_graph operation '{other}': expected one of \
-                 'neighbors', 'ranked', 'impact', 'implementations', \
-                 'search', 'query_subgraph', 'route_map', 'shape_check', \
-                 'api_impact', 'flow', 'cycles', 'orphans', 'path', 'edges', \
-                 'symbols_at', 'diff_touches', 'detect_changes', \
-                 'describe', 'context', 'status', 'workspaces', \
-                 'api_surface', 'boundary_check', 'hotspots', 'complexity', \
-                 'refactor_candidates', 'metrics_at', \
-                 'dead_symbols', 'deprecated_callers', 'touches_hot_path', \
-                 'coupling', 'churn', 'coupling_hotspots', 'coupling_hubs', \
-                 'crate_graph', 'impact_check', \
-                 .snapshot, route_map, shape_check, api_impact."
+                "internal dispatch error: registry entry '{other}' has no handler arm"
             )),
         }
     }
 
     /// PR C2 dispatcher hook: for ops that read a caller-supplied node
     /// key (`neighbors`, `impact`, `implementations`, `describe`,
-    /// `path`), pre-resolve via [`RepoGraphOps::resolve`] so the inner
-    /// op gets either a unique RepoNodeKey or short-circuits on a
-    /// disambiguation list / hard miss.
+    /// `context`) or two keys (`path`), pre-resolve via
+    /// [`RepoGraphOps::resolve`] so the inner op gets either a unique
+    /// RepoNodeKey or short-circuits on a disambiguation list / hard miss.
+    ///
+    /// Pre-resolve classification is **registry-derived**: the
+    /// operation's [`operation_registry::PreResolveCategory`] determines
+    /// which resolution path is taken.  No independent handwritten
+    /// operation-name lists are maintained.
     ///
     /// Returns:
     /// - `Ok(None)` — caller may dispatch the inner op as usual. For
@@ -294,93 +294,78 @@ impl DjinnMcpServer {
         ctx: &ProjectCtx,
         params: &mut CodeGraphParams,
     ) -> Result<Option<CodeGraphResponse>, String> {
-        // Operations that take a single `key`. `search`/`ranked`/
-        // `cycles`/`orphans`/`hotspots`/etc. don't go through
-        // resolution — their `key` is a query/glob.
-        //
-        // Derive the list from registry metadata so the converted basic
-        // ops (`neighbors`, `impact`, `context`) are mechanically checked
-        // against the single source of truth.  Unconverted ops that
-        // still need single-key resolution (`implementations`,
-        // `describe`) remain in the handwritten fallback until they are
-        // registered.
-        let single_key_ops: Vec<&str> = {
-            let mut registered: Vec<&str> = operation_registry::CODE_GRAPH_REGISTRY
-                .iter()
-                .filter(|e| e.pre_resolve == operation_registry::PreResolveCategory::SingleKey)
-                .map(|e| e.name)
-                .collect();
-            // Fallback for unconverted ops that still require single-key resolution
-            for unconverted in &["implementations", "describe"] {
-                if !registered.contains(unconverted) {
-                    registered.push(unconverted);
-                }
-            }
-            registered
-        };
-        if single_key_ops.contains(&params.operation.as_str())
-            && let Some(key) = params.key.as_deref().filter(|k| !k.is_empty())
-        {
-            let kind_hint = params.kind_hint.as_deref();
-            match graph.resolve(ctx, key, kind_hint).await? {
-                ResolveOutcome::Found(uid) => {
-                    params.key = Some(uid);
-                }
-                ResolveOutcome::Ambiguous(candidates) => {
-                    return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
-                        candidates,
-                        next_step: None,
-                        graph_staleness: None,
-                    })));
-                }
-                ResolveOutcome::NotFound => {
-                    return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
-                        not_found: NotFoundDetail {
-                            query: key.to_string(),
-                            kind_hint: kind_hint.map(str::to_string),
-                        },
-                        next_step: None,
-                        graph_staleness: None,
-                    })));
-                }
-            }
-        }
+        // Look up the registry entry to determine pre-resolve behaviour.
+        // Unknown ops (not in the registry) skip pre-resolve — they'll
+        // fail later in dispatch_code_graph_op with a clear error.
+        let entry = operation_registry::lookup_by_name(&params.operation);
 
-        // `path` takes two keys; resolve both.
-        if params.operation == "path" {
-            for which in ["from", "to"] {
-                let raw = match which {
-                    "from" => params.from.as_deref().filter(|s| !s.is_empty()),
-                    _ => params.to.as_deref().filter(|s| !s.is_empty()),
-                };
-                let Some(key) = raw else { continue };
-                let kind_hint = params.kind_hint.as_deref();
-                match graph.resolve(ctx, key, kind_hint).await? {
-                    ResolveOutcome::Found(uid) => {
-                        if which == "from" {
-                            params.from = Some(uid);
-                        } else {
-                            params.to = Some(uid);
+        match entry.map(|e| e.pre_resolve) {
+            Some(operation_registry::PreResolveCategory::SingleKey) => {
+                if let Some(key) = params.key.as_deref().filter(|k| !k.is_empty()) {
+                    let kind_hint = params.kind_hint.as_deref();
+                    match graph.resolve(ctx, key, kind_hint).await? {
+                        ResolveOutcome::Found(uid) => {
+                            params.key = Some(uid);
+                        }
+                        ResolveOutcome::Ambiguous(candidates) => {
+                            return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
+                                candidates,
+                                next_step: None,
+                                graph_staleness: None,
+                            })));
+                        }
+                        ResolveOutcome::NotFound => {
+                            return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
+                                not_found: NotFoundDetail {
+                                    query: key.to_string(),
+                                    kind_hint: kind_hint.map(str::to_string),
+                                },
+                                next_step: None,
+                                graph_staleness: None,
+                            })));
                         }
                     }
-                    ResolveOutcome::Ambiguous(candidates) => {
-                        return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
-                            candidates,
-                            next_step: None,
-                            graph_staleness: None,
-                        })));
-                    }
-                    ResolveOutcome::NotFound => {
-                        return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
-                            not_found: NotFoundDetail {
-                                query: key.to_string(),
-                                kind_hint: kind_hint.map(str::to_string),
-                            },
-                            next_step: None,
-                            graph_staleness: None,
-                        })));
+                }
+            }
+            Some(operation_registry::PreResolveCategory::DualKey) => {
+                // `path` is the only DualKey op; resolve `from` and `to`.
+                for which in ["from", "to"] {
+                    let raw = match which {
+                        "from" => params.from.as_deref().filter(|s| !s.is_empty()),
+                        _ => params.to.as_deref().filter(|s| !s.is_empty()),
+                    };
+                    let Some(key) = raw else { continue };
+                    let kind_hint = params.kind_hint.as_deref();
+                    match graph.resolve(ctx, key, kind_hint).await? {
+                        ResolveOutcome::Found(uid) => {
+                            if which == "from" {
+                                params.from = Some(uid);
+                            } else {
+                                params.to = Some(uid);
+                            }
+                        }
+                        ResolveOutcome::Ambiguous(candidates) => {
+                            return Ok(Some(CodeGraphResponse::Ambiguous(AmbiguousResponse {
+                                candidates,
+                                next_step: None,
+                                graph_staleness: None,
+                            })));
+                        }
+                        ResolveOutcome::NotFound => {
+                            return Ok(Some(CodeGraphResponse::NotFound(NotFoundResponse {
+                                not_found: NotFoundDetail {
+                                    query: key.to_string(),
+                                    kind_hint: kind_hint.map(str::to_string),
+                                },
+                                next_step: None,
+                                graph_staleness: None,
+                            })));
+                        }
                     }
                 }
+            }
+            Some(operation_registry::PreResolveCategory::None) | None => {
+                // No pre-resolve for this operation.
             }
         }
 
