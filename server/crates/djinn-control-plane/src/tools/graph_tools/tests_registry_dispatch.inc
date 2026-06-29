@@ -1281,11 +1281,15 @@
                 operation_registry::ValidationCategory::None => {
                     assert!(
                         entry.smoke.key.is_none(),
-                        "registry entry '{}' has No validation but smoke exemplar \
+                        "registry entry '{}' has None validation but smoke exemplar \
                          supplies a key",
                         entry.name
                     );
                 }
+                // All other validation categories do not require a key exemplar.
+                // Smoke tests for these categories are covered by their own
+                // dedicated exemplar fields (query, file, from/to, etc.).
+                _ => {}
             }
         }
     }
