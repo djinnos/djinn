@@ -606,6 +606,9 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
 
 /// Deduplicate-append `new_permalinks` into a JSON array string, returning the
 /// updated JSON. Preserves existing entries and only adds new ones.
+///
+/// The final serialization uses a non-panicking fallback: if `to_string` fails
+/// the caller receives an empty JSON array (`"[]"`) rather than a panic.
 fn dedup_append_memory_refs(existing_json: &str, new_permalinks: &[String]) -> String {
     let mut refs: Vec<String> = serde_json::from_str(existing_json).unwrap_or_default();
     let existing_set: HashSet<String> = refs.iter().cloned().collect();
