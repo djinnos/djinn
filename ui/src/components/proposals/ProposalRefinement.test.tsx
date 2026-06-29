@@ -309,8 +309,13 @@ describe("ProposalRefinement", () => {
 
   // ── Autonomous review flow (awaiting_review) ─────────────────────────────
 
-  it("renders the review panel with Accept/Reject when awaiting_review", () => {
-    const status: ProposalRefinementStatus = {
+  // Shared factory for the converged/awaiting-review state so the three-choice
+  // panel tests don't repeat the same status object on every test. Override
+  // individual fields per test when needed.
+  function reviewStatus(
+    overrides: Partial<ProposalRefinementStatus> = {},
+  ): ProposalRefinementStatus {
+    return {
       active: true,
       current_round: 4,
       dry_rounds: 2,
@@ -318,12 +323,15 @@ describe("ProposalRefinement", () => {
       stop_reason: null,
       awaiting_review: true,
       judge_summary: "The spec was tightened and ambiguities resolved.",
-      snapshot_revision_seq: 3,
+      ...overrides,
     };
+  }
+
+  it("renders the three-choice review panel with distinct accessible action labels", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -337,29 +345,39 @@ describe("ProposalRefinement", () => {
     expect(
       screen.getByText(/the diff from your original is in the revision history/),
     ).toBeInTheDocument();
+    // Three unambiguous human choices with distinct accessible names.
     expect(
-      screen.getByRole("button", { name: "Accept" }),
+      screen.getByRole("button", { name: "Accept refined spec" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Reject" }),
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reject and revert" }),
+    ).toBeInTheDocument();
+    // The consequences of each choice are surfaced to the reviewer.
+    expect(
+      screen.getByText(/Accept keeps the refined spec/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Reject reverts to your original spec/),
+    ).toBeInTheDocument();
+    // The feedback-to-another-round action is disabled until feedback is
+    // entered — verified together with the panel layout to avoid a separate
+    // render with duplicate setup.
+    expect(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    ).toBeDisabled();
   });
 
   it("renders judge_summary markdown semantically", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary:
-        "**Approved** changes:\n\n- Tightened scope\n- Resolved ambiguity",
-    };
     const { container } = render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus({
+          judge_summary:
+            "**Approved** changes:\n\n- Tightened scope\n- Resolved ambiguity",
+        })}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -373,19 +391,10 @@ describe("ProposalRefinement", () => {
   });
 
   it("falls back to a default summary when judge_summary is blank", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: " \n\t ",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus({ judge_summary: " \n\t " })}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -398,25 +407,18 @@ describe("ProposalRefinement", () => {
 
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={onChanged}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(
+      screen.getByRole("button", { name: "Accept refined spec" }),
+    );
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
       proposal_id: proposalId,
@@ -432,25 +434,18 @@ describe("ProposalRefinement", () => {
 
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={onChanged}
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Reject" }));
+    await user.click(
+      screen.getByRole("button", { name: "Reject and revert" }),
+    );
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
       proposal_id: proposalId,
@@ -465,67 +460,12 @@ describe("ProposalRefinement", () => {
 
   // ── Send feedback for another round (awaiting_review) ────────────────────
 
-  it("renders the Send feedback for another round action when awaiting_review", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByRole("button", { name: /Send feedback for another round/ }),
-    ).toBeInTheDocument();
-  });
-
-  it("disables the another-round action when feedback is blank", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByRole("button", { name: /Send feedback for another round/ }),
-    ).toBeDisabled();
-  });
-
   it("enables the another-round action when feedback is non-blank", async () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
     const user = userEvent.setup();
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -545,19 +485,10 @@ describe("ProposalRefinement", () => {
 
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={onChanged}
       />,
@@ -593,19 +524,10 @@ describe("ProposalRefinement", () => {
 
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 4,
-      dry_rounds: 2,
-      total_entries: 12,
-      stop_reason: null,
-      awaiting_review: true,
-      judge_summary: "Converged.",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus()}
         canStart={false}
         onChanged={onChanged}
       />,
@@ -627,18 +549,15 @@ describe("ProposalRefinement", () => {
   });
 
   it("does not render the review panel while in progress", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 4,
-      stop_reason: null,
-      awaiting_review: false,
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={reviewStatus({
+          current_round: 2,
+          dry_rounds: 0,
+          total_entries: 4,
+          awaiting_review: false,
+        })}
         canStart={false}
         onChanged={vi.fn()}
       />,
