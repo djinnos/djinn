@@ -38,6 +38,7 @@ pub(super) fn agent_to_dispatch_slot_context(
         coordinator_trigger: None,
         runtime_ops: agent.runtime_ops.clone(),
         repo_graph_ops: agent.repo_graph_ops.clone(),
+        clock: Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: Arc::new(AgentDispatchCallbacks(agent.clone())),
     }
 }
