@@ -84,7 +84,9 @@ export function ProposalRefinement({
   }, [owner, me?.id]);
 
   // Optional feedback the human attaches when accepting/rejecting the result.
+  // Required to demand another tribunal round (sent as the request reason).
   const [feedback, setFeedback] = useState<string>("");
+  const feedbackBlank = !feedback.trim();
 
   const handleResolve = useCallback(
     async (decision: "accept" | "reject") => {
@@ -115,6 +117,31 @@ export function ProposalRefinement({
     },
     [proposalId, feedback, onChanged],
   );
+
+  // Send the textarea feedback into another tribunal round from the
+  // awaiting_review state. The feedback is passed as the request `reason` so
+  // the next round receives the human's notes. Unlike accept/reject, a reason
+  // is required — the action is disabled until non-blank feedback is entered.
+  const handleDemandRound = useCallback(async () => {
+    setBusy(true);
+    try {
+      const res = await callMcpTool("proposal_refinement_demand_round", {
+        proposal_id: proposalId,
+        reason: feedback.trim() || undefined,
+      });
+      if (res.error || !res.accepted) {
+        throw new Error(res.error ?? "Refinement round was not accepted");
+      }
+      showToast.success("Feedback sent — another tribunal round started");
+      onChanged();
+    } catch (e) {
+      showToast.error("Failed to send feedback for another round", {
+        description: (e as Error).message,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [proposalId, feedback, onChanged]);
 
   const handleStart = useCallback(async () => {
     setBusy(true);
@@ -224,7 +251,7 @@ export function ProposalRefinement({
                 htmlFor="refinement-feedback"
                 className="text-xs uppercase text-muted-foreground"
               >
-                Feedback (optional)
+                Feedback
               </Label>
               <textarea
                 id="refinement-feedback"
@@ -232,15 +259,32 @@ export function ProposalRefinement({
                 value={feedback}
                 onChange={(e) => setFeedback(e.target.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                Optional for accept or reject. Enter feedback to send it into
+                another tribunal round.
+              </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 variant="default"
                 disabled={busy}
                 onClick={() => handleResolve("accept")}
               >
-                Accept
+                Accept refined spec
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy || feedbackBlank}
+                onClick={handleDemandRound}
+                title={
+                  feedbackBlank
+                    ? "Enter feedback to send another tribunal round"
+                    : undefined
+                }
+              >
+                Send feedback for another round
               </Button>
               <Button
                 size="sm"
@@ -248,9 +292,13 @@ export function ProposalRefinement({
                 disabled={busy}
                 onClick={() => handleResolve("reject")}
               >
-                Reject
+                Reject and revert
               </Button>
             </div>
+            <p className="text-xs text-muted-foreground">
+              Accept keeps the refined spec. Send feedback reruns the tribunal
+              with your notes. Reject reverts to your original spec.
+            </p>
           </div>
         )}
 

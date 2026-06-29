@@ -1211,6 +1211,13 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         checkpoint_identity.clone(),
     );
 
+    // Clones reserved for the terminal "save before teardown" checkpoint fired
+    // after the supervisor returns (see below). `checkpoint_identity` is moved
+    // into the soft-deadline handler and `captured_workspace_path` into the
+    // supervisor services, so capture our copies before those moves.
+    let terminal_checkpoint_identity = checkpoint_identity.clone();
+    let terminal_captured_workspace_path = captured_workspace_path.clone();
+
     // Arm the in-pod soft deadline. The kubelet's `activeDeadlineSeconds` is a
     // hard backstop that SIGKILLs the Pod with no chance to save work; the soft
     // deadline fires `margin` ahead of it and drives the SAME graceful path as
@@ -1294,10 +1301,32 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
     //    every host-bound trait call (DB writes, SSE publish, PR open)
     //    round-trips over RPC.
     let supervisor = TaskRunSupervisor::new(mirror, worker_services.clone());
-    let report = supervisor
+    let report_result = supervisor
         .run(spec.clone())
         .await
-        .context("task-run supervisor drive")?;
+        .context("task-run supervisor drive");
+
+    // Terminal "save before teardown" checkpoint. The supervisor only
+    // commits+pushes at a clean stage boundary, so an exit that breaks out
+    // mid-stage — a provider 401 / `Failed` stage outcome, a cancelled stage,
+    // or a drive-level error — would otherwise strand the worker's uncommitted
+    // in-flight edits (plus anything committed since the last ~180s periodic
+    // push) in the ephemeral clone. The SIGTERM and soft-deadline handlers
+    // checkpoint on their paths; this covers the in-process failure/interrupt
+    // exit that neither signal fires on, so a re-dispatch resumes from the work
+    // instead of redoing it. Idempotent: a no-op commit on a clean tree
+    // (successful runs already committed at the stage boundary) and a no-op push
+    // when the mirror is current. MUST run before `drop(supervisor)` below,
+    // which deletes the ephemeral stage clone the checkpoint reads from.
+    checkpoint_workspace(
+        &terminal_captured_workspace_path,
+        &spec.task_branch,
+        &terminal_checkpoint_identity,
+        &args.task_run_id,
+    )
+    .await;
+
+    let report = report_result?;
 
     // 8. Ship the terminal report back to the launcher as a `WorkerEvent::
     //    TerminalReport` on the same RPC connection. The launcher's
