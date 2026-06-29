@@ -38,8 +38,10 @@ function proposal(overrides: Partial<Proposal> = {}): Proposal {
     title: "External implementation",
     status: "done",
     body: "Base body",
+    body_format: "markdown",
     acceptance_criteria: [],
     latest_revision_seq: 1,
+    pending_reconcile: false,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-02T00:00:00Z",
     ...overrides,
@@ -55,6 +57,7 @@ function revision(
     seq,
     title: "External implementation",
     body: "Base body",
+    body_format: "markdown",
     acceptance_criteria: [],
     event_kind: "spec_revision",
     created_at: "2026-06-01T00:00:00Z",
@@ -79,6 +82,8 @@ function detail(revisions: ProposalRevision[]): ProposalDetail {
     signoffs: [],
     epics: [],
     debate_trail: [],
+    refinement: null,
+    gate_status: null,
   };
 }
 
