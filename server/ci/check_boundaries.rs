@@ -24,8 +24,6 @@ use clap::Parser;
 use globset::Glob;
 use serde::Deserialize;
 
-use djinn_graph::repo_graph::CrateGraph;
-
 // ---------------------------------------------------------------------------
 // Minimal WarmContext — same shape as WorkerWarmContext in djinn-agent-worker.
 // ---------------------------------------------------------------------------
@@ -537,15 +535,19 @@ async fn main() {
 
 // ---------------------------------------------------------------------------
 // Testable helpers for violation checking and reporting
+//
+// These helpers are used by `main` (lines 513 and 531) AND by `#[cfg(test)]`
+// tests below.  Since `main` calls them unconditionally, they must remain
+// available in non-test builds; the usage in `main` keeps clippy dead-code
+// warnings satisfied without additional annotations.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 /// Check a crate graph against compiled boundary rules and return the
 /// violations as structured data.  This helper is factored out of `main`
 /// so tests can assert forbidden-edge behaviour without spawning the full
 /// binary (which needs Postgres).
 fn check_violations<'a>(
-    crate_graph: &CrateGraph,
+    crate_graph: &djinn_graph::repo_graph::CrateGraph,
     compiled: &'a [CompiledRule<'a>],
 ) -> Vec<(usize, &'a TomlRule, String, String)> {
     let mut violations = Vec::new();
@@ -559,7 +561,6 @@ fn check_violations<'a>(
     violations
 }
 
-#[allow(dead_code)]
 /// Render a human-readable violation report to the supplied writer.
 /// Returns the exit code that the CLI should use (1 for violations).
 fn render_violation_report<W: std::fmt::Write>(
