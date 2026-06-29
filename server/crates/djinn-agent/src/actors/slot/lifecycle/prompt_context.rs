@@ -268,110 +268,180 @@ async fn load_sibling_tasks(
     }
 }
 
-/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
-async fn load_blocking_epics(
+/// Append `  - Delivered: <title>` sub-bullets for closed tasks owned by
+/// `blocker`. Logs and silently skips DB errors.
+async fn append_blocker_deliveries(
     epic_id: &str,
-    epic_repo: &djinn_db::EpicRepository,
+    blocker: &djinn_db::EpicBlockerRef,
     task_repo: &TaskRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    match epic_repo.list_blockers(epic_id).await {
-        Ok(blockers) if !blockers.is_empty() => {
-            ctx_lines.push("\n### Blocking Epics".to_string());
-            for blocker in &blockers {
-                ctx_lines.push(format!(
-                    "- **{}** ({}) — {}",
-                    blocker.title, blocker.short_id, blocker.status
-                ));
-                match task_repo
-                    .list_filtered(djinn_db::ListQuery {
-                        parent: Some(blocker.epic_id.clone()),
-                        status: Some("closed".to_string()),
-                        limit: 20,
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(closed_tasks) => {
-                        for t in &closed_tasks.tasks {
-                            ctx_lines.push(format!("  - Delivered: {}", t.title));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            epic_id = %epic_id,
-                            blocking_epic_id = %blocker.epic_id,
-                            error = %e,
-                            "Lifecycle: failed to list closed tasks for blocking epic"
-                        );
-                    }
-                }
-            }
+    let closed_tasks = match task_repo
+        .list_filtered(djinn_db::ListQuery {
+            parent: Some(blocker.epic_id.clone()),
+            status: Some("closed".to_string()),
+            limit: 20,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                blocking_epic_id = %blocker.epic_id,
+                error = %e,
+                "Lifecycle: failed to list closed tasks for blocking epic"
+            );
+            return;
         }
-        Ok(_) => {}
+    };
+
+    for t in &closed_tasks.tasks {
+        ctx_lines.push(format!("  - Delivered: {}", t.title));
+    }
+}
+
+/// Fetch the list of blocking epics, returning `None` on empty or error.
+///
+/// Logs and silently swallows DB errors (same non-fatal semantics as the
+/// rest of the prompt-context loaders).
+async fn fetch_blockers(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+) -> Option<Vec<djinn_db::EpicBlockerRef>> {
+    match epic_repo.list_blockers(epic_id).await {
+        Ok(b) if !b.is_empty() => Some(b),
+        Ok(_) => None,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
                 error = %e,
                 "Lifecycle: failed to list blocking epics for prompt context"
             );
+            None
         }
+    }
+}
+
+/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
+///
+/// Delegates blocker list retrieval to [`fetch_blockers`].
+async fn load_blocking_epics(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    let Some(blockers) = fetch_blockers(epic_id, epic_repo).await else {
+        return;
+    };
+
+    ctx_lines.push("\n### Blocking Epics".to_string());
+    for blocker in &blockers {
+        ctx_lines.push(format!(
+            "- **{}** ({}) — {}",
+            blocker.title, blocker.short_id, blocker.status
+        ));
+        append_blocker_deliveries(epic_id, blocker, task_repo, ctx_lines).await;
     }
 }
 
 /// Append proposal-sibling-epic lines to `ctx_lines` if the epic belongs
 /// to a proposal that also graduated other epics.
+///
+/// Delegates proposal and sibling retrieval to [`fetch_proposal_sibling_ids`].
 async fn load_proposal_sibling_epics(
     epic_id: &str,
     epic_repo: &djinn_db::EpicRepository,
     proposal_repo: &ProposalRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    match proposal_repo.proposal_for_epic(epic_id).await {
-        Ok(Some(proposal)) => match proposal_repo.graduated_epics(&proposal.id).await {
-            Ok(siblings) => {
-                let sibling_ids: Vec<_> = siblings
-                    .into_iter()
-                    .filter(|(sid, _)| sid != epic_id)
-                    .collect();
-                if !sibling_ids.is_empty() {
-                    ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal.title));
-                    for (sid, _) in &sibling_ids {
-                        match epic_repo.get(sid).await {
-                            Ok(Some(sibling_epic)) => {
-                                ctx_lines.push(format!(
-                                    "- **{}** ({}) — {}",
-                                    sibling_epic.title, sibling_epic.short_id, sibling_epic.status
-                                ));
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::debug!(
-                                    epic_id = %epic_id,
-                                    sibling_epic_id = %sid,
-                                    error = %e,
-                                    "Lifecycle: failed to load proposal sibling epic for prompt context"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    epic_id = %epic_id,
-                    proposal_id = %proposal.id,
-                    error = %e,
-                    "Lifecycle: failed to list proposal sibling epics for prompt context"
-                );
-            }
-        },
-        Ok(None) => {}
+    let Some((proposal_title, sibling_ids)) =
+        fetch_proposal_sibling_ids(epic_id, proposal_repo).await
+    else {
+        return;
+    };
+
+    ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal_title));
+    for sid in &sibling_ids {
+        append_proposal_sibling_epic(epic_id, sid, epic_repo, ctx_lines).await;
+    }
+}
+
+/// Fetch the proposal title and the list of sibling epic IDs (excluding the
+/// current epic). Returns `None` when no parent proposal exists, when the
+/// graduated-epics query fails, or when there are no remaining siblings.
+///
+/// Logs and silently swallows DB errors (same non-fatal semantics as the
+/// rest of the prompt-context loaders).
+async fn fetch_proposal_sibling_ids(
+    epic_id: &str,
+    proposal_repo: &ProposalRepository,
+) -> Option<(String, Vec<String>)> {
+    let proposal = match proposal_repo.proposal_for_epic(epic_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return None,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
                 error = %e,
                 "Lifecycle: failed to find parent proposal for prompt context"
+            );
+            return None;
+        }
+    };
+
+    let siblings = match proposal_repo.graduated_epics(&proposal.id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                proposal_id = %proposal.id,
+                error = %e,
+                "Lifecycle: failed to list proposal sibling epics for prompt context"
+            );
+            return None;
+        }
+    };
+
+    let sibling_ids: Vec<String> = siblings
+        .into_iter()
+        .filter(|(sid, _)| sid != epic_id)
+        .map(|(sid, _)| sid)
+        .collect();
+
+    if sibling_ids.is_empty() {
+        return None;
+    }
+
+    Some((proposal.title, sibling_ids))
+}
+
+/// Append a single proposal-sibling-epic bullet to `ctx_lines`.
+///
+/// Logs and silently skips on DB error or missing epic (same non-fatal
+/// semantics as the rest of the prompt-context loaders).
+async fn append_proposal_sibling_epic(
+    epic_id: &str,
+    sibling_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    match epic_repo.get(sibling_id).await {
+        Ok(Some(sibling_epic)) => {
+            ctx_lines.push(format!(
+                "- **{}** ({}) — {}",
+                sibling_epic.title, sibling_epic.short_id, sibling_epic.status
+            ));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                sibling_epic_id = %sibling_id,
+                error = %e,
+                "Lifecycle: failed to load proposal sibling epic for prompt context"
             );
         }
     }
