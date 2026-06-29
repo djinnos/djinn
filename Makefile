@@ -9,7 +9,7 @@ SERVER_DIR := $(CURDIR)/server
 # Postgres (docker-compose.yml → `postgres-test` service at :5433) plus the
 # test harness targets that depend on it.
 
-.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries
+.PHONY: help dev test-db-migrate test-db-postgres-template test-vault test-db-reset sqlx-prepare sqlx-check sqlx-verify skills-manifest-generate skills-manifest-check test test-all validate-taskrun-backstop check-boundaries
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -69,10 +69,57 @@ sqlx-prepare: ## Regenerate server/.sqlx/ offline cache (uses test Postgres on :
 	@rm -rf /tmp/sqlx-prepare
 	@echo "server/.sqlx/ regenerated ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries) — run 'git add server/.sqlx' and commit."
 
-sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (CI)
+sqlx-check: ## Fail if server/.sqlx/ is stale vs. current queries (local)
 	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+	@# Local convenience: bring the docker test Postgres up to schema, then
+	@# run the DB-agnostic verifier. CI applies migrations with its own step
+	@# (service container, no `docker exec`) and calls `sqlx-verify` directly.
 	@$(MAKE) --no-print-directory test-db-migrate
-	cd $(SERVER_DIR) && cargo sqlx prepare --check --workspace
+	@$(MAKE) --no-print-directory sqlx-verify
+
+sqlx-verify: ## Verify server/.sqlx/ freshness; assumes schema already applied + DATABASE_URL reachable (CI)
+	@command -v sqlx >/dev/null 2>&1 || { echo "Install sqlx-cli: cargo install sqlx-cli --no-default-features --features postgres,rustls"; exit 1; }
+	@# Regenerate into a scratch dir using the EXACT same surface as
+	@# `sqlx-prepare` (--all-targets --all-features) and force macro
+	@# re-execution by touching every sqlx::query file, then diff against the
+	@# committed cache. `cargo sqlx prepare --check` is NOT sufficient: it
+	@# skips test targets, ignores feature-gated queries, and — because the
+	@# sqlx proc-macro only reads/writes query data when its source file is
+	@# (re)compiled — a warm build cache lets a stale/deleted .sqlx entry pass
+	@# undetected. That exact gap silently dropped 71 `#[cfg(test)]` entries
+	@# (commit ed6f954d5) which then only failed in the push-only Warm Cache
+	@# (Test) job. Mirroring the generator here closes it.
+	@rm -rf /tmp/sqlx-check && mkdir -p /tmp/sqlx-check
+	@grep -rl --include='*.rs' 'sqlx::query' $(SERVER_DIR)/crates/ 2>/dev/null | xargs -r touch
+	@cd $(SERVER_DIR) && SQLX_OFFLINE_DIR=/tmp/sqlx-check cargo check --workspace --all-targets --all-features
+	@if [ -z "$$(ls -A /tmp/sqlx-check 2>/dev/null)" ]; then \
+		echo "ERROR: regeneration produced no query files — cannot validate .sqlx/."; \
+		echo "       Try 'cargo clean -p djinn-db' and rerun."; \
+		exit 1; \
+	fi
+	@# The freshly generated set must match the committed cache exactly
+	@# (same query hashes AND same type info). Any difference => stale cache.
+	@stale=0; \
+	for f in /tmp/sqlx-check/query-*.json; do \
+		b=$$(basename $$f); \
+		if [ ! -f "$(SERVER_DIR)/.sqlx/$$b" ]; then \
+			echo "::error::missing committed .sqlx entry: $$b"; stale=1; \
+		elif ! cmp -s "$$f" "$(SERVER_DIR)/.sqlx/$$b"; then \
+			echo "::error::out-of-date committed .sqlx entry: $$b"; stale=1; \
+		fi; \
+	done; \
+	for f in $(SERVER_DIR)/.sqlx/query-*.json; do \
+		b=$$(basename $$f); \
+		if [ ! -f "/tmp/sqlx-check/$$b" ]; then \
+			echo "::error::stale committed .sqlx entry (no longer used): $$b"; stale=1; \
+		fi; \
+	done; \
+	rm -rf /tmp/sqlx-check; \
+	if [ "$$stale" = "1" ]; then \
+		echo "server/.sqlx/ is out of date — run 'make sqlx-prepare' and commit server/.sqlx/."; \
+		exit 1; \
+	fi
+	@echo "server/.sqlx/ is up to date ($$(ls $(SERVER_DIR)/.sqlx/query-*.json | wc -l) entries)."
 
 skills-manifest-generate: ## Regenerate .djinn/skills.json after editing skills/references
 		cd $(SERVER_DIR) && cargo run -p djinn-agent --bin djinn-skills-manifest -- generate --root ..
