@@ -3,6 +3,127 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+// ── CiStatus ──────────────────────────────────────────────────────────────────
+
+/// Required-CI status for the current PR head.
+///
+/// Serializes/deserializes to/from the exact wire strings consumed by the
+/// backend DTOs and (eventually) the frontend. These values are intentionally
+/// independent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is
+/// derived downstream, not encoded here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiStatus {
+    /// All required checks passed on the current head.
+    Passing,
+    /// At least one required check failed on the current head.
+    Failing,
+    /// Required checks are still running; no blocking failure yet.
+    Pending,
+    /// CI state is not known (e.g. PR not yet polled, no checks present).
+    #[default]
+    Unknown,
+}
+
+impl CiStatus {
+    /// The wire/JSON string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passing => "passing",
+            Self::Failing => "failing",
+            Self::Pending => "pending",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Parse from a wire/JSON string.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "passing" => Ok(Self::Passing),
+            "failing" => Ok(Self::Failing),
+            "pending" => Ok(Self::Pending),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(Error::Internal(format!("unknown ci_status: {other}"))),
+        }
+    }
+}
+
+impl std::fmt::Display for CiStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ── TaskPrCiSnapshot ──────────────────────────────────────────────────────────
+
+/// Durable snapshot of required-CI state for a task's current PR head.
+///
+/// This is the core data contract consumed by repository, DTO, and pr_poller
+/// follow-up tasks. It intentionally carries no lifecycle policy: callers
+/// combine `ci_status` with the task's `TaskStatus` to decide transitions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPrCiSnapshot {
+    pub task_id: String,
+    pub pr_number: i64,
+    pub head_sha: String,
+    pub ci_status: CiStatus,
+    /// Names of required checks that are currently failing and blocking merge.
+    pub blocking_required_check_names: Vec<String>,
+    /// Stable fingerprint of the current failure signature (e.g. sorted failing
+    /// check names + head SHA). Used by downstream remediation escalation to
+    /// detect unchanged-head repeated failures.
+    pub failure_fingerprint: Option<String>,
+    /// ISO-8601 timestamp when this snapshot was first observed.
+    pub first_seen_at: String,
+    /// ISO-8601 timestamp when this snapshot was last observed/updated.
+    pub last_seen_at: String,
+    /// How many consecutive observations have carried the same
+    /// `failure_fingerprint` for the same `head_sha`.
+    pub same_signature_count: i64,
+    /// Base SHA of the last remediation attempt for this failing signature.
+    /// `None` when no remediation has been attempted yet.
+    pub last_remediation_base_sha: Option<String>,
+}
+
+/// Input shape for creating or upserting a [`TaskPrCiSnapshot`].
+///
+/// Separate from the full snapshot so callers that do not yet know the
+/// persisted `first_seen_at` (e.g. the pr_poller) can supply the observed
+/// fields and let the repository layer resolve timestamps.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPrCiSnapshotInput {
+    pub task_id: String,
+    pub pr_number: i64,
+    pub head_sha: String,
+    pub ci_status: CiStatus,
+    pub blocking_required_check_names: Vec<String>,
+    pub failure_fingerprint: Option<String>,
+    pub same_signature_count: i64,
+    pub last_remediation_base_sha: Option<String>,
+}
+
+impl TaskPrCiSnapshot {
+    /// Build a snapshot from an input plus resolved timestamps.
+    pub fn from_input(
+        input: TaskPrCiSnapshotInput,
+        first_seen_at: String,
+        last_seen_at: String,
+    ) -> Self {
+        Self {
+            task_id: input.task_id,
+            pr_number: input.pr_number,
+            head_sha: input.head_sha,
+            ci_status: input.ci_status,
+            blocking_required_check_names: input.blocking_required_check_names,
+            failure_fingerprint: input.failure_fingerprint,
+            first_seen_at,
+            last_seen_at,
+            same_signature_count: input.same_signature_count,
+            last_remediation_base_sha: input.last_remediation_base_sha,
+        }
+    }
+}
+
 // ── IssueType ─────────────────────────────────────────────────────────────────
 
 /// All recognised task issue types.
@@ -1213,5 +1334,135 @@ mod tests {
         let start = compute_transition(&TransitionAction::Start, &TaskStatus::Open, None).unwrap();
         assert!(!start.clear_merge_conflict_metadata);
         assert!(!start.set_merge_conflict_metadata);
+    }
+
+    // ── CI gate core model tests ───────────────────────────────────────────────
+
+    #[test]
+    fn ci_status_serializes_to_exact_wire_strings() {
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Passing).unwrap(),
+            "\"passing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Failing).unwrap(),
+            "\"failing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CiStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn ci_status_deserializes_from_exact_wire_strings() {
+        assert_eq!(
+            serde_json::from_str::<CiStatus>("\"passing\"").unwrap(),
+            CiStatus::Passing
+        );
+        assert_eq!(
+            serde_json::from_str::<CiStatus>("\"failing\"").unwrap(),
+            CiStatus::Failing
+        );
+        assert_eq!(
+            serde_json::from_str::<CiStatus>("\"pending\"").unwrap(),
+            CiStatus::Pending
+        );
+        assert_eq!(
+            serde_json::from_str::<CiStatus>("\"unknown\"").unwrap(),
+            CiStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn ci_status_default_is_unknown() {
+        assert_eq!(CiStatus::default(), CiStatus::Unknown);
+    }
+
+    #[test]
+    fn ci_status_parse_round_trips() {
+        for status in [
+            CiStatus::Passing,
+            CiStatus::Failing,
+            CiStatus::Pending,
+            CiStatus::Unknown,
+        ] {
+            assert_eq!(CiStatus::parse(status.as_str()).unwrap(), status);
+        }
+        assert!(CiStatus::parse("red").is_err());
+    }
+
+    #[test]
+    fn task_pr_ci_snapshot_defaults_to_unknown() {
+        let snapshot = TaskPrCiSnapshot::default();
+        assert_eq!(snapshot.ci_status, CiStatus::Unknown);
+        assert!(snapshot.blocking_required_check_names.is_empty());
+        assert_eq!(snapshot.same_signature_count, 0);
+        assert!(snapshot.failure_fingerprint.is_none());
+        assert!(snapshot.last_remediation_base_sha.is_none());
+    }
+
+    #[test]
+    fn task_pr_ci_snapshot_from_input_preserves_fields() {
+        let input = TaskPrCiSnapshotInput {
+            task_id: "task-1".to_owned(),
+            pr_number: 42,
+            head_sha: "abc123".to_owned(),
+            ci_status: CiStatus::Failing,
+            blocking_required_check_names: vec!["Quality Gate".to_owned()],
+            failure_fingerprint: Some("abc123:Quality Gate".to_owned()),
+            same_signature_count: 3,
+            last_remediation_base_sha: Some("base999".to_owned()),
+        };
+        let snapshot = TaskPrCiSnapshot::from_input(
+            input.clone(),
+            "2026-01-01T00:00:00Z".to_owned(),
+            "2026-01-02T00:00:00Z".to_owned(),
+        );
+
+        assert_eq!(snapshot.task_id, "task-1");
+        assert_eq!(snapshot.pr_number, 42);
+        assert_eq!(snapshot.head_sha, "abc123");
+        assert_eq!(snapshot.ci_status, CiStatus::Failing);
+        assert_eq!(snapshot.blocking_required_check_names, &["Quality Gate"]);
+        assert_eq!(
+            snapshot.failure_fingerprint,
+            Some("abc123:Quality Gate".to_owned())
+        );
+        assert_eq!(snapshot.first_seen_at, "2026-01-01T00:00:00Z");
+        assert_eq!(snapshot.last_seen_at, "2026-01-02T00:00:00Z");
+        assert_eq!(snapshot.same_signature_count, 3);
+        assert_eq!(
+            snapshot.last_remediation_base_sha,
+            Some("base999".to_owned())
+        );
+
+        // The input itself should default to unknown when empty.
+        let empty_input = TaskPrCiSnapshotInput::default();
+        assert_eq!(empty_input.ci_status, CiStatus::Unknown);
+    }
+
+    #[test]
+    fn task_pr_ci_snapshot_serializes_and_deserializes() {
+        let snapshot = TaskPrCiSnapshot {
+            task_id: "task-2".to_owned(),
+            pr_number: 7,
+            head_sha: "deadbeef".to_owned(),
+            ci_status: CiStatus::Pending,
+            blocking_required_check_names: vec!["Tests".to_owned(), "Lint".to_owned()],
+            failure_fingerprint: None,
+            first_seen_at: "2026-06-29T12:00:00Z".to_owned(),
+            last_seen_at: "2026-06-29T12:00:00Z".to_owned(),
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: TaskPrCiSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, snapshot);
+        assert!(json.contains("\"ci_status\":\"pending\""));
     }
 }
