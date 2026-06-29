@@ -129,18 +129,13 @@ impl CoordinatorContext {
 
     /// Register a task as having in-flight post-session background work.
     pub fn register_background_work(&self, task_id: &str) {
-        self.background_work_tasks
-            .lock()
-            .expect("poisoned")
+        recover_lock(&self.background_work_tasks, "background_work_tasks")
             .insert(task_id.to_string());
     }
 
     /// Deregister a task's post-session background work (completed or crashed).
     pub fn deregister_background_work(&self, task_id: &str) {
-        self.background_work_tasks
-            .lock()
-            .expect("poisoned")
-            .remove(task_id);
+        recover_lock(&self.background_work_tasks, "background_work_tasks").remove(task_id);
     }
 
     /// Register a task as active and return the shared timestamp atomic.
@@ -151,16 +146,13 @@ impl CoordinatorContext {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let ts = Arc::new(AtomicU64::new(now));
-        self.active_tasks
-            .lock()
-            .expect("poisoned")
-            .insert(task_id.to_string(), ts.clone());
+        recover_lock(&self.active_tasks, "active_tasks").insert(task_id.to_string(), ts.clone());
         ts
     }
 
     /// Remove a task from the active-tasks tracker.
     pub fn deregister_activity(&self, task_id: &str) {
-        self.active_tasks.lock().expect("poisoned").remove(task_id);
+        recover_lock(&self.active_tasks, "active_tasks").remove(task_id);
     }
 
     /// Record a stall-check timestamp for a task (overwrites the existing entry).
@@ -169,8 +161,29 @@ impl CoordinatorContext {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if let Some(ts) = self.active_tasks.lock().expect("poisoned").get(task_id) {
+        if let Some(ts) = recover_lock(&self.active_tasks, "active_tasks").get(task_id) {
             ts.store(now, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Acquire a `std::sync::Mutex` guard, recovering from poison with a warning.
+///
+/// Mutex poisoning only occurs when a previous holder panicked — a programming
+/// invariant violation.  The guarded data remains structurally valid, so we log
+/// the anomaly and continue operating rather than cascading the panic.
+fn recover_lock<'a, T>(
+    mutex: &'a std::sync::Mutex<T>,
+    label: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                mutex = label,
+                "std::sync::Mutex poisoned by prior panic; recovering with data"
+            );
+            poisoned.into_inner()
         }
     }
 }
