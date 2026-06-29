@@ -19,6 +19,8 @@
 
 #![allow(dead_code)]
 
+#[allow(clippy::disallowed_methods)]
+// doctor latency accounting uses monotonic instants for elapsed timing
 pub mod leader_tick;
 pub mod live_mover;
 pub mod zombie_running_session;

@@ -194,12 +194,10 @@ impl McpToolRegistry {
             .get(server_name.as_str())
             .ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?;
 
-        let params = CallToolRequestParams {
-            name: original_name.to_string().into(),
-            arguments: arguments.map(|m| m.into_iter().collect()),
-            meta: None,
-            task: None,
-        };
+        // CallToolRequestParams is #[non_exhaustive] in rmcp 1.x; build via
+        // new() + field assignment (meta/task default to None).
+        let mut params = CallToolRequestParams::new(original_name.to_string());
+        params.arguments = arguments.map(|m| m.into_iter().collect());
 
         let result = peer.call_tool(params).await.map_err(|e| {
             format!("MCP tool call `{tool_name}` on server `{server_name}` failed: {e}")
@@ -554,12 +552,7 @@ mod tests {
     fn call_tool_result_text_content() {
         use rmcp::model::Content;
 
-        let result = CallToolResult {
-            content: vec![Content::text("hello world")],
-            is_error: None,
-            meta: None,
-            structured_content: None,
-        };
+        let result = CallToolResult::success(vec![Content::text("hello world")]);
         let json = call_tool_result_to_json(result).unwrap();
         assert_eq!(json, serde_json::json!({ "result": "hello world" }));
     }
@@ -568,12 +561,7 @@ mod tests {
     fn call_tool_result_json_content() {
         use rmcp::model::Content;
 
-        let result = CallToolResult {
-            content: vec![Content::text(r#"{"key": "value"}"#)],
-            is_error: None,
-            meta: None,
-            structured_content: None,
-        };
+        let result = CallToolResult::success(vec![Content::text(r#"{"key": "value"}"#)]);
         let json = call_tool_result_to_json(result).unwrap();
         assert_eq!(json, serde_json::json!({ "key": "value" }));
     }
@@ -582,12 +570,7 @@ mod tests {
     fn call_tool_result_error() {
         use rmcp::model::Content;
 
-        let result = CallToolResult {
-            content: vec![Content::text("something went wrong")],
-            is_error: Some(true),
-            meta: None,
-            structured_content: None,
-        };
+        let result = CallToolResult::error(vec![Content::text("something went wrong")]);
         let err = call_tool_result_to_json(result).unwrap_err();
         assert_eq!(err, "something went wrong");
     }

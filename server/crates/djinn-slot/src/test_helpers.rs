@@ -4,6 +4,8 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use futures::stream;
+
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_provider::message::{ContentBlock, Conversation};
@@ -15,6 +17,13 @@ use crate::host::SlotContext;
 
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("open in-memory test database")
+}
+
+/// Cheap `SupervisorServices` stub for tests that exercise non-host-bound tool
+/// paths. This mirrors the agent test helper without pulling in any
+/// `djinn-agent`-only state.
+pub fn test_services() -> djinn_supervisor::services::rpc::UnimplementedRpcServices {
+    djinn_supervisor::services::rpc::UnimplementedRpcServices::new()
 }
 
 pub fn test_events() -> EventBus {
@@ -274,12 +283,16 @@ impl LlmProvider for FakeProvider {
     > {
         let scripted_turns = Arc::clone(&self.scripted_turns);
         Box::pin(async move {
-            let mut turns = scripted_turns.lock().expect("scripted_turns mutex");
-            let events = turns
+            let events = scripted_turns
+                .lock()
+                .expect("scripted_turns mutex")
                 .pop_front()
-                .unwrap_or_else(|| vec![Ok(StreamEvent::Done)]);
-            Ok(Box::pin(futures::stream::iter(events))
-                as Pin<Box<dyn futures::Stream<Item = _> + Send>>)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "FakeProvider script exhausted: stream() called with no scripted turns remaining"
+                    )
+                });
+            Ok(Box::pin(stream::iter(events)) as Pin<Box<dyn futures::Stream<Item = _> + Send>>)
         })
     }
 }
