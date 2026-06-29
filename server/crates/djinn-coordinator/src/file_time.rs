@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use djinn_core::clock::{Clock, SystemClock};
 use tokio::sync::{Mutex, RwLock};
 
 type SessionId = String;
@@ -27,7 +28,7 @@ impl FileTime {
 
     pub async fn read(&self, session_id: &str, path: &Path) -> Result<(), String> {
         let normalized = normalize(path);
-        let now = SystemTime::now();
+        let now = SystemClock::new().now();
         let mtime = file_mtime(path)?;
         let mut guard = self.inner.write().await;
         let by_path = guard.entry(session_id.to_string()).or_default();
