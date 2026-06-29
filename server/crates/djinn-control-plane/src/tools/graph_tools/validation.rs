@@ -308,3 +308,152 @@ pub(crate) fn validate_group_by(group_by: Option<&str>) -> Result<(), String> {
         Ok(())
     }
 }
+
+/// Registry-driven validation routing.
+///
+/// Dispatches to the correct validation helpers based on the operation's
+/// [`ValidationCategory`] from the registry.  Each category maps to a
+/// specific set of validators that must pass before the handler runs.
+///
+/// The individual validator implementations and their exact error shapes
+/// are preserved from the handwritten helpers above.  This function is
+/// the single routing point — adding a new validation category requires
+/// one match arm here plus the registry entry's `ValidationCategory`.
+pub(crate) fn run_validation_checks(
+    category: super::operation_registry::ValidationCategory,
+    params: &CodeGraphParams,
+) -> Result<(), String> {
+    use super::operation_registry::ValidationCategory::*;
+
+    match category {
+        KeyWithEdgeFilters => {
+            let _key = require_key(params)?;
+            validate_direction(params.direction.as_deref())?;
+            validate_group_by(params.group_by.as_deref())?;
+            validate_edge_kind_filter(params.kind_filter.as_deref())?;
+        }
+        KeyWithConfidence => {
+            let _key = require_key(params)?;
+            validate_group_by(params.group_by.as_deref())?;
+            if let Some(mc) = params.min_confidence {
+                validate_min_confidence_value(mc)?;
+            }
+        }
+        KeyOnly => {
+            let _key = require_key(params)?;
+        }
+        QueryWithKindFilter => {
+            let _query = require_query(params)?;
+            validate_kind_filter(params.kind_filter.as_deref())?;
+        }
+        QueryWithFlowKind => {
+            let _query = require_query(params)?;
+            validate_flow_kind_filter(params.kind_filter.as_deref())?;
+        }
+        DualKey => {
+            let _ = require_from_to(params)?;
+        }
+        Globs => {
+            let _ = require_globs(params)?;
+        }
+        RouteSelector => {
+            let _ = require_route_selector(params)?;
+        }
+        RouteSelectorWithConfidence => {
+            let _ = require_route_selector(params)?;
+            if let Some(mc) = params.min_confidence {
+                validate_min_confidence_value(mc)?;
+            }
+        }
+        KindFilterAndVisibility => {
+            validate_kind_filter(params.kind_filter.as_deref())?;
+            validate_visibility(params.visibility.as_deref())?;
+        }
+        KindFilterAndSortBy => {
+            validate_kind_filter(params.kind_filter.as_deref())?;
+            validate_sort_by(params.sort_by.as_deref())?;
+        }
+        KindFilterOnly => {
+            validate_kind_filter(params.kind_filter.as_deref())?;
+        }
+        FileWithLines => {
+            // symbols_at: file + start_line required
+            params
+                .file
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!("'file' is required for operation '{}'", params.operation)
+                })?;
+            if params.start_line.is_none() {
+                return Err(format!(
+                    "'start_line' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+        }
+        ChangedRanges => {
+            // diff_touches: changed_ranges required
+            if params.changed_ranges.is_none() {
+                return Err(format!(
+                    "'changed_ranges' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+        }
+        Rules => {
+            // boundary_check: rules required
+            if params.rules.is_none() {
+                return Err(format!(
+                    "'rules' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+        }
+        ImpactTargets => {
+            // impact_check: impact_targets required
+            if params.impact_targets.is_none() {
+                return Err(format!(
+                    "'impact_targets' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+        }
+        HotPathSeeds => {
+            // touches_hot_path: seed_entries + seed_sinks + symbols required
+            if params.seed_entries.is_none() {
+                return Err(format!(
+                    "'seed_entries' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+            if params.seed_sinks.is_none() {
+                return Err(format!(
+                    "'seed_sinks' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+            if params.symbols.is_none() {
+                return Err(format!(
+                    "'symbols' is required for operation '{}'",
+                    params.operation
+                ));
+            }
+        }
+        FileOnly => {
+            // coupling: file required
+            params
+                .file
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    format!("'file' is required for operation '{}'", params.operation)
+                })?;
+        }
+        None => {
+            // No operation-specific validation beyond normalize().
+        }
+    }
+
+    Ok(())
+}

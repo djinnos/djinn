@@ -797,11 +797,21 @@ impl CoordinatorActor {
     pub(super) fn record_live_metrics(&self) {
         djinn_telemetry::dispatch::set_cooldowns_active(self.dispatch_cooldowns.len());
         djinn_telemetry::dispatch::set_inflight_ledger_size(self.inflight_dispatches.len());
+<<<<<<< HEAD
         let pr_poller_tracked = self
             .auto_merge_tracker
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len();
+=======
+        let pr_poller_tracked = match self.auto_merge_tracker.lock() {
+            Ok(guard) => guard.len(),
+            Err(poisoned) => {
+                tracing::warn!("auto_merge_tracker mutex poisoned; recovering with data");
+                poisoned.into_inner().len()
+            }
+        };
+>>>>>>> origin/main
         djinn_telemetry::pr_poller::set_tracked(pr_poller_tracked);
     }
 
