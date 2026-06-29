@@ -1,18 +1,20 @@
 //! Declarative registry for `code_graph` operations.
 //!
 //! This module is the **single source of truth** for operation metadata.
-//! Follow-up tasks will derive dispatch and pre-resolve tables from here
-//! instead of maintaining separate handwritten match arms.
+//! `handler.rs` derives dispatch, pre-resolve, and validation routing
+//! from here so adding a new operation requires one registry entry plus
+//! handler logic — no independent handwritten operation-name lists.
 //!
-//! The registry is wired into runtime dispatch in `handler.rs` for the
-//! vertical slice (`neighbors`, `impact`, `context`, `coupling_hotspots`).
-//! Smoke exemplars and bridge coverage helpers are still only exercised
-//! by unit tests, so `dead_code` is suppressed at the module boundary.
-#![allow(dead_code)]
 //! The registry is purely data — no build scripts, no runtime graph
 //! cache access, no database or network dependencies.  Each entry is
 //! a `const`-compatible [`OpEntry`] struct collected into the
 //! [`CODE_GRAPH_REGISTRY`] static slice.
+//!
+//! Some fields (e.g. [`SmokeExemplar`], [`OpEntry::handler_fn`],
+//! [`OpEntry::aliases`]) are test/documentary infrastructure not
+//! referenced by production dispatch code; dead_code is suppressed
+//! at the module boundary.
+#![allow(dead_code)]
 //!
 //! # Design choices
 //!
@@ -20,11 +22,12 @@
 //!   entry into `.rodata`.  A `HashMap` would require a
 //!   `lazy_static`/`OnceLock` for no benefit (the set is < 50
 //!   entries and iteration is fine for lookups).
-//! * **Stringly-typed identifiers** — handler fn names, bridge method
-//!   names, and validation categories are `&'static str` so the
-//!   registry stays decoupled from the concrete `impl` signatures.
-//!   Future PRs can upgrade these to typed enums once the full set
-//!   is stable.
+//! * **Typed enums** — pre-resolve, validation, and workspace
+//!   categories use typed enums (`PreResolveCategory`,
+//!   `ValidationCategory`, `WorkspaceBehavior`) for compile-time
+//!   exhaustiveness.  Handler fn names and bridge method names
+//!   remain `&'static str` so the registry stays decoupled from
+//!   the concrete `impl` signatures.
 //! * **Exemplar data** — each entry carries a [`SmokeExemplar`] that
 //!   captures the minimum `CodeGraphParams` fields a smoke test needs
 //!   to exercise the operation end-to-end.  This lets the downstream
@@ -241,17 +244,55 @@ pub fn registered_names() -> Vec<&'static str> {
 
 // ── Bridge coverage ──────────────────────────────────────────────────────────
 
-/// `RepoGraphOps` trait method names whose runtime dispatch has been
-/// converted to registry-derived routing.
+/// Known `RepoGraphOps` trait method names that correspond to
+/// registry entries.  The bridge coverage tests and the compile-time
+/// `const _` guard below verify that every registered `bridge_method`
+/// appears here and vice-versa.
 ///
-/// The full catalog registry records bridge method identities for every
-/// `code_graph` operation, but this task deliberately leaves runtime
-/// dispatch unchanged.  Keep this list scoped to the vxmw vertical slice
-/// so bridge-forwarding and dispatch-smoke tests only require the methods
-/// that are actually registry-routed today.  Follow-up migration tasks can
-/// extend this list as they move additional operations onto registry-owned
-/// dispatch.
-pub const KNOWN_BRIDGE_METHODS: &[&str] = &["neighbors", "impact", "context", "coupling_hotspots"];
+/// This is the canonical mapping between registry metadata and the
+/// `RepoGraphOps` trait surface in
+/// `server/crates/djinn-control-plane/src/bridge/graph_bridge.rs`.
+/// When a new operation is registered, its `bridge_method` **must**
+/// appear here and have a corresponding `async fn` on `RepoGraphOps`
+/// plus a forwarding stub on `RepoGraphBridge` in the server crate.
+pub const KNOWN_BRIDGE_METHODS: &[&str] = &[
+    "neighbors",
+    "ranked",
+    "implementations",
+    "impact",
+    "search",
+    "query_subgraph",
+    "route_map",
+    "shape_check",
+    "api_impact",
+    "flow",
+    "cycles",
+    "orphans",
+    "path",
+    "edges",
+    "describe",
+    "context",
+    "status",
+    "workspaces",
+    "symbols_at",
+    "diff_touches",
+    "detect_changes",
+    "api_surface",
+    "boundary_check",
+    "hotspots",
+    "complexity",
+    "refactor_candidates",
+    "metrics_at",
+    "dead_symbols",
+    "deprecated_callers",
+    "touches_hot_path",
+    "coupling",
+    "coupling_hotspots",
+    "coupling_hubs",
+    "churn",
+    "snapshot",
+    "crate_graph",
+];
 
 /// Byte-equality helper usable in `const`-context.
 const fn str_eq(a: &str, b: &str) -> bool {
@@ -494,6 +535,57 @@ mod tests {
                 !entry.bridge_method.is_empty(),
                 "registry entry '{}' has empty bridge_method",
                 entry.name,
+            );
+        }
+    }
+
+    /// All validation categories are exercised by at least one registry entry.
+    #[test]
+    fn all_validation_categories_exercised() {
+        let categories: Vec<ValidationCategory> =
+            CODE_GRAPH_REGISTRY.iter().map(|e| e.validation).collect();
+        let expected = [
+            ValidationCategory::KeyWithEdgeFilters,
+            ValidationCategory::KeyWithConfidence,
+            ValidationCategory::KeyOnly,
+            ValidationCategory::QueryWithKindFilter,
+            ValidationCategory::QueryWithFlowKind,
+            ValidationCategory::DualKey,
+            ValidationCategory::Globs,
+            ValidationCategory::RouteSelector,
+            ValidationCategory::RouteSelectorWithConfidence,
+            ValidationCategory::KindFilterAndVisibility,
+            ValidationCategory::KindFilterAndSortBy,
+            ValidationCategory::KindFilterOnly,
+            ValidationCategory::FileWithLines,
+            ValidationCategory::ChangedRanges,
+            ValidationCategory::Rules,
+            ValidationCategory::ImpactTargets,
+            ValidationCategory::HotPathSeeds,
+            ValidationCategory::FileOnly,
+            ValidationCategory::None,
+        ];
+        for cat in expected {
+            assert!(
+                categories.contains(&cat),
+                "validation category {cat:?} is not exercised by any registry entry"
+            );
+        }
+    }
+
+    /// All workspace behaviors are exercised by at least one registry entry.
+    #[test]
+    fn all_workspace_behaviors_exercised() {
+        let behaviors: Vec<WorkspaceBehavior> =
+            CODE_GRAPH_REGISTRY.iter().map(|e| e.workspace).collect();
+        for expected in &[
+            WorkspaceBehavior::Ignored,
+            WorkspaceBehavior::TraversalSeedOnly,
+            WorkspaceBehavior::HardScoped,
+        ] {
+            assert!(
+                behaviors.contains(expected),
+                "workspace behavior {expected:?} is not exercised by any registry entry"
             );
         }
     }
