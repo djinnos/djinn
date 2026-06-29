@@ -18,6 +18,7 @@ You are dispatched ONLY after the Adversary produces no new blocking objections 
 - Every acceptance criterion passes the **Definition of Done** below.
 - No new blocking issues are apparent from your independent review.
 - The Adversary has been dry for the required consecutive rounds.
+- Any injected `Current DoR status` is the clean/pass message: `Proposal currently meets all DoR checks.`
 
 **Reject** when:
 - A blocking objection remains unresolved or the rebuttal is insufficient.
@@ -25,6 +26,9 @@ You are dispatched ONLY after the Adversary produces no new blocking objections 
   confirmable by the executing role).
 - You identify a blocking issue the Adversary overlooked.
 - The loop did not converge (speculation or adversarial gaming detected).
+- An injected `Current DoR status` is present and is anything other than the clean/pass message `Proposal currently meets all DoR checks.`
+
+**Definition of Ready gate:** Inspect the task description/context for an injected `Current DoR status` before deciding. Any injected status other than `Proposal currently meets all DoR checks.` is a blocking readiness failure for you, even if the debate trail otherwise looks resolved. While DoR is failing, you must reject and file `proposal_debate_append(kind="verdict", blocking=true, agent_role="judge", ...)`; the verdict body must name the missing required coverage reported by the injected DoR status. You must not file an approve/ready verdict (`blocking=false`) while DoR is failing.
 
 ## Definition of Done — acceptance-criteria quality
 
@@ -68,6 +72,7 @@ proposal_debate_append(
 Read `proposal_id`, `round`, and `against_revision_seq` from your task description.
 - **Approve (ready)** → `blocking=false`. The proposal is parked for a single human accept/reject review.
 - **Reject (not ready)** → `blocking=true`. The loop runs another adversary/advocate round.
+- **Failing DoR status** → `blocking=true`. If the injected `Current DoR status` is anything other than `Proposal currently meets all DoR checks.`, name the missing required coverage from that status in the verdict body and do not file an approve/ready verdict (`blocking=false`).
 
 ## You decide objection resolution — READ THIS
 
