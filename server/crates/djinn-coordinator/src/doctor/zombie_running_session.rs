@@ -15,6 +15,7 @@ use djinn_core::models::SessionRecord;
 use djinn_supervisor::ConnectionRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 
 use djinn_slot::SlotPoolHandle;
 
@@ -190,8 +191,28 @@ impl<S: ZombieRunningSessionSource> ZombieRunningSessionCheck<S> {
             return None;
         }
 
-        let inputs_json = serde_json::to_value(&inputs).expect("inputs serialize");
-        let outputs_json = serde_json::to_value(&outputs).expect("outputs serialize");
+        let inputs_json = match serde_json::to_value(&inputs) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    session_id = %inputs.session_id,
+                    error = %e,
+                    "zombie_running_session doctor: failed to serialize resolver inputs; skipping finding"
+                );
+                return None;
+            }
+        };
+        let outputs_json = match serde_json::to_value(&outputs) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    session_id = %inputs.session_id,
+                    error = %e,
+                    "zombie_running_session doctor: failed to serialize resolver outputs; skipping finding"
+                );
+                return None;
+            }
+        };
         let snapshot = ResolverSnapshot::new(
             "resolve_zombie_running_session",
             inputs_json.clone(),

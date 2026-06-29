@@ -12,8 +12,44 @@
 ///
 /// This list is intentionally manual — it mirrors `KNOWN_BRIDGE_METHODS`
 /// in `operation_registry.rs` and is validated by the tests below.
-const EXPECTED_BRIDGE_FORWARDINGS: &[&str] =
-    &["neighbors", "impact", "context", "coupling_hotspots"];
+const EXPECTED_BRIDGE_FORWARDINGS: &[&str] = &[
+    "neighbors",
+    "ranked",
+    "implementations",
+    "impact",
+    "search",
+    "query_subgraph",
+    "route_map",
+    "shape_check",
+    "api_impact",
+    "flow",
+    "cycles",
+    "orphans",
+    "path",
+    "edges",
+    "describe",
+    "context",
+    "status",
+    "workspaces",
+    "symbols_at",
+    "diff_touches",
+    "detect_changes",
+    "api_surface",
+    "boundary_check",
+    "hotspots",
+    "complexity",
+    "refactor_candidates",
+    "metrics_at",
+    "dead_symbols",
+    "deprecated_callers",
+    "touches_hot_path",
+    "coupling",
+    "coupling_hotspots",
+    "coupling_hubs",
+    "churn",
+    "snapshot",
+    "crate_graph",
+];
 
 #[test]
 fn converted_registry_ops_have_bridge_forwardings() {
