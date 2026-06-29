@@ -1,9 +1,15 @@
-// Sibling epic mzdj (Coordinator reliability lint cleanup) owns the full
-// migration of this crate's ~46 production SystemTime::now/Instant::now call
-// sites to djinn_core::clock. Keeping a crate-level allow here avoids
-// duplicating mzdj's deep dependency/signature churn in this lint-ratchet
-// task (70y0). mzdj is expected to remove this allow as it migrates sites.
-#![allow(clippy::disallowed_methods)]
+// Test-only coordinator fixtures intentionally use unwrap/expect/panic and
+// real clocks for assertion readability; production targets deny these lints
+// via Cargo.toml plus the non-test module-scoped wall-clock allowances below.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::disallowed_methods
+    )
+)]
 //! # djinn-coordinator
 //!
 //! Production coordinator, doctor, and coordinator-owned supervisor
@@ -54,10 +60,15 @@ pub(crate) mod truncate;
 
 // ─── Coordinator actor tree (was actors::coordinator in djinn-agent) ──────
 
+#[allow(clippy::disallowed_methods)]
+// legacy coordinator sweep timers; tracked by mzdj clock follow-up audit
 mod actor;
+#[allow(clippy::disallowed_methods)] // test helpers in this module seed real monotonic timestamps
 mod consolidation;
 pub mod dispatch;
 mod evidence;
+#[allow(clippy::disallowed_methods)]
+// status-wait timeout uses tokio::time::Instant for runtime deadline
 pub mod handle;
 mod health;
 pub mod messages;
@@ -66,10 +77,17 @@ mod prompt_eval;
 mod reentrance;
 #[allow(dead_code)]
 pub(crate) mod refinement;
+#[allow(clippy::disallowed_methods)]
+// dispatch ledger timestamps still use monotonic instants pending clock plumb-through
 mod refinement_dispatch;
 mod refinement_outcome;
+#[allow(clippy::disallowed_methods)]
+// rule tests and throughput fixtures use real monotonic timestamps
 pub mod rules;
+#[allow(clippy::disallowed_methods)]
+// debug DTO defaults preserve existing real-time snapshot semantics
 mod types;
+#[allow(clippy::disallowed_methods)] // wave orchestration waits use tokio::time deadlines
 mod wave;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────

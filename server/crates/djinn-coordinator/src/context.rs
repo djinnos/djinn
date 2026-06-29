@@ -132,7 +132,7 @@ impl CoordinatorContext {
     pub fn register_background_work(&self, task_id: &str) {
         self.background_work_tasks
             .lock()
-            .expect("poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(task_id.to_string());
     }
 
@@ -140,7 +140,7 @@ impl CoordinatorContext {
     pub fn deregister_background_work(&self, task_id: &str) {
         self.background_work_tasks
             .lock()
-            .expect("poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(task_id);
     }
 
@@ -155,14 +155,17 @@ impl CoordinatorContext {
         let ts = Arc::new(AtomicU64::new(now));
         self.active_tasks
             .lock()
-            .expect("poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(task_id.to_string(), ts.clone());
         ts
     }
 
     /// Remove a task from the active-tasks tracker.
     pub fn deregister_activity(&self, task_id: &str) {
-        self.active_tasks.lock().expect("poisoned").remove(task_id);
+        self.active_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(task_id);
     }
 
     /// Record a stall-check timestamp for a task (overwrites the existing entry).
@@ -172,7 +175,12 @@ impl CoordinatorContext {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if let Some(ts) = self.active_tasks.lock().expect("poisoned").get(task_id) {
+        if let Some(ts) = self
+            .active_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(task_id)
+        {
             ts.store(now, Ordering::Relaxed);
         }
     }
