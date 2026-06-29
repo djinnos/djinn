@@ -41,12 +41,12 @@ fn assert_environment_config_workspace_metadata_schema(
     let workspace = &schema["$defs"]["Workspace"];
     assert_eq!(
         workspace["properties"]["slug"],
-        json!({"default": null, "nullable": true, "type": "string"}),
+        json!({"default": null, "type": ["string", "null"]}),
         "{context} Workspace.slug schema drifted"
     );
     assert_eq!(
         workspace["properties"]["name"],
-        json!({"default": null, "nullable": true, "type": "string"}),
+        json!({"default": null, "type": ["string", "null"]}),
         "{context} Workspace.name schema drifted"
     );
     assert_eq!(
@@ -309,13 +309,15 @@ async fn code_graph_schema_unchanged_by_registry_dispatch_refactor() {
         "code_graph outputSchema must stay `additionalProperties: true` so every \
          `CodeGraphResponse` variant passes through the `ErrorOr` envelope unchanged"
     );
-    assert_eq!(
-        output
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        "ErrorOrCodeGraphResponse",
-        "code_graph outputSchema envelope title must stay `ErrorOrCodeGraphResponse`"
+    // schemars 1.x (via rmcp 1.x) no longer emits a `title` for this derived
+    // envelope wrapper. The functional wire-shape (object + additionalProperties)
+    // asserted above is what variant pass-through depends on; the title was a
+    // cosmetic annotation, so its absence under the new schema generator is fine.
+    assert!(
+        output.get("title").is_none(),
+        "code_graph outputSchema envelope no longer carries a title under schemars 1.x; \
+         got {:?}",
+        output.get("title")
     );
 
     // The description advertises the full operation surface. The
@@ -656,10 +658,11 @@ async fn session_surfaces_advertise_nullable_parked_reason() {
     let list = find_tool("session_list");
     let show = find_tool("session_show");
     let timeline = find_tool("task_timeline");
+    // schemars 1.x (via rmcp 1.x) renders nullable Option<T> as a JSON Schema
+    // 2020-12 type array rather than the `nullable: true` extension.
     let expected = json!({
         "description": "Optional deliberate-park reason for terminal sessions, e.g. `budget`.",
-        "nullable": true,
-        "type": "string"
+        "type": ["string", "null"]
     });
 
     assert_eq!(

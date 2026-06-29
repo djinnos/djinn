@@ -21,7 +21,7 @@ djinn-telemetry = { path = "../djinn-telemetry" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
-rmcp = { version = "0.16", features = ["server"] }
+rmcp = { version = "1", features = ["server"] }
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v7"] }
