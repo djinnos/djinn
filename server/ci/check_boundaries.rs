@@ -509,10 +509,11 @@ async fn main() {
         }
     };
 
-    // 6. Detect violations using the testable helper.
+    // 7. Check + report. Use the same `check_violations` / `render_violation_report`
+    //    helpers the tests exercise, so `main` and the test suite share one code
+    //    path (and the helpers aren't dead code in the bin target).
     let violations = check_violations(&crate_graph, &compiled);
 
-    // 7. Report.
     if violations.is_empty() {
         println!(
             "✓ No boundary violations found. (checked {} rule(s) against {} crate edge(s))",
@@ -522,14 +523,17 @@ async fn main() {
         std::process::exit(0);
     }
 
-    let report_violations: Vec<(usize, &TomlRule, &str, &str)> = violations
+    // `check_violations` returns owned source/target strings; borrow them as
+    // `&str` for the renderer's slice-based signature.
+    let borrowed: Vec<(usize, &TomlRule, &str, &str)> = violations
         .iter()
-        .map(|(idx, rule, from, to)| (*idx, *rule, from.as_str(), to.as_str()))
+        .map(|(index, rule, from, to)| (*index, *rule, from.as_str(), to.as_str()))
         .collect();
     let mut report = String::new();
-    render_violation_report(&mut report, &report_violations).ok();
+    let exit_code = render_violation_report(&mut report, &borrowed)
+        .expect("writing a boundary report to a String never fails");
     eprint!("{report}");
-    std::process::exit(1);
+    std::process::exit(exit_code);
 }
 
 // ---------------------------------------------------------------------------
