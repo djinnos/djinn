@@ -263,12 +263,13 @@ impl DjinnMcpServer {
     }
 
     /// Demand another tribunal round for a proposal whose refinement has
-    /// stopped (e.g. after a judge verdict, round cap, or spawn cap).
-    /// Reuses the existing coordinator refinement loop — clears the stop
-    /// state and re-enqueues an Advocate→Adversary→Judge cycle.
+    /// stopped (e.g. after a judge verdict, round cap, or spawn cap) or is
+    /// parked awaiting human review.
+    /// Reuses the existing coordinator refinement loop — clears the stop or
+    /// parked review state and re-enqueues an Advocate→Adversary→Judge cycle.
     /// Records the demand action in proposal history.
     #[tool(
-        description = "Demand another tribunal round for a proposal whose refinement has stopped (e.g. after a judge verdict or round cap). Reuses the existing coordinator refinement loop. Records the action in proposal history. Returns an error if refinement is still active."
+        description = "Demand another tribunal round for a proposal whose refinement has stopped (e.g. after a judge verdict or round cap) or is parked awaiting human review. Reuses the existing coordinator refinement loop. Records the action in proposal history. Returns an error if refinement is still actively running."
     )]
     pub async fn proposal_refinement_demand_round(
         &self,
