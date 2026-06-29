@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT owner_user_id FROM credentials WHERE key_name = $1",
+  "query": "SELECT id FROM credentials WHERE key_name = $1 AND owner_user_id IS NULL",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "owner_user_id",
+        "name": "id",
         "type_info": "Varchar"
       }
     ],
@@ -15,8 +15,8 @@
       ]
     },
     "nullable": [
-      true
+      false
     ]
   },
-  "hash": "b0fe3227152fdedda936447256b331c494cdd9df933fa7a5c85e8967be956345"
+  "hash": "2077da269693ed881449ff8196883a652597fbdcb3b69b00f72f8a115f55da31"
 }
