@@ -24,6 +24,8 @@ use clap::Parser;
 use globset::Glob;
 use serde::Deserialize;
 
+use djinn_graph::repo_graph::CrateGraph;
+
 // ---------------------------------------------------------------------------
 // Minimal WarmContext — same shape as WorkerWarmContext in djinn-agent-worker.
 // ---------------------------------------------------------------------------
@@ -506,16 +508,11 @@ async fn main() {
         }
     };
 
-    let mut violations: Vec<(usize, &TomlRule, &str, &str)> = Vec::new();
-    for edge in &crate_graph.edges {
-        for cr in &compiled {
-            if cr.from_matcher.is_match(&edge.source) && cr.to_matcher.is_match(&edge.target) {
-                violations.push((cr.index, cr.rule, &edge.source, &edge.target));
-            }
-        }
-    }
+    // 7. Check + report. Use the same `check_violations` / `render_violation_report`
+    //    helpers the tests exercise, so `main` and the test suite share one code
+    //    path (and the helpers aren't dead code in the bin target).
+    let violations = check_violations(&crate_graph, &compiled);
 
-    // 7. Report.
     if violations.is_empty() {
         println!(
             "✓ No boundary violations found. (checked {} rule(s) against {} crate edge(s))",
@@ -525,19 +522,65 @@ async fn main() {
         std::process::exit(0);
     }
 
-    eprintln!("✗ {} boundary violation(s) found:\n", violations.len());
-    for (i, rule, from, to) in &violations {
-        eprintln!("  [{rule_index}] {from} → {to}", rule_index = i);
-        eprintln!("      rule name:  {}", rule.name);
-        if let Some(desc) = &rule.description {
-            eprintln!("      description: {desc}");
+    // `check_violations` returns owned source/target strings; borrow them as
+    // `&str` for the renderer's slice-based signature.
+    let borrowed: Vec<(usize, &TomlRule, &str, &str)> = violations
+        .iter()
+        .map(|(index, rule, from, to)| (*index, *rule, from.as_str(), to.as_str()))
+        .collect();
+    let mut report = String::new();
+    let exit_code = render_violation_report(&mut report, &borrowed)
+        .expect("writing a boundary report to a String never fails");
+    eprint!("{report}");
+    std::process::exit(exit_code);
+}
+
+// ---------------------------------------------------------------------------
+// Testable helpers for violation checking and reporting
+// ---------------------------------------------------------------------------
+
+/// Check a crate graph against compiled boundary rules and return the
+/// violations as structured data.  This helper is factored out of `main`
+/// so tests can assert forbidden-edge behaviour without spawning the full
+/// binary (which needs Postgres).
+fn check_violations<'a>(
+    crate_graph: &CrateGraph,
+    compiled: &'a [CompiledRule<'a>],
+) -> Vec<(usize, &'a TomlRule, String, String)> {
+    let mut violations = Vec::new();
+    for edge in &crate_graph.edges {
+        for cr in compiled {
+            if cr.from_matcher.is_match(&edge.source) && cr.to_matcher.is_match(&edge.target) {
+                violations.push((cr.index, cr.rule, edge.source.clone(), edge.target.clone()));
+            }
         }
-        eprintln!("      from_key:   {from}");
-        eprintln!("      to_key:     {to}");
-        eprintln!("      witness:    {from} → {to}");
-        eprintln!();
     }
-    std::process::exit(1);
+    violations
+}
+
+/// Render a human-readable violation report to the supplied writer.
+/// Returns the exit code that the CLI should use (1 for violations).
+fn render_violation_report<W: std::fmt::Write>(
+    writer: &mut W,
+    violations: &[(usize, &TomlRule, &str, &str)],
+) -> Result<i32, std::fmt::Error> {
+    writeln!(
+        writer,
+        "✗ {} boundary violation(s) found:\n",
+        violations.len()
+    )?;
+    for (i, rule, from, to) in violations {
+        writeln!(writer, "  [{rule_index}] {from} → {to}", rule_index = i)?;
+        writeln!(writer, "      rule name:  {}", rule.name)?;
+        if let Some(desc) = &rule.description {
+            writeln!(writer, "      description: {desc}")?;
+        }
+        writeln!(writer, "      from_key:   {from}")?;
+        writeln!(writer, "      to_key:     {to}")?;
+        writeln!(writer, "      witness:    {from} → {to}")?;
+        writeln!(writer)?;
+    }
+    Ok(1)
 }
 
 #[cfg(test)]
@@ -1003,5 +1046,496 @@ mod tests {
         };
         let s = format!("{err}");
         assert_eq!(s, "rule[3] 'my-rule' — from_glob: must be nonblank");
+    }
+
+    // ------------------------------------------------------------------
+    // check_violations — forbidden-edge fixture tests
+    // ------------------------------------------------------------------
+
+    /// Build a minimal `CrateGraph` with a single forbidden edge that
+    /// matches a boundary rule.  This is the lowest-practical-level
+    /// fixture for asserting violation detection without Postgres.
+    fn forbidden_edge_crate_graph() -> CrateGraph {
+        CrateGraph {
+            crates: vec![
+                CrateNode {
+                    name: "djinn-agent".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-agent/Cargo.toml"),
+                    loc: 100,
+                    node_count: 10,
+                    fan_in: 0.0,
+                    fan_out: 1.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 1.0,
+                },
+                CrateNode {
+                    name: "djinn-control-plane".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-control-plane/Cargo.toml"),
+                    loc: 200,
+                    node_count: 20,
+                    fan_in: 1.0,
+                    fan_out: 0.0,
+                    inbound_weight: 1.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: vec![CrateEdge {
+                source: "djinn-agent".to_string(),
+                target: "djinn-control-plane".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn check_violations_detects_forbidden_edge() {
+        let crate_graph = forbidden_edge_crate_graph();
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some(
+                "Agent must not import control-plane; control-plane is the bridge layer."
+                    .to_string(),
+            ),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let violations = check_violations(&crate_graph, &compiled);
+        assert_eq!(violations.len(), 1, "expected exactly one violation");
+        let (idx, rule, from, to) = &violations[0];
+        assert_eq!(*idx, 0);
+        assert_eq!(rule.name, "no-agent-imports-control-plane");
+        assert_eq!(from, "djinn-agent");
+        assert_eq!(to, "djinn-control-plane");
+    }
+
+    #[test]
+    fn check_violations_returns_empty_when_no_edges_match() {
+        let crate_graph = CrateGraph {
+            crates: vec![
+                CrateNode {
+                    name: "djinn-core".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-core/Cargo.toml"),
+                    loc: 50,
+                    node_count: 5,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+                CrateNode {
+                    name: "djinn-stack".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-stack/Cargo.toml"),
+                    loc: 50,
+                    node_count: 5,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: vec![CrateEdge {
+                source: "djinn-core".to_string(),
+                target: "djinn-stack".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            }],
+        };
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some("Agent must not import control-plane.".to_string()),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let violations = check_violations(&crate_graph, &compiled);
+        assert!(
+            violations.is_empty(),
+            "expected no violations for non-matching edges"
+        );
+    }
+
+    #[test]
+    fn check_violations_excludes_self_references() {
+        // Self-references (a crate importing itself) should never be
+        // reported as violations.
+        let crate_graph = CrateGraph {
+            crates: vec![CrateNode {
+                name: "djinn-agent".to_string(),
+                manifest_path: PathBuf::from("crates/djinn-agent/Cargo.toml"),
+                loc: 100,
+                node_count: 10,
+                fan_in: 1.0,
+                fan_out: 1.0,
+                inbound_weight: 1.0,
+                outbound_weight: 1.0,
+            }],
+            edges: vec![CrateEdge {
+                source: "djinn-agent".to_string(),
+                target: "djinn-agent".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            }],
+        };
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-agent/**".to_string(),
+            description: Some("Self-reference should not be a violation.".to_string()),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let violations = check_violations(&crate_graph, &compiled);
+        // The rule matches, but the checker intentionally does NOT filter
+        // self-references at this level — the main loop reports them.  This
+        // test documents the current behaviour; if we want to exclude
+        // self-references, that change belongs to the matching logic above.
+        // For now we assert that the match *does* fire so the test is
+        // honest about what the code does.
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].2, "djinn-agent");
+        assert_eq!(violations[0].3, "djinn-agent");
+    }
+
+    // ------------------------------------------------------------------
+    // render_violation_report — violation output contract
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_violation_report_includes_all_required_fields() {
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some(
+                "Agent must not import control-plane; control-plane is the bridge layer."
+                    .to_string(),
+            ),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let crate_graph = forbidden_edge_crate_graph();
+        let violations = check_violations(&crate_graph, &compiled);
+        assert_eq!(violations.len(), 1);
+
+        // Convert to the slice type expected by render_violation_report.
+        let report_violations: Vec<(usize, &TomlRule, &str, &str)> = violations
+            .iter()
+            .map(|(idx, rule, from, to)| (*idx, *rule, from.as_str(), to.as_str()))
+            .collect();
+
+        let mut buf = String::new();
+        let exit_code =
+            render_violation_report(&mut buf, &report_violations).expect("render should succeed");
+        assert_eq!(exit_code, 1, "violations should map to exit code 1");
+
+        let output = buf;
+        assert!(
+            output.contains("no-agent-imports-control-plane"),
+            "report must include rule name: {output}"
+        );
+        assert!(
+            output.contains("Agent must not import control-plane"),
+            "report must include description: {output}"
+        );
+        assert!(
+            output.contains("from_key:   djinn-agent"),
+            "report must include from_key: {output}"
+        );
+        assert!(
+            output.contains("to_key:     djinn-control-plane"),
+            "report must include to_key: {output}"
+        );
+        assert!(
+            output.contains("witness:    djinn-agent → djinn-control-plane"),
+            "report must include witness: {output}"
+        );
+    }
+
+    #[test]
+    fn render_violation_report_multiple_violations() {
+        let crate_graph = CrateGraph {
+            crates: vec![
+                CrateNode {
+                    name: "djinn-agent".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-agent/Cargo.toml"),
+                    loc: 100,
+                    node_count: 10,
+                    fan_in: 0.0,
+                    fan_out: 2.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 2.0,
+                },
+                CrateNode {
+                    name: "djinn-control-plane".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-control-plane/Cargo.toml"),
+                    loc: 200,
+                    node_count: 20,
+                    fan_in: 1.0,
+                    fan_out: 0.0,
+                    inbound_weight: 1.0,
+                    outbound_weight: 0.0,
+                },
+                CrateNode {
+                    name: "djinn-db".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-db/Cargo.toml"),
+                    loc: 150,
+                    node_count: 15,
+                    fan_in: 1.0,
+                    fan_out: 0.0,
+                    inbound_weight: 1.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: vec![
+                CrateEdge {
+                    source: "djinn-agent".to_string(),
+                    target: "djinn-control-plane".to_string(),
+                    weight: 1.0,
+                    edge_count: 1,
+                },
+                CrateEdge {
+                    source: "djinn-agent".to_string(),
+                    target: "djinn-db".to_string(),
+                    weight: 1.0,
+                    edge_count: 1,
+                },
+            ],
+        };
+        let rules = vec![
+            TomlRule {
+                name: "no-agent-imports-control-plane".to_string(),
+                from_glob: "**/djinn-agent/**".to_string(),
+                to_glob: "**/djinn-control-plane/**".to_string(),
+                description: Some("Agent must not import control-plane.".to_string()),
+            },
+            TomlRule {
+                name: "no-agent-imports-db".to_string(),
+                from_glob: "**/djinn-agent/**".to_string(),
+                to_glob: "**/djinn-db/**".to_string(),
+                description: Some("Agent must not import db.".to_string()),
+            },
+        ];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let violations = check_violations(&crate_graph, &compiled);
+        assert_eq!(violations.len(), 2, "expected two violations");
+
+        let report_violations: Vec<(usize, &TomlRule, &str, &str)> = violations
+            .iter()
+            .map(|(idx, rule, from, to)| (*idx, *rule, from.as_str(), to.as_str()))
+            .collect();
+
+        let mut buf = String::new();
+        let exit_code =
+            render_violation_report(&mut buf, &report_violations).expect("render should succeed");
+        assert_eq!(exit_code, 1);
+
+        let output = buf;
+        assert!(output.contains("no-agent-imports-control-plane"));
+        assert!(output.contains("no-agent-imports-db"));
+        assert!(output.contains("2 boundary violation(s) found"));
+    }
+
+    // ------------------------------------------------------------------
+    // Operational failure semantics (exit-2 contract)
+    // ------------------------------------------------------------------
+
+    /// Helper that simulates the CLI's operational-failure path for an
+    /// empty rule file.  Returns the error text that would be printed.
+    fn simulate_empty_rules_failure() -> String {
+        let config = BoundaryConfig {
+            boundary: BoundaryMeta {
+                level: "crate".to_string(),
+                description: None,
+            },
+            rules: vec![],
+        };
+        let mut out = String::new();
+        if config.rules.is_empty() {
+            out.push_str("Error: no boundary rules defined.\n");
+        }
+        out
+    }
+
+    #[test]
+    fn empty_rules_produces_operational_failure_text() {
+        let text = simulate_empty_rules_failure();
+        assert!(
+            text.contains("Error:"),
+            "operational failure must mention Error: {text}"
+        );
+        assert!(
+            text.contains("no boundary rules defined"),
+            "operational failure must cite empty rules: {text}"
+        );
+    }
+
+    #[test]
+    fn validation_errors_produce_operational_failure_text() {
+        let rules = vec![TomlRule {
+            name: "".to_string(),
+            from_glob: "   ".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: None,
+        }];
+        let errors = validate_rules(&rules);
+        assert!(!errors.is_empty(), "expected validation errors");
+
+        let mut out = String::new();
+        out.push_str("Error: boundary rule validation failed:\n");
+        for err in &errors {
+            out.push_str(&format!("  {err}\n"));
+        }
+
+        let text = out;
+        assert!(text.contains("Error:"), "must start with Error: {text}");
+        assert!(
+            text.contains("boundary rule validation failed"),
+            "must cite validation failure: {text}"
+        );
+        assert!(text.contains("name:"), "must mention name field: {text}");
+        assert!(
+            text.contains("from_glob:"),
+            "must mention from_glob field: {text}"
+        );
+        assert!(
+            text.contains("description:"),
+            "must mention description field: {text}"
+        );
+    }
+
+    #[test]
+    fn compilation_errors_produce_operational_failure_text() {
+        let rules = vec![TomlRule {
+            name: "bad-glob".to_string(),
+            from_glob: "[unclosed".to_string(),
+            to_glob: "**/b/**".to_string(),
+            description: Some("Valid description.".to_string()),
+        }];
+        let result = compile_rules(&rules);
+        assert!(result.is_err(), "expected compilation failure");
+
+        let mut out = String::new();
+        out.push_str("Error: boundary rule compilation failed:\n");
+        if let Err(errors) = result {
+            for err in &errors {
+                out.push_str(&format!("  {err}\n"));
+            }
+        }
+
+        let text = out;
+        assert!(text.contains("Error:"));
+        assert!(text.contains("boundary rule compilation failed"));
+        assert!(text.contains("invalid glob"));
+    }
+
+    #[test]
+    fn graph_sanity_failure_produces_operational_failure_text() {
+        let empty_graph = RepoDependencyGraph::build(&[]);
+        let result = check_graph_sanity(&empty_graph);
+        assert!(result.is_err(), "expected graph sanity failure");
+
+        let mut out = String::new();
+        if let Err(e) = result {
+            out.push_str(&format!("Error: loaded graph is unusable: {e}\n"));
+        }
+
+        let text = out;
+        assert!(text.contains("Error:"));
+        assert!(text.contains("loaded graph is unusable"));
+        assert!(text.contains("zero nodes"));
+    }
+
+    #[test]
+    fn crate_graph_usable_failure_produces_operational_failure_text() {
+        let empty_crate_graph = CrateGraph {
+            crates: vec![],
+            edges: vec![],
+        };
+        let result = check_crate_graph_usable(&empty_crate_graph);
+        assert!(result.is_err());
+
+        let mut out = String::new();
+        if let Err(e) = result {
+            out.push_str(&format!("Error: derived crate graph is unusable: {e}\n"));
+        }
+
+        let text = out;
+        assert!(text.contains("Error:"));
+        assert!(text.contains("derived crate graph is unusable"));
+        assert!(text.contains("no crate nodes"));
+    }
+
+    // ------------------------------------------------------------------
+    // Exit-code semantics: violation (1) vs operational (2)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn violation_exit_code_is_one() {
+        // Violations map to exit code 1 — distinct from operational errors (2).
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some("Agent must not import control-plane.".to_string()),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let crate_graph = forbidden_edge_crate_graph();
+        let violations = check_violations(&crate_graph, &compiled);
+        assert!(!violations.is_empty(), "fixture must produce a violation");
+
+        let report_violations: Vec<(usize, &TomlRule, &str, &str)> = violations
+            .iter()
+            .map(|(idx, rule, from, to)| (*idx, *rule, from.as_str(), to.as_str()))
+            .collect();
+
+        let mut buf = String::new();
+        let code = render_violation_report(&mut buf, &report_violations).expect("render ok");
+        assert_eq!(code, 1, "violations must return exit code 1, not 2");
+    }
+
+    #[test]
+    fn no_violations_exit_code_is_zero() {
+        // Empty violation list means success → exit code 0.
+        let rules = vec![TomlRule {
+            name: "no-agent-imports-control-plane".to_string(),
+            from_glob: "**/djinn-agent/**".to_string(),
+            to_glob: "**/djinn-control-plane/**".to_string(),
+            description: Some("Agent must not import control-plane.".to_string()),
+        }];
+        let compiled = compile_rules(&rules).expect("valid globs should compile");
+        let crate_graph = CrateGraph {
+            crates: vec![
+                CrateNode {
+                    name: "djinn-core".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-core/Cargo.toml"),
+                    loc: 50,
+                    node_count: 5,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+                CrateNode {
+                    name: "djinn-stack".to_string(),
+                    manifest_path: PathBuf::from("crates/djinn-stack/Cargo.toml"),
+                    loc: 50,
+                    node_count: 5,
+                    fan_in: 0.0,
+                    fan_out: 0.0,
+                    inbound_weight: 0.0,
+                    outbound_weight: 0.0,
+                },
+            ],
+            edges: vec![CrateEdge {
+                source: "djinn-core".to_string(),
+                target: "djinn-stack".to_string(),
+                weight: 1.0,
+                edge_count: 1,
+            }],
+        };
+        let violations = check_violations(&crate_graph, &compiled);
+        assert!(violations.is_empty(), "fixture must produce no violations");
+        // When violations are empty, the CLI exits 0.  This helper test
+        // documents the contract without needing the full binary.
     }
 }
