@@ -509,14 +509,8 @@ async fn main() {
         }
     };
 
-    let mut violations: Vec<(usize, &TomlRule, &str, &str)> = Vec::new();
-    for edge in &crate_graph.edges {
-        for cr in &compiled {
-            if cr.from_matcher.is_match(&edge.source) && cr.to_matcher.is_match(&edge.target) {
-                violations.push((cr.index, cr.rule, &edge.source, &edge.target));
-            }
-        }
-    }
+    // 6. Detect violations using the testable helper.
+    let violations = check_violations(&crate_graph, &compiled);
 
     // 7. Report.
     if violations.is_empty() {
@@ -528,18 +522,13 @@ async fn main() {
         std::process::exit(0);
     }
 
-    eprintln!("✗ {} boundary violation(s) found:\n", violations.len());
-    for (i, rule, from, to) in &violations {
-        eprintln!("  [{rule_index}] {from} → {to}", rule_index = i);
-        eprintln!("      rule name:  {}", rule.name);
-        if let Some(desc) = &rule.description {
-            eprintln!("      description: {desc}");
-        }
-        eprintln!("      from_key:   {from}");
-        eprintln!("      to_key:     {to}");
-        eprintln!("      witness:    {from} → {to}");
-        eprintln!();
-    }
+    let report_violations: Vec<(usize, &TomlRule, &str, &str)> = violations
+        .iter()
+        .map(|(idx, rule, from, to)| (*idx, *rule, from.as_str(), to.as_str()))
+        .collect();
+    let mut report = String::new();
+    render_violation_report(&mut report, &report_violations).ok();
+    eprint!("{report}");
     std::process::exit(1);
 }
 
