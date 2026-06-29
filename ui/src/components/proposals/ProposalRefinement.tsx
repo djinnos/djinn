@@ -271,7 +271,7 @@ export function ProposalRefinement({
                 disabled={busy}
                 onClick={() => handleResolve("accept")}
               >
-                Accept
+                Accept refined spec
               </Button>
               <Button
                 size="sm"
@@ -292,7 +292,7 @@ export function ProposalRefinement({
                 disabled={busy}
                 onClick={() => handleResolve("reject")}
               >
-                Reject
+                Reject and revert
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
