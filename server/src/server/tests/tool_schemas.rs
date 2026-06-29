@@ -217,7 +217,138 @@ async fn code_graph_schema_advertises_uid_resolver_pagination_and_partial_semant
     }
 }
 
-/// The curated chat surface (`filter_chat_allowed_mcp_schemas`) is what the
+/// vxmw / 5ice: registry-driven dispatch is a *runtime* change — the MCP
+/// tool wire shape (operation names, parameter surface, response envelope
+/// variants) must stay bit-identical through the vxmw vertical slice.
+///
+/// This test guards the contract that the checked-in
+/// `djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap`
+/// snapshot does **not** drift on the `code_graph` tool's `input_schema`
+/// as a result of the registry-driven dispatch refactor. The runtime
+/// dispatcher (`DjinnMcpServer::dispatch_code_graph`) is now
+/// registry-derived for `neighbors` / `impact` / `context` /
+/// `coupling_hotspots`, but the externally visible tool surface — the
+/// `code_graph` MCP tool's `inputSchema` — is unchanged.
+///
+/// If the snapshot diff is purely description-only (e.g. the tool's
+/// `description` block was rewritten but no field was added/removed),
+/// accept the snapshot and document the diff in the task report.
+#[tokio::test]
+async fn code_graph_schema_unchanged_by_registry_dispatch_refactor() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    let code_graph = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("code_graph"))
+        .expect("code_graph schema");
+    let live_input_schema = code_graph
+        .get("inputSchema")
+        .expect("code_graph inputSchema");
+    let live_output_schema = code_graph
+        .get("outputSchema")
+        .expect("code_graph outputSchema");
+    let live_description = code_graph
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("code_graph description");
+
+    // ── Wire-shape invariants that the registry vertical slice must
+    // not perturb. If any of these fail, the refactor leaked an
+    // implementation detail into the MCP contract — a wire-shape
+    // break for every chat / UI host that consumes the schema.
+    //
+    // The check here is the **field / variant set** (additive types),
+    // not byte-equality of the snapshot. The full byte-equality lives
+    // in the `mcp_tools_schema` insta snapshot; this test catches the
+    // specific class of regression where the vxmw refactor accidentally
+    // rewrites the `code_graph` schema.
+    let input = live_input_schema
+        .as_object()
+        .expect("input_schema is a JSON object");
+    let input_props = input
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("input_schema has properties");
+    // `operation` is the routing key the dispatcher branches on. The
+    // registry refactor MUST NOT widen the field type (e.g. from
+    // string to enum) because chat / UI hosts string-match the
+    // operation name.
+    assert!(
+        input_props.contains_key("operation"),
+        "code_graph input_schema lost `operation` field — registry refactor leak"
+    );
+    let operation_schema = &input_props["operation"];
+    let operation_type = operation_schema
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    assert_eq!(
+        operation_type, "string",
+        "code_graph `operation` field type changed from `string` to `{operation_type}` — \
+         registry refactor must preserve wire-shape"
+    );
+
+    // The `outputSchema` for `code_graph` is the `ErrorOr<CodeGraphResponse>`
+    // envelope — a thin tagged union that carries the variant envelope
+    // through `additionalProperties: true`. The registry refactor is
+    // forbidden from changing the envelope's wire shape (it must remain
+    // permissive enough for every variant to pass through unchanged).
+    let output = live_output_schema
+        .as_object()
+        .expect("output_schema is a JSON object");
+    assert_eq!(
+        output.get("type").and_then(Value::as_str),
+        Some("object"),
+        "code_graph outputSchema envelope type must stay `object`"
+    );
+    assert_eq!(
+        output.get("additionalProperties").and_then(Value::as_bool),
+        Some(true),
+        "code_graph outputSchema must stay `additionalProperties: true` so every \
+         `CodeGraphResponse` variant passes through the `ErrorOr` envelope unchanged"
+    );
+    assert_eq!(
+        output
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "ErrorOrCodeGraphResponse",
+        "code_graph outputSchema envelope title must stay `ErrorOrCodeGraphResponse`"
+    );
+
+    // The description advertises the full operation surface. The
+    // vxmw registry refactor is allowed to make this richer but
+    // never thinner — every operation that the pre-vxmw handwritten
+    // dispatch handled must still be advertised in the description.
+    for required_op in [
+        "neighbors",
+        "impact",
+        "context",
+        "coupling_hotspots",
+        "coupling",
+        "ranked",
+        "search",
+        "cycles",
+        "orphans",
+        "path",
+        "edges",
+        "describe",
+        "status",
+        "snapshot",
+        "crate_graph",
+        "impact_check",
+    ] {
+        assert!(
+            live_description.contains(required_op),
+            "code_graph description lost `{required_op}` — registry refactor \
+             must not drop pre-vxmw operations from the advertised surface"
+        );
+    }
+}
+
+
 /// chat completions handler hands to the provider. Every `object`-typed
 /// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict
 /// validator 400s on object schemas without one (the original bug that
