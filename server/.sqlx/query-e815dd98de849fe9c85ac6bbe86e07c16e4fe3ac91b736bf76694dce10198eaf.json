@@ -1,0 +1,130 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,\n                    author_user_id, author_model, source_task_id,\n                    against_revision_seq, round,\n                    body_metadata::text AS body_metadata,\n                    resolved_at, resolved_by_user_id,\n                    reopened_at, reopened_by_user_id,\n                    created_at, updated_at\n             FROM proposal_debate_trail\n             WHERE proposal_id = $1\n             ORDER BY round, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "proposal_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "body",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "blocking",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "agent_role",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "author_kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "author_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "author_model",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "source_task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 10,
+        "name": "against_revision_seq",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "round",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "body_metadata",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "resolved_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "resolved_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 15,
+        "name": "reopened_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 16,
+        "name": "reopened_by_user_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 17,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 18,
+        "name": "updated_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "e815dd98de849fe9c85ac6bbe86e07c16e4fe3ac91b736bf76694dce10198eaf"
+}

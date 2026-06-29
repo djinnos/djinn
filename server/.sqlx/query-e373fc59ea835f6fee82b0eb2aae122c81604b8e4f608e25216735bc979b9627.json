@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM blockers WHERE task_id = $1 AND blocking_task_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e373fc59ea835f6fee82b0eb2aae122c81604b8e4f608e25216735bc979b9627"
+}

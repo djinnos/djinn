@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.project_id, c.file_path, c.symbol_key, c.kind,\n                      c.content_hash, c.embedded_text,\n                      m.content_hash AS \"meta_content_hash?\",\n                      m.model_version AS \"meta_model_version?\",\n                      m.extension_state AS \"meta_extension_state?\"\n                 FROM code_chunks c\n            LEFT JOIN code_chunk_meta m ON m.id = c.id\n                WHERE c.project_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "file_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "symbol_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "content_hash",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "embedded_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "meta_content_hash?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "meta_model_version?",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "meta_extension_state?",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "374309d052695a3f7f894cb8e2ca49a5a5da2ba6f75696883d492b89f424cff3"
+}
