@@ -566,7 +566,7 @@ jobs:
         working-directory: server/crates/djinn-db
         run: sqlx migrate run --source migrations_postgres
 
-      # `make sqlx-check` regenerates the offline cache into a scratch dir
+      # `make sqlx-verify` regenerates the offline cache into a scratch dir
       # with the SAME surface the offline consumers compile (`--all-targets
       # --all-features`), force-re-runs the sqlx proc-macros (touch), and
       # diffs against the committed cache. This is a strict superset of the
@@ -575,9 +575,14 @@ jobs:
       # instead of post-merge. The old `cargo sqlx prepare --check
       # -- --all-targets` covered neither feature-gated queries nor macro
       # re-execution on a warm cache and let 71 entries slip through.
+      #
+      # `sqlx-verify` (not `sqlx-check`) is used here: the schema is already
+      # applied by the step above against the service Postgres, and the
+      # `sqlx-check` wrapper's `test-db-migrate` prerequisite waits on a
+      # `docker exec djinn-postgres-test` container that does not exist in CI.
       - name: Verify .sqlx offline cache is up to date
         working-directory: .
-        run: make sqlx-check
+        run: make sqlx-verify
 
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI (PR + merge queue)                                           ║
