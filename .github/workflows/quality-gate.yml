@@ -552,6 +552,83 @@ jobs:
         run: cargo sqlx prepare --check --workspace -- --all-targets
 
   # ╔══════════════════════════════════════════════════════════════════╗
+  # ║  Server Architectural Boundary Check (PR + merge queue)         ║
+  # ║                                                                  ║
+  # ║  Loads the warmed canonical graph from Postgres and checks every ║
+  # ║  crate-level dependency edge against server/boundary_rules.toml. ║
+  # ║  Requires the graph to be warmed first, so this job depends on   ║
+  # ║  server-clippy (which populates the Rust cache) and runs after   ║
+  # ║  Postgres + migrations are ready.                                ║
+  # ╚══════════════════════════════════════════════════════════════════╝
+
+  server-boundaries:
+    name: Server Boundaries
+    needs: [changes, server-clippy]
+    if: needs.changes.outputs.server == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # Point every tool at the same ephemeral Postgres the other
+      # server jobs use. DJINN_PROJECT_ROOT overrides the DB-stored
+      # path so the warm pipeline operates on the CI checkout.
+      DJINN_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5433/djinn"
+      DJINN_PROJECT_ID: "019ea3bd-a305-73e3-806c-4edcc96ebfe2"
+      DJINN_PROJECT_PATH: ${{ github.workspace }}
+      DJINN_PROJECT_ROOT: ${{ github.workspace }}
+    # Ephemeral Postgres 16 on host port 5433 — same pattern as
+    # server-test and server-sqlx-cache.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: djinn
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-quality
+          cache-on-failure: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+
+      - name: Apply djinn-db migrations
+        working-directory: server/crates/djinn-db
+        run: sqlx migrate run --source migrations_postgres
+
+      - name: Seed project row for warm-graph
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -p 5433 -U postgres -d djinn -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO projects (id, name, github_owner, github_repo) \
+                VALUES ('${DJINN_PROJECT_ID}', 'djinn', 'djinnos', 'djinn') \
+                ON CONFLICT (id) DO NOTHING;"
+
+      - name: Warm canonical graph
+        run: cargo run -p djinn-agent-worker -- warm-graph "$DJINN_PROJECT_ID"
+
+      - name: Check architectural boundaries
+        working-directory: ${{ github.workspace }}
+        run: make check-boundaries
+
+  # ╔══════════════════════════════════════════════════════════════════╗
   # ║  UI (PR + merge queue)                                           ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -623,6 +700,7 @@ jobs:
       - server-size-guard
       - server-migrations-guard
       - server-raw-sql-boundary
+      - server-boundaries
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -635,6 +713,7 @@ jobs:
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
             "${{ needs.server-raw-sql-boundary.result }}"
+            "${{ needs.server-boundaries.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"
