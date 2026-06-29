@@ -154,7 +154,7 @@ pub enum PoolMessage {
 /// Format the current unix-seconds timestamp (read through the shared clock
 /// seam) as a decimal string.  Falls back to `"0"` when the wall-clock is
 /// before `UNIX_EPOCH`.
-pub(super) fn now_unix_string(clock: &Arc<dyn Clock>) -> String {
+pub(super) fn now_unix_string(clock: &dyn Clock) -> String {
     let secs = clock
         .now()
         .duration_since(UNIX_EPOCH)

@@ -217,7 +217,13 @@ impl SlotPool {
         let duration_seconds = self
             .task_started
             .get(task_id)
-            .map(|ts| self.ctx.clock.now_instant().saturating_duration_since(*ts).as_secs())
+            .map(|ts| {
+                self.ctx
+                    .clock
+                    .now_instant()
+                    .saturating_duration_since(*ts)
+                    .as_secs()
+            })
             .unwrap_or(0);
         // If activity tracker has no entry (reply loop not started yet),
         // the session has been idle since slot assignment.
@@ -309,7 +315,7 @@ impl SlotPool {
                         slot_id,
                         SlotState::Busy {
                             task_id: String::new(),
-                            started_at: now_unix_string(&self.ctx.clock),
+                            started_at: now_unix_string(self.ctx.clock.as_ref()),
                             agent_type: "worker".to_string(),
                         },
                     );
@@ -340,7 +346,7 @@ impl SlotPool {
                 slot_id,
                 SlotState::Busy {
                     task_id: task_owned.clone(),
-                    started_at: now_unix_string(&self.ctx.clock),
+                    started_at: now_unix_string(self.ctx.clock.as_ref()),
                     agent_type: String::new(),
                 },
             );
@@ -931,7 +937,7 @@ impl SlotPool {
             slot_id,
             SlotState::Busy {
                 task_id: task_id.to_owned(),
-                started_at: now_unix_string(&self.ctx.clock),
+                started_at: now_unix_string(self.ctx.clock.as_ref()),
                 agent_type: "worker".to_owned(),
             },
         );

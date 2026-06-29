@@ -233,8 +233,7 @@ impl SlotContext {
     pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
         let now = self.now_unix_secs();
         let ts = Arc::new(AtomicU64::new(now));
-        recover_lock(&self.active_tasks, "active_tasks")
-            .insert(task_id.to_string(), ts.clone());
+        recover_lock(&self.active_tasks, "active_tasks").insert(task_id.to_string(), ts.clone());
         ts
     }
 
