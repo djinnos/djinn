@@ -1,3 +1,6 @@
+// Test-only: Instant::now is used for deadlined warm-poll loops in this
+// test module.
+#![allow(clippy::disallowed_methods)]
 use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::RepoGraphCacheInsert;

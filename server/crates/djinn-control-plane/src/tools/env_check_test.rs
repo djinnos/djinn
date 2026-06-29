@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::print_stderr)] // test diagnostic: prints env vars for debugging CI
 mod env_check {
     #[test]
     fn print_env() {

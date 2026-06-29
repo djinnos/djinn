@@ -11,3 +11,6 @@ doctest = false
 metrics = "=0.24.6"
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 workspace-hack.workspace = true
+
+[lints]
+workspace = true

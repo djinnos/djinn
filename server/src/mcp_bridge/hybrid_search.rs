@@ -34,6 +34,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use djinn_control_plane::bridge::{ProjectCtx, SearchHit};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::CodeChunkSearchHit;
 use djinn_db::repositories::note::rrf::rrf_fuse;
 use sha2::{Digest, Sha256};
@@ -89,7 +90,7 @@ fn write_cache(key: String, hits: Vec<SearchHit>) {
         guard.insert(
             key,
             CacheEntry {
-                inserted_at: Instant::now(),
+                inserted_at: SystemClockTrait::new().now_instant(),
                 hits,
             },
         );

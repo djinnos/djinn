@@ -1,7 +1,9 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
 /// Default outer timeout for per-tool dispatch in the chat loop.
 /// Defense-in-depth on top of op-specific inner timeouts (e.g. the 60s
@@ -791,7 +793,7 @@ async fn dispatch_tool_call(
         .await;
 
     let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
-    let started_at = Instant::now();
+    let started_at = SystemClockTrait::new().now_instant();
 
     // `output_view` / `output_grep` are served in-process against the
     // per-request stash — they never hit tool dispatch, and their

@@ -34,9 +34,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -282,7 +283,7 @@ impl SessionRuntime for TestRuntime {
             task_run_id,
             container_id: None,
             pod_ref: None,
-            started_at: SystemTime::now(),
+            started_at: SystemClockTrait::new().now(),
         })
     }
 
@@ -398,6 +399,7 @@ impl SessionRuntime for TestRuntime {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real monotonic time for timing assertions
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

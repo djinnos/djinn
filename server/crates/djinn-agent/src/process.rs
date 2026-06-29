@@ -198,6 +198,8 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 }
 
 #[cfg(all(test, unix))]
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // tests use real time for timeout/duration assertions
 mod tests {
     use super::*;
 

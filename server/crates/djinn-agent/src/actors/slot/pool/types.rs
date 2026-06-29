@@ -150,6 +150,7 @@ pub enum PoolMessage {
     },
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(super) fn now_unix_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

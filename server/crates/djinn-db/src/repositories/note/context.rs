@@ -541,9 +541,9 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        use std::time::SystemTime;
+        use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
-        let now = SystemTime::now();
+        let now = SystemClockTrait::new().now();
         const HALF_LIFE_DAYS: f64 = 7.0;
         const HOTNESS_ALPHA: f64 = 0.2;
 
