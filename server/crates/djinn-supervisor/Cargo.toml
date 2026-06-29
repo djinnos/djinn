@@ -27,6 +27,14 @@ uuid = { version = "1", features = ["v7"] }
 workspace-hack.workspace = true
 
 [lints.clippy]
+# Workspace lint baseline (manually replicated because this crate also carries
+# crate-specific deny lints; Cargo forbids mixing `lints.workspace = true` with
+# per-crate overrides — see server/Cargo.toml [workspace.lints.clippy]).
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+disallowed_methods = "deny"
+# Crate-specific reliability lints (sibling epic a3qw).
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

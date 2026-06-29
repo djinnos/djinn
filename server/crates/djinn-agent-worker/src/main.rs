@@ -1,5 +1,3 @@
-#![allow(clippy::disallowed_methods)]
-// TODO(70y0): temporary; remove after wall-clock migration
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 //! `djinn-agent-worker` — the binary the `KubernetesRuntime` launches inside
 //! each per-task-run Pod.
@@ -695,6 +693,7 @@ fn resolve_cargo_workspace_dir(
 ///
 /// Best-effort throughout: a missing cargo workspace (non-Rust repo) or any
 /// compile failure logs and returns — it never fails the graph warm.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn warm_cargo_target_base(
     project_id: &str,
     project_root: &Path,
@@ -2054,6 +2053,9 @@ impl CachedGraphArtifactCache
     }
 }
 
+// CLI binary subcommand: println is the correct output channel for reporting
+// comparison results to the operator.
+#[allow(clippy::print_stdout)]
 async fn run_compare_graph_artifacts(
     project_id: &str,
     old_commit: &str,
