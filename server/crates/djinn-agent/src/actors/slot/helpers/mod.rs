@@ -60,7 +60,7 @@ const REVIEWER_DIFF_IMPACT_DEPTH: usize = 3;
 
 mod code_context;
 mod feedback;
-mod provider_resolution;
+pub mod provider_resolution;
 mod reviewer_diff;
 
 // Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose: the lock

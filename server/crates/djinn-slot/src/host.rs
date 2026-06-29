@@ -106,9 +106,9 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<String, ErrorResponse>> + Send + 'a>>;
 
     /// Resolve a provider credential from the host's credential store
-    /// (including OAuth refresh when applicable).  Returns the credential
-    /// as a serializable JSON blob; the slot crate uses
-    /// [`ProviderCredential`] to carry it.
+    /// (including OAuth refresh when applicable). Serialization for worker
+    /// dispatch is host-only and remains outside `djinn-slot`; this callback
+    /// returns a live [`ProviderCredential`] for slot-side provider construction.
     fn resolve_provider_credential<'a>(
         &'a self,
         provider_id: &'a str,
