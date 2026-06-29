@@ -56,7 +56,7 @@ jobs:
             server:
               # Boundary checker rule-only, checker-only, and workflow-only
               # edits must select the server gate: server/boundary_rules.toml,
-              # server/ci/**, and this workflow are all covered below.
+              # scripts/check_boundaries.py, and this workflow are all covered.
               - '.djinn/skills.json'
               - '.claude/skills/**'
               - '.opencode/skills/**'
@@ -65,7 +65,7 @@ jobs:
               - 'server/Cargo.lock'
               - 'server/deny.toml'
               - 'server/boundary_rules.toml'
-              - 'server/ci/**'
+              - 'scripts/check_boundaries.py'
               - 'server/rust-toolchain.toml'
               - 'server/.cargo/**'
               - 'server/.config/**'
@@ -381,6 +381,24 @@ jobs:
                || '' }}
         run: ./scripts/check-raw-sql-boundary.sh
 
+  # Pure-script PR-time guard: architectural layering boundaries.
+  # Enforces the forbidden-edge rules in `server/boundary_rules.toml`
+  # against the workspace's declared crate dependencies + a source scan
+  # for file-level rules. Reads manifests and greps source only — no DB,
+  # no SCIP graph warm, no workspace compile — so it runs in seconds and
+  # needs no Postgres or build step. Wired into the Quality Gate below as
+  # a hard blocker.
+  server-boundaries:
+    name: Server Architectural Boundaries
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check architectural boundaries
+        run: python3 scripts/check_boundaries.py
+
   # ╔══════════════════════════════════════════════════════════════════╗
   # ║  Server Tests (merge queue only)                                 ║
   # ║                                                                  ║
@@ -623,6 +641,7 @@ jobs:
       - server-size-guard
       - server-migrations-guard
       - server-raw-sql-boundary
+      - server-boundaries
       - server-test
       - server-sqlx-cache
       - ui-frontend
@@ -635,6 +654,7 @@ jobs:
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
             "${{ needs.server-raw-sql-boundary.result }}"
+            "${{ needs.server-boundaries.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
             "${{ needs.ui-frontend.result }}"

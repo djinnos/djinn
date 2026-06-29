@@ -45,10 +45,11 @@ ignore = [
     "RUSTSEC-2026-0183",
     # gix: undefined behavior with Signature from buffer
     "RUSTSEC-2026-0184",
-    # rmcp < 1.4.0 Streamable HTTP server transport does not validate Host.
-    # The affected server transport is already only bound behind trusted host
-    # routing in this workspace; keep CI green until the broader rmcp 1.x
-    # migration can absorb upstream API changes across the control-plane tools.
+    # rmcp: DNS rebinding in Streamable HTTP server transport (missing Host
+    # header validation). Patched in rmcp >= 1.4.0; we are on 0.16.0 and the
+    # upgrade is a breaking major-version migration tracked separately. djinn's
+    # MCP server runs ingress-fronted + OAuth-authenticated, not as a loopback
+    # server, which is the primary DNS-rebinding target. Remove this on upgrade.
     "RUSTSEC-2026-0189",
 ]
 
