@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge;
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_git::{GitActorHandle, GitError};
 use djinn_lsp::LspManager;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
@@ -146,7 +147,8 @@ impl CoordinatorContext {
     /// Register a task as active and return the shared timestamp atomic.
     /// The atomic is initialized to the current unix timestamp.
     pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
-        let now = SystemTime::now()
+        let now = SystemClock::new()
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -165,7 +167,8 @@ impl CoordinatorContext {
 
     /// Record a stall-check timestamp for a task (overwrites the existing entry).
     pub fn record_heartbeat(&self, task_id: &str) {
-        let now = SystemTime::now()
+        let now = SystemClock::new()
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);

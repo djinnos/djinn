@@ -52,7 +52,17 @@ pub const DOCTOR_FINDING_ACTIVITY: &str = "doctor_finding";
 /// indistinguishable from one inserted by an MCP caller (check name, severity,
 /// entity ids, evidence, resolver snapshot, detail all preserved).
 pub fn finding_to_new_row(finding: &Finding, run_id: Option<&str>) -> NewDoctorFinding {
-    let entity_ids = serde_json::to_value(&finding.entity_ids).unwrap_or_else(|_| json!([]));
+    let entity_ids = match serde_json::to_value(&finding.entity_ids) {
+        Ok(value) => value,
+        Err(e) => {
+            warn!(
+                check_name = %finding.check_name,
+                error = %e,
+                "doctor leader tick: failed to serialize finding entity ids; storing empty array"
+            );
+            json!([])
+        }
+    };
     let resolver_snapshot = serde_json::to_value(&finding.resolver_snapshot).ok();
 
     NewDoctorFinding {
