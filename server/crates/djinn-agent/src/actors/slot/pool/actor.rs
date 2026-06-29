@@ -41,6 +41,8 @@ pub(super) struct SlotPool {
 }
 
 impl SlotPool {
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
     pub(super) fn new(
         receiver: mpsc::Receiver<PoolMessage>,
         app_state: AgentContext,

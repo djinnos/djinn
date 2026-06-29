@@ -158,3 +158,64 @@ pub(super) fn now_unix_string() -> String {
         .unwrap_or(0);
     secs.to_string()
 }
+
+impl From<djinn_slot::PoolError> for PoolError {
+    fn from(err: djinn_slot::PoolError) -> Self {
+        match err {
+            djinn_slot::PoolError::ActorDead => Self::ActorDead,
+            djinn_slot::PoolError::NoResponse => Self::NoResponse,
+            djinn_slot::PoolError::SessionAlreadyActive { task_id } => {
+                Self::SessionAlreadyActive { task_id }
+            }
+            djinn_slot::PoolError::TaskNotFound { task_id } => Self::TaskNotFound { task_id },
+            djinn_slot::PoolError::AtCapacity { model_id } => Self::AtCapacity { model_id },
+            djinn_slot::PoolError::SlotNotFound { slot_id } => Self::SlotNotFound { slot_id },
+            djinn_slot::PoolError::Slot(err) => Self::Slot(err),
+        }
+    }
+}
+
+impl From<djinn_slot::ModelPoolStatus> for ModelPoolStatus {
+    fn from(status: djinn_slot::ModelPoolStatus) -> Self {
+        Self {
+            active: status.active,
+            free: status.free,
+            total: status.total,
+        }
+    }
+}
+
+impl From<djinn_slot::RunningTaskInfo> for RunningTaskInfo {
+    fn from(info: djinn_slot::RunningTaskInfo) -> Self {
+        Self {
+            task_id: info.task_id,
+            model_id: info.model_id,
+            slot_id: info.slot_id,
+            duration_seconds: info.duration_seconds,
+            idle_seconds: info.idle_seconds,
+            activity_tracked: info.activity_tracked,
+            project_id: info.project_id,
+            token_count: info.token_count,
+            turn_count: info.turn_count,
+        }
+    }
+}
+
+impl From<djinn_slot::PoolStatus> for PoolStatus {
+    fn from(status: djinn_slot::PoolStatus) -> Self {
+        Self {
+            active_slots: status.active_slots,
+            total_slots: status.total_slots,
+            per_model: status
+                .per_model
+                .into_iter()
+                .map(|(model_id, model_status)| (model_id, model_status.into()))
+                .collect(),
+            running_tasks: status
+                .running_tasks
+                .into_iter()
+                .map(RunningTaskInfo::from)
+                .collect(),
+        }
+    }
+}

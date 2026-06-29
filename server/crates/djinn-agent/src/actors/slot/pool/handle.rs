@@ -5,14 +5,22 @@ use crate::context::AgentContext;
 use djinn_orchestration_types::coordinator::DebugSlot;
 
 use super::super::SlotPoolConfig;
+#[cfg(any(test, feature = "test-support"))]
 use super::actor::SlotPool;
 #[cfg(any(test, feature = "test-support"))]
 use super::types::SlotFactory;
 use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
 
 #[derive(Clone)]
+enum SlotPoolInner {
+    Canonical(djinn_slot::SlotPoolHandle),
+    #[cfg(any(test, feature = "test-support"))]
+    Legacy(mpsc::Sender<PoolMessage>),
+}
+
+#[derive(Clone)]
 pub struct SlotPoolHandle {
-    sender: mpsc::Sender<PoolMessage>,
+    inner: SlotPoolInner,
 }
 
 impl SlotPoolHandle {
@@ -21,9 +29,22 @@ impl SlotPoolHandle {
         cancel: CancellationToken,
         config: SlotPoolConfig,
     ) -> Self {
-        let (sender, receiver) = mpsc::channel(64);
-        tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
-        Self { sender }
+        let slot_context = super::super::host_callbacks::agent_to_dispatch_slot_context(&app_state);
+        Self {
+            inner: SlotPoolInner::Canonical(djinn_slot::SlotPoolHandle::spawn(
+                slot_context,
+                cancel,
+                config,
+            )),
+        }
+    }
+
+    pub(crate) fn into_djinn_slot(self) -> Option<djinn_slot::SlotPoolHandle> {
+        match self.inner {
+            SlotPoolInner::Canonical(handle) => Some(handle),
+            #[cfg(any(test, feature = "test-support"))]
+            SlotPoolInner::Legacy(_) => None,
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -37,16 +58,21 @@ impl SlotPoolHandle {
         tokio::spawn(
             SlotPool::new_with_factory(receiver, app_state, cancel, config, slot_factory).run(),
         );
-        Self { sender }
+        Self {
+            inner: SlotPoolInner::Legacy(sender),
+        }
     }
 
     async fn request<T>(&self, f: impl FnOnce(Reply<T>) -> PoolMessage) -> Result<T, PoolError> {
         let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(f(tx))
-            .await
-            .map_err(|_| PoolError::ActorDead)?;
-        rx.await.map_err(|_| PoolError::NoResponse)?
+        match &self.inner {
+            SlotPoolInner::Canonical(_) => Err(PoolError::ActorDead),
+            #[cfg(any(test, feature = "test-support"))]
+            SlotPoolInner::Legacy(sender) => {
+                sender.send(f(tx)).await.map_err(|_| PoolError::ActorDead)?;
+                rx.await.map_err(|_| PoolError::NoResponse)?
+            }
+        }
     }
 
     pub async fn dispatch(
@@ -55,6 +81,12 @@ impl SlotPoolHandle {
         project_path: &str,
         model_id: &str,
     ) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle
+                .dispatch(task_id, project_path, model_id)
+                .await
+                .map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::Dispatch {
             task_id: task_id.to_owned(),
             project_path: project_path.to_owned(),
@@ -65,6 +97,9 @@ impl SlotPoolHandle {
     }
 
     pub async fn has_session(&self, task_id: &str) -> Result<bool, PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.has_session(task_id).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::HasSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -73,6 +108,9 @@ impl SlotPoolHandle {
     }
 
     pub async fn kill_session(&self, task_id: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.kill_session(task_id).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::KillSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -88,6 +126,12 @@ impl SlotPoolHandle {
     /// [`PoolError::TaskNotFound`] rather than treated as an idempotent leak
     /// cleanup no-op.
     pub async fn terminate_session(&self, task_id: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle
+                .terminate_session(task_id)
+                .await
+                .map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::TerminateSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -101,6 +145,9 @@ impl SlotPoolHandle {
     /// reclaims the in-memory task mapping so the task can redispatch while the
     /// slot itself rejoins rotation only after a later lifecycle event.
     pub async fn evict_session(&self, task_id: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.evict_session(task_id).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::EvictSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -109,6 +156,9 @@ impl SlotPoolHandle {
     }
 
     pub async fn pause_session(&self, task_id: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.pause_session(task_id).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::PauseSession {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -117,11 +167,21 @@ impl SlotPoolHandle {
     }
 
     pub async fn get_status(&self) -> Result<PoolStatus, PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle
+                .get_status()
+                .await
+                .map(PoolStatus::from)
+                .map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::GetStatus { respond_to: tx })
             .await
     }
 
     pub async fn snapshot(&self) -> Result<Vec<DebugSlot>, PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.snapshot().await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::Snapshot { respond_to: tx })
             .await
     }
@@ -130,6 +190,13 @@ impl SlotPoolHandle {
         &self,
         task_id: &str,
     ) -> Result<Option<RunningTaskInfo>, PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle
+                .session_for_task(task_id)
+                .await
+                .map(|info| info.map(RunningTaskInfo::from))
+                .map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::GetSessionForTask {
             task_id: task_id.to_owned(),
             respond_to: tx,
@@ -138,6 +205,9 @@ impl SlotPoolHandle {
     }
 
     pub async fn reconfigure(&self, config: SlotPoolConfig) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.reconfigure(config).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::Reconfigure {
             config,
             respond_to: tx,
@@ -146,6 +216,9 @@ impl SlotPoolHandle {
     }
 
     pub async fn interrupt_all(&self, reason: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle.interrupt_all(reason).await.map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::InterruptAll {
             reason: reason.to_owned(),
             respond_to: tx,
@@ -154,6 +227,12 @@ impl SlotPoolHandle {
     }
 
     pub async fn interrupt_project(&self, project_id: &str, reason: &str) -> Result<(), PoolError> {
+        if let SlotPoolInner::Canonical(handle) = &self.inner {
+            return handle
+                .interrupt_project(project_id, reason)
+                .await
+                .map_err(PoolError::from);
+        }
         self.request(|tx| PoolMessage::InterruptProject {
             project_id: project_id.to_owned(),
             reason: reason.to_owned(),
@@ -167,14 +246,21 @@ impl SlotPoolHandle {
     /// session without a real worker bridging `touch_activity`.
     #[cfg(test)]
     pub async fn test_set_token_override(&self, task_id: &str, token_count: u64, turn_count: u64) {
-        // Fire-and-forget — no reply channel.
-        let _ = self
-            .sender
-            .send(PoolMessage::TestSetTokenOverride {
-                task_id: task_id.to_owned(),
-                token_count,
-                turn_count,
-            })
-            .await;
+        match &self.inner {
+            SlotPoolInner::Canonical(handle) => {
+                handle
+                    .test_set_token_override(task_id, token_count, turn_count)
+                    .await;
+            }
+            SlotPoolInner::Legacy(sender) => {
+                let _ = sender
+                    .send(PoolMessage::TestSetTokenOverride {
+                        task_id: task_id.to_owned(),
+                        token_count,
+                        turn_count,
+                    })
+                    .await;
+            }
+        }
     }
 }
