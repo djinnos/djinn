@@ -2388,4 +2388,760 @@ mod tests {
         assert_eq!(edge.source_entity_type, "note");
         assert_eq!(edge.target_entity_type, "note");
     }
+
+    // ── process_batch_edges characterization tests ──────────────────────
+
+    /// Helper: build an `LlmEdge` between two note ids with the given kind
+    /// and optional evidence quote. Defaults to `source_entity_type = "note"`,
+    /// `target_entity_type = "note"`.
+    fn make_llm_edge(
+        source: &str,
+        target: &str,
+        kind: &str,
+        evidence: Option<&str>,
+    ) -> LlmEdge {
+        LlmEdge {
+            source_note_id: source.to_string(),
+            target_note_id: target.to_string(),
+            kind: kind.to_string(),
+            confidence: 0.7,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "note".to_string(),
+            evidence_quote: evidence.map(|s| s.to_string()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_edge_cap_limits_accepted_edges_to_max() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content A"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content B"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let proposal_ids = HashSet::new();
+
+        // 55 valid candidate edges — more than MAX_EDGES_PER_BATCH (50).
+        let kinds = ["builds_on", "contradicts", "supersedes", "exemplifies"];
+        let llm_edges: Vec<LlmEdge> = (0..55)
+            .map(|i| make_llm_edge(&n1.id, &n2.id, kinds[i % kinds.len()], None))
+            .collect();
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.edges.len(),
+            MAX_EDGES_PER_BATCH,
+            "should accept exactly MAX_EDGES_PER_BATCH edges; got {}",
+            report.edges.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skipped_edges_do_not_count_toward_cap() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content A"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content B"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let proposal_ids = HashSet::new();
+
+        let mut llm_edges = Vec::new();
+
+        // 30 edges with unknown source entity type — should be dropped
+        // without incrementing the counter.
+        for _ in 0..30 {
+            llm_edges.push(LlmEdge {
+                source_note_id: n1.id.clone(),
+                target_note_id: n2.id.clone(),
+                kind: "builds_on".to_string(),
+                confidence: 0.7,
+                source_entity_type: "unknown_type".to_string(),
+                target_entity_type: "note".to_string(),
+                evidence_quote: None,
+            });
+        }
+
+        // 50 valid edges — all should be accepted (exactly the cap).
+        for _ in 0..50 {
+            llm_edges.push(make_llm_edge(&n1.id, &n2.id, "builds_on", None));
+        }
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.edges.len(),
+            MAX_EDGES_PER_BATCH,
+            "skipped edges should not count toward cap; got {} accepted",
+            report.edges.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unknown_source_entity_type_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: n2.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.7,
+            source_entity_type: "wiki".to_string(), // unrecognized
+            target_entity_type: "note".to_string(),
+            evidence_quote: None,
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unknown source entity type should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unknown_target_entity_type_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: n2.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.7,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "unknown_type".to_string(), // unrecognized
+            evidence_quote: None,
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unknown target entity type should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unknown_note_source_endpoint_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        // n1 NOT in batch_ids → source is unknown.
+        let batch_ids = vec![n2.id.clone()];
+        let llm_edges = vec![make_llm_edge(&n1.id, &n2.id, "builds_on", None)];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unknown note source should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unknown_note_target_endpoint_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        // n2 NOT in batch_ids → target is unknown.
+        let batch_ids = vec![n1.id.clone()];
+        let llm_edges = vec![make_llm_edge(&n1.id, &n2.id, "builds_on", None)];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unknown note target should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unrecognized_kind_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let llm_edges =
+            vec![make_llm_edge(&n1.id, &n2.id, "related_to", None)];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unrecognized kind should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_involving_edge_without_evidence_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+
+        let batch_ids = vec![n1.id.clone()];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+
+        // note→proposal edge WITHOUT evidence_quote.
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: p1.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.8,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "proposal".to_string(),
+            evidence_quote: None, // missing!
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "proposal-involving edge without evidence should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_involving_edge_with_evidence_is_accepted() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+
+        let batch_ids = vec![n1.id.clone()];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+
+        // note→proposal edge WITH evidence_quote.
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: p1.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.8,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "proposal".to_string(),
+            evidence_quote: Some("evidence text".to_string()),
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.edges.len(),
+            1,
+            "proposal-involving edge with evidence should be accepted; got {:?}",
+            report.edges
+        );
+        let edge = &report.edges[0];
+        assert_eq!(edge.source_note_id, n1.id);
+        assert_eq!(edge.target_note_id, p1.id);
+        assert_eq!(edge.kind, "builds_on");
+        assert_eq!(edge.evidence_quote.as_deref(), Some("evidence text"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn note_note_wikilink_dup_is_counted_in_report() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Create two notes with a wikilink between them.
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Source",
+            &make_note_content("Source", "Links to [[Target]]."),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Target",
+            &make_note_content("Target", "content"),
+        )
+        .await;
+
+        // Re-index n1 to resolve the wikilink.
+        note_repo
+            .update(&n1.id, &n1.title, &n1.content, &n1.tags)
+            .await
+            .ok();
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+
+        // Edge between n1 and n2 duplicates the wikilink.
+        let llm_edges =
+            vec![make_llm_edge(&n1.id, &n2.id, "builds_on", None)];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "wikilink-duplicate note-note edge should be dropped"
+        );
+        assert_eq!(
+            report.edges_dropped_wikilink_dup, 1,
+            "should count the dropped wikilink dup"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wikilink_dup_check_does_not_apply_to_proposal_edges() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        // Create notes with a wikilink so wikilink_pairs is populated.
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "Links to [[Note B]]."),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+        let _n3 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note C",
+            &make_note_content("Note C", "filler"),
+        )
+        .await;
+
+        // Re-index n1 to resolve wikilink.
+        note_repo
+            .update(&n1.id, &n1.title, &n1.content, &n1.tags)
+            .await
+            .ok();
+
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+
+        // note→proposal edge with the same n1 that has a wikilink to n2.
+        // Wikilink dedup should NOT apply because involves_proposal is true.
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: p1.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.8,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "proposal".to_string(),
+            evidence_quote: Some("evidence".to_string()),
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.edges.len(),
+            1,
+            "proposal-involving edge should bypass wikilink dedup; got {:?}",
+            report.edges
+        );
+        assert_eq!(
+            report.edges_dropped_wikilink_dup, 0,
+            "no wikilink dup drop for proposal-involving edges"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn report_edge_records_source_target_kind_confidence_and_entity_types()
+    {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+        let llm_edges = vec![LlmEdge {
+            source_note_id: n1.id.clone(),
+            target_note_id: n2.id.clone(),
+            kind: "contradicts".to_string(),
+            confidence: 0.95,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "note".to_string(),
+            evidence_quote: Some("conflicting evidence".to_string()),
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.edges.len(), 1);
+        let edge = &report.edges[0];
+        assert_eq!(edge.source_note_id, n1.id);
+        assert_eq!(edge.target_note_id, n2.id);
+        assert_eq!(edge.kind, "contradicts");
+        assert!((edge.confidence - 0.95).abs() < 1e-9);
+        assert_eq!(edge.source_entity_type, "note");
+        assert_eq!(edge.target_entity_type, "note");
+        assert_eq!(
+            edge.evidence_quote.as_deref(),
+            Some("conflicting evidence")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_to_note_edge_is_persisted_as_entity_association() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let _n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content"),
+        )
+        .await;
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+
+        let batch_ids = vec![n1.id.clone()];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+
+        // proposal→note edge with evidence.
+        let llm_edges = vec![LlmEdge {
+            source_note_id: p1.id.clone(),
+            target_note_id: n1.id.clone(),
+            kind: "exemplifies".to_string(),
+            confidence: 0.75,
+            source_entity_type: "proposal".to_string(),
+            target_entity_type: "note".to_string(),
+            evidence_quote: Some("exemplifies the design".to_string()),
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.edges.len(), 1);
+        let edge = &report.edges[0];
+        assert_eq!(edge.source_note_id, p1.id);
+        assert_eq!(edge.target_note_id, n1.id);
+        assert_eq!(edge.kind, "exemplifies");
+        assert_eq!(edge.source_entity_type, "proposal");
+        assert_eq!(edge.target_entity_type, "note");
+
+        // Verify persistence through heterogeneous substrate.
+        let edges = note_repo
+            .list_typed_entity_associations_for(
+                MemoryEntityRef::proposal(&p1.id),
+                0.0,
+                10,
+            )
+            .await
+            .expect("list entity associations");
+        assert!(
+            edges.iter().any(|e| {
+                e.source == MemoryEntityRef::proposal(&p1.id)
+                    && e.target == MemoryEntityRef::note(&n1.id)
+                    && e.kind == MemoryEntityKind::Exemplifies
+            }),
+            "proposal→note edge should be persisted; got: {:?}",
+            edges
+        );
+    }
 }
