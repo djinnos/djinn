@@ -32,7 +32,13 @@ impl CoordinatorActor {
         );
 
         for task in tasks_with_pr {
-            let pr_url = task.pr_url.as_deref().unwrap();
+            let Some(pr_url) = task.pr_url.as_deref() else {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    "PR poller: pr_review task lost PR URL before checks; skipping"
+                );
+                continue;
+            };
             let Some((owner, repo, pull_number)) = parse_pr_url(pr_url) else {
                 tracing::warn!(
                     task_id = %task.short_id,
