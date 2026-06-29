@@ -571,6 +571,50 @@ fn judge_prompt_contains_adjudication_contract() {
     );
 }
 
+/// The Judge prompt must contain the DoR-blocking rule that prevents autonomous
+/// approval when deterministic Definition of Ready status is failing. This
+/// contract test fails if the rule is silently removed.
+#[test]
+fn judge_prompt_blocks_on_failing_dor_status() {
+    let task = make_task();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Judge, &task, &ctx);
+
+    // The prompt must call out the injected DoR status field.
+    assert!(
+        prompt.contains("Current DoR status"),
+        "judge prompt must reference the injected 'Current DoR status'"
+    );
+
+    // Any non-clean/non-pass status is treated as blocking.
+    assert!(
+        prompt.contains("anything other than the clean/pass message")
+            || prompt.contains("anything other than `Proposal currently meets all DoR checks.`"),
+        "judge prompt must treat any non-clean DoR status as blocking"
+    );
+
+    // Failing DoR requires blocking=true in the verdict.
+    assert!(
+        prompt.contains("blocking=true"),
+        "judge prompt must require blocking=true when DoR is failing"
+    );
+
+    // The verdict body must name the missing required coverage from the injected DoR status.
+    assert!(
+        prompt.contains("name the missing required coverage")
+            || prompt.contains("missing required coverage reported by the injected DoR status"),
+        "judge prompt must require the verdict body to name the missing required coverage from the DoR status"
+    );
+
+    // The Judge must not file an approve/ready verdict while DoR is failing.
+    assert!(
+        prompt.contains("must not file an approve/ready verdict")
+            || prompt.contains("do not file an approve/ready verdict")
+            || prompt.contains("You must not file an approve/ready verdict"),
+        "judge prompt must forbid approve/ready verdict while DoR is failing"
+    );
+}
+
 #[test]
 fn tribunal_roles_are_not_routed_through_reviewer() {
     // Verify tribunal roles have distinct config names, not aliases for "reviewer".

@@ -1427,6 +1427,47 @@ impl ProposalRepository {
         Ok(None)
     }
 
+    /// Return the latest human demand-round reviewer feedback for the proposal's
+    /// current head revision.
+    ///
+    /// Demand-round feedback is recorded on `refinement_start` lifecycle rows.
+    /// Because those rows carry `seq = proposals.latest_revision_seq`, this
+    /// helper deliberately filters to the current seq so feedback from a prior
+    /// proposal revision is not reused by a later tribunal round.
+    pub async fn latest_current_revision_reviewer_feedback(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let proposal = self
+            .get(proposal_id)
+            .await?
+            .ok_or_else(|| Error::InvalidData(format!("proposal not found: {proposal_id}")))?;
+
+        let rows = sqlx::query_scalar::<_, Option<String>>(
+            r#"SELECT event_metadata::text FROM proposal_revisions
+               WHERE proposal_id = $1
+                 AND seq = $2
+                 AND event_kind = 'refinement_start'
+                 AND event_metadata IS NOT NULL
+               ORDER BY created_at DESC, id DESC"#,
+        )
+        .bind(proposal_id)
+        .bind(proposal.latest_revision_seq)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        for meta_str in rows.into_iter().flatten() {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str)
+                && meta.get("source").and_then(|v| v.as_str()) == Some("human_demand_round")
+                && let Some(feedback) = meta.get("reviewer_feedback").and_then(|v| v.as_str())
+            {
+                return Ok(Some(feedback.to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Patch the `event_metadata` column on the latest `spec_revision` row for
     /// `proposal_id`.  Used by the refinement coordinator to retroactively
     /// attribute an advocate-authored revision after the agent session completes
@@ -4260,6 +4301,74 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reviewer_feedback_helper_ignores_stale_revision_feedback() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Reviewer Feedback")).await.unwrap();
+        let stale_feedback = "stale feedback from previous revision 019f0fed";
+        let current_feedback = "current feedback for latest revision 019f0fed";
+
+        repo.record_refinement_lifecycle(
+            &p.id,
+            "refinement_start",
+            Some(&serde_json::json!({
+                "source": "human_demand_round",
+                "reviewer_feedback": stale_feedback,
+                "reason": stale_feedback,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.latest_current_revision_reviewer_feedback(&p.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(stale_feedback)
+        );
+
+        repo.update(
+            &p.id,
+            ProposalUpdateInput {
+                title: &p.title,
+                body: "new body advances revision",
+                acceptance_criteria: &p.acceptance_criteria,
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.latest_current_revision_reviewer_feedback(&p.id)
+                .await
+                .unwrap(),
+            None,
+            "feedback from an older seq must not be considered current"
+        );
+
+        repo.record_refinement_lifecycle(
+            &p.id,
+            "refinement_start",
+            Some(&serde_json::json!({
+                "source": "human_demand_round",
+                "reviewer_feedback": current_feedback,
+                "reason": current_feedback,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.latest_current_revision_reviewer_feedback(&p.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(current_feedback)
         );
     }
 
