@@ -217,7 +217,13 @@ impl SlotPool {
         let duration_seconds = self
             .task_started
             .get(task_id)
-            .map(|ts| ts.elapsed().as_secs())
+            .map(|ts| {
+                self.ctx
+                    .clock
+                    .now_instant()
+                    .saturating_duration_since(*ts)
+                    .as_secs()
+            })
             .unwrap_or(0);
         // If activity tracker has no entry (reply loop not started yet),
         // the session has been idle since slot assignment.
@@ -309,7 +315,7 @@ impl SlotPool {
                         slot_id,
                         SlotState::Busy {
                             task_id: String::new(),
-                            started_at: now_unix_string(),
+                            started_at: now_unix_string(self.ctx.clock.as_ref()),
                             agent_type: "worker".to_string(),
                         },
                     );
@@ -329,7 +335,8 @@ impl SlotPool {
             }
 
             self.task_to_slot.insert(task_owned.clone(), slot_id);
-            self.task_started.insert(task_owned.clone(), Instant::now());
+            self.task_started
+                .insert(task_owned.clone(), self.ctx.clock.now_instant());
             self.task_projects.insert(task_owned.clone(), String::new());
             // Look up the project ID for project-scoped queries (e.g. interrupt_project)
             if let Some(project_id) = self.project_id_for_task(&task_owned).await {
@@ -339,7 +346,7 @@ impl SlotPool {
                 slot_id,
                 SlotState::Busy {
                     task_id: task_owned.clone(),
-                    started_at: now_unix_string(),
+                    started_at: now_unix_string(self.ctx.clock.as_ref()),
                     agent_type: String::new(),
                 },
             );
@@ -680,7 +687,12 @@ impl SlotPool {
             .filter_map(|(task_id, slot_id)| {
                 let model_id = self.slot_models.get(slot_id)?.clone();
                 let started = self.task_started.get(task_id)?;
-                let duration_seconds = started.elapsed().as_secs();
+                let duration_seconds = self
+                    .ctx
+                    .clock
+                    .now_instant()
+                    .saturating_duration_since(*started)
+                    .as_secs();
                 let tracked_idle = self.ctx.idle_seconds(task_id);
                 let idle_seconds = tracked_idle.unwrap_or(duration_seconds);
                 let project_id = self.task_projects.get(task_id).cloned();
@@ -925,7 +937,7 @@ impl SlotPool {
             slot_id,
             SlotState::Busy {
                 task_id: task_id.to_owned(),
-                started_at: now_unix_string(),
+                started_at: now_unix_string(self.ctx.clock.as_ref()),
                 agent_type: "worker".to_owned(),
             },
         );

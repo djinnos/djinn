@@ -165,6 +165,7 @@ pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::S
         coordinator_trigger: None,
         runtime_ops: agent.runtime_ops.clone(),
         repo_graph_ops: agent.repo_graph_ops.clone(),
+        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(ExtractionCallbacks),
     }
 }
