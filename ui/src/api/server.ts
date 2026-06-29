@@ -408,7 +408,7 @@ export async function fetchKanbanSnapshot(
 
   // Fetch first page of tasks + all epics in parallel
   const PAGE_SIZE = 200;
-  const [firstTaskPage, epicList] = await Promise.all([
+  const [firstTaskPage, firstEpicPage] = await Promise.all([
     callMcpTool("task_list", {
       project: resolvedProjectSlug,
       limit: PAGE_SIZE,
@@ -416,7 +416,7 @@ export async function fetchKanbanSnapshot(
     }),
     callMcpTool("epic_list", {
       project: resolvedProjectSlug,
-      limit: 500,
+      limit: PAGE_SIZE,
       offset: 0,
     }),
   ]);
@@ -438,6 +438,27 @@ export async function fetchKanbanSnapshot(
     }
   }
 
+  // Paginate remaining epics too. The server caps epic_list at ~200 per page
+  // (a higher requested limit is clamped), so without this loop the *newest*
+  // epics fall off the first page — and since the default sort is created-asc,
+  // those are the currently-active ones, whose tasks then render under
+  // "Unknown Epic" once the closed-epic count grows past one page.
+  const allEpics: Epic[] = [...((firstEpicPage.epics ?? []) as unknown as Epic[])];
+  if (firstEpicPage.has_more) {
+    let epicOffset = allEpics.length;
+
+    while (true) {
+      const page = await callMcpTool("epic_list", {
+        project: resolvedProjectSlug,
+        limit: PAGE_SIZE,
+        offset: epicOffset,
+      });
+      allEpics.push(...(page.epics as unknown as Epic[]));
+      if (!page.has_more) break;
+      epicOffset += (page.epics as unknown[]).length;
+    }
+  }
+
   // Stamp each task with the project it belongs to (needed for all-projects view)
   const projectId = projectStore
     .getState()
@@ -447,6 +468,6 @@ export async function fetchKanbanSnapshot(
   return {
     projectSlug: resolvedProjectSlug,
     tasks,
-    epics: (epicList.epics ?? []) as unknown as Epic[],
+    epics: allEpics,
   };
 }

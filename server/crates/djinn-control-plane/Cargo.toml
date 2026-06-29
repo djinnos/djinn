@@ -16,7 +16,7 @@ djinn-provider = { path = "../djinn-provider" }
 djinn-stack = { path = "../djinn-stack" }
 async-trait = "0.1"
 dirs = "6"
-rmcp = { version = "0.16", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "1", features = ["server", "transport-streamable-http-server"] }
 http = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

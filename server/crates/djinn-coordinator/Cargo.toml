@@ -54,5 +54,15 @@ tempfile = "3"
 insta = { version = "1", features = ["json"] }
 djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 
-[lints]
-workspace = true
+[lints.clippy]
+# Workspace lint baseline (manually replicated because this crate also carries
+# crate-specific deny lints; Cargo forbids mixing `lints.workspace = true` with
+# per-crate overrides — see server/Cargo.toml [workspace.lints.clippy]).
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+disallowed_methods = "deny"
+# Crate-specific reliability lints (sibling epic mzdj).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

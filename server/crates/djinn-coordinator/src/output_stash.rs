@@ -934,7 +934,7 @@ pub fn render_tool_result(
         let stash_text = extract_stash_content(tool_name, value).unwrap_or_else(|| text.clone());
         stash
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(tool_use_id.to_string(), tool_name.to_string(), stash_text);
         let full_bytes = text.len();
         text = crate::truncate::smart_truncate(&text, MAX_TOOL_RESULT_CHARS);
@@ -961,7 +961,9 @@ pub fn handle_stash_tool(
     name: &str,
     args: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, String> {
-    let guard = stash.lock().unwrap();
+    let guard = stash
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tid = args
         .and_then(|m| m.get("tool_use_id"))
         .and_then(|v| v.as_str())

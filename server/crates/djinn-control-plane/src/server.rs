@@ -21,9 +21,7 @@ use rmcp::{
         common::server_side_http::{ServerSseMessage, session_id},
         streamable_http_server::{
             SessionId, SessionManager, StreamableHttpServerConfig, StreamableHttpService,
-            session::local::{
-                LocalSessionManager, LocalSessionManagerError, SessionConfig, create_local_session,
-            },
+            session::local::{LocalSessionManager, LocalSessionManagerError, create_local_session},
         },
     },
 };
@@ -155,14 +153,14 @@ impl DjinnMcpServer {
         let result = if let Some(project_id) = parse_graph_schema_project_id(&uri) {
             let text = serde_json::to_string_pretty(&graph_schema_payload(project_id))
                 .expect("graph schema payload must serialize");
-            Some(ReadResourceResult {
-                contents: vec![ResourceContents::TextResourceContents {
+            Some(ReadResourceResult::new(vec![
+                ResourceContents::TextResourceContents {
                     uri,
                     mime_type: Some(GRAPH_SCHEMA_RESOURCE_MIME_TYPE.to_string()),
                     text,
                     meta: None,
-                }],
-            })
+                },
+            ]))
         } else {
             None
         };
@@ -231,9 +229,14 @@ impl DjinnMcpServer {
                 }
             },
             session_manager,
-            StreamableHttpServerConfig {
-                cancellation_token: cancel.child_token(),
-                ..Default::default()
+            {
+                // StreamableHttpServerConfig is #[non_exhaustive] in rmcp 1.x.
+                // Build via Default + field assignment, and set the Host-header
+                // allowlist (DNS-rebinding guard, RUSTSEC-2026-0189).
+                let mut config = StreamableHttpServerConfig::default();
+                config.cancellation_token = cancel.child_token();
+                config.allowed_hosts = mcp_allowed_hosts();
+                config
             },
         )
     }
@@ -432,10 +435,9 @@ pub struct SessionEndHookSessionManager {
 impl SessionEndHookSessionManager {
     pub fn new(state: McpState) -> Self {
         Self {
-            local: LocalSessionManager {
-                sessions: Default::default(),
-                session_config: SessionConfig::default(),
-            },
+            // `LocalSessionManager` is #[non_exhaustive] in rmcp 1.x; its
+            // Default already gives empty sessions + default SessionConfig.
+            local: LocalSessionManager::default(),
             state: Some(state),
             session_servers: RwLock::new(HashMap::new()),
             staged_server: RwLock::new(None),
@@ -544,22 +546,82 @@ impl SessionManager for SessionEndHookSessionManager {
     }
 }
 
+/// Compute the `Host`-header allowlist for the Streamable HTTP MCP server.
+///
+/// rmcp 1.x validates the inbound `Host` header to defend against DNS-rebinding
+/// attacks (RUSTSEC-2026-0189); an empty list disables the check (rmcp 0.16
+/// behaviour). We keep loopback allowed — local dev is the real DNS-rebinding
+/// target — and add the public ingress host derived from `DJINN_PUBLIC_URL`
+/// (djinn's OAuth issuer base). Operators may override with
+/// `DJINN_MCP_ALLOWED_HOSTS` (comma-separated authorities); set it to `*` to
+/// disable Host validation entirely.
+fn mcp_allowed_hosts() -> Vec<String> {
+    mcp_allowed_hosts_from(
+        std::env::var("DJINN_MCP_ALLOWED_HOSTS").ok().as_deref(),
+        std::env::var("DJINN_PUBLIC_URL").ok().as_deref(),
+    )
+}
+
+fn mcp_allowed_hosts_from(override_var: Option<&str>, public_url: Option<&str>) -> Vec<String> {
+    if let Some(raw) = override_var {
+        let raw = raw.trim();
+        if raw == "*" {
+            return Vec::new(); // empty list => rmcp allows any Host
+        }
+        let hosts: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if !hosts.is_empty() {
+            return hosts;
+        }
+    }
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    // No port => rmcp matches this host on any port.
+    if let Some(host) = public_url.and_then(public_url_host)
+        && !hosts.contains(&host)
+    {
+        hosts.push(host);
+    }
+    hosts
+}
+
+/// Extract the bare host (no scheme, userinfo, port, or path) from a URL.
+fn public_url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        // IPv6 literal, e.g. [::1]:8372
+        rest.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    }
+    .trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for DjinnMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .build(),
-            server_info: Implementation {
-                name: "djinn-server".to_string(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                ..Default::default()
-            },
-            instructions: None,
-        }
+        // ServerInfo (= InitializeResult) and Implementation are
+        // #[non_exhaustive] in rmcp 1.x, so build via constructors + field
+        // assignment rather than struct literals.
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        let mut info = ServerInfo::new(capabilities);
+        info.protocol_version = ProtocolVersion::LATEST;
+        info.server_info = Implementation::new("djinn-server", env!("CARGO_PKG_VERSION"));
+        info.instructions = None;
+        info
     }
 
     fn list_resources(
@@ -584,5 +646,68 @@ impl ServerHandler for DjinnMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
         std::future::ready(self.read_resource_uri(request.uri))
+    }
+}
+
+#[cfg(test)]
+mod host_allowlist_tests {
+    use super::{mcp_allowed_hosts_from, public_url_host};
+
+    #[test]
+    fn public_url_host_strips_scheme_port_path() {
+        assert_eq!(
+            public_url_host("https://code.djinnai.io"),
+            Some("code.djinnai.io".into())
+        );
+        assert_eq!(
+            public_url_host("https://code.djinnai.io:443/mcp"),
+            Some("code.djinnai.io".into())
+        );
+        assert_eq!(
+            public_url_host("http://user@host.example:8372/x"),
+            Some("host.example".into())
+        );
+        assert_eq!(public_url_host("http://[::1]:8372/mcp"), Some("::1".into()));
+        assert_eq!(public_url_host("127.0.0.1:3000"), Some("127.0.0.1".into()));
+        assert_eq!(public_url_host(""), None);
+    }
+
+    #[test]
+    fn default_allows_loopback_only_when_no_public_url() {
+        let hosts = mcp_allowed_hosts_from(None, None);
+        assert_eq!(hosts, vec!["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn public_url_host_is_added_to_loopback() {
+        let hosts = mcp_allowed_hosts_from(None, Some("https://code.djinnai.io/mcp"));
+        assert!(hosts.contains(&"code.djinnai.io".to_string()));
+        assert!(hosts.contains(&"localhost".to_string()));
+    }
+
+    #[test]
+    fn loopback_public_url_is_not_duplicated() {
+        let hosts = mcp_allowed_hosts_from(None, Some("http://127.0.0.1:8372"));
+        assert_eq!(hosts.iter().filter(|h| *h == "127.0.0.1").count(), 1);
+    }
+
+    #[test]
+    fn override_takes_precedence_and_splits_csv() {
+        let hosts = mcp_allowed_hosts_from(
+            Some("a.example, b.example:8080"),
+            Some("https://ignored.example"),
+        );
+        assert_eq!(hosts, vec!["a.example", "b.example:8080"]);
+    }
+
+    #[test]
+    fn star_override_disables_validation() {
+        assert!(mcp_allowed_hosts_from(Some("*"), Some("https://x.example")).is_empty());
+    }
+
+    #[test]
+    fn blank_override_falls_back_to_defaults() {
+        let hosts = mcp_allowed_hosts_from(Some("   "), None);
+        assert_eq!(hosts, vec!["localhost", "127.0.0.1", "::1"]);
     }
 }
