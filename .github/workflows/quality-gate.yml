@@ -581,6 +581,9 @@ jobs:
       - name: Generated MCP types are up to date
         run: pnpm mcp:types:check
 
+      - name: Generated usage analytics types are up to date
+        run: pnpm usage:types:check
+
       - name: Type check
         run: pnpm tsc --noEmit
 

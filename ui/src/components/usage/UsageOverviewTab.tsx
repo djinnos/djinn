@@ -266,18 +266,21 @@ function SplitKpiRow({ data }: { data: UsageAnalyticsResponse }) {
         label="Actual API spend"
         value={hasSplitFields ? formatCurrency(totalActual) : EM_DASH}
         caption="Real API-key spend from billed sessions"
+        testId="usage-split-kpi-actual-spend"
       />
       {/* Projected subscription-equivalent cost */}
       <SimpleKpiCard
         label="Projected subscription-equivalent cost"
         value={hasSplitFields ? formatCurrency(totalProjected) : EM_DASH}
         caption="List-price equivalent for flat-rate plan usage"
+        testId="usage-split-kpi-projected-cost"
       />
       {/* Unpriced sessions */}
       <SimpleKpiCard
         label="Unpriced sessions"
         value={unpricedTotal > 0 ? formatInteger(unpricedTotal) : "0"}
         caption="Excluded from both cost figures"
+        testId="usage-split-kpi-unpriced-sessions"
       />
       {/* Tokens (re-use existing tokens KPI or compute) */}
       {tokensKpi ? (
@@ -293,13 +296,18 @@ function SimpleKpiCard({
   label,
   value,
   caption,
+  testId,
 }: {
   label: string;
   value: string;
   caption?: string;
+  testId?: string;
 }) {
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-card p-4">
+    <div
+      className="min-w-0 rounded-lg border border-border bg-card p-4"
+      data-testid={testId}
+    >
       <p className="truncate text-xs text-muted-foreground">{label}</p>
       <p className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-foreground">
         {value}
