@@ -1,14 +1,11 @@
 //! Bridge coverage for registry-converted operations.
 //!
-//! The `RepoGraphOps` trait impl in `mod.rs` forwards every trait method,
-//! so any missing forwarding is a compile error.  The tests below verify
-//! the stronger contract: every `bridge_method` referenced by the
-//! operation registry has a corresponding forwarding stub in the
-//! `RepoGraphBridge` adapter (not just a trait default).
-//!
-//! When a new operation is registered in `operation_registry.rs`, both
-//! its `RepoGraphOps::method` and its `RepoGraphBridge::method` must
-//! exist.  The tests catch forward additions that forgot either side.
+//! The full operation registry records bridge method identities for every
+//! supported `code_graph` operation, while runtime dispatch is still only
+//! registry-routed for the vxmw vertical slice.  These tests verify the
+//! stronger forwarding-stub contract for the methods that are actually
+//! converted today; follow-up migration tasks can extend the converted set
+//! as they route more operations through the registry.
 
 /// Expected `RepoGraphOps` trait methods that are forwarded by the
 /// `RepoGraphBridge` adapter for every converted registry entry.
@@ -25,14 +22,12 @@ fn converted_registry_ops_have_bridge_forwardings() {
         CODE_GRAPH_REGISTRY, KNOWN_BRIDGE_METHODS,
     };
 
-    // Every registered bridge_method must be in EXPECTED_BRIDGE_FORWARDINGS.
-    for entry in CODE_GRAPH_REGISTRY {
+    // Every registry-routed bridge_method must be forwarded by RepoGraphBridge.
+    for method in KNOWN_BRIDGE_METHODS {
         assert!(
-            EXPECTED_BRIDGE_FORWARDINGS.contains(&entry.bridge_method),
-            "registry entry '{}' has bridge_method '{}' not in EXPECTED_BRIDGE_FORWARDINGS — \
+            EXPECTED_BRIDGE_FORWARDINGS.contains(method),
+            "registry-routed bridge_method '{method}' is not in EXPECTED_BRIDGE_FORWARDINGS — \
              add a forwarding stub in RepoGraphBridge",
-            entry.name,
-            entry.bridge_method,
         );
     }
 

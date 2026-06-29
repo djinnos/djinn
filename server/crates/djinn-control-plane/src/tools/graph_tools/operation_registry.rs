@@ -31,6 +31,10 @@
 //!   test task generate param sets from the registry instead of
 //!   hand-writing each fixture.
 
+mod catalog;
+
+pub use catalog::CODE_GRAPH_REGISTRY;
+
 use std::fmt;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -71,6 +75,36 @@ pub enum ValidationCategory {
     KeyWithConfidence,
     /// `require_key` only; no extra param validators.
     KeyOnly,
+    /// `require_query` + validate_kind_filter.
+    QueryWithKindFilter,
+    /// `require_query` + validate_flow_kind_filter.
+    QueryWithFlowKind,
+    /// `require_from_to` only.
+    DualKey,
+    /// `require_globs` only.
+    Globs,
+    /// `require_route_selector` only.
+    RouteSelector,
+    /// `require_route_selector` + validate_min_confidence_value.
+    RouteSelectorWithConfidence,
+    /// `validate_kind_filter` + `validate_visibility`.
+    KindFilterAndVisibility,
+    /// `validate_kind_filter` + `validate_sort_by`.
+    KindFilterAndSortBy,
+    /// `validate_kind_filter` only.
+    KindFilterOnly,
+    /// `file` + `start_line` required (symbols_at).
+    FileWithLines,
+    /// `changed_ranges` required (diff_touches).
+    ChangedRanges,
+    /// `rules` required (boundary_check).
+    Rules,
+    /// `impact_targets` required (impact_check).
+    ImpactTargets,
+    /// `seed_entries` + `seed_sinks` + `symbols` required (touches_hot_path).
+    HotPathSeeds,
+    /// `file` required (coupling).
+    FileOnly,
     /// No operation-specific validation beyond the generic
     /// normalization applied by `CodeGraphParams::normalize()`.
     None,
@@ -82,6 +116,21 @@ impl fmt::Display for ValidationCategory {
             Self::KeyWithEdgeFilters => f.write_str("key_with_edge_filters"),
             Self::KeyWithConfidence => f.write_str("key_with_confidence"),
             Self::KeyOnly => f.write_str("key_only"),
+            Self::QueryWithKindFilter => f.write_str("query_with_kind_filter"),
+            Self::QueryWithFlowKind => f.write_str("query_with_flow_kind"),
+            Self::DualKey => f.write_str("dual_key"),
+            Self::Globs => f.write_str("globs"),
+            Self::RouteSelector => f.write_str("route_selector"),
+            Self::RouteSelectorWithConfidence => f.write_str("route_selector_with_confidence"),
+            Self::KindFilterAndVisibility => f.write_str("kind_filter_and_visibility"),
+            Self::KindFilterAndSortBy => f.write_str("kind_filter_and_sort_by"),
+            Self::KindFilterOnly => f.write_str("kind_filter_only"),
+            Self::FileWithLines => f.write_str("file_with_lines"),
+            Self::ChangedRanges => f.write_str("changed_ranges"),
+            Self::Rules => f.write_str("rules"),
+            Self::ImpactTargets => f.write_str("impact_targets"),
+            Self::HotPathSeeds => f.write_str("hot_path_seeds"),
+            Self::FileOnly => f.write_str("file_only"),
             Self::None => f.write_str("none"),
         }
     }
@@ -151,7 +200,7 @@ pub struct OpEntry {
     /// Canonical operation string that appears on the wire
     /// (`params.operation`).
     pub name: &'static str,
-    /// Accepted aliases.  Empty for the current vertical slice.
+    /// Accepted aliases.  Empty when no aliases are defined.
     pub aliases: &'static [&'static str],
     /// Pre-resolve classification.
     pub pre_resolve: PreResolveCategory,
@@ -169,123 +218,6 @@ pub struct OpEntry {
     /// Smoke-test exemplar data.
     pub smoke: SmokeExemplar,
 }
-
-// ── Registry ─────────────────────────────────────────────────────────────────
-
-/// The canonical `code_graph` operation registry.
-///
-/// Each entry maps one wire-level operation name to its dispatch
-/// metadata.  The current vertical slice covers four operations;
-/// follow-up tasks will extend this slice to cover the full set.
-///
-/// **Lookup helpers** — [`lookup_by_name`] performs a linear scan
-/// (the table is small; a `HashMap` would cost more in `lazy_static`
-/// machinery than it saves in lookup time).
-pub const CODE_GRAPH_REGISTRY: &[OpEntry] = &[
-    // ── neighbors ────────────────────────────────────────────────────
-    //
-    // Handler  : code_graph_neighbors  (handler_basic_ops.rs)
-    // Bridge   : RepoGraphOps::neighbors
-    // Pre-res  : single_key — `params.key` resolved via `RepoGraphOps::resolve`
-    // Validation: require_key + validate_direction + validate_group_by
-    //            + validate_edge_kind_filter (reads/writes)
-    // Workspace: ignored — neighbors are not workspace-scoped
-    OpEntry {
-        name: "neighbors",
-        aliases: &[],
-        pre_resolve: PreResolveCategory::SingleKey,
-        validation: ValidationCategory::KeyWithEdgeFilters,
-        handler_fn: "code_graph_neighbors",
-        bridge_method: "neighbors",
-        workspace: WorkspaceBehavior::Ignored,
-        smoke: SmokeExemplar {
-            operation: "neighbors",
-            key: Some("MyStruct"),
-            query: None,
-            file: None,
-            from: None,
-            to: None,
-            note: "basic neighbor lookup for a struct symbol",
-        },
-    },
-    // ── impact ───────────────────────────────────────────────────────
-    //
-    // Handler  : code_graph_impact  (handler_basic_ops.rs)
-    // Bridge   : RepoGraphOps::impact
-    // Pre-res  : single_key — `params.key` resolved via `RepoGraphOps::resolve`
-    // Validation: require_key + validate_group_by + min_confidence range
-    // Workspace: traversal_seed_only — workspace scopes only seed
-    //            resolution; the BFS walk is unconstrained (pb94)
-    OpEntry {
-        name: "impact",
-        aliases: &[],
-        pre_resolve: PreResolveCategory::SingleKey,
-        validation: ValidationCategory::KeyWithConfidence,
-        handler_fn: "code_graph_impact",
-        bridge_method: "impact",
-        workspace: WorkspaceBehavior::TraversalSeedOnly,
-        smoke: SmokeExemplar {
-            operation: "impact",
-            key: Some("MyStruct"),
-            query: None,
-            file: None,
-            from: None,
-            to: None,
-            note: "blast-radius BFS from a struct symbol",
-        },
-    },
-    // ── context ──────────────────────────────────────────────────────
-    //
-    // Handler  : code_graph_context  (handler_basic_ops.rs)
-    // Bridge   : RepoGraphOps::context
-    // Pre-res  : single_key — `params.key` resolved via `RepoGraphOps::resolve`
-    // Validation: require_key only
-    // Workspace: ignored
-    OpEntry {
-        name: "context",
-        aliases: &[],
-        pre_resolve: PreResolveCategory::SingleKey,
-        validation: ValidationCategory::KeyOnly,
-        handler_fn: "code_graph_context",
-        bridge_method: "context",
-        workspace: WorkspaceBehavior::Ignored,
-        smoke: SmokeExemplar {
-            operation: "context",
-            key: Some("MyStruct"),
-            query: None,
-            file: None,
-            from: None,
-            to: None,
-            note: "360\u{b0} view of a symbol's incoming/outgoing edges",
-        },
-    },
-    // ── coupling_hotspots ────────────────────────────────────────────
-    //
-    // Handler  : code_graph_coupling_hotspots  (handler_coupling_ops.rs)
-    // Bridge   : RepoGraphOps::coupling_hotspots
-    // Pre-res  : none — no caller-supplied node key; the op scans
-    //            the coupling index project-wide
-    // Validation: none beyond CodeGraphParams::normalize()
-    // Workspace: ignored — coupling_hotspots is project-global
-    OpEntry {
-        name: "coupling_hotspots",
-        aliases: &[],
-        pre_resolve: PreResolveCategory::None,
-        validation: ValidationCategory::None,
-        handler_fn: "code_graph_coupling_hotspots",
-        bridge_method: "coupling_hotspots",
-        workspace: WorkspaceBehavior::Ignored,
-        smoke: SmokeExemplar {
-            operation: "coupling_hotspots",
-            key: None,
-            query: None,
-            file: None,
-            from: None,
-            to: None,
-            note: "top file pairs by co-edit frequency",
-        },
-    },
-];
 
 // ── Lookup helpers ───────────────────────────────────────────────────────────
 
@@ -309,17 +241,16 @@ pub fn registered_names() -> Vec<&'static str> {
 
 // ── Bridge coverage ──────────────────────────────────────────────────────────
 
-/// Known `RepoGraphOps` trait method names that correspond to converted
-/// registry entries.  The bridge coverage tests and the compile-time
-/// `const _` guard below verify that every registered `bridge_method`
-/// appears here and vice-versa.
+/// `RepoGraphOps` trait method names whose runtime dispatch has been
+/// converted to registry-derived routing.
 ///
-/// This is the canonical mapping between registry metadata and the
-/// `RepoGraphOps` trait surface in
-/// `server/crates/djinn-control-plane/src/bridge/graph_bridge.rs`.
-/// When a new operation is registered, its `bridge_method` **must**
-/// appear here and have a corresponding `async fn` on `RepoGraphOps`
-/// plus a forwarding stub on `RepoGraphBridge` in the server crate.
+/// The full catalog registry records bridge method identities for every
+/// `code_graph` operation, but this task deliberately leaves runtime
+/// dispatch unchanged.  Keep this list scoped to the vxmw vertical slice
+/// so bridge-forwarding and dispatch-smoke tests only require the methods
+/// that are actually registry-routed today.  Follow-up migration tasks can
+/// extend this list as they move additional operations onto registry-owned
+/// dispatch.
 pub const KNOWN_BRIDGE_METHODS: &[&str] = &["neighbors", "impact", "context", "coupling_hotspots"];
 
 /// Byte-equality helper usable in `const`-context.
@@ -370,13 +301,78 @@ const _: () = {
 mod tests {
     use super::*;
 
+    /// Full catalog of operations supported by the `code_graph` tool.
+    /// This is the source of truth for the registry coverage test.
+    const FULL_CATALOG: &[&str] = &[
+        "neighbors",
+        "impact",
+        "context",
+        "coupling_hotspots",
+        "workspaces",
+        "ranked",
+        "implementations",
+        "search",
+        "query_subgraph",
+        "route_map",
+        "shape_check",
+        "api_impact",
+        "flow",
+        "cycles",
+        "orphans",
+        "path",
+        "edges",
+        "symbols_at",
+        "diff_touches",
+        "detect_changes",
+        "describe",
+        "status",
+        "snapshot",
+        "api_surface",
+        "boundary_check",
+        "hotspots",
+        "complexity",
+        "refactor_candidates",
+        "metrics_at",
+        "dead_symbols",
+        "deprecated_callers",
+        "touches_hot_path",
+        "coupling",
+        "churn",
+        "coupling_hubs",
+        "crate_graph",
+        "impact_check",
+    ];
+
     #[test]
-    fn registry_contains_vertical_slice_ops() {
+    fn registry_contains_full_catalog() {
         let names = registered_names();
-        for expected in &["neighbors", "impact", "context", "coupling_hotspots"] {
+        for expected in FULL_CATALOG {
             assert!(
                 names.contains(expected),
                 "registry missing expected operation '{expected}'"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_has_no_extra_ops() {
+        let names = registered_names();
+        assert_eq!(
+            names.len(),
+            FULL_CATALOG.len(),
+            "registry has {} entries but full catalog has {}. \
+             Extra: {:?}",
+            names.len(),
+            FULL_CATALOG.len(),
+            names
+                .iter()
+                .filter(|n| !FULL_CATALOG.contains(n))
+                .collect::<Vec<_>>(),
+        );
+        for name in &names {
+            assert!(
+                FULL_CATALOG.contains(name),
+                "registry has unexpected extra operation '{name}'"
             );
         }
     }
@@ -440,7 +436,13 @@ mod tests {
     fn pre_resolve_matches_handler_dispatch() {
         // Operations that appear in `single_key_ops` in handler.rs
         // must be `SingleKey` here.
-        for name in &["neighbors", "impact", "context"] {
+        for name in &[
+            "neighbors",
+            "impact",
+            "context",
+            "implementations",
+            "describe",
+        ] {
             let entry = lookup_by_name(name).unwrap();
             assert_eq!(
                 entry.pre_resolve,
@@ -448,26 +450,12 @@ mod tests {
                 "{name}: expected SingleKey pre-resolve"
             );
         }
-        // coupling_hotspots is NOT in single_key_ops
+        // path is DualKey
+        let path = lookup_by_name("path").unwrap();
+        assert_eq!(path.pre_resolve, PreResolveCategory::DualKey);
+        // coupling_hotspots and most others are NOT in single_key_ops
         let ch = lookup_by_name("coupling_hotspots").unwrap();
         assert_eq!(ch.pre_resolve, PreResolveCategory::None);
-    }
-
-    /// Every converted registry entry's `bridge_method` must appear
-    /// in `KNOWN_BRIDGE_METHODS`.  This is the dynamic counterpart
-    /// of the compile-time `const _` guard — it catches forward
-    /// additions to the registry that forgot to extend the
-    /// known-methods list.
-    #[test]
-    fn all_registered_bridge_methods_are_known() {
-        for entry in CODE_GRAPH_REGISTRY {
-            assert!(
-                KNOWN_BRIDGE_METHODS.contains(&entry.bridge_method),
-                "registry entry '{}' has bridge_method '{}' not in KNOWN_BRIDGE_METHODS",
-                entry.name,
-                entry.bridge_method,
-            );
-        }
     }
 
     /// Every `KNOWN_BRIDGE_METHODS` entry is referenced by at least
@@ -482,6 +470,30 @@ mod tests {
             assert!(
                 registry_methods.contains(method),
                 "KNOWN_BRIDGE_METHODS has '{method}' not referenced by any registry entry",
+            );
+        }
+    }
+
+    /// Every operation in the full catalog has a non-empty handler_fn.
+    #[test]
+    fn all_entries_have_handler_fn() {
+        for entry in CODE_GRAPH_REGISTRY {
+            assert!(
+                !entry.handler_fn.is_empty(),
+                "registry entry '{}' has empty handler_fn",
+                entry.name,
+            );
+        }
+    }
+
+    /// Every operation in the full catalog has a non-empty bridge_method.
+    #[test]
+    fn all_entries_have_bridge_method() {
+        for entry in CODE_GRAPH_REGISTRY {
+            assert!(
+                !entry.bridge_method.is_empty(),
+                "registry entry '{}' has empty bridge_method",
+                entry.name,
             );
         }
     }
