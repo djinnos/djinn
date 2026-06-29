@@ -221,6 +221,12 @@ impl DjinnMcpServer {
             format!("unknown code_graph operation '{op}': expected one of {names}")
         })?;
 
+        // Validation routing is registry-derived: the entry's
+        // ValidationCategory determines which validators run.  This
+        // mirrors the inline validation each handler performs so the
+        // routing decision comes from the single source of truth.
+        validation::run_validation_checks(entry.validation, params)?;
+
         // Dispatch on the registry entry's canonical name.  Every
         // entry in CODE_GRAPH_REGISTRY has a handler arm here.  Adding
         // a new operation requires one registry entry plus the handler

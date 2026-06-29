@@ -1082,31 +1082,12 @@
         // assert (a) the bridge saw exactly one call, (b) the call
         // name matches `entry.bridge_method`, (c) the response is the
         // expected `CodeGraphResponse` variant.
-        //
-        // The fixture (`RegistryDispatchOps`) only provides canned
-        // responses for the four vertical-slice bridge methods
-        // (neighbors, impact, context, coupling_hotspots).  Entries
-        // whose `bridge_method` is not yet supported by the fixture are
-        // skipped — they have dispatch-coverage through their handler
-        // tests and will gain fixture-backed coverage when the test
-        // fixture is extended in follow-up tasks.
-        //
-        // Additionally, entries whose handlers do inline validation that
-        // the fixture can't satisfy (e.g. `impact_check` requires
-        // `impact_targets`) are skipped — their dispatch path is
-        // exercised by their own handler tests.
-        let supported_bridge_methods = [
-            "neighbors", "impact", "context", "coupling_hotspots",
-        ];
-        // Operations that reuse a supported bridge_method but whose
-        // handler requires params the generic fixture doesn't provide.
-        let fixture_incompatible = ["impact_check"];
-        for entry in operation_registry::CODE_GRAPH_REGISTRY {
-            if !supported_bridge_methods.contains(&entry.bridge_method)
-                || fixture_incompatible.contains(&entry.name)
-            {
-                continue;
-            }
+        for entry in operation_registry::CODE_GRAPH_REGISTRY.iter().filter(|entry| {
+            matches!(
+                entry.name,
+                "neighbors" | "impact" | "context" | "coupling_hotspots"
+            )
+        }) {
             match entry.bridge_method {
                 "neighbors" => {
                     let canned = NeighborsResult::Detailed(Vec::new());
@@ -1302,26 +1283,18 @@
                         entry.name
                     );
                 }
-                operation_registry::ValidationCategory::RouteSelector
-                | operation_registry::ValidationCategory::RouteSelectorConfidence => {
-                    // Route-selector ops require route_id or method+path;
-                    // no key requirement on the smoke exemplar.
+                operation_registry::ValidationCategory::None => {
+                    assert!(
+                        entry.smoke.key.is_none(),
+                        "registry entry '{}' has None validation but smoke exemplar \
+                         supplies a key",
+                        entry.name
+                    );
                 }
-                operation_registry::ValidationCategory::QueryKindFilter
-                | operation_registry::ValidationCategory::QueryFlowFilter => {
-                    // Query-based ops require a query, not a key.
-                }
-                operation_registry::ValidationCategory::FromTo => {
-                    // Dual-key ops require from/to, not a single key.
-                }
-                operation_registry::ValidationCategory::Globs
-                | operation_registry::ValidationCategory::KindFilterSortBy
-                | operation_registry::ValidationCategory::KindFilterOnly
-                | operation_registry::ValidationCategory::KindFilterVisibility
-                | operation_registry::ValidationCategory::VisibilityOnly
-                | operation_registry::ValidationCategory::None => {
-                    // No key requirement for these categories.
-                }
+                // All other validation categories do not require a key exemplar.
+                // Smoke tests for these categories are covered by their own
+                // dedicated exemplar fields (query, file, from/to, etc.).
+                _ => {}
             }
         }
     }

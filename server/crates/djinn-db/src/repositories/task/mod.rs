@@ -603,6 +603,137 @@ mod tests {
             "task becomes ready again once its conflict-blocker is closed"
         );
     }
+
+    /// Regression: a task blocked by an open `review`-type hold (the
+    /// human-review-hold shape observed in pdn6) must be excluded from ALL
+    /// dispatch-readiness paths — `list_ready`, `claim`, and
+    /// `list_by_status_filtered(…, true)` — until the hold is closed.
+    ///
+    /// The blocker predicate must treat every unresolved blocker equally,
+    /// regardless of `issue_type`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn review_human_hold_blocks_source_from_all_dispatch_paths() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        // Source task — a normal work item.
+        let source = make_task(&repo, &epic_id, "task", None).await;
+
+        // Human-review hold task: issue_type=review, owner=system,
+        // label=human-review-hold (matches the auto-park shape from pdn6).
+        let hold = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic_id),
+                "Human review hold",
+                "",
+                "",
+                "review",
+                0,
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        // Stamp the label via raw update so the hold carries the exact
+        // human-review-hold marker the auto-park mechanism uses.
+        sqlx::query(
+            "UPDATE tasks SET labels = $1::jsonb WHERE id = $2",
+        )
+        .bind(r#"["human-review-hold"]"#)
+        .bind(&hold.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        // ── Pre-condition: source is ready before the blocker is wired ──
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == source.id),
+            "source is ready before the review hold blocker is added"
+        );
+
+        // Wire the blocker edge: source is blocked by the hold task.
+        repo.add_blocker(&source.id, &hold.id).await.unwrap();
+
+        // ── list_ready must exclude the blocked source ──
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "list_ready must exclude source while review hold is open"
+        );
+
+        // ── claim must not be able to claim the blocked source ──
+        let claimed = repo
+            .claim(
+                ReadyQuery {
+                    project_id: Some(project.id.clone()),
+                    limit: 50,
+                    ..Default::default()
+                },
+                "coordinator",
+                "system",
+            )
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_none() || claimed.as_ref().unwrap().id != source.id,
+            "claim must not return the blocked source while review hold is open"
+        );
+
+        // ── list_by_status_filtered("open", true) dispatch path ──
+        let filtered = repo
+            .list_by_status_filtered("open", true)
+            .await
+            .unwrap();
+        assert!(
+            !filtered.iter().any(|t| t.id == source.id),
+            "list_by_status_filtered(open, true) must exclude source while review hold is open"
+        );
+
+        // ── Closing the hold releases the source back to readiness ──
+        repo.set_status(&hold.id, "closed").await.unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == source.id),
+            "source must be ready again after the review hold is closed"
+        );
+
+        let filtered = repo
+            .list_by_status_filtered("open", true)
+            .await
+            .unwrap();
+        assert!(
+            filtered.iter().any(|t| t.id == source.id),
+            "list_by_status_filtered(open, true) must include source after review hold is closed"
+        );
+    }
 }
 
 pub struct CreateTaskParams<'a> {
