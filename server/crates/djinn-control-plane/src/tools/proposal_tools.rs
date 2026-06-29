@@ -951,18 +951,21 @@ async fn build_gate_status(
     let proposal_id = &proposal.id;
     let mut blocked_explanations: Vec<String> = Vec::new();
 
-    // Add DoR failures to explanations
-    if !dor_ready {
+    // 2a. Human authority checks. Current human gate authority (either an
+    // explicit verdict override or a human-accepted refinement stop on the
+    // latest revision) suppresses deterministic DoR false-positive blocks for
+    // proposal_show, while only an explicit current verdict override suppresses
+    // judge verdict blocking semantics below.
+    let human_authority_is_current = current_human_gate_authority(repo, proposal).await;
+    let override_is_current = current_explicit_verdict_override(repo, proposal).await;
+
+    // Add DoR failures to explanations only when they are actually blocking.
+    // Keep `dor_failures` populated either way so clients can show diagnostics.
+    if !dor_ready && !human_authority_is_current {
         for f in &dor_failures {
             blocked_explanations.push(f.message.clone());
         }
     }
-
-    // 2a. Human override check
-    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
-        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
-        _ => false,
-    };
 
     // 2b. Unresolved blocking debate entries
     let (unresolved_blocking_ids, unresolved_count) = match repo
@@ -1069,7 +1072,7 @@ async fn build_gate_status(
         unresolved_blocking_count: unresolved_count,
         unresolved_blocking_ids,
         needs_evidence,
-        human_override_active: override_is_current,
+        human_override_active: human_authority_is_current,
         blocked_explanations,
     }
 }
@@ -5456,6 +5459,30 @@ What happens if D fails?
         proposal
     }
 
+    async fn show_gate_status(
+        server: &DjinnMcpServer,
+        user_id: &str,
+        proposal_id: &str,
+    ) -> serde_json::Value {
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.to_string()), async {
+                server
+                    .dispatch_tool("proposal_show", serde_json::json!({ "id": proposal_id }))
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            response.get("error").is_none(),
+            "proposal_show should succeed: {:?}",
+            response.get("error")
+        );
+        response
+            .get("gate_status")
+            .cloned()
+            .expect("proposal_show must include gate_status")
+    }
+
     /// Create a complete, ready proposal in draft with a target.
     async fn create_ready_proposal(
         repo: &ProposalRepository,
@@ -5791,6 +5818,152 @@ What happens if D fails?
             "error should keep deterministic DoR details: {error}"
         );
         assert!(repo.signoffs(&proposal.id).await.unwrap().is_empty());
+    }
+
+    /// `proposal_show` keeps DoR diagnostics visible under a current human
+    /// override but does not report those diagnostics as blocking explanations.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gate_status_dor_only_current_override_is_ready_with_diagnostics() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Show DoR Override Ready",
+            incomplete_body(),
+        )
+        .await;
+
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "Human reviewer accepted deterministic DoR risk",
+            "override_by_user_id": user_id
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        let gate = show_gate_status(&server, &user_id, &proposal.id).await;
+        assert_eq!(gate.get("ready").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(gate.get("dor_ready").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            gate.get("human_override_active").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(
+            gate.get("dor_failures")
+                .and_then(|v| v.as_array())
+                .is_some_and(|failures| !failures.is_empty()),
+            "DoR diagnostics should remain visible: {gate:?}"
+        );
+        assert!(
+            gate.get("blocked_explanations")
+                .and_then(|v| v.as_array())
+                .is_some_and(|explanations| explanations.is_empty()),
+            "overridden DoR-only failures should not be blocking explanations: {gate:?}"
+        );
+    }
+
+    /// Without current authority, `proposal_show` preserves the historical
+    /// DoR-only blocking status and explanations.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gate_status_dor_only_without_override_blocks_with_explanation() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Show DoR No Override",
+            incomplete_body(),
+        )
+        .await;
+
+        let gate = show_gate_status(&server, &user_id, &proposal.id).await;
+        assert_eq!(gate.get("ready").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(gate.get("dor_ready").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            gate.get("human_override_active").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let explanations = gate
+            .get("blocked_explanations")
+            .and_then(|v| v.as_array())
+            .expect("blocked_explanations must be present");
+        assert!(
+            explanations.iter().any(|v| v
+                .as_str()
+                .is_some_and(|s| s.contains("Missing required coverage: problem"))),
+            "DoR block should remain a blocking explanation without override: {gate:?}"
+        );
+    }
+
+    /// DoR authority is revision-scoped in `proposal_show`; advancing the
+    /// proposal revision makes the previous authority stale.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gate_status_stale_dor_override_after_revision_advance_blocks() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "Show DoR Override Stale",
+            incomplete_body(),
+        )
+        .await;
+
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "Accepted original incomplete draft"
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        let updated = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.update(
+                    &proposal.id,
+                    djinn_db::ProposalUpdateInput {
+                        title: &proposal.title,
+                        body: "Different incomplete text after a material edit.",
+                        acceptance_criteria: &proposal.acceptance_criteria,
+                        status: &proposal.status,
+                        superseded_by: proposal.superseded_by.as_deref(),
+                        body_format: Some(&proposal.body_format),
+                        event_metadata: None,
+                    },
+                )
+                .await
+            })
+            .await
+            .unwrap();
+        assert!(updated.latest_revision_seq > proposal.latest_revision_seq);
+
+        let gate = show_gate_status(&server, &user_id, &updated.id).await;
+        assert_eq!(gate.get("ready").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(
+            gate.get("human_override_active").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        let explanations = gate
+            .get("blocked_explanations")
+            .and_then(|v| v.as_array())
+            .expect("blocked_explanations must be present");
+        assert!(
+            explanations.iter().any(|v| v
+                .as_str()
+                .is_some_and(|s| s.contains("Missing required coverage: problem"))),
+            "stale authority should not suppress DoR blocking explanations: {gate:?}"
+        );
     }
 
     /// A current explicit human override excludes deterministic DoR failures
