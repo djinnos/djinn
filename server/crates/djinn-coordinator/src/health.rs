@@ -960,11 +960,27 @@ async fn sweep_cargo_health_under(warm_base_root: &Path) {
 /// values from a Prometheus text exposition. Returns `(project_id, hit_count,
 /// cold_count)` tuples aggregated per project.
 fn parse_seed_metrics_from_text(rendered: &str) -> Vec<(String, u64, u64)> {
-    let hit_re =
-        Regex::new(r#"djinn_cargo_seed_hit_total\{([^}]*)\}\s+(\d+)"#).expect("valid regex");
-    let cold_re =
-        Regex::new(r#"djinn_cargo_seed_cold_total\{([^}]*)\}\s+(\d+)"#).expect("valid regex");
-    let project_re = Regex::new(r#"project_id="([^"]+)""#).expect("valid regex");
+    let hit_re = match Regex::new(r#"djinn_cargo_seed_hit_total\{([^}]*)\}\s+(\d+)"#) {
+        Ok(re) => re,
+        Err(e) => {
+            tracing::warn!(error = %e, "cargo cache health: invalid seed-hit regex");
+            return Vec::new();
+        }
+    };
+    let cold_re = match Regex::new(r#"djinn_cargo_seed_cold_total\{([^}]*)\}\s+(\d+)"#) {
+        Ok(re) => re,
+        Err(e) => {
+            tracing::warn!(error = %e, "cargo cache health: invalid cold-fallback regex");
+            return Vec::new();
+        }
+    };
+    let project_re = match Regex::new(r#"project_id="([^"]+)""#) {
+        Ok(re) => re,
+        Err(e) => {
+            tracing::warn!(error = %e, "cargo cache health: invalid project-label regex");
+            return Vec::new();
+        }
+    };
 
     let mut hits: HashMap<String, u64> = HashMap::new();
     let mut colds: HashMap<String, u64> = HashMap::new();
@@ -1178,12 +1194,12 @@ async fn sweep_orphaned_cargo_target_run_dirs(db: &djinn_db::Database, root: Opt
     // Production wiring sets `cargo_target_runs_root` explicitly (the server pod
     // mounts the shared cache PVC at `$DJINN_HOME/cache`, NOT the Job-pod
     // `/cache` path the [`CARGO_TARGET_RUNS_ROOT`] constant names). The
-    // `unwrap_or_else` fallback only fires in tests/contexts that don't set it.
-    sweep_orphaned_cargo_target_run_dirs_under(
-        db,
-        root.unwrap_or_else(|| Path::new(CARGO_TARGET_RUNS_ROOT)),
-    )
-    .await;
+    // fallback only fires in tests/contexts that don't set it.
+    let root = match root {
+        Some(root) => root,
+        None => Path::new(CARGO_TARGET_RUNS_ROOT),
+    };
+    sweep_orphaned_cargo_target_run_dirs_under(db, root).await;
 }
 
 pub(super) async fn sweep_orphaned_cargo_target_run_dirs_under(

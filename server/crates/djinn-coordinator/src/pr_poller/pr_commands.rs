@@ -222,9 +222,10 @@ impl CoordinatorActor {
         dequeue: Option<&djinn_provider::github_api::DequeueEvent>,
         source: &str,
     ) {
-        let reason = dequeue
-            .and_then(|d| d.reason.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+        let reason = match dequeue.and_then(|d| d.reason.clone()) {
+            Some(reason) => reason,
+            None => "unknown".to_string(),
+        };
         let created_at = dequeue.and_then(|d| d.created_at.clone());
 
         tracing::warn!(
@@ -384,10 +385,19 @@ impl CoordinatorActor {
         // returned, an in-flight entry short-circuits (skip), and an absent entry
         // is marked in-flight so a re-entrant tick (or the sibling draft/review
         // callsite) can't double-spawn.
-        let (decision, tracked) = {
-            let mut guard = self.auto_merge_tracker.lock().unwrap();
-            let decision = decide_auto_merge_tick(&mut guard, task_id);
-            (decision, guard.len())
+        let (decision, tracked) = match self.auto_merge_tracker.lock() {
+            Ok(mut guard) => {
+                let decision = decide_auto_merge_tick(&mut guard, task_id);
+                (decision, guard.len())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id,
+                    error = %e,
+                    "PR poller: auto-merge tracker lock poisoned; skipping fast path"
+                );
+                return AutoMergeFastPathState::Reopen;
+            }
         };
         record_auto_merge_decision_metrics(&decision, tracked);
         match decision {
@@ -398,7 +408,13 @@ impl CoordinatorActor {
         // Spawn the heavy merge off the actor tick. It records its terminal state
         // back into the tracker and clears the in-flight flag; the next tick
         // consumes it via the match above.
-        let mirror = self.mirror.clone().expect("mirror checked Some above");
+        let Some(mirror) = self.mirror.clone() else {
+            tracing::warn!(
+                task_id,
+                "PR poller: mirror disappeared before spawning auto-merge fast path"
+            );
+            return AutoMergeFastPathState::Reopen;
+        };
         let db = self.db.clone();
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let tracker = self.auto_merge_tracker.clone();
@@ -415,12 +431,18 @@ impl CoordinatorActor {
                 &project_id,
             )
             .await;
-            let tracked = {
-                let mut guard = tracker.lock().unwrap();
-                guard.insert(task_id, final_state);
-                guard.len()
-            };
-            djinn_telemetry::pr_poller::set_tracked(tracked);
+            match tracker.lock() {
+                Ok(mut guard) => {
+                    guard.insert(task_id, final_state);
+                    djinn_telemetry::pr_poller::set_tracked(guard.len());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "PR poller: auto-merge tracker lock poisoned; dropping fast-path result"
+                    );
+                }
+            }
         });
 
         AutoMergeFastPathState::InFlight

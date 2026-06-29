@@ -348,7 +348,10 @@ impl<C: PrCleanupGitHub> PrCleanupPolicy<C> {
     }
 
     fn now(&self) -> OffsetDateTime {
-        self.now_override.unwrap_or_else(OffsetDateTime::now_utc)
+        match self.now_override {
+            Some(now) => now,
+            None => OffsetDateTime::now_utc(),
+        }
     }
 }
 
