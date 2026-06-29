@@ -1,8 +1,10 @@
-//! Provider credential resolution for the slot crate.
+//! Provider resolution helpers for the slot crate.
 //!
 //! The pure provider-identification functions live here. Credential loading
 //! (which involves OAuth refresh and is host-specific) delegates to
 //! [`SlotHostCallbacks::resolve_provider_credential`].
+//! Host-only credential serialization (for worker Pod Secrets / runtime wire payloads) intentionally
+//! stays in `djinn-agent` behind that boundary.
 
 use crate::host::SlotContext;
 
@@ -107,128 +109,6 @@ impl ProviderCredential {
             cfg.model_id = model_id.to_string();
         }
         self
-    }
-
-    pub fn to_serializable(&self) -> djinn_runtime::SerializableCredential {
-        match self {
-            ProviderCredential::ApiKey(key_name, api_key) => {
-                djinn_runtime::SerializableCredential::ApiKey {
-                    key_name: key_name.clone(),
-                    api_key: api_key.clone(),
-                }
-            }
-            ProviderCredential::OAuthConfig(cfg) => {
-                let wire = OAuthConfigWire::from_provider_config(cfg);
-                let config_json = serde_json::to_string(&wire)
-                    .expect("OAuthConfigWire serialization cannot fail");
-                djinn_runtime::SerializableCredential::OAuthConfig { config_json }
-            }
-        }
-    }
-}
-
-// ─── Wire mirror types ──────────────────────────────────────────────────────
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct OAuthConfigWire {
-    pub base_url: String,
-    pub auth: OAuthAuthMethodWire,
-    pub format_family: OAuthFormatFamilyWire,
-    pub model_id: String,
-    pub context_window: u32,
-    pub session_affinity_key: Option<String>,
-    pub provider_headers: std::collections::HashMap<String, String>,
-    pub capabilities: OAuthCapabilitiesWire,
-    #[serde(default)]
-    pub reasoning_effort: Option<djinn_provider::provider::ReasoningEffort>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub enum OAuthAuthMethodWire {
-    BearerToken(String),
-    ApiKeyHeader { header: String, key: String },
-    NoAuth,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub enum OAuthFormatFamilyWire {
-    OpenAI,
-    OpenAIResponses,
-    Anthropic,
-    Google,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct OAuthCapabilitiesWire {
-    pub streaming: bool,
-    pub max_tokens_default: Option<u32>,
-}
-
-impl OAuthConfigWire {
-    pub fn from_provider_config(cfg: &djinn_provider::provider::ProviderConfig) -> Self {
-        use djinn_provider::provider::{AuthMethod, FormatFamily};
-        let auth = match &cfg.auth {
-            AuthMethod::BearerToken(t) => OAuthAuthMethodWire::BearerToken(t.clone()),
-            AuthMethod::ApiKeyHeader { header, key } => OAuthAuthMethodWire::ApiKeyHeader {
-                header: header.clone(),
-                key: key.clone(),
-            },
-            AuthMethod::NoAuth => OAuthAuthMethodWire::NoAuth,
-        };
-        let format_family = match cfg.format_family {
-            FormatFamily::OpenAI => OAuthFormatFamilyWire::OpenAI,
-            FormatFamily::OpenAIResponses => OAuthFormatFamilyWire::OpenAIResponses,
-            FormatFamily::Anthropic => OAuthFormatFamilyWire::Anthropic,
-            FormatFamily::Google => OAuthFormatFamilyWire::Google,
-        };
-        Self {
-            base_url: cfg.base_url.clone(),
-            auth,
-            format_family,
-            model_id: cfg.model_id.clone(),
-            context_window: cfg.context_window,
-            session_affinity_key: cfg.session_affinity_key.clone(),
-            provider_headers: cfg.provider_headers.clone(),
-            capabilities: OAuthCapabilitiesWire {
-                streaming: cfg.capabilities.streaming,
-                max_tokens_default: cfg.capabilities.max_tokens_default,
-            },
-            reasoning_effort: cfg.reasoning_effort,
-        }
-    }
-
-    pub fn to_provider_config(self) -> djinn_provider::provider::ProviderConfig {
-        use djinn_provider::provider::{
-            AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig,
-        };
-        let auth = match self.auth {
-            OAuthAuthMethodWire::BearerToken(t) => AuthMethod::BearerToken(t),
-            OAuthAuthMethodWire::ApiKeyHeader { header, key } => {
-                AuthMethod::ApiKeyHeader { header, key }
-            }
-            OAuthAuthMethodWire::NoAuth => AuthMethod::NoAuth,
-        };
-        let format_family = match self.format_family {
-            OAuthFormatFamilyWire::OpenAI => FormatFamily::OpenAI,
-            OAuthFormatFamilyWire::OpenAIResponses => FormatFamily::OpenAIResponses,
-            OAuthFormatFamilyWire::Anthropic => FormatFamily::Anthropic,
-            OAuthFormatFamilyWire::Google => FormatFamily::Google,
-        };
-        ProviderConfig {
-            base_url: self.base_url,
-            auth,
-            format_family,
-            model_id: self.model_id,
-            context_window: self.context_window,
-            telemetry: None,
-            session_affinity_key: self.session_affinity_key,
-            provider_headers: self.provider_headers,
-            capabilities: ProviderCapabilities {
-                streaming: self.capabilities.streaming,
-                max_tokens_default: self.capabilities.max_tokens_default,
-            },
-            reasoning_effort: self.reasoning_effort,
-        }
     }
 }
 
@@ -345,78 +225,4 @@ pub(crate) fn resolved_needs_base_url(
         resolved.provider_credential,
         Some(ProviderCredential::ApiKey(..))
     )
-}
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use djinn_provider::provider::{
-        AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort,
-    };
-
-    fn sample_oauth_config(
-        reasoning: Option<ReasoningEffort>,
-    ) -> djinn_provider::provider::ProviderConfig {
-        djinn_provider::provider::ProviderConfig {
-            base_url: "https://api.minimax.io/anthropic".to_string(),
-            auth: AuthMethod::BearerToken("test-token".to_string()),
-            format_family: FormatFamily::Anthropic,
-            model_id: "minimax-coding-plan/M-2".to_string(),
-            context_window: 200_000,
-            telemetry: None,
-            session_affinity_key: Some("session-123".to_string()),
-            provider_headers: std::collections::HashMap::from([(
-                "chatgpt-account-id".to_string(),
-                "acc-1".to_string(),
-            )]),
-            capabilities: ProviderCapabilities {
-                streaming: true,
-                max_tokens_default: Some(64_000),
-            },
-            reasoning_effort: reasoning,
-        }
-    }
-
-    #[test]
-    fn oauth_wire_round_trip_preserves_some_medium() {
-        let original = sample_oauth_config(Some(ReasoningEffort::Medium));
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-        assert_eq!(
-            reconstructed.reasoning_effort,
-            Some(ReasoningEffort::Medium)
-        );
-    }
-
-    #[test]
-    fn oauth_wire_round_trip_preserves_none() {
-        let original = sample_oauth_config(None);
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-        assert_eq!(reconstructed.reasoning_effort, None);
-    }
-
-    #[test]
-    fn oauth_wire_legacy_blob_without_field_deserializes_to_none() {
-        let legacy = r#"{
-            "base_url": "https://api.openai.com",
-            "auth": { "BearerToken": "tok" },
-            "format_family": "OpenAIResponses",
-            "model_id": "gpt-5.1-codex",
-            "context_window": 400000,
-            "session_affinity_key": null,
-            "provider_headers": {},
-            "capabilities": { "streaming": true, "max_tokens_default": null }
-        }"#;
-        let decoded: OAuthConfigWire =
-            serde_json::from_str(legacy).expect("legacy blob must still deserialize");
-        let reconstructed = decoded.to_provider_config();
-        assert_eq!(reconstructed.reasoning_effort, None);
-    }
 }
