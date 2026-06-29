@@ -25,10 +25,6 @@ workspace = true
 doctest = false
 
 [[bin]]
-name = "check-boundaries"
-path = "ci/check_boundaries.rs"
-
-[[bin]]
 name = "export-usage-schema"
 path = "src/bin/export_usage_schema.rs"
 
