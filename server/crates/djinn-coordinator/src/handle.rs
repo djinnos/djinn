@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
+use djinn_core::clock::{Clock, SystemClock};
 use tokio::sync::{
     mpsc::{self, error::TrySendError},
     watch,
@@ -356,7 +357,8 @@ impl CoordinatorTrigger for CoordinatorHandle {
 }
 
 fn should_log_try_trigger_dispatch_failure(last_log_secs: &AtomicU64) -> bool {
-    let now_secs = SystemTime::now()
+    let now_secs = SystemClock::new()
+        .now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     let last_secs = last_log_secs.load(Ordering::Relaxed);
