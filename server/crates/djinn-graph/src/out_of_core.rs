@@ -653,6 +653,7 @@ impl std::error::Error for OutOfCoreError {}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
 

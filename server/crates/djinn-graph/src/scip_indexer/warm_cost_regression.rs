@@ -1,3 +1,5 @@
+// Test module: eprintln used for regression harness diagnostics.
+#![allow(clippy::print_stderr)]
 //! Deterministic regression harness proving the versioned SCIP cache and
 //! partition plumbing make unchanged and one-partition-changed warm paths
 //! substantially cheaper than cold while preserving whole-graph semantics.

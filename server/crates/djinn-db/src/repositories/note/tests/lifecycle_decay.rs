@@ -1,3 +1,6 @@
+// Test-only: Instant::now is used for timing assertions; eprintln is used for
+// benchmark diagnostics in this test module.
+#![allow(clippy::disallowed_methods, clippy::print_stderr)]
 //! Tests for [`NoteRepository::decay_stale_extracted_notes`].
 //!
 //! Covers the acceptance-criteria matrix:

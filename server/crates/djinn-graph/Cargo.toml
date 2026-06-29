@@ -50,3 +50,6 @@ workspace-hack.workspace = true
 tokio = { version = "1", features = ["full", "test-util"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v7"] }
+
+[lints]
+workspace = true

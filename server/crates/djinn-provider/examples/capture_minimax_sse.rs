@@ -1,3 +1,5 @@
+// Example binary: legitimate CLI output for capturing SSE frames.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
 //! Capture raw MiniMax Anthropic-compatible streaming `data:` frames safely.
 //!
 //! Example:

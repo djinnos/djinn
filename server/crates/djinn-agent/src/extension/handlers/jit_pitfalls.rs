@@ -32,6 +32,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+
 use crate::context::AgentContext;
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
@@ -307,7 +309,7 @@ pub(super) async fn maybe_pitfall_hint(
         Some(project_id),
         touched_paths,
     );
-    let search_started = Instant::now();
+    let search_started = SystemClockTrait::new().now_instant();
 
     let notes = match note_repo
         .query_by_scope_overlap(
