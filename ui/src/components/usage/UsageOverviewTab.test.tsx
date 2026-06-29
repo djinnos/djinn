@@ -59,6 +59,24 @@ describe("UsageOverviewTab — split cost labels", () => {
     expect(screen.getByText("Unpriced sessions")).toBeInTheDocument();
   });
 
+  it("exposes stable data-testid selectors on the three split KPI cards", () => {
+    render(
+      <UsageOverviewTab
+        data={makeResponse({ kpis: [makeKpi()] })}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("usage-split-kpi-actual-spend"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("usage-split-kpi-projected-cost"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("usage-split-kpi-unpriced-sessions"),
+    ).toBeInTheDocument();
+  });
+
   it("renders Actual API spend KPI value from split field", () => {
     render(
       <UsageOverviewTab
