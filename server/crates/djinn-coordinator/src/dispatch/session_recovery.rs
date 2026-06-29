@@ -806,6 +806,7 @@ impl CoordinatorActor {
                     }
 
                     let has_background_work = {
+                        #[allow(clippy::expect_used)]
                         let guard = self
                             .background_work_tracker
                             .lock()
@@ -861,6 +862,7 @@ impl CoordinatorActor {
                 // work (merge, transition) in a background task. The
                 // background-work tracker covers that in-flight post-session work.
                 let has_background_work = {
+                    #[allow(clippy::expect_used)]
                     let guard = self
                         .background_work_tracker
                         .lock()
