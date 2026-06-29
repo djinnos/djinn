@@ -384,12 +384,19 @@ impl CoordinatorActor {
             cleanup_action,
             TransitionAction::PrMerge | TransitionAction::ForceClose
         ) {
-            let tracked = {
-                let mut guard = self.auto_merge_tracker.lock().unwrap();
-                guard.remove(task_id);
-                guard.len()
-            };
-            djinn_telemetry::pr_poller::set_tracked(tracked);
+            match self.auto_merge_tracker.lock() {
+                Ok(mut guard) => {
+                    guard.remove(task_id);
+                    djinn_telemetry::pr_poller::set_tracked(guard.len());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        error = %e,
+                        "PR poller: auto-merge tracker lock poisoned during terminal cleanup"
+                    );
+                }
+            }
         }
         if matches!(
             cleanup_action,

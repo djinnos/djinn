@@ -395,8 +395,10 @@ fn pr_open_failure_outcome(
     err: &GitHubApiError,
     reason_override: Option<String>,
 ) -> TaskRunOutcome {
-    let reason = reason_override
-        .unwrap_or_else(|| render_github_write_error("GitHub PR creation failed", err));
+    let reason = match reason_override {
+        Some(reason) => reason,
+        None => render_github_write_error("GitHub PR creation failed", err),
+    };
 
     tracing::warn!(
         method,
@@ -559,21 +561,24 @@ async fn build_corrective_nudge_evidence(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
 ) -> NudgeHintEvidence {
-    let activity = task_repo
+    let activity = match task_repo
         .query_activity(ActivityQuery {
             task_id: Some(task.id.clone()),
             limit: 50,
             ..Default::default()
         })
         .await
-        .unwrap_or_else(|e| {
+    {
+        Ok(activity) => activity,
+        Err(e) => {
             tracing::warn!(
                 task_id = %task.id,
                 error = %e,
                 "supervisor PR-open: unable to read activity for corrective nudge hint"
             );
             Vec::new()
-        });
+        }
+    };
 
     NudgeHintEvidence {
         wind_down_summary: activity.iter().find_map(wind_down_or_finalize_summary),
@@ -700,7 +705,14 @@ pub(crate) async fn handle_noop_disposition(
     let nudge = matches!(disposition, RunDisposition::Nudge) && release_action.is_some();
 
     if nudge {
-        let release_action = release_action.expect("nudge implies a release action");
+        let Some(release_action) = release_action else {
+            tracing::warn!(
+                task_id = %task.id,
+                status = %task.status,
+                "supervisor PR-open: nudge selected without a safe release action; falling back to terminal close"
+            );
+            return close_noop(task, task_repo, true, &signals).await;
+        };
         let evidence = build_corrective_nudge_evidence(task, task_repo).await;
         let next_action_hint = resolve_corrective_nudge_hint(&evidence);
         let attempt = task.continuation_count + 1;
