@@ -999,9 +999,6 @@ export namespace DispatchResumeOutputSchema {
 }
 export type DispatchResumeOutput = DispatchResumeOutputSchema.DispatchResumeOutput;
 export namespace DoctorFixInputSchema {
-  /**
-   * Parameters for `doctor_fix`.
-   */
   export interface DoctorFixInput {
   /**
    * The stable name of the check that owns the finding. Must match the
@@ -1018,9 +1015,6 @@ export namespace DoctorFixInputSchema {
 }
 export type DoctorFixInput = DoctorFixInputSchema.DoctorFixInput;
 export namespace DoctorFixOutputSchema {
-  /**
-   * Response for `doctor_fix`.
-   */
   export interface DoctorFixOutput {
   check_name: string
   error?: string
@@ -1032,23 +1026,6 @@ export namespace DoctorFixOutputSchema {
 }
 export type DoctorFixOutput = DoctorFixOutputSchema.DoctorFixOutput;
 export namespace DoctorListFindingsInputSchema {
-  /**
-   * Parameters for `doctor_list_findings`.
-   * 
-   * All filters are optional; an unset field means "no narrowing on that
-   * dimension". The `check` filter matches `check_name` exactly. The
-   * `since` filter is a lower-bound timestamp — rows with
-   * `created_at < since` are excluded. The value should be a UTC
-   * ISO-8601 string matching the schema's `created_at` template so the
-   * string comparison the repository issues in SQL is also a valid
-   * chronological comparison.
-   * 
-   * `limit` is `i64` (not `usize`) so the generated MCP JSON schema
-   * lands on `format: int64` instead of the nonstandard `uint` pinned
-   * by `tool_schemas::mcp_tools_list_schemas_do_not_use_nonstandard_uint_…`.
-   * The repository's defensive ceiling (`MAX_RECENT_FINDINGS`) still
-   * applies, and any caller value above it is silently clamped.
-   */
   export interface DoctorListFindingsInput {
   /**
    * Optional check name to narrow on (matches `check_name` exactly).
@@ -1074,9 +1051,6 @@ export namespace DoctorListFindingsInputSchema {
 }
 export type DoctorListFindingsInput = DoctorListFindingsInputSchema.DoctorListFindingsInput;
 export namespace DoctorListFindingsOutputSchema {
-  /**
-   * Response for `doctor_list_findings`.
-   */
   export interface DoctorListFindingsOutput {
   error?: string
   /**
@@ -1153,9 +1127,6 @@ export namespace DoctorListFindingsOutputSchema {
 }
 export type DoctorListFindingsOutput = DoctorListFindingsOutputSchema.DoctorListFindingsOutput;
 export namespace DoctorRunInputSchema {
-  /**
-   * Parameters for `doctor_run`.
-   */
   export interface DoctorRunInput {
   /**
    * Optional list of check names to run. When omitted (or empty), all
@@ -1169,9 +1140,6 @@ export namespace DoctorRunInputSchema {
 }
 export type DoctorRunInput = DoctorRunInputSchema.DoctorRunInput;
 export namespace DoctorRunOutputSchema {
-  /**
-   * Response for `doctor_run`.
-   */
   export interface DoctorRunOutput {
   error?: string
   ok: boolean
@@ -1259,9 +1227,6 @@ export namespace EpicAddReadSourceInputSchema {
 }
 export type EpicAddReadSourceInput = EpicAddReadSourceInputSchema.EpicAddReadSourceInput;
 export namespace EpicAddReadSourceOutputSchema {
-  /**
-   * Response for the read-only multi-repo read-source tools.
-   */
   export interface EpicAddReadSourceOutput {
   error?: string
   /**
@@ -1289,9 +1254,6 @@ export namespace EpicBlockedListInputSchema {
 }
 export type EpicBlockedListInput = EpicBlockedListInputSchema.EpicBlockedListInput;
 export namespace EpicBlockedListOutputSchema {
-  /**
-   * Response for the epic-dependency listing tools.
-   */
   export interface EpicBlockedListOutput {
   blockers?: EpicBlockerItem[]
   error?: string
@@ -1326,9 +1288,6 @@ export namespace EpicBlockersListInputSchema {
 }
 export type EpicBlockersListInput = EpicBlockersListInputSchema.EpicBlockersListInput;
 export namespace EpicBlockersListOutputSchema {
-  /**
-   * Response for the epic-dependency listing tools.
-   */
   export interface EpicBlockersListOutput {
   blockers?: EpicBlockerItem[]
   error?: string
@@ -1624,9 +1583,6 @@ export namespace EpicListReadSourcesInputSchema {
 }
 export type EpicListReadSourcesInput = EpicListReadSourcesInputSchema.EpicListReadSourcesInput;
 export namespace EpicListReadSourcesOutputSchema {
-  /**
-   * Response for the read-only multi-repo read-source tools.
-   */
   export interface EpicListReadSourcesOutput {
   error?: string
   /**
@@ -1659,9 +1615,6 @@ export namespace EpicRemoveReadSourceInputSchema {
 }
 export type EpicRemoveReadSourceInput = EpicRemoveReadSourceInputSchema.EpicRemoveReadSourceInput;
 export namespace EpicRemoveReadSourceOutputSchema {
-  /**
-   * Response for the read-only multi-repo read-source tools.
-   */
   export interface EpicRemoveReadSourceOutput {
   error?: string
   /**
@@ -1943,9 +1896,6 @@ export namespace ExecutionKillTaskOutputSchema {
 }
 export type ExecutionKillTaskOutput = ExecutionKillTaskOutputSchema.ExecutionKillTaskOutput;
 export namespace GetBlockCatalogInputSchema {
-  /**
-   * Params for the lean `get_block_catalog` tool (no fields required).
-   */
   export interface GetBlockCatalogInput {
   [k: string]: any
   }
@@ -1953,9 +1903,6 @@ export namespace GetBlockCatalogInputSchema {
 }
 export type GetBlockCatalogInput = GetBlockCatalogInputSchema.GetBlockCatalogInput;
 export namespace GetBlockCatalogOutputSchema {
-  /**
-   * Response envelope for `get_block_catalog`: a lean list of type/tag pairs.
-   */
   export interface GetBlockCatalogOutput {
   blocks: BlockCatalogEntry[]
   [k: string]: any
@@ -1990,10 +1937,6 @@ export namespace GetProjectDevcontainerStatusInputSchema {
 }
 export type GetProjectDevcontainerStatusInput = GetProjectDevcontainerStatusInputSchema.GetProjectDevcontainerStatusInput;
 export namespace GetProjectDevcontainerStatusOutputSchema {
-  /**
-   * Snapshot of a project's image-build state, used by the UI onboarding
-   * banner.
-   */
   export interface GetProjectDevcontainerStatusOutput {
   /**
    * Populated on lookup failures; clients should surface this verbatim.
@@ -4172,12 +4115,6 @@ export namespace MemoryRunEnrichmentInputSchema {
 }
 export type MemoryRunEnrichmentInput = MemoryRunEnrichmentInputSchema.MemoryRunEnrichmentInput;
 export namespace MemoryRunEnrichmentOutputSchema {
-  /**
-   * MCP response for `memory_run_enrichment`. The `report` is present when
-   * `status="completed"` (foreground execution). For
-   * `status="queued"` (background execution) the report is `None`; the pass
-   * emits the structured report through its own `INFO` log line at finish.
-   */
   export interface MemoryRunEnrichmentOutput {
   /**
    * Top-level failure: project not found, enrichment subsystem not
@@ -4629,9 +4566,6 @@ export namespace OrgPolicySetOutputSchema {
 }
 export type OrgPolicySetOutput = OrgPolicySetOutputSchema.OrgPolicySetOutput;
 export namespace PrReviewContextInputSchema {
-  /**
-   * Input parameters for the `pr_review_context` meta-tool.
-   */
   export interface PrReviewContextInput {
   /**
    * Architecture boundary rules. When empty, boundary analysis is
@@ -5637,11 +5571,6 @@ export namespace ProjectGraphExclusionsGetOutputSchema {
 }
 export type ProjectGraphExclusionsGetOutput = ProjectGraphExclusionsGetOutputSchema.ProjectGraphExclusionsGetOutput;
 export namespace ProjectGraphExclusionsSetInputSchema {
-  /**
-   * Partial-update payload. Either field may be `None` — the repository
-   * leaves the corresponding column untouched when the caller only wants
-   * to rewrite one of the two lists.
-   */
   export interface ProjectGraphExclusionsSetInput {
   /**
    * When present, replaces `graph_excluded_paths` wholesale. Empty
@@ -7000,9 +6929,6 @@ export namespace ProposalRefinementDemandRoundInputSchema {
 }
 export type ProposalRefinementDemandRoundInput = ProposalRefinementDemandRoundInputSchema.ProposalRefinementDemandRoundInput;
 export namespace ProposalRefinementDemandRoundOutputSchema {
-  /**
-   * Response for `proposal_refinement_demand_round`.
-   */
   export interface ProposalRefinementDemandRoundOutput {
   /**
    * True when the demand was accepted and a new round started.
@@ -7113,9 +7039,6 @@ export namespace ProposalRefinementResolveInputSchema {
 }
 export type ProposalRefinementResolveInput = ProposalRefinementResolveInputSchema.ProposalRefinementResolveInput;
 export namespace ProposalRefinementResolveOutputSchema {
-  /**
-   * Response for `proposal_refinement_resolve`.
-   */
   export interface ProposalRefinementResolveOutput {
   error?: string
   proposal_id?: string
@@ -7146,9 +7069,6 @@ export namespace ProposalRefinementStartInputSchema {
 }
 export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.ProposalRefinementStartInput;
 export namespace ProposalRefinementStartOutputSchema {
-  /**
-   * Response for `proposal_refinement_start`.
-   */
   export interface ProposalRefinementStartOutput {
   error?: string
   proposal_id?: string
@@ -7245,9 +7165,6 @@ export namespace ProposalRefinementStatusInputSchema {
 }
 export type ProposalRefinementStatusInput = ProposalRefinementStatusInputSchema.ProposalRefinementStatusInput;
 export namespace ProposalRefinementStatusOutputSchema {
-  /**
-   * Response for `proposal_refinement_status`.
-   */
   export interface ProposalRefinementStatusOutput {
   error?: string
   proposal_id?: string
@@ -8152,9 +8069,6 @@ export namespace ProposalVerdictOverrideInputSchema {
 }
 export type ProposalVerdictOverrideInput = ProposalVerdictOverrideInputSchema.ProposalVerdictOverrideInput;
 export namespace ProposalVerdictOverrideOutputSchema {
-  /**
-   * Response for `proposal_verdict_override`.
-   */
   export interface ProposalVerdictOverrideOutput {
   error?: string
   /**
