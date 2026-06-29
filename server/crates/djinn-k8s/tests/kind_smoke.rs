@@ -1,3 +1,5 @@
+// Test: eprintln used for skip-reason diagnostics in this smoke test.
+#![allow(clippy::print_stderr)]
 //! `KubernetesRuntime` end-to-end smoke test against a live `kind` cluster.
 //!
 //! Phase 2 K8s PR 3 of `/home/fernando/.claude/plans/phase2-k8s-scaffolding.md`.

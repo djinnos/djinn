@@ -1,4 +1,5 @@
 use djinn_control_plane::bridge::{ImpactEntry, PagerankTier};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_graph::repo_graph::{RepoGraphEdge, RepoGraphEdgeKind, RouteExclusionConfig};
 use petgraph::visit::EdgeRef;
 
@@ -154,7 +155,8 @@ pub(super) fn resolve_node_or_err_for_workspace_seed(
 pub(super) fn since_days_to_cutoff(since_days: Option<u32>) -> Option<String> {
     since_days.map(|d| {
         let clamped = d.clamp(1, 3650) as u64;
-        let now = std::time::SystemTime::now()
+        let now = SystemClockTrait::new()
+            .now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);

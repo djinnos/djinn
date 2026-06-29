@@ -493,15 +493,15 @@ impl NoteRepository {
             return Ok(None);
         };
 
-        Ok(sqlx::query_scalar!(
+        Ok(sqlx::query_scalar::<_, String>(
             "SELECT short_id
                  FROM tasks
                  WHERE project_id = $1 AND (id = $2 OR short_id = $3)
                  LIMIT 1",
-            project_id,
-            task_id,
-            task_id
         )
+        .bind(project_id)
+        .bind(task_id)
+        .bind(task_id)
         .fetch_optional(self.db.pool())
         .await?
         .map(|short_id| task_branch_name(&short_id)))
@@ -804,23 +804,23 @@ impl NoteRepository {
         // any task whose array contains the requested permalink. We pass the
         // probe as a JSONB array literal so the index can drive the lookup.
         let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
-        let rows = sqlx::query!(
-            r#"SELECT id, short_id, title, status AS "status!" FROM tasks
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT id, short_id, title, status FROM tasks
              WHERE memory_refs @> $1
              ORDER BY priority, created_at"#,
-            sqlx::types::Json(probe) as _
         )
+        .bind(sqlx::types::Json(probe))
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(|row| {
+            .map(|(id, short_id, title, status)| {
                 serde_json::json!({
-                    "id": row.id,
-                    "short_id": row.short_id,
-                    "title": row.title,
-                    "status": row.status,
+                    "id": id,
+                    "short_id": short_id,
+                    "title": title,
+                    "status": status,
                 })
             })
             .collect())
@@ -835,26 +835,26 @@ impl NoteRepository {
 
         // Same JSONB containment probe as `task_refs`.
         let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
-        let rows = sqlx::query!(
-            r#"SELECT DISTINCT p.id AS "id!", p.short_id, p.title, p.status AS "status!"
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT DISTINCT p.id, p.short_id, p.title, p.status
              FROM proposals p
              JOIN proposal_epics pe ON pe.proposal_id = p.id
              JOIN tasks t ON t.epic_id = pe.epic_id
              WHERE t.memory_refs @> $1
              ORDER BY p.id"#,
-            sqlx::types::Json(probe) as _
         )
+        .bind(sqlx::types::Json(probe))
         .fetch_all(self.db.pool())
         .await?;
 
         Ok(rows
             .into_iter()
-            .map(|row| {
+            .map(|(id, short_id, title, status)| {
                 serde_json::json!({
-                    "id": row.id,
-                    "short_id": row.short_id,
-                    "title": row.title,
-                    "status": row.status,
+                    "id": id,
+                    "short_id": short_id,
+                    "title": title,
+                    "status": status,
                 })
             })
             .collect())
@@ -890,13 +890,13 @@ mod contradiction_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let owner = "test";
         let repo_slug = format!("contradiction-{id}");
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
-            id,
-            "test",
-            owner,
-            repo_slug,
         )
+        .bind(&id)
+        .bind("test")
+        .bind(owner)
+        .bind(repo_slug)
         .execute(db.pool())
         .await
         .unwrap();
@@ -1044,13 +1044,13 @@ mod scope_overlap_decay_tests {
         let id = uuid::Uuid::now_v7().to_string();
         let owner = "test";
         let repo_slug = format!("scope-overlap-{id}");
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO projects (id, name, github_owner, github_repo) VALUES ($1, $2, $3, $4)",
-            id,
-            "test",
-            owner,
-            repo_slug,
         )
+        .bind(&id)
+        .bind("test")
+        .bind(owner)
+        .bind(repo_slug)
         .execute(db.pool())
         .await
         .unwrap();

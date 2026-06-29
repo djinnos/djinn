@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 // Touch to advance main HEAD and trigger a warm job (verification warm-base
 // cargo cache validation, 2026-06-16). No behavior change.
 //
@@ -656,6 +655,7 @@ pub mod dispatch {
         metrics::counter!(super::CROSS_MODEL_REVIEW_TOTAL, "result" => result).increment(1);
     }
 
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_last_success_now() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

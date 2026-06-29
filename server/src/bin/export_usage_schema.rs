@@ -1,3 +1,5 @@
+// No `SystemTime::now`/`Instant::now` calls in this binary; blanket allow is a
+// safety net for any future CLI timestamp helper. Migration tracked by lint-ratchet task 70y0.
 #![allow(clippy::disallowed_methods)]
 //! Export the JSON Schema for `/api/admin/usage` request/response DTOs.
 //!
