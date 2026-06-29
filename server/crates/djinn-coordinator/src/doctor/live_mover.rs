@@ -26,6 +26,7 @@ use djinn_core::doctor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 
 use crate::supervisor_impl::{
     LiveMoverEvidence, LiveMoverReason, LiveMoverSummary, summarize_live_mover,
@@ -210,10 +211,28 @@ impl LiveMoverPredicateCheck {
             return None;
         }
 
-        let resolver_inputs_json =
-            serde_json::to_value(inputs).expect("LiveMoverPredicateInputs serializes");
-        let resolver_outputs_json =
-            serde_json::to_value(&outputs).expect("LiveMoverPredicateOutputs serializes");
+        let resolver_inputs_json = match serde_json::to_value(inputs) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    task_id = %inputs.task_id,
+                    error = %e,
+                    "live_mover doctor: failed to serialize resolver inputs; skipping finding"
+                );
+                return None;
+            }
+        };
+        let resolver_outputs_json = match serde_json::to_value(&outputs) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!(
+                    task_id = %inputs.task_id,
+                    error = %e,
+                    "live_mover doctor: failed to serialize resolver outputs; skipping finding"
+                );
+                return None;
+            }
+        };
         let snapshot = ResolverSnapshot::new(
             "resolve_live_mover_predicate",
             resolver_inputs_json.clone(),
