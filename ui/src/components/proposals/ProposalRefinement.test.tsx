@@ -463,6 +463,169 @@ describe("ProposalRefinement", () => {
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
+  // ── Send feedback for another round (awaiting_review) ────────────────────
+
+  it("renders the Send feedback for another round action when awaiting_review", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("disables the another-round action when feedback is blank", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    ).toBeDisabled();
+  });
+
+  it("enables the another-round action when feedback is non-blank", async () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    const user = userEvent.setup();
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    const textarea = screen.getByLabelText(/Feedback/);
+    await user.type(textarea, "Please tighten the acceptance criteria.");
+    expect(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    ).toBeEnabled();
+  });
+
+  it("calls proposal_refinement_demand_round with feedback as reason", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      proposal_id: proposalId,
+      accepted: true,
+    } as never);
+
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.type(
+      screen.getByLabelText(/Feedback/),
+      "Please tighten the acceptance criteria.",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    );
+
+    expect(callMcpTool).toHaveBeenCalledWith(
+      "proposal_refinement_demand_round",
+      {
+        proposal_id: proposalId,
+        reason: "Please tighten the acceptance criteria.",
+      },
+    );
+    expect(showToast.success).toHaveBeenCalledWith(
+      "Feedback sent — another tribunal round started",
+    );
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onChanged when demand round fails", async () => {
+    vi.mocked(callMcpTool).mockResolvedValueOnce({
+      proposal_id: proposalId,
+      accepted: false,
+      error: "coordinator not available",
+    } as never);
+
+    const onChanged = vi.fn();
+    const user = userEvent.setup();
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 4,
+      dry_rounds: 2,
+      total_entries: 12,
+      stop_reason: null,
+      awaiting_review: true,
+      judge_summary: "Converged.",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={onChanged}
+      />,
+    );
+
+    await user.type(
+      screen.getByLabelText(/Feedback/),
+      "Another round please.",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Send feedback for another round/ }),
+    );
+
+    expect(showToast.error).toHaveBeenCalledWith(
+      "Failed to send feedback for another round",
+      { description: "coordinator not available" },
+    );
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
   it("does not render the review panel while in progress", () => {
     const status: ProposalRefinementStatus = {
       active: true,
