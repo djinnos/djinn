@@ -103,8 +103,5 @@ test-all: ## Run the merge-queue/full-suite nextest command with template Postgr
 validate-taskrun-backstop: ## Run epic 8451 full Postgres-backed validation
 	./scripts/validate-taskrun-backstop.sh
 
-check-boundaries: ## Run crate-level architectural boundary checks against the server workspace
-	cd $(SERVER_DIR) && cargo run --bin check-boundaries -- \
-		--rules boundary_rules.toml \
-		--project-id $$DJINN_PROJECT_ID \
-		--project-path $$DJINN_PROJECT_PATH
+check-boundaries: ## Run architectural boundary checks against the server workspace (no DB / no graph warm)
+	python3 scripts/check_boundaries.py

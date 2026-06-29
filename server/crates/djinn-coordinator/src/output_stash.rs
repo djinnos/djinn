@@ -20,6 +20,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::SessionStatus;
 use sha2::{Digest, Sha256};
 
@@ -152,7 +153,8 @@ pub(crate) fn parse_durable_pointer(raw: &str) -> Result<DurablePointerRecord, S
 }
 
 fn unix_time_secs() -> u64 {
-    std::time::SystemTime::now()
+    SystemClock::new()
+        .now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
@@ -569,7 +571,8 @@ fn atomic_write(
     use std::io::Write as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
+    let nanos = SystemClock::new()
+        .now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
