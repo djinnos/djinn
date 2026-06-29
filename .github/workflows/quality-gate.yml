@@ -626,11 +626,14 @@ jobs:
       - name: Warm canonical graph
         run: cargo run -p djinn-agent-worker -- warm-graph "$DJINN_PROJECT_ID"
 
-      - name: Expose checkout as canonical index tree
+      - name: Expose server checkout as canonical index tree
         working-directory: ${{ github.workspace }}
         run: |
+          # The Cargo workspace root is server/ (Cargo.toml + crates/),
+          # not the repo root. derive_crate_map reads <index-tree>/Cargo.toml,
+          # so the symlink must point at the server/ subdirectory.
           mkdir -p "$DJINN_PROJECT_ROOT/.djinn/worktrees"
-          ln -sfn "$DJINN_PROJECT_ROOT" "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index"
+          ln -sfn "$DJINN_PROJECT_ROOT/server" "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index"
           git -C "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index" rev-parse HEAD
 
       - name: Check architectural boundaries
