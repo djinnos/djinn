@@ -1041,6 +1041,10 @@ mod cargo_cache_health_tests {
         std::fs::create_dir(&dir).unwrap();
 
         // The directory was just created, so its mtime ≈ now.
+        // This test compares a freshly-created directory's filesystem mtime
+        // against the current wall-clock — a real-clock read is the
+        // intentionally non-deterministic assertion under test.
+        #[allow(clippy::disallowed_methods)] // test-only: asserts real mtime ≈ real now
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
