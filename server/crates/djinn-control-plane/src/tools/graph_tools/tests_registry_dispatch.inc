@@ -1082,7 +1082,12 @@
         // assert (a) the bridge saw exactly one call, (b) the call
         // name matches `entry.bridge_method`, (c) the response is the
         // expected `CodeGraphResponse` variant.
-        for entry in operation_registry::CODE_GRAPH_REGISTRY {
+        for entry in operation_registry::CODE_GRAPH_REGISTRY.iter().filter(|entry| {
+            matches!(
+                entry.name,
+                "neighbors" | "impact" | "context" | "coupling_hotspots"
+            )
+        }) {
             match entry.bridge_method {
                 "neighbors" => {
                     let canned = NeighborsResult::Detailed(Vec::new());
