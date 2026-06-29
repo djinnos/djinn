@@ -276,7 +276,7 @@ async fn append_blocker_deliveries(
     task_repo: &TaskRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    match task_repo
+    let closed_tasks = match task_repo
         .list_filtered(djinn_db::ListQuery {
             parent: Some(blocker.epic_id.clone()),
             status: Some("closed".to_string()),
@@ -285,11 +285,7 @@ async fn append_blocker_deliveries(
         })
         .await
     {
-        Ok(closed_tasks) => {
-            for t in &closed_tasks.tasks {
-                ctx_lines.push(format!("  - Delivered: {}", t.title));
-            }
-        }
+        Ok(tasks) => tasks,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
@@ -297,7 +293,12 @@ async fn append_blocker_deliveries(
                 error = %e,
                 "Lifecycle: failed to list closed tasks for blocking epic"
             );
+            return;
         }
+    };
+
+    for t in &closed_tasks.tasks {
+        ctx_lines.push(format!("  - Delivered: {}", t.title));
     }
 }
 
@@ -308,25 +309,26 @@ async fn load_blocking_epics(
     task_repo: &TaskRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    match epic_repo.list_blockers(epic_id).await {
-        Ok(blockers) if !blockers.is_empty() => {
-            ctx_lines.push("\n### Blocking Epics".to_string());
-            for blocker in &blockers {
-                ctx_lines.push(format!(
-                    "- **{}** ({}) — {}",
-                    blocker.title, blocker.short_id, blocker.status
-                ));
-                append_blocker_deliveries(epic_id, blocker, task_repo, ctx_lines).await;
-            }
-        }
-        Ok(_) => {}
+    let blockers = match epic_repo.list_blockers(epic_id).await {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => return,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
                 error = %e,
                 "Lifecycle: failed to list blocking epics for prompt context"
             );
+            return;
         }
+    };
+
+    ctx_lines.push("\n### Blocking Epics".to_string());
+    for blocker in &blockers {
+        ctx_lines.push(format!(
+            "- **{}** ({}) — {}",
+            blocker.title, blocker.short_id, blocker.status
+        ));
+        append_blocker_deliveries(epic_id, blocker, task_repo, ctx_lines).await;
     }
 }
 
