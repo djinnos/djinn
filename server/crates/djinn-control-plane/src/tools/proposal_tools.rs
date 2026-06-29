@@ -748,6 +748,57 @@ impl ComposedGateResult {
     }
 }
 
+async fn current_explicit_verdict_override(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+) -> bool {
+    match repo.latest_verdict_override(&proposal.id).await {
+        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
+        _ => false,
+    }
+}
+
+fn revision_metadata_is_human_accept(event_metadata: Option<&str>) -> bool {
+    let Some(event_metadata) = event_metadata else {
+        return false;
+    };
+    let Ok(meta) = serde_json::from_str::<serde_json::Value>(event_metadata) else {
+        return false;
+    };
+
+    meta.get("reason_tag")
+        .or_else(|| meta.get("stop_reason"))
+        .and_then(|v| v.as_str())
+        == Some("human_accepted")
+}
+
+async fn current_human_accept_authority(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+) -> bool {
+    match repo.revisions(&proposal.id).await {
+        Ok(revisions) => revisions
+            .iter()
+            .rev()
+            .find(|revision| {
+                revision.event_kind == "refinement_stop"
+                    && revision.seq == proposal.latest_revision_seq
+            })
+            .is_some_and(|revision| {
+                revision_metadata_is_human_accept(revision.event_metadata.as_deref())
+            }),
+        Err(_) => false,
+    }
+}
+
+async fn current_human_gate_authority(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::proposal::Proposal,
+) -> bool {
+    current_explicit_verdict_override(repo, proposal).await
+        || current_human_accept_authority(repo, proposal).await
+}
+
 /// Run the composed gate: deterministic DoR check + tribunal conditions.
 ///
 /// Returns `ComposedGateResult` with all failures collected. Callers
@@ -765,22 +816,27 @@ async fn evaluate_composed_gate(
     // 1. Deterministic DoR check (existing evaluator, reused not duplicated).
     let ac_items = parse_ac_items(ac_json);
     let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
-    if let Some(err) = format_readiness_error(&readiness) {
+    let readiness_error = format_readiness_error(&readiness);
+
+    // Consult current human authority before deciding whether deterministic
+    // readiness failures block. A current explicit override or human acceptance
+    // is scoped to the latest revision only; stale lifecycle rows do not apply.
+    let human_authority_is_current = current_human_gate_authority(repo, proposal).await;
+    if let Some(err) = readiness_error
+        && !human_authority_is_current
+    {
         failures.push(err);
-        // DoR failed — no point checking tribunal conditions since
-        // the gate is already blocked.
+        // Preserve the historical no-authority DoR blocking behavior: DoR-only
+        // failures stop the gate before tribunal diagnostics are appended.
         return ComposedGateResult { failures };
     }
 
     // 2. Tribunal conditions.
     let proposal_id = &proposal.id;
 
-    // 2a. Check for a current human override first — it gates whether
+    // 2a. Check for a current explicit human override first — it gates whether
     // judge-verdict blocking entries and needs-work verdicts are enforced.
-    let override_is_current = match repo.latest_verdict_override(proposal_id).await {
-        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
-        _ => false,
-    };
+    let override_is_current = current_explicit_verdict_override(repo, proposal).await;
 
     // 2b. Unresolved blocking debate-trail entries.
     // When a current override exists, judge verdict entries are excluded —
@@ -5362,12 +5418,16 @@ What happens if D fails?
             .unwrap();
     }
 
-    /// Create a complete, ready proposal in draft with a target.
-    async fn create_ready_proposal(
+    fn incomplete_body() -> &'static str {
+        "Just some random text without any required sections."
+    }
+
+    async fn create_proposal_with_body(
         repo: &ProposalRepository,
         project_repo: &ProjectRepository,
         user_id: &str,
         title: &str,
+        body: &str,
     ) -> djinn_core::models::proposal::Proposal {
         let project = project_repo
             .create(
@@ -5381,7 +5441,7 @@ What happens if D fails?
             .scope(Some(user_id.to_string()), async {
                 repo.create(ProposalCreateInput {
                     title,
-                    body: ready_body(),
+                    body,
                     acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
                     status: None,
                     body_format: None,
@@ -5394,6 +5454,16 @@ What happens if D fails?
             .await
             .unwrap();
         proposal
+    }
+
+    /// Create a complete, ready proposal in draft with a target.
+    async fn create_ready_proposal(
+        repo: &ProposalRepository,
+        project_repo: &ProjectRepository,
+        user_id: &str,
+        title: &str,
+    ) -> djinn_core::models::proposal::Proposal {
+        create_proposal_with_body(repo, project_repo, user_id, title, ready_body()).await
     }
 
     /// A needs-work judge verdict blocks sign-off with a deterministic
@@ -5685,6 +5755,223 @@ What happens if D fails?
         // Sign-off should be recorded.
         let signoffs = repo.signoffs(&proposal.id).await.unwrap();
         assert_eq!(signoffs.len(), 1, "one sign-off should be recorded");
+    }
+
+    /// Without current human authority, deterministic DoR failures still block
+    /// sign-off before any sign-off is recorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dor_failure_blocks_signoff_without_current_human_authority() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "DoR Block No Authority",
+            incomplete_body(),
+        )
+        .await;
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(error.is_some(), "sign-off should fail without authority");
+        let error = error.unwrap();
+        assert!(
+            error.contains("Missing required coverage: problem"),
+            "error should keep deterministic DoR details: {error}"
+        );
+        assert!(repo.signoffs(&proposal.id).await.unwrap().is_empty());
+    }
+
+    /// A current explicit human override excludes deterministic DoR failures
+    /// from both sign-off and graduation composed gates when no tribunal
+    /// condition remains blocking.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_override_allows_dor_only_signoff_and_graduation() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "DoR Override Success",
+            incomplete_body(),
+        )
+        .await;
+
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "Human reviewer accepted deterministic DoR risk",
+            "override_by_user_id": user_id
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        let signoff_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            signoff_resp.get("error").is_none(),
+            "current override should allow DoR-only sign-off: {:?}",
+            signoff_resp.get("error")
+        );
+
+        force_approved(&db, &proposal.id).await;
+        let grad_resp = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_graduate",
+                        serde_json::json!({ "id": proposal.id }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(
+            grad_resp.get("error").is_none(),
+            "current override should allow DoR-only graduation: {:?}",
+            grad_resp.get("error")
+        );
+    }
+
+    /// A current human-accepted refinement stop is also human authority for the
+    /// latest revision, so DoR false positives do not block sign-off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_human_accept_allows_dor_only_signoff() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "DoR Human Accept Success",
+            incomplete_body(),
+        )
+        .await;
+
+        let accept_meta = serde_json::json!({
+            "source": "human_review",
+            "event": "refinement_stop",
+            "reason_tag": "human_accepted"
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_stop", Some(&accept_meta))
+            .await
+            .unwrap();
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": proposal.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            response.get("error").is_none(),
+            "current human accept should allow DoR-only sign-off: {:?}",
+            response.get("error")
+        );
+        assert_eq!(repo.signoffs(&proposal.id).await.unwrap().len(), 1);
+    }
+
+    /// DoR override authority is revision-scoped; after a material edit advances
+    /// the proposal revision, the same override no longer suppresses DoR blocks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dor_override_is_stale_after_revision_advances() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_proposal_with_body(
+            &repo,
+            &project_repo,
+            &user_id,
+            "DoR Override Stale",
+            incomplete_body(),
+        )
+        .await;
+
+        let override_meta = serde_json::json!({
+            "override_on_revision_seq": proposal.latest_revision_seq,
+            "reason": "Accepted original incomplete draft"
+        });
+        repo.record_refinement_lifecycle(&proposal.id, "verdict_override", Some(&override_meta))
+            .await
+            .unwrap();
+
+        let updated = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                repo.update(
+                    &proposal.id,
+                    djinn_db::ProposalUpdateInput {
+                        title: &proposal.title,
+                        body: "Different incomplete text after a material edit.",
+                        acceptance_criteria: &proposal.acceptance_criteria,
+                        status: &proposal.status,
+                        superseded_by: proposal.superseded_by.as_deref(),
+                        body_format: Some(&proposal.body_format),
+                        event_metadata: None,
+                    },
+                )
+                .await
+            })
+            .await
+            .unwrap();
+        assert!(updated.latest_revision_seq > proposal.latest_revision_seq);
+
+        let response = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_signoff",
+                        serde_json::json!({ "id": updated.id, "kind": "technical" }),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+
+        let error = response.get("error").and_then(|v| v.as_str());
+        assert!(
+            error.is_some(),
+            "stale override should not allow DoR-only sign-off"
+        );
+        let error = error.unwrap();
+        assert!(
+            error.contains("Missing required coverage: problem"),
+            "stale override should expose DoR block: {error}"
+        );
     }
 
     /// A stale override (different revision) does not unlock a needs-work
