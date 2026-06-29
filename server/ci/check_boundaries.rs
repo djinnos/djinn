@@ -312,6 +312,22 @@ fn check_graph_sanity(graph: &djinn_graph::repo_graph::RepoDependencyGraph) -> R
     Ok(())
 }
 
+fn derive_boundary_crate_map(
+    index_tree_path: &std::path::Path,
+) -> djinn_graph::canonical_graph::CrateMap {
+    let root_map = djinn_graph::canonical_graph::derive_crate_map(index_tree_path);
+    if !root_map.is_empty() {
+        return root_map;
+    }
+
+    // The repository checkout root is not itself the Cargo workspace; the server
+    // workspace lives under `server/`. CI intentionally passes the repository
+    // root as DJINN_PROJECT_PATH so warm-graph and check-boundaries agree on the
+    // canonical checkout, then the checker derives crate boundaries from the
+    // nested server workspace.
+    djinn_graph::canonical_graph::derive_crate_map(&index_tree_path.join("server"))
+}
+
 /// Validate that the derived `CrateGraph` is usable for boundary checking.
 /// Returns `Err` with a human-readable message when the crate graph has
 /// no usable crate nodes or edges for a nontrivial workspace.
@@ -471,14 +487,16 @@ async fn main() {
     }
 
     // 4. Derive the crate map from the index-tree checkout (where Cargo.toml lives).
-    let crate_map = djinn_graph::canonical_graph::derive_crate_map(&index_tree_path);
+    let crate_map = derive_boundary_crate_map(&index_tree_path);
 
     if crate_map.is_empty() {
         eprintln!(
             "Error: no crate mapping derived from '{}'.",
             index_tree_path.display()
         );
-        eprintln!("Hint: ensure --project-path points to a Cargo workspace root.");
+        eprintln!(
+            "Hint: ensure --project-path points to the repo checkout root containing server/Cargo.toml."
+        );
         std::process::exit(2);
     }
 

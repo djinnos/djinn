@@ -629,11 +629,13 @@ jobs:
       - name: Expose server checkout as canonical index tree
         working-directory: ${{ github.workspace }}
         run: |
-          # The Cargo workspace root is server/ (Cargo.toml + crates/),
-          # not the repo root. derive_crate_map reads <index-tree>/Cargo.toml,
-          # so the symlink must point at the server/ subdirectory.
+          # In CI warm-graph runs in DJINN_PROJECT_ROOT/pod-workspace mode,
+          # where the checkout root is the canonical index tree. Expose that
+          # same checkout at the read path used by load_canonical_graph().
+          # The boundary checker derives crate boundaries from server/ inside
+          # this repo root because the Cargo workspace is nested there.
           mkdir -p "$DJINN_PROJECT_ROOT/.djinn/worktrees"
-          ln -sfn "$DJINN_PROJECT_ROOT/server" "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index"
+          ln -sfn "$DJINN_PROJECT_ROOT" "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index"
           git -C "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index" rev-parse HEAD
 
       - name: Check architectural boundaries
