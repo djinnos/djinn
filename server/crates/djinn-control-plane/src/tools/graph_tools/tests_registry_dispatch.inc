@@ -1313,25 +1313,43 @@
         let snapshot = include_str!(
             "../../../../../src/server/tests/snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap"
         );
-        let code_graph_start = snapshot
-            .find("\"name\": \"code_graph\"")
+        // Parse the snapshot JSON body (after the insta metadata header) and
+        // assert structural wire-shape rather than brittle substrings. Note:
+        // schemars 1.x (rmcp 1.x) no longer emits a `title` on the input
+        // schema, so we pin the operation field's shape instead — it must
+        // stay a plain required string, not a generated enum from the partial
+        // registry slice.
+        let body = snapshot
+            .splitn(3, "---\n")
+            .nth(2)
+            .expect("insta snapshot body after metadata header");
+        let tools: Vec<serde_json::Value> =
+            serde_json::from_str(body).expect("MCP schema snapshot is JSON");
+        let code_graph = tools
+            .iter()
+            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some("code_graph"))
             .expect("MCP tool schema snapshot should contain code_graph tool");
-        let code_graph_snapshot = &snapshot[code_graph_start..];
+        let input = &code_graph["input_schema"];
 
+        let required: Vec<&str> = input["required"]
+            .as_array()
+            .expect("code_graph input schema has a required array")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
         assert!(
-            code_graph_snapshot.contains("\"title\": \"CodeGraphParams\""),
-            "code_graph tool schema must remain backed by CodeGraphParams"
+            required.contains(&"operation") && required.contains(&"project"),
+            "operation/project should remain required fields, got {required:?}"
+        );
+
+        let operation = &input["properties"]["operation"];
+        assert_eq!(
+            operation.get("type").and_then(serde_json::Value::as_str),
+            Some("string"),
+            "operation should remain a string field"
         );
         assert!(
-            code_graph_snapshot.contains("\"operation\": {"),
-            "code_graph schema must still expose an operation property"
-        );
-        assert!(
-            code_graph_snapshot.contains("\"operation\",\n        \"project\""),
-            "operation/project should remain required fields in the MCP schema snapshot"
-        );
-        assert!(
-            code_graph_snapshot.contains("\"type\": \"string\"\n        },\n        \"page_limit\""),
-            "operation should remain a string field; the partial vxmw registry must not emit an enum"
+            operation.get("enum").is_none(),
+            "operation must not become a generated enum from the partial vxmw registry"
         );
     }

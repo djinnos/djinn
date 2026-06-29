@@ -49,7 +49,7 @@ serde_json = "1"
 futures = "0.3"
 async-stream = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
-rmcp = { version = "0.16", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "1", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 regex = "1.12.3"
 git2 = "0.20"
