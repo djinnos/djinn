@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::SystemTime;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_memory::ContradictionWarning;
 
 use crate::error::DbResult as Result;
@@ -181,7 +182,7 @@ impl NoteRepository {
         }
 
         let rows = q.fetch_all(self.db.pool()).await?;
-        let now = SystemTime::now();
+        let now = SystemClockTrait::new().now();
 
         let mut scores: Vec<(String, f64)> = rows
             .into_iter()

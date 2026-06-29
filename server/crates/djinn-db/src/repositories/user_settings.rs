@@ -42,6 +42,18 @@ pub struct UserSettingsRepository {
     db: Database,
 }
 
+#[derive(sqlx::FromRow)]
+struct UserSettingsRow {
+    user_id: String,
+    auto_approve_prs: bool,
+    diverse_review: bool,
+    diverse_refinement: bool,
+    model_lanes: Option<String>,
+    max_sessions: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
 impl UserSettingsRepository {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -52,16 +64,15 @@ impl UserSettingsRepository {
     pub async fn get(&self, user_id: &str) -> Result<Option<UserSettings>> {
         self.db.ensure_initialized().await?;
         // `model_lanes` is a JSON-object TEXT column, so we read the raw string
-        // with `query!` and parse it rather than letting `query_as!` try to
-        // decode it directly.
-        let row = sqlx::query!(
-            r#"SELECT user_id, auto_approve_prs AS "auto_approve_prs!: bool",
-                      diverse_review AS "diverse_review!: bool",
-                      diverse_refinement AS "diverse_refinement!: bool",
+        // and parse it rather than letting sqlx try to decode it directly.
+        let row = sqlx::query_as::<_, UserSettingsRow>(
+            r#"SELECT user_id, auto_approve_prs,
+                      diverse_review,
+                      diverse_refinement,
                       model_lanes, max_sessions, created_at, updated_at
                FROM user_settings WHERE user_id = $1"#,
-            user_id,
         )
+        .bind(user_id)
         .fetch_optional(self.db.pool())
         .await?;
         Ok(row.map(|r| UserSettings {
@@ -95,14 +106,14 @@ impl UserSettingsRepository {
     /// typically have a single human user so this list has length 0 or 1.
     pub async fn list_users_with_auto_approve(&self) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
-        let rows = sqlx::query!(
+        let rows = sqlx::query_as::<_, (String,)>(
             "SELECT user_id FROM user_settings \
              WHERE auto_approve_prs = TRUE \
              ORDER BY updated_at DESC",
         )
         .fetch_all(self.db.pool())
         .await?;
-        Ok(rows.into_iter().map(|r| r.user_id).collect())
+        Ok(rows.into_iter().map(|(user_id,)| user_id).collect())
     }
 
     /// Upsert the `auto_approve_prs` toggle. Returns the resulting row.
@@ -112,7 +123,7 @@ impl UserSettingsRepository {
         value: bool,
     ) -> Result<UserSettings> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO user_settings (user_id, auto_approve_prs, created_at, updated_at)
              VALUES ($1, $2,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -120,9 +131,9 @@ impl UserSettingsRepository {
              ON CONFLICT (user_id) DO UPDATE SET
                  auto_approve_prs = EXCLUDED.auto_approve_prs,
                  updated_at = EXCLUDED.updated_at"#,
-            user_id,
-            value,
         )
+        .bind(user_id)
+        .bind(value)
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
@@ -137,7 +148,7 @@ impl UserSettingsRepository {
     /// `auto_approve_prs = FALSE` and the explicit `diverse_review` value.
     pub async fn upsert_diverse_review(&self, user_id: &str, value: bool) -> Result<UserSettings> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO user_settings (user_id, auto_approve_prs, diverse_review, created_at, updated_at)
              VALUES ($1, FALSE, $2,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -145,9 +156,9 @@ impl UserSettingsRepository {
              ON CONFLICT (user_id) DO UPDATE SET
                  diverse_review = EXCLUDED.diverse_review,
                  updated_at = EXCLUDED.updated_at"#,
-            user_id,
-            value,
         )
+        .bind(user_id)
+        .bind(value)
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
@@ -167,7 +178,7 @@ impl UserSettingsRepository {
         value: bool,
     ) -> Result<UserSettings> {
         self.db.ensure_initialized().await?;
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO user_settings (user_id, auto_approve_prs, diverse_refinement, created_at, updated_at)
              VALUES ($1, FALSE, $2,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -175,9 +186,9 @@ impl UserSettingsRepository {
              ON CONFLICT (user_id) DO UPDATE SET
                  diverse_refinement = EXCLUDED.diverse_refinement,
                  updated_at = EXCLUDED.updated_at"#,
-            user_id,
-            value,
         )
+        .bind(user_id)
+        .bind(value)
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
@@ -195,7 +206,7 @@ impl UserSettingsRepository {
         self.db.ensure_initialized().await?;
         let json = serde_json::to_string(lanes)
             .map_err(|e| crate::Error::Internal(format!("serialize user model lanes: {e}")))?;
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO user_settings (user_id, auto_approve_prs, model_lanes, created_at, updated_at)
              VALUES ($1, FALSE, $2,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -203,9 +214,9 @@ impl UserSettingsRepository {
              ON CONFLICT (user_id) DO UPDATE SET
                  model_lanes = EXCLUDED.model_lanes,
                  updated_at = EXCLUDED.updated_at"#,
-            user_id,
-            json,
         )
+        .bind(user_id)
+        .bind(json)
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
@@ -227,7 +238,7 @@ impl UserSettingsRepository {
         self.db.ensure_initialized().await?;
         let json = serde_json::to_string(max_sessions)
             .map_err(|e| crate::Error::Internal(format!("serialize user max_sessions: {e}")))?;
-        sqlx::query!(
+        sqlx::query(
             r#"INSERT INTO user_settings (user_id, auto_approve_prs, max_sessions, created_at, updated_at)
              VALUES ($1, FALSE, $2,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
@@ -235,9 +246,9 @@ impl UserSettingsRepository {
              ON CONFLICT (user_id) DO UPDATE SET
                  max_sessions = EXCLUDED.max_sessions,
                  updated_at = EXCLUDED.updated_at"#,
-            user_id,
-            json,
         )
+        .bind(user_id)
+        .bind(json)
         .execute(self.db.pool())
         .await?;
         self.get(user_id).await?.ok_or_else(|| {
@@ -253,14 +264,15 @@ impl UserSettingsRepository {
     /// dispatch may run any of them. Skips users with no explicit selection.
     pub async fn all_selected_models(&self) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
-        let rows =
-            sqlx::query!("SELECT model_lanes FROM user_settings WHERE model_lanes IS NOT NULL")
-                .fetch_all(self.db.pool())
-                .await?;
+        let rows = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT model_lanes FROM user_settings WHERE model_lanes IS NOT NULL",
+        )
+        .fetch_all(self.db.pool())
+        .await?;
         let mut seen = HashSet::new();
         let mut out = Vec::new();
-        for r in rows {
-            if let Some(lanes) = parse_lanes(r.model_lanes.as_deref()) {
+        for (model_lanes,) in rows {
+            if let Some(lanes) = parse_lanes(model_lanes.as_deref()) {
                 for m in lanes.all_models() {
                     if seen.insert(m.clone()) {
                         out.push(m);
@@ -282,15 +294,13 @@ mod tests {
         let id = uuid::Uuid::now_v7().to_string();
         let github_id: i64 = suffix.bytes().map(i64::from).sum::<i64>() + 1_000_000;
         let login = format!("user-{suffix}");
-        sqlx::query!(
-            "INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)",
-            id,
-            github_id,
-            login,
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+            .bind(&id)
+            .bind(github_id)
+            .bind(login)
+            .execute(db.pool())
+            .await
+            .unwrap();
         id
     }
 

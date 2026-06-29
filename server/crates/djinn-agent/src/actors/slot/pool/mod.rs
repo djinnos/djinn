@@ -8,4 +8,5 @@ pub use types::{
 };
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: deadlined poll loops in integration tests
 mod tests;

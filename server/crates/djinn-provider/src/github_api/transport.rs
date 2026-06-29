@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use reqwest::{Response, StatusCode};
 use thiserror::Error;
 
@@ -145,7 +146,8 @@ pub(super) async fn handle_rate_limit(resp: Response) -> Result<Response> {
 
     if remaining == Some(0) {
         let sleep_secs = if let Some(reset_epoch) = reset {
-            let now = std::time::SystemTime::now()
+            let now = SystemClockTrait::new()
+                .now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);

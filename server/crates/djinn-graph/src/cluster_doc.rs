@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_db::repositories::note::NoteRepository;
@@ -342,7 +343,7 @@ pub fn spawn_generate_for_all(
         return;
     }
     tokio::spawn(async move {
-        let started = std::time::Instant::now();
+        let started = SystemClockTrait::new().now_instant();
         let community_count = graph.communities().len();
         let written = generate_for_all(db, event_bus, &project_id, graph).await;
         tracing::info!(

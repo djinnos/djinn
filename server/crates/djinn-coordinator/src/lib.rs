@@ -1,4 +1,9 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
+// Sibling epic mzdj (Coordinator reliability lint cleanup) owns the full
+// migration of this crate's ~46 production SystemTime::now/Instant::now call
+// sites to djinn_core::clock. Keeping a crate-level allow here avoids
+// duplicating mzdj's deep dependency/signature churn in this lint-ratchet
+// task (70y0). mzdj is expected to remove this allow as it migrates sites.
+#![allow(clippy::disallowed_methods)]
 //! # djinn-coordinator
 //!
 //! Production coordinator, doctor, and coordinator-owned supervisor

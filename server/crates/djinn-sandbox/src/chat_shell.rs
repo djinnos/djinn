@@ -204,6 +204,7 @@ impl ChatShellSandbox {
     }
 
     /// Execute a shell request under the full layered policy.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn run(&self, req: ChatShellRequest) -> Result<ChatShellResult, ChatShellError> {
         validate_argv(&req.argv)?;
         let cwd = resolve_cwd(&self.clone_root, req.cwd.as_deref())?;
@@ -616,6 +617,7 @@ async fn read_capped<R: AsyncReadExt + Unpin>(mut reader: R) -> (Vec<u8>, bool) 
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_methods, clippy::print_stderr)] // test diagnostics for sandbox availability
 mod tests {
     use super::*;
     use std::fs;

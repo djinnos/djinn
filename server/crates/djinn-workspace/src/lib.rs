@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! Djinn workspace layer.
 //!
 //! Replaces the pre-migration git-worktree model. Three primitives:

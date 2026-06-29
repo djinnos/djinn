@@ -130,6 +130,7 @@ impl CatalogService {
 
     /// Attempt a live fetch from models.dev.  Replaces cached data on success;
     /// preserves embedded/stale data on failure.
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn refresh(&self) {
         match self.fetch_remote().await {
             Ok(raw) => {

@@ -1,3 +1,6 @@
+// Test-only: Instant::now is used for deadlined poll loops in these
+// integration tests.
+#![allow(clippy::disallowed_methods)]
 //! Contract tests for `execution_*` MCP tools.
 //!
 //! The nonexistent-task test intentionally uses strict stubs so it pins the MCP

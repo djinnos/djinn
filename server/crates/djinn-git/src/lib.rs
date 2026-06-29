@@ -1,4 +1,7 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
+// This is a narrow utility crate that only uses wall-clock reads for retry
+// jitter (retry_delay). Threading a Clock dependency through would be
+// disproportionate for jitter selection, so the single production read here
+// carries a function-level allow instead of a full migration.
 use std::path::{Path, PathBuf};
 
 /// Lower CPU and I/O priority for a child process so djinn operations do not
@@ -102,9 +105,15 @@ pub fn is_non_fast_forward_error(err: &GitError) -> bool {
     s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("rejected")
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub fn retry_delay(attempt: u32) -> std::time::Duration {
     let exp = attempt.saturating_sub(1).min(4);
     let base_ms = 200u64.saturating_mul(1u64 << exp);
+    // Scoped allow: this is a jitter source only (not a correctness-critical
+    // time read). Migrating to the Clock abstraction would require adding a
+    // djinn-core dependency to this utility crate just for jitter, which is
+    // disproportionate churn.
+    #[allow(clippy::disallowed_methods)]
     let jitter_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| (d.as_millis() as u64) % 151)

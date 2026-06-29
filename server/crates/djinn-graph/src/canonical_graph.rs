@@ -393,6 +393,7 @@ fn run_route_extraction_post_processor(
 /// Pod is short-lived and has no inbound traffic, so spinning up the
 /// HTTP server + coordinator + RPC listener would be ~2.5s of wasted
 /// latency per warm run.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn run_warm_graph_command<C: WarmContext>(
     ctx: &C,
     project_id: &str,
@@ -440,6 +441,7 @@ pub async fn run_warm_graph_command<C: WarmContext>(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn ensure_canonical_graph<C: WarmContext>(
     ctx: &C,
     project_id: &str,
