@@ -4,7 +4,33 @@ async function getBaseUrl(): Promise<string> {
   return getServerBaseUrl();
 }
 
-// ── Request types ──────────────────────────────────────────────────────────
+// ── Generated response types (source of truth) ───────────────────────────
+//
+// The canonical contract for `/api/admin/usage` response DTOs.
+// Regenerate with `pnpm usage:types`; CI drift-check via `pnpm usage:types:check`.
+import type {
+  UsageResponse,
+  UsageKpiDto,
+  UsageKpiPartDto,
+  SeriesPointDto,
+  BreakdownsDto,
+  BreakdownRowDto,
+  ModelEffectivenessDto,
+  ProjectModelCellDto,
+} from "@/api/generated/usage-analytics.gen";
+
+export type {
+  UsageResponse,
+  UsageKpiDto,
+  UsageKpiPartDto,
+  SeriesPointDto,
+  BreakdownsDto,
+  BreakdownRowDto,
+  ModelEffectivenessDto,
+  ProjectModelCellDto,
+};
+
+// ── Request types (locally authored) ─────────────────────────────────────
 
 export type DateRangePreset = "7d" | "30d";
 
@@ -35,78 +61,56 @@ export interface UsageAnalyticsFilters {
   user_id?: string;
 }
 
-// ── Response types ─────────────────────────────────────────────────────────
+// ── Backward-compatible response type aliases ────────────────────────────
+//
+// These extend the generated DTOs with legacy field names and nullable
+// markers that existing UI components depend on.  Generated names are the
+// canonical contract — these aliases keep existing imports working until
+// callers are migrated to the generated names directly.
+//
+// Key divergences from the generated types:
+//   - `value` / `delta_pct` are `number | null` (always serialized by serde)
+//     rather than `number | undefined` (json-schema-to-typescript output).
+//   - `unpriced_count` (legacy alias) vs `unpriced_session_count` (generated).
+//   - `cost`, `cost_per_task`, `total_cost`, `model_split`, `time_series`,
+//     `url`, `task_url`, `proposal_url`, `group_key`, `agent_role` are
+//     legacy/UI-only fields not in the generated schema.
+//   - Some generated-required fields (`tokens_cached`, `session_count`,
+//     etc.) are optional here because the hand-maintained types had them
+//     optional and existing test fixtures omit them.
 
-export interface UsageKpiPart {
-  label: string;
-  value: number;
-}
+export type UsageKpiPart = UsageKpiPartDto;
 
-export interface UsageKpi {
-  label: string;
+export type UsageKpi = Omit<UsageKpiDto, "value" | "delta_pct"> & {
   value: number | null;
-  /** Period-over-period delta (e.g. +12% or -5%). */
   delta_pct: number | null;
-  /** Formatted display value for the KPI card. */
-  formatted: string;
-  /** Optional qualifier shown under the value (e.g. spend estimate basis). */
-  caption?: string | null;
-  /** Optional composition of the value (e.g. Tokens → input / cached / output). */
-  breakdown?: UsageKpiPart[] | null;
-  /**
-   * Real API-key spend in USD. Only present for cost-basis split responses
-   * (backend task 87v3+). Subscription/coding-plan sessions contribute $0.
-   */
-  actual_spend_usd?: number | null;
-  /**
-   * Projected subscription-equivalent cost in USD (list-rate estimate).
-   * Only present for cost-basis split responses. API-key sessions carry $0
-   * here; the real spend is in `actual_spend_usd`.
-   */
-  projected_usd?: number | null;
-  /**
-   * Count of sessions excluded from both actual and projected figures because
-   * they were uncatalogued or had no pricing data.
-   */
-  unpriced_count?: number;
-}
+};
 
-export interface UsageTimeSeriesPoint {
-  /** ISO-8601 date string for the bucket. */
-  date: string;
-  /** Spend amount in USD. May be null when pricing data is unavailable. */
-  cost: number | null;
-  tokens_in: number;
-  tokens_out: number;
-  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+export type UsageTimeSeriesPoint = Omit<
+  SeriesPointDto,
+  | "tokens_cached"
+  | "model"
+  | "project_id"
+  | "project_name"
+  | "agent_type"
+  | "unpriced_session_count"
+> & {
   tokens_cached?: number;
-  task_count: number;
-  /** Optional dimension key (model, project, agent_type) when grouped. */
-  group_key?: string;
-  /** Optional model dimension supplied by grouped overview responses. */
   model?: string;
-  /** Optional project dimension supplied by grouped overview responses. */
   project_id?: string;
   project_name?: string;
-  /** Optional agent role / type dimension supplied by grouped overview responses. */
   agent_type?: string;
-  agent_role?: string;
-  /**
-   * Real API-key spend in this bucket (split cost-basis). Null when the
-   * bucket contains unpriced sessions; absent on pre-split responses.
-   */
-  actual_spend_usd?: number | null;
-  /**
-   * Projected subscription-equivalent cost in this bucket (split cost-basis).
-   * Absent on pre-split responses.
-   */
-  projected_usd?: number | null;
-  /**
-   * Count of unpriced sessions in this bucket. Absent on pre-split responses.
-   */
+  /** Legacy blended cost field. */
+  cost?: number | null;
+  /** Legacy alias — prefer unpriced_session_count. */
   unpriced_count?: number;
-}
+  /** Group key for dimension grouping. */
+  group_key?: string;
+  /** Agent role (alias for agent_type in some views). */
+  agent_role?: string;
+};
 
+/** Per-model cost split detail row (not in generated schema). */
 export interface UsageModelSplit {
   model: string;
   cost: number | null;
@@ -125,80 +129,84 @@ export interface UsageModelSplit {
   unpriced_count?: number;
 }
 
-export interface UsageBreakdownRow {
-  id: string;
-  name: string;
-  cost: number | null;
-  tokens_in: number;
-  tokens_out: number;
-  /** Cache-read (cached input) tokens — priced separately from fresh input. */
+export type UsageBreakdownRow = Omit<
+  BreakdownRowDto,
+  "success_rate" | "avg_reopens" | "tokens_cached" | "unpriced_session_count"
+> & {
+  success_rate: number | null;
+  avg_reopens: number | null;
   tokens_cached?: number;
-  task_count: number;
-  success_rate: number | null;
-  avg_reopens: number | null;
-  cost_per_task: number | null;
-  model_split?: UsageModelSplit[];
-  time_series?: UsageTimeSeriesPoint[];
-  url?: string | null;
-  task_id?: string | null;
-  task_url?: string | null;
-  proposal_id?: string | null;
-  proposal_url?: string | null;
-  /** Real API-key spend for this breakdown row (split cost-basis). */
-  actual_spend_usd?: number | null;
-  /** Projected subscription-equivalent cost for this breakdown row. */
-  projected_usd?: number | null;
-  /** Count of unpriced sessions in this breakdown row. */
+  /** Legacy alias — prefer unpriced_session_count. */
   unpriced_count?: number;
-}
+  /** Legacy blended cost. */
+  cost?: number | null;
+  /** Legacy cost per task (generated has actual_cost_per_task). */
+  cost_per_task?: number | null;
+  /** Per-model split detail (not in schema). */
+  model_split?: UsageModelSplit[];
+  /** Time-series detail (not in schema). */
+  time_series?: UsageTimeSeriesPoint[];
+  /** Link fields not in schema. */
+  url?: string | null;
+  task_url?: string | null;
+  proposal_url?: string | null;
+};
 
-export interface UsageModelEffectiveness {
-  model: string;
-  task_count: number;
+export type UsageModelEffectiveness = Omit<
+  ModelEffectivenessDto,
+  | "success_rate"
+  | "avg_reopens"
+  | "tokens_cached"
+  | "session_count"
+  | "completed_task_count"
+  | "unpriced_session_count"
+  | "actual_cost_per_task"
+> & {
   success_rate: number | null;
   avg_reopens: number | null;
-  cost_per_task: number | null;
-  total_cost: number | null;
-  total_tokens: number;
-  tokens_in?: number;
-  tokens_out?: number;
-  /** Cache-read (cached input) tokens — priced separately from fresh input. */
   tokens_cached?: number;
   session_count?: number;
   completed_task_count?: number;
-  reopen_count?: number;
-  /** Real API-key spend for this model (split cost-basis). */
-  actual_spend_usd?: number | null;
-  /** Projected subscription-equivalent cost for this model. */
-  projected_usd?: number | null;
-  /** Count of unpriced sessions for this model. */
+  /** Legacy alias — prefer unpriced_session_count. */
   unpriced_count?: number;
-}
+  /** Legacy total cost (blended). */
+  total_cost?: number | null;
+  /** Legacy cost per task (generated has actual_cost_per_task). */
+  cost_per_task?: number | null;
+  /** Legacy reopen count. */
+  reopen_count?: number;
+  actual_cost_per_task?: number | null;
+};
 
-export interface UsageProjectModelCell {
-  project_id: string;
-  project_name: string;
-  model: string;
-  cost_per_task: number | null;
+export type UsageProjectModelCell = Omit<
+  ProjectModelCellDto,
+  | "success_rate"
+  | "avg_reopens"
+  | "tokens_cached"
+  | "unpriced_session_count"
+  | "actual_cost_per_task"
+> & {
   success_rate: number | null;
   avg_reopens: number | null;
-  total_cost: number | null;
-  total_tokens: number;
-  /** Cache-read (cached input) tokens — priced separately from fresh input. */
   tokens_cached?: number;
-  /** Real API-key spend for this project×model cell (split cost-basis). */
-  actual_spend_usd?: number | null;
-  /** Projected subscription-equivalent cost for this project×model cell. */
-  projected_usd?: number | null;
-  /** Count of unpriced sessions in this project×model cell. */
+  /** Legacy alias — prefer unpriced_session_count. */
   unpriced_count?: number;
-}
+  /** Legacy total cost (blended). */
+  total_cost?: number | null;
+  /** Legacy cost per task (generated has actual_cost_per_task). */
+  cost_per_task?: number | null;
+  actual_cost_per_task?: number | null;
+};
 
-/**
- * Top-level response shape for `GET /api/admin/usage`.
- * Each tab draws from its own key; tabs will be added in subsequent tasks.
- */
-export interface UsageAnalyticsResponse {
+export type UsageAnalyticsResponse = Omit<
+  UsageResponse,
+  | "kpis"
+  | "unpriced_session_count"
+  | "time_series"
+  | "breakdowns"
+  | "model_effectiveness"
+  | "project_model_matrix"
+> & {
   kpis: UsageKpi[];
   time_series: UsageTimeSeriesPoint[];
   breakdowns: {
@@ -209,13 +217,12 @@ export interface UsageAnalyticsResponse {
   };
   model_effectiveness: UsageModelEffectiveness[];
   project_model_matrix: UsageProjectModelCell[];
-  generated_at: string;
   /**
    * Total count of unpriced sessions across the entire filtered window.
    * Present on split cost-basis responses; absent on pre-split responses.
    */
   unpriced_session_count?: number;
-}
+};
 
 // ── Serialization ──────────────────────────────────────────────────────────
 
