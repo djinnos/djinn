@@ -17,6 +17,11 @@ fn suppression_state() -> &'static Mutex<SuppressionState> {
     STATE.get_or_init(|| Mutex::new(SuppressionState { active_until: None }))
 }
 
+/// Scoped allow: rate-limit suppression uses a process-global monotonic
+/// deadline. This is not a semantic wall-clock read; it measures elapsed time
+/// for backoff. Threading a Clock through the global static state would require
+/// broader refactoring of the suppression mechanism.
+#[allow(clippy::disallowed_methods)]
 pub fn activate_suppression_window(delay: Duration) -> Instant {
     let until = Instant::now() + delay;
     let mut state = suppression_state()
@@ -60,6 +65,7 @@ pub fn suppression_remaining(now: Instant) -> Option<Duration> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // Tests use real monotonic time for suppression checks
 mod tests {
     use super::*;
 

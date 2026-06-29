@@ -55,3 +55,6 @@ tokio-util = "0.7"
 insta = { version = "1", features = ["json", "redactions"] }
 uuid = { version = "1", features = ["v7"] }
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+
+[lints]
+workspace = true

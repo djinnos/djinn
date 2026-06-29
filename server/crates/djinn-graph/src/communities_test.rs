@@ -834,9 +834,9 @@ fn seed_partition_by_crate_merges_paths_sharing_a_crate_name() {
 
     let partition = seed_partition_by_crate(&graph, 6, &crate_map);
     let first = partition[0];
-    for v in 0..6 {
+    for (v, &community) in partition.iter().enumerate().take(6) {
         assert_eq!(
-            partition[v], first,
+            community, first,
             "node {v} should share the single monolib seed community"
         );
     }

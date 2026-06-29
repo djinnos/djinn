@@ -1,3 +1,6 @@
+// Test-only: Instant::now is used for deadlined suppression poll loops in
+// this integration test.
+#![allow(clippy::disallowed_methods)]
 use std::time::{Duration, Instant};
 use std::{
     sync::{Mutex, MutexGuard, OnceLock},

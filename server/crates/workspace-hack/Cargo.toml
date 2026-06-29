@@ -171,3 +171,6 @@ rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs
 rustls-webpki = { version = "0.103.10", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 
 ### END HAKARI SECTION
+
+[lints]
+workspace = true

@@ -665,6 +665,7 @@ pub async fn normalize_mtimes_at(root: &Path) {
 /// Synchronous core of [`Workspace::normalize_mtimes`]; see that method's docs
 /// for the rationale and algorithm. Uses blocking `std::process::Command` +
 /// `File::set_modified`, so it must run on a blocking thread.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn normalize_mtimes_blocking(root: &Path) -> Result<NormalizeStats, EphemeralWorkspaceError> {
     let start = Instant::now();
 

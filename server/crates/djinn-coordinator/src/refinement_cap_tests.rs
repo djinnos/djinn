@@ -798,3 +798,224 @@ async fn refinement_and_normal_dispatch_share_inflight_ledger() {
         "max(db=2, ledger=1) = 2"
     );
 }
+
+// ── AC#1–5: Reviewer feedback injection into tribunal task descriptions ──
+
+/// The exact label used to inject human reviewer feedback into refinement
+/// task descriptions. Must match the label emitted by
+/// `create_refinement_task_with_context`.
+const REVIEWER_FEEDBACK_LABEL: &str = "Human reviewer feedback for this round:";
+
+/// Regression: when the latest current-revision demand-round carries reviewer
+/// feedback, the next Advocate, Adversary, and Judge refinement task
+/// descriptions each contain the exact label followed by the exact feedback
+/// string, unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reviewer_feedback_injected_into_all_three_tribunal_task_descriptions() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    // Record a demand round with a unique feedback string on the current
+    // revision (seq == latest_revision_seq at creation time == 1).
+    let unique_feedback = "UNIQUE-FEEDBACK-019f0fed-advocate-adversary-judge";
+    let demand_metadata = serde_json::json!({
+        "source": "human_demand_round",
+        "reviewer_feedback": unique_feedback,
+        "reason": unique_feedback,
+    });
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .record_refinement_lifecycle(
+            &fixture.proposal_id,
+            "refinement_start",
+            Some(&demand_metadata),
+        )
+        .await
+        .expect("record demand-round lifecycle");
+
+    let readiness_context = "Proposal currently meets all DoR checks.";
+    let revision_seq = 1;
+
+    // Create refinement tasks for all three tribunal roles and assert each
+    // description contains the exact label and feedback string.
+    for agent_type in ["advocate", "adversary", "judge"] {
+        let task_id = actor
+            .create_refinement_task_with_context(
+                &fixture.proposal_id,
+                agent_type,
+                1,
+                revision_seq,
+                readiness_context,
+                Some(unique_feedback),
+                Some(&fixture.user_id),
+            )
+            .await
+            .unwrap_or_else(|| panic!("create refinement task for {agent_type}"));
+
+        let task = TaskRepository::new(db.clone(), EventBus::noop())
+            .get(&task_id)
+            .await
+            .expect("read task")
+            .expect("task exists");
+
+        assert!(
+            task.description.contains(REVIEWER_FEEDBACK_LABEL),
+            "{agent_type} task description must contain the exact feedback label:\n{}",
+            task.description
+        );
+        assert!(
+            task.description.contains(unique_feedback),
+            "{agent_type} task description must contain the exact unique feedback string unchanged:\n{}",
+            task.description
+        );
+    }
+}
+
+/// Regression: when no current-revision reviewer feedback exists, the task
+/// description preserves the existing DoR/readiness behavior and does NOT
+/// contain the feedback label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_current_feedback_preserves_existing_task_description() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    // No demand-round feedback recorded — pass None explicitly.
+    let readiness_context = "Proposal currently meets all DoR checks.";
+
+    let task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "adversary",
+            1,
+            1,
+            readiness_context,
+            None,
+            Some(&fixture.user_id),
+        )
+        .await
+        .expect("create refinement task");
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+
+    assert!(
+        !task.description.contains(REVIEWER_FEEDBACK_LABEL),
+        "no feedback label should appear when no current feedback exists:\n{}",
+        task.description
+    );
+    assert!(
+        task.description.contains("Current DoR status:"),
+        "DoR readiness context must still be present:\n{}",
+        task.description
+    );
+}
+
+/// Regression: stale reviewer feedback from a prior revision is excluded —
+/// when the proposal's revision has advanced, the helper returns `None` and
+/// the task description does not contain the feedback label or stale string.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_revision_feedback_is_excluded_from_task_description() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    let actor = build_refinement_actor(&db, &events_tx, pool.clone());
+
+    let stale_feedback = "STALE-FEEDBACK-from-older-revision-019f0fed";
+    let demand_metadata = serde_json::json!({
+        "source": "human_demand_round",
+        "reviewer_feedback": stale_feedback,
+        "reason": stale_feedback,
+    });
+    let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
+    proposal_repo
+        .record_refinement_lifecycle(
+            &fixture.proposal_id,
+            "refinement_start",
+            Some(&demand_metadata),
+        )
+        .await
+        .expect("record stale demand-round lifecycle");
+
+    // The helper should still see the feedback on the current revision (seq=1).
+    let still_current = proposal_repo
+        .latest_current_revision_reviewer_feedback(&fixture.proposal_id)
+        .await
+        .expect("read feedback");
+    assert_eq!(still_current.as_deref(), Some(stale_feedback));
+
+    // Advance the proposal revision (body change bumps latest_revision_seq).
+    let proposal = proposal_repo
+        .get(&fixture.proposal_id)
+        .await
+        .expect("read proposal")
+        .expect("proposal exists");
+    proposal_repo
+        .update(
+            &fixture.proposal_id,
+            djinn_db::ProposalUpdateInput {
+                title: &proposal.title,
+                body: "updated body that advances the revision seq",
+                acceptance_criteria: &proposal.acceptance_criteria,
+                status: "draft",
+                superseded_by: None,
+                body_format: None,
+                event_metadata: None,
+            },
+        )
+        .await
+        .expect("advance proposal revision");
+
+    // Now the helper must return None — feedback is from an older seq.
+    let now_stale = proposal_repo
+        .latest_current_revision_reviewer_feedback(&fixture.proposal_id)
+        .await
+        .expect("read feedback after revision advance");
+    assert!(
+        now_stale.is_none(),
+        "stale feedback from an older revision must not be considered current"
+    );
+
+    // Simulating the dispatch path: with None feedback, the task description
+    // must not contain the stale feedback or the label.
+    let task_id = actor
+        .create_refinement_task_with_context(
+            &fixture.proposal_id,
+            "judge",
+            2,
+            2,
+            "Proposal currently meets all DoR checks.",
+            now_stale.as_deref(),
+            Some(&fixture.user_id),
+        )
+        .await
+        .expect("create refinement task");
+
+    let task = TaskRepository::new(db.clone(), EventBus::noop())
+        .get(&task_id)
+        .await
+        .expect("read task")
+        .expect("task exists");
+
+    assert!(
+        !task.description.contains(REVIEWER_FEEDBACK_LABEL),
+        "stale feedback must not inject the label:\n{}",
+        task.description
+    );
+    assert!(
+        !task.description.contains(stale_feedback),
+        "stale feedback string must not appear in the task description:\n{}",
+        task.description
+    );
+}

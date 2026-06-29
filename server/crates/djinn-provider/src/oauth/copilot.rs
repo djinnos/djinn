@@ -9,6 +9,7 @@
 //! (`~/.djinn/oauth/copilot.json`) is supported as a migration fallback only.
 
 use anyhow::{Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use reqwest::{Client, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -62,7 +63,8 @@ impl CopilotTokens {
         let Some(exp) = self.expires_at else {
             return false; // unknown — assume valid
         };
-        let now = std::time::SystemTime::now()
+        let now = SystemClockTrait::new()
+            .now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
@@ -391,6 +393,7 @@ pub async fn exchange_for_copilot_token(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
 

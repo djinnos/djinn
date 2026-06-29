@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 pub mod bootstrap;
 pub mod catalog;
 pub mod completion;

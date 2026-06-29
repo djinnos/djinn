@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 // Sandbox module — OS-level shell sandbox trait and backend selection.
 //
 // ADR-013: OS-Level Shell Sandboxing — Landlock + Seatbelt

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use djinn_control_plane::{
@@ -24,6 +24,7 @@ use crate::actors::coordinator::CoordinatorHandle;
 use crate::file_time::FileTime;
 use crate::lsp::LspManager;
 use crate::roles::RoleRegistry;
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
@@ -774,7 +775,8 @@ impl AgentContext {
     /// Register a task as active and return the shared timestamp atomic.
     /// The atomic is initialized to the current unix timestamp.
     pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
-        let now = SystemTime::now()
+        let now = SystemClockTrait::new()
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -804,7 +806,8 @@ impl AgentContext {
     /// stall poller uses to grant the full role budget instead of the aggressive
     /// first-call cap.
     pub fn touch_activity(&self, task_id: &str) {
-        let now = SystemTime::now()
+        let now = SystemClockTrait::new()
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -819,7 +822,8 @@ impl AgentContext {
 
     /// Return seconds since last activity touch, or `None` if not registered.
     pub fn idle_seconds(&self, task_id: &str) -> Option<u64> {
-        let now = SystemTime::now()
+        let now = SystemClockTrait::new()
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);

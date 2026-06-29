@@ -5,6 +5,7 @@
 //! before expiry.
 
 use anyhow::{Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,7 +78,7 @@ fn cache_put(id: u64, token: InstallationToken) {
             id,
             CacheEntry {
                 token,
-                fetched_at: Instant::now(),
+                fetched_at: SystemClockTrait::new().now_instant(),
                 ttl,
             },
         );

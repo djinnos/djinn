@@ -12,6 +12,7 @@ use anyhow::{Context, Result as AnyhowResult, bail};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::nomic_bert::{self, Config, NomicBertModel};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use serde::Serialize;
 use tokenizers::{
@@ -251,7 +252,7 @@ impl EmbeddingService {
             cache_dir = %self.inner.cache_dir.display(),
             "loading embedding model"
         );
-        let start = std::time::Instant::now();
+        let start = SystemClockTrait::new().now_instant();
 
         match self
             .inner

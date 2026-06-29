@@ -1,3 +1,6 @@
+// Test-only: Instant::now is used for timing assertions and deadlined poll
+// loops in these integration tests.
+#![allow(clippy::disallowed_methods)]
 //! Concurrency / non-blocking regression for `memory_run_enrichment`.
 //!
 //! Asserts the contract documented in

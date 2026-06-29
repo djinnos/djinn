@@ -1,4 +1,3 @@
-#![allow(clippy::disallowed_methods)] // TODO(70y0): temporary; remove after wall-clock migration
 //! `djinn-graph` — canonical-graph building and repo-map rendering
 //! extracted out of `djinn-server` so the warm worker binary
 //! (`djinn-agent-worker warm-graph ...`) can link just the graph pipeline
