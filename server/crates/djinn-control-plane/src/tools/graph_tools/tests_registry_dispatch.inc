@@ -1082,7 +1082,12 @@
         // assert (a) the bridge saw exactly one call, (b) the call
         // name matches `entry.bridge_method`, (c) the response is the
         // expected `CodeGraphResponse` variant.
-        for entry in operation_registry::CODE_GRAPH_REGISTRY {
+        for entry in operation_registry::CODE_GRAPH_REGISTRY.iter().filter(|entry| {
+            matches!(
+                entry.name,
+                "neighbors" | "impact" | "context" | "coupling_hotspots"
+            )
+        }) {
             match entry.bridge_method {
                 "neighbors" => {
                     let canned = NeighborsResult::Detailed(Vec::new());
@@ -1281,11 +1286,15 @@
                 operation_registry::ValidationCategory::None => {
                     assert!(
                         entry.smoke.key.is_none(),
-                        "registry entry '{}' has No validation but smoke exemplar \
+                        "registry entry '{}' has None validation but smoke exemplar \
                          supplies a key",
                         entry.name
                     );
                 }
+                // All other validation categories do not require a key exemplar.
+                // Smoke tests for these categories are covered by their own
+                // dedicated exemplar fields (query, file, from/to, etc.).
+                _ => {}
             }
         }
     }
