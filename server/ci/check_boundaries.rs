@@ -543,6 +543,7 @@ async fn main() {
 // behaviour of `main`.
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 /// Check a crate graph against compiled boundary rules and return the
 /// violations as structured data.  This helper is factored out of `main`
 /// so tests can assert forbidden-edge behaviour without spawning the full
@@ -563,6 +564,7 @@ fn check_violations<'a>(
     violations
 }
 
+#[allow(dead_code)]
 /// Render a human-readable violation report to the supplied writer.
 /// Returns the exit code that the CLI should use (1 for violations).
 #[cfg(test)]
