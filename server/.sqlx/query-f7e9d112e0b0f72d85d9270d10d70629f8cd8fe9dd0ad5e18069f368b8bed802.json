@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.source_id, l.target_id AS \"target_id!\", l.target_raw\n             FROM note_links l\n             JOIN notes src ON src.id = l.source_id AND src.project_id = $1\n             WHERE l.target_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "source_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "target_id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_raw",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f7e9d112e0b0f72d85d9270d10d70629f8cd8fe9dd0ad5e18069f368b8bed802"
+}

@@ -1,7 +1,7 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings (key, value, updated_at)\n             VALUES ($1, $2, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n             ON CONFLICT (key) DO UPDATE SET\n               value = EXCLUDED.value,\n               updated_at = EXCLUDED.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eefebe0f5d1f9d5400fde87350c841ec65a92fc36b0838867092071c3b2343b1"
+}

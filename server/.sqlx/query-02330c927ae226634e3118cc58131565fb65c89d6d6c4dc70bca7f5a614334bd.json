@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, task_id, actor_id, actor_role, event_type, payload::text AS \"payload!\", created_at\n             FROM activity_log WHERE task_id = $1 AND archived = FALSE ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "actor_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "actor_role",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "event_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "payload!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "02330c927ae226634e3118cc58131565fb65c89d6d6c4dc70bca7f5a614334bd"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM epic_blockers WHERE epic_id = $1 AND blocking_epic_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "040a2cf7c7449dcbbd7a03ccd76a195a66ca83d70e4c56857ad0dc6138326052"
+}

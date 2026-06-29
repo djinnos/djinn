@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id AS \"id!\",\n                      COALESCE(m.last_at, s.started_at) AS \"last_activity!\"\n                 FROM sessions s\n                 LEFT JOIN (\n                    SELECT session_id, MAX(created_at) AS last_at\n                    FROM session_messages\n                    GROUP BY session_id\n                 ) m ON m.session_id = s.id\n                WHERE s.agent_type = 'chat' AND s.status = 'running'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_activity!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "43d957fe67081c45a8c59797747c555ac510b83445b606666307afc5a2eee205"
+}

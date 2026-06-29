@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE epics SET status = $1,\n                    closed_at = CASE WHEN $2 = 'closed' THEN COALESCE(closed_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')) ELSE NULL END,\n                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n             WHERE id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "61d034e02b5303acb57c82ceb42092c8f4bfc6034086e1aaa73b1614a6d248bb"
+}

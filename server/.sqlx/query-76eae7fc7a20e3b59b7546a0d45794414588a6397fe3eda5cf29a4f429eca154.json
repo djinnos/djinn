@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.id AS epic_id, e.short_id, e.title, e.status AS \"status!\"\n             FROM epic_blockers b\n             JOIN epics e ON e.id = b.blocking_epic_id\n             WHERE b.epic_id = $1\n             ORDER BY e.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epic_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "short_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "status!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "76eae7fc7a20e3b59b7546a0d45794414588a6397fe3eda5cf29a4f429eca154"
+}
