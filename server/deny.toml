@@ -45,6 +45,9 @@ ignore = [
     "RUSTSEC-2026-0183",
     # gix: undefined behavior with Signature from buffer
     "RUSTSEC-2026-0184",
+    # rmcp: DNS rebinding vulnerability in Streamable HTTP server transport;
+    # fix requires rmcp >= 1.4.0 (major version bump from 0.16, tracked separately)
+    "RUSTSEC-2026-0189",
 ]
 
 # ---------------------------------------------------------------------------
