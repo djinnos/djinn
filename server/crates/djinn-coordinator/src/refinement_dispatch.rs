@@ -388,6 +388,30 @@ impl CoordinatorActor {
             .and_then(|r| r.to_error_string())
             .unwrap_or_else(|| "Proposal currently meets all DoR checks.".to_string());
 
+        // Retrieve the latest current-revision human reviewer feedback recorded
+        // by a demand round. The helper filters to the proposal's current
+        // `latest_revision_seq` so stale feedback from a prior revision is
+        // never injected into the next tribunal task.
+        let reviewer_feedback = {
+            let event_bus = crate::events::event_bus_for(&self.events_tx);
+            let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+            match proposal_repo
+                .latest_current_revision_reviewer_feedback(proposal_id)
+                .await
+            {
+                Ok(fb) => fb,
+                Err(e) => {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        error = %e,
+                        "Failed to retrieve reviewer feedback for refinement dispatch; \
+                         proceeding without feedback injection"
+                    );
+                    None
+                }
+            }
+        };
+
         // ── Step 3: Create the refinement task (first DB side effect) ────────
         //
         // The task row is created only AFTER the cap reservation exists. On
@@ -399,6 +423,7 @@ impl CoordinatorActor {
                 round,
                 revision_seq,
                 &readiness_context,
+                reviewer_feedback.as_deref(),
                 Some(user_id),
             )
             .await

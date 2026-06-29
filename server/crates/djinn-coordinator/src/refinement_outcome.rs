@@ -679,7 +679,9 @@ impl CoordinatorActor {
             .unwrap_or(false)
     }
 
-    /// Create a refinement task in the DB, enriched with DoR context.
+    /// Create a refinement task in the DB, enriched with DoR context and any
+    /// current-revision human reviewer feedback from the latest demand round.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_refinement_task_with_context(
         &self,
         proposal_id: &str,
@@ -687,6 +689,7 @@ impl CoordinatorActor {
         round: i32,
         against_revision_seq: i32,
         readiness_context: &str,
+        reviewer_feedback: Option<&str>,
         attributed_user_id: Option<&str>,
     ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
@@ -700,11 +703,21 @@ impl CoordinatorActor {
             .unwrap_or_else(|| proposal_id.to_string());
 
         let title = format!("Refinement {agent_type} — {proposal_label} (round {round})");
-        let description = format!(
+        let mut description = format!(
             "Proposal refinement session: {agent_type} role for proposal {proposal_id}, \
              round {round}, against revision {against_revision_seq}.\n\n\
              Current DoR status: {readiness_context}"
         );
+
+        // Inject current human reviewer feedback near the DoR status so the
+        // tribunal agent sees the exact feedback string for this round. The
+        // caller is responsible for ensuring the feedback belongs to the
+        // proposal's current revision (see
+        // `ProposalRepository::latest_current_revision_reviewer_feedback`).
+        if let Some(feedback) = reviewer_feedback.filter(|s| !s.is_empty()) {
+            description.push_str("\n\nHuman reviewer feedback for this round: ");
+            description.push_str(feedback);
+        }
 
         let project_id = match proposal_repo.targets(proposal_id).await {
             Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
