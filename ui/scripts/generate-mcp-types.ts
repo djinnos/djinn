@@ -135,6 +135,19 @@ function normalizeSchema(raw: JsonSchema | undefined): JsonSchema {
           continue;
         }
 
+        // schemars 1.x (rmcp 1.x) renders nullable `Option<T>` as a JSON
+        // Schema 2020-12 type array `["T", "null"]` rather than the 0.8
+        // `nullable: true` extension. Strip the `"null"` member so a
+        // nullable-optional field generates `T` (matching the prior
+        // `nullable`-stripping behavior above) instead of `T | null`, which
+        // would otherwise ripple `| null` through every consumer of the
+        // generated types.
+        if (key === "type" && Array.isArray(current)) {
+          const nonNull = (current as unknown[]).filter((t) => t !== "null");
+          next[key] = nonNull.length === 1 ? nonNull[0] : nonNull;
+          continue;
+        }
+
         next[key] = replacer(current);
       }
 
