@@ -626,6 +626,13 @@ jobs:
       - name: Warm canonical graph
         run: cargo run -p djinn-agent-worker -- warm-graph "$DJINN_PROJECT_ID"
 
+      - name: Expose checkout as canonical index tree
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p "$DJINN_PROJECT_ROOT/.djinn/worktrees"
+          ln -sfn "$DJINN_PROJECT_ROOT" "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index"
+          git -C "$DJINN_PROJECT_ROOT/.djinn/worktrees/_index" rev-parse HEAD
+
       - name: Check architectural boundaries
         working-directory: ${{ github.workspace }}
         run: make check-boundaries
