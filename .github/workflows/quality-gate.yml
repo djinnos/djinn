@@ -610,6 +610,8 @@ jobs:
 
       - name: Apply djinn-db migrations
         working-directory: server/crates/djinn-db
+        env:
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/djinn
         run: sqlx migrate run --source migrations_postgres
 
       - name: Seed project row for warm-graph
