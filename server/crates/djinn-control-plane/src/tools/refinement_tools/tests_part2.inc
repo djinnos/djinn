@@ -399,6 +399,194 @@
             resp.get("proposal_id").and_then(|v| v.as_str()),
             Some(proposal.id.as_str()),
         );
+
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let start = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_start")
+            .expect("demand round should record refinement_start");
+        assert_eq!(
+            start.seq, proposal.latest_revision_seq,
+            "reviewer feedback must be scoped to the current proposal revision"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_str(start.event_metadata.as_deref().expect("metadata")).unwrap();
+        assert_eq!(meta["source"], "human_demand_round");
+        assert_eq!(
+            meta["reviewer_feedback"],
+            "Need another round after judge feedback"
+        );
+        assert_eq!(meta["reason"], "Need another round after judge feedback");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_allows_parked_awaiting_review_and_dispatches_once() {
+        use crate::bridge::{CoordinatorOps, ProposalRefinementStartRequest};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingDemandCoordinator {
+            demand_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl CoordinatorOps for CountingDemandCoordinator {
+            fn get_status(&self) -> Result<crate::bridge::CoordinatorStatus, String> {
+                Err("not initialized".into())
+            }
+            async fn trigger_dispatch_for_project(&self, _: &str) -> Result<(), String> {
+                Err("not initialized".into())
+            }
+            async fn start_proposal_refinement(
+                &self,
+                _: ProposalRefinementStartRequest,
+            ) -> Result<(), String> {
+                Err("unexpected start call".into())
+            }
+            async fn demand_proposal_refinement_round(
+                &self,
+                _: ProposalRefinementStartRequest,
+            ) -> Result<(), String> {
+                self.demand_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn resolve_refinement_review(
+                &self,
+                _: String,
+                _: bool,
+                _: Option<String>,
+            ) -> Result<(), String> {
+                Err("unexpected resolve call".into())
+            }
+        }
+
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        let base = test_mcp_state(db.clone());
+        let demand_calls = Arc::new(AtomicUsize::new(0));
+        let state = crate::state::McpState::with_enrichment(
+            db.clone(),
+            base.event_bus(),
+            base.catalog().clone(),
+            base.health_tracker().clone(),
+            Some(Arc::new(CountingDemandCoordinator {
+                demand_calls: demand_calls.clone(),
+            }) as Arc<dyn CoordinatorOps>),
+            None,
+            None,
+            None,
+            base.lsp().clone(),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+            None,
+        );
+        let server = DjinnMcpServer::new(state);
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Awaiting Review Demand",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("in_review"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(
+            &proposal.id,
+            "refinement_awaiting_review",
+            Some(&serde_json::json!({ "judge_summary": "parked for review" })),
+        )
+        .await
+        .unwrap();
+
+        let feedback = "UNIQUE awaiting-review feedback 019f0fed exact";
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_demand_round",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": feedback,
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(true));
+        assert!(resp.get("error").and_then(|v| v.as_str()).is_none());
+        assert_eq!(demand_calls.load(Ordering::SeqCst), 1);
+
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        let demand_starts: Vec<_> = revisions
+            .iter()
+            .filter(|r| {
+                r.event_kind == "refinement_start"
+                    && r.event_metadata
+                        .as_deref()
+                        .is_some_and(|m| m.contains("human_demand_round"))
+            })
+            .collect();
+        assert_eq!(demand_starts.len(), 1, "fresh demand start exactly once");
+        let meta: serde_json::Value = serde_json::from_str(
+            demand_starts[0]
+                .event_metadata
+                .as_deref()
+                .expect("demand metadata"),
+        )
+        .unwrap();
+        assert_eq!(meta["source"], "human_demand_round");
+        assert_eq!(meta["reviewer_feedback"], feedback);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn demand_round_rejects_true_duplicate_active_refinement() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Duplicate Active Demand",
+                body: "body",
+                acceptance_criteria: Some("[]"),
+                status: Some("draft"),
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        repo.record_refinement_lifecycle(&proposal.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        let resp = server
+            .dispatch_tool(
+                "proposal_refinement_demand_round",
+                serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "reason": "should not dispatch while active",
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.get("accepted").and_then(|v| v.as_bool()), Some(false));
+        let error = resp.get("error").and_then(|v| v.as_str()).unwrap();
+        assert!(error.contains("already active"), "unexpected error: {error}");
+
+        let revisions = repo.revisions(&proposal.id).await.unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .filter(|r| r.event_kind == "refinement_start")
+                .count(),
+            1,
+            "duplicate active demand must not record or dispatch a new start"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
