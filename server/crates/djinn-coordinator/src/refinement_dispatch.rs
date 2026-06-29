@@ -460,6 +460,7 @@ impl CoordinatorActor {
         // On spawn-cap overflow, clear the in-flight reservation (the real
         // task id) before terminating so the slot is immediately available.
         {
+            #[allow(clippy::unwrap_used)]
             let state = self.active_refinements.get_mut(proposal_id).unwrap();
             if let Err(reason) = state.record_spawn() {
                 tracing::warn!(

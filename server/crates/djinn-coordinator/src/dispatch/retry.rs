@@ -956,7 +956,13 @@ impl CoordinatorActor {
             return;
         }
 
-        let project_path = project_path.expect("planner remediation resolves a project path");
+        let Some(project_path) = project_path else {
+            tracing::error!(
+                source_task_id = %source_task_id,
+                "planner remediation: project_path unexpectedly None after early-return guard"
+            );
+            return;
+        };
         let task_id = review_task.id.clone();
         let project_path_owned = project_path.clone();
         let outcome = self
