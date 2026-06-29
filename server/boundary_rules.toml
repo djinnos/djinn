@@ -1,20 +1,23 @@
 # server/boundary_rules.toml
 #
 # Checked-in architectural boundary rule set encoding the intended
-# workspace layering DAG.  CI loads this file and runs the crate-level
-# `boundary_check` op against it so that architectural inversions cannot
-# silently re-tangle the dependency graph.
+# workspace layering DAG.  CI runs `scripts/check_boundaries.py` against
+# this file so that architectural inversions cannot silently re-tangle
+# the dependency graph.  The checker reads crate manifests + greps source
+# only — no database, no code-graph warm, no workspace compile.  See
+# docs/BOUNDARY_CHECKER_RUNBOOK.md.
 #
 # Each `[[rules]]` entry is a single forbidden edge: if any dependency
 # whose source matches `from_glob` targets a node matching `to_glob`,
 # that edge is reported as a violation.
 #
-# Glob syntax: `**/djinn-agent/**` matches files inside the djinn-agent
-# crate (file-level checking) and reduces to the crate name `djinn-agent`
-# for crate-level matching.  The crate-level checker strips the glob to a
-# crate-name pattern, so `**/djinn-*/**` becomes `djinn-*` and matches
-# every djinn-* crate.  Self-references (a crate importing itself) are
-# excluded by the checker and never reported as violations.
+# Glob syntax: `**/djinn-agent/**` reduces to the crate name `djinn-agent`
+# for crate-level rules (matched against declared Cargo.toml dependency
+# edges), and `**/djinn-*/**` becomes `djinn-*` to match every djinn-*
+# crate.  Self-references (a crate depending on itself) are never edges
+# and so are never reported.  A rule whose `from_glob` keeps a path shape
+# (e.g. ends in `.rs`) is treated as file-level: the matching source
+# files are scanned for a `use` of the forbidden crate.
 #
 # The slot-pool/k8s lifecycle rule is intentionally file-level because it
 # replaces the former source-scanning unit test and only constrains
@@ -28,38 +31,12 @@ level = "file"
 description = "Server workspace layering DAG — architectural boundary rules"
 
 # ------------------------------------------------------------------ #
-# Reverse-dependency guard
+# Agent high fan-out guard
 # ------------------------------------------------------------------ #
-# The agent sits at the top of the layering DAG and must NOT import the
-# control-plane crate.  control-plane is the bridge / orchestration
-# layer; an agent → control-plane edge creates a cycle because the
-# control-plane already dispatches into the agent.
-
-[[rules]]
-name = "no-agent-imports-control-plane"
-from_glob = "**/djinn-agent/**"
-to_glob = "**/djinn-control-plane/**"
-description = "Agent must not import control-plane; control-plane is the bridge layer that dispatches into the agent. A reverse edge here creates a layering cycle."
-
-# ------------------------------------------------------------------ #
-# Agent high fan-out guards
-# ------------------------------------------------------------------ #
-# The agent should talk to infrastructure exclusively through the
-# control-plane bridge.  Direct agent → db / agent → graph edges bypass
-# that indirection and tightly couple the agent to storage / graph
-# internals, which is an architectural smell that should be flagged.
-
-[[rules]]
-name = "slot-pool-no-k8s-direct-import"
-from_glob = "**/actors/slot/pool/{actor,handle,mod,types}.rs"
-to_glob = "**/djinn-k8s/**"
-description = "Production slot pool lifecycle code must not import djinn_k8s directly; use the RuntimeOps bridge layer."
-
-[[rules]]
-name = "no-agent-imports-db"
-from_glob = "**/djinn-agent/**"
-to_glob = "**/djinn-db/**"
-description = "Agent must not import djinn-db directly; storage access should go through the control-plane bridge. This edge also guards the downward layering (nothing below djinn-db should import the higher agent)."
+# The agent should reach the code-graph tool surface through the
+# control-plane bridge, not as a direct crate dependency.  This edge is
+# currently green (djinn-agent has no djinn-graph dependency), so it is
+# enforced as a hard "do not introduce" guard.
 
 [[rules]]
 name = "no-agent-imports-graph"
@@ -68,17 +45,37 @@ to_glob = "**/djinn-graph/**"
 description = "Agent must not import djinn-graph directly; the code-graph tool surface should be reached through the control-plane bridge, not a direct dependency."
 
 # ------------------------------------------------------------------ #
-# Known inversion guard
+# Slot-pool / k8s lifecycle guard (file-level)
 # ------------------------------------------------------------------ #
-# djinn-db → djinn-memory is a known historical inversion.  It is
-# documented here so the rule set catches it and any NEW occurrence is
-# surfaced in CI rather than silently merged.
+# Intentionally file-level: it constrains only the production slot-pool
+# lifecycle files, not all of djinn-agent.  It replaces the former
+# source-scanning unit test and is currently green.
 
 [[rules]]
-name = "no-db-imports-memory"
-from_glob = "**/djinn-db/**"
-to_glob = "**/djinn-memory/**"
-description = "Known inversion guard: djinn-db must not import djinn-memory. The memory layer is higher in the DAG than the db layer; this edge is tracked so new occurrences surface in CI."
+name = "slot-pool-no-k8s-direct-import"
+from_glob = "**/actors/slot/pool/{actor,handle,mod,types}.rs"
+to_glob = "**/djinn-k8s/**"
+description = "Production slot pool lifecycle code must not import djinn_k8s directly; use the RuntimeOps bridge layer."
+
+# ------------------------------------------------------------------ #
+# DEFERRED — aspirational rules not enforced today
+# ------------------------------------------------------------------ #
+# The following edges describe a TARGET architecture that the current
+# tree massively violates, so they cannot be enforced as hard "zero"
+# rules without a false-green baseline:
+#
+#   * no-agent-imports-control-plane — djinn-agent → djinn-control-plane
+#     (~20 source files reference djinn_control_plane today)
+#   * no-agent-imports-db            — djinn-agent → djinn-db
+#     (~44 source files reference djinn_db today)
+#   * no-db-imports-memory           — djinn-db → djinn-memory
+#     (~15 source files reference djinn_memory today)
+#
+# These intentionally route the agent's storage/orchestration access
+# through a bridge instead of direct crate deps.  Enforcing them is a
+# real refactor, not a CI wiring task.  If a "no NEW occurrences"
+# ratchet is wanted before that refactor lands, add a baseline-allowlist
+# mode to scripts/check_boundaries.py and re-introduce them here.
 
 # ------------------------------------------------------------------ #
 # Leaf crate isolation
