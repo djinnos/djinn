@@ -291,9 +291,13 @@ fn bounded_confidence(cluster_size: usize) -> f64 {
 }
 
 fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .expect("rfc3339 timestamp formatting should succeed")
+    match OffsetDateTime::now_utc().format(&Rfc3339) {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            tracing::warn!(%error, "failed to format consolidation timestamp as RFC3339");
+            OffsetDateTime::now_utc().to_string()
+        }
+    }
 }
 
 pub(super) async fn run_note_consolidation(

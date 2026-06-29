@@ -78,6 +78,8 @@ pub(crate) mod pr_cleanup;
 mod pr_commands;
 mod pr_review_handlers;
 mod pr_review_watcher;
+#[allow(clippy::disallowed_methods)]
+// PR watcher throttle/cooldown bookkeeping uses monotonic instants
 mod pr_watcher;
 mod state;
 

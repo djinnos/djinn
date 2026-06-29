@@ -175,10 +175,14 @@ impl CoordinatorActor {
             explicit_dry,
         };
 
-        let outcome = {
-            let state = self.active_refinements.get_mut(proposal_id).unwrap();
-            state.process_adversary_pass(&adversary_result)
+        let Some(state) = self.active_refinements.get_mut(proposal_id) else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                "adversary outcome arrived for missing refinement state"
+            );
+            return;
         };
+        let outcome = state.process_adversary_pass(&adversary_result);
 
         match outcome {
             AdversaryPassOutcome::Continue => {
