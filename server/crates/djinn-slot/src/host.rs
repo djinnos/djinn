@@ -13,11 +13,12 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::UNIX_EPOCH;
 
 use djinn_control_plane::bridge::RuntimeOps;
 use djinn_control_plane::tools::task_tools::ErrorResponse;
+use djinn_core::clock::Clock;
 use djinn_core::events::EventBus;
 use djinn_core::models::Task;
 use djinn_db::Database;
@@ -173,6 +174,12 @@ pub struct SlotContext {
     pub runtime_ops: Option<Arc<dyn RuntimeOps>>,
     /// Code-graph operations handle (for auto code-context features).
     pub repo_graph_ops: Option<Arc<dyn djinn_control_plane::bridge::RepoGraphOps>>,
+    /// Shared wall-clock seam. Production code constructs this with
+    /// [`SystemClock::new`]; tests may inject a `TestClock` for deterministic
+    /// time reads.  All wall-clock reads on slot runtime paths route through
+    /// this field rather than calling `SystemTime::now()`/`Instant::now()`
+    /// directly, so the `disallowed_methods` lint stays clean.
+    pub clock: Arc<dyn Clock>,
     /// Host-specific callbacks for complex operations.
     pub callbacks: Arc<dyn SlotHostCallbacks>,
 }
@@ -213,25 +220,27 @@ impl SlotContext {
 
     // ── Activity tracking ──────────────────────────────────────────────
 
-    pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
-        let now = SystemTime::now()
+    /// Current unix-seconds timestamp read through the shared clock seam.
+    /// Falls back to 0 when the wall-clock is before `UNIX_EPOCH`.
+    fn now_unix_secs(&self) -> u64 {
+        self.clock
+            .now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+
+    pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
+        let now = self.now_unix_secs();
         let ts = Arc::new(AtomicU64::new(now));
-        self.active_tasks
-            .lock()
-            .expect("poisoned")
+        recover_lock(&self.active_tasks, "active_tasks")
             .insert(task_id.to_string(), ts.clone());
         ts
     }
 
     pub fn touch_activity(&self, task_id: &str) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut guard = self.active_tasks.lock().expect("poisoned");
+        let now = self.now_unix_secs();
+        let mut guard = recover_lock(&self.active_tasks, "active_tasks");
         match guard.get(task_id) {
             Some(ts) => ts.store(now, Ordering::Relaxed),
             None => {
@@ -241,15 +250,12 @@ impl SlotContext {
     }
 
     pub fn deregister_activity(&self, task_id: &str) {
-        self.active_tasks.lock().expect("poisoned").remove(task_id);
+        recover_lock(&self.active_tasks, "active_tasks").remove(task_id);
     }
 
     pub fn idle_seconds(&self, task_id: &str) -> Option<u64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let guard = self.active_tasks.lock().expect("poisoned");
+        let now = self.now_unix_secs();
+        let guard = recover_lock(&self.active_tasks, "active_tasks");
         let ts = guard.get(task_id)?;
         let last = ts.load(Ordering::Relaxed);
         Some(now.saturating_sub(last))
@@ -258,17 +264,12 @@ impl SlotContext {
     // ── Background work ────────────────────────────────────────────────
 
     pub fn register_background_work(&self, task_id: &str) {
-        self.background_work_tasks
-            .lock()
-            .expect("poisoned")
+        recover_lock(&self.background_work_tasks, "background_work_tasks")
             .insert(task_id.to_string());
     }
 
     pub fn deregister_background_work(&self, task_id: &str) {
-        self.background_work_tasks
-            .lock()
-            .expect("poisoned")
-            .remove(task_id);
+        recover_lock(&self.background_work_tasks, "background_work_tasks").remove(task_id);
     }
 
     // ── Coordinator ────────────────────────────────────────────────────
@@ -300,5 +301,23 @@ impl SlotContext {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("task {task_id} not found"))
+    }
+}
+
+/// Acquire a `std::sync::Mutex` guard, recovering from poison with a warning.
+///
+/// Mutex poisoning only occurs when a previous holder panicked — a programming
+/// invariant violation.  The guarded data remains structurally valid, so we log
+/// the anomaly and continue operating rather than cascading the panic.
+fn recover_lock<'a, T>(mutex: &'a Mutex<T>, label: &'static str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                mutex = label,
+                "std::sync::Mutex poisoned by prior panic; recovering with data"
+            );
+            poisoned.into_inner()
+        }
     }
 }
