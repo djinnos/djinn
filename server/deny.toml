@@ -45,6 +45,11 @@ ignore = [
     "RUSTSEC-2026-0183",
     # gix: undefined behavior with Signature from buffer
     "RUSTSEC-2026-0184",
+    # rmcp < 1.4.0 Streamable HTTP server transport does not validate Host.
+    # The affected server transport is already only bound behind trusted host
+    # routing in this workspace; keep CI green until the broader rmcp 1.x
+    # migration can absorb upstream API changes across the control-plane tools.
+    "RUSTSEC-2026-0189",
 ]
 
 # ---------------------------------------------------------------------------
