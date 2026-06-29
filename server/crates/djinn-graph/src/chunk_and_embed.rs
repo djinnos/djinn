@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::repositories::code_chunk::chunker::{
     ChunkConfig, FileInput, RepoMetadata, SymbolChunkKind, SymbolInput,
 };
@@ -70,7 +71,7 @@ pub fn spawn_chunk_and_embed_pass(
             }
         };
 
-        let started = std::time::Instant::now();
+        let started = SystemClockTrait::new().now_instant();
         match run_chunk_and_embed_pass(
             &db,
             embeddings,

@@ -1,3 +1,5 @@
+// CLI binary: eprintln is the correct output channel for a command-line tool.
+#![allow(clippy::print_stderr)]
 //! `djinn-skills-manifest` — generate/check the project's `skills.json` manifest.
 //!
 //! Usage:

@@ -5,9 +5,10 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use djinn_core::clock::{Clock, SystemClock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -556,7 +557,8 @@ fn atomic_replace(final_path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn unique_temp_path(dir: &Path, file_name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
+    let nanos = SystemClock::new()
+        .now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();

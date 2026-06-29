@@ -348,7 +348,6 @@ async fn code_graph_schema_unchanged_by_registry_dispatch_refactor() {
     }
 }
 
-
 /// chat completions handler hands to the provider. Every `object`-typed
 /// (sub)schema in it must carry a `properties` field — OpenAI/Codex's strict
 /// validator 400s on object schemas without one (the original bug that

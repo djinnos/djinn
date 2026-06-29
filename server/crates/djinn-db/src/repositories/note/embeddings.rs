@@ -87,10 +87,10 @@ pub trait NoteVectorStore: Send + Sync {
 
     async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
         let canonical = canonical_embedding_branch(branch);
-        let note_ids = sqlx::query_scalar!(
+        let note_ids = sqlx::query_scalar::<_, String>(
             "SELECT note_id FROM note_embedding_meta WHERE branch = $1",
-            canonical
         )
+        .bind(canonical)
         .fetch_all(repo.db.pool())
         .await?;
         let deleted = note_ids.len() as u64;
@@ -336,22 +336,22 @@ async fn upsert_embedding_metadata(
 
     let mut tx = repo.db.pool().begin().await?;
 
-    sqlx::query!(
+    sqlx::query(
         r#"INSERT INTO note_embeddings (note_id, embedding, embedding_dim, updated_at)
          VALUES ($1, $2, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
          ON CONFLICT (note_id) DO UPDATE SET
              embedding = EXCLUDED.embedding,
              embedding_dim = EXCLUDED.embedding_dim,
              updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-        input.note_id,
-        embedding_blob,
-        embedding_dim
     )
+    .bind(input.note_id)
+    .bind(embedding_blob)
+    .bind(embedding_dim)
     .execute(&mut *tx)
     .await?;
 
     let canonical_branch = canonical_embedding_branch(input.branch);
-    sqlx::query!(
+    sqlx::query(
         r#"INSERT INTO note_embedding_meta (
             note_id, content_hash, embedded_at, model_version, embedding_dim, extension_state, branch
          ) VALUES (
@@ -364,13 +364,13 @@ async fn upsert_embedding_metadata(
             embedding_dim = EXCLUDED.embedding_dim,
             extension_state = EXCLUDED.extension_state,
             branch = EXCLUDED.branch"#,
-        input.note_id,
-        input.content_hash,
-        input.model_version,
-        embedding_dim,
-        extension_state,
-        canonical_branch
     )
+    .bind(input.note_id)
+    .bind(input.content_hash)
+    .bind(input.model_version)
+    .bind(embedding_dim)
+    .bind(extension_state)
+    .bind(canonical_branch)
     .execute(&mut *tx)
     .await?;
 
@@ -382,15 +382,14 @@ async fn upsert_embedding_metadata(
 
 async fn delete_embedding_metadata(repo: &NoteRepository, note_id: &str) -> Result<()> {
     let mut tx = repo.db.pool().begin().await?;
-    sqlx::query!("DELETE FROM note_embeddings WHERE note_id = $1", note_id)
+    sqlx::query("DELETE FROM note_embeddings WHERE note_id = $1")
+        .bind(note_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query!(
-        "DELETE FROM note_embedding_meta WHERE note_id = $1",
-        note_id
-    )
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("DELETE FROM note_embedding_meta WHERE note_id = $1")
+        .bind(note_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }
@@ -768,10 +767,10 @@ impl NoteVectorStore for QdrantNoteVectorStore {
     ) -> Result<u64> {
         let from_branch = canonical_embedding_branch(from_branch);
         let to_branch = canonical_embedding_branch(to_branch);
-        let note_ids = sqlx::query_scalar!(
+        let note_ids = sqlx::query_scalar::<_, String>(
             "SELECT note_id FROM note_embedding_meta WHERE branch = $1",
-            from_branch
         )
+        .bind(&from_branch)
         .fetch_all(repo.db.pool())
         .await?;
         if let Err(error) = self.qdrant_set_branch(&note_ids, &to_branch).await {
@@ -788,10 +787,10 @@ impl NoteVectorStore for QdrantNoteVectorStore {
 
     async fn delete_branch(&self, repo: &NoteRepository, branch: &str) -> Result<u64> {
         let branch = canonical_embedding_branch(branch);
-        let note_ids = sqlx::query_scalar!(
+        let note_ids = sqlx::query_scalar::<_, String>(
             "SELECT note_id FROM note_embedding_meta WHERE branch = $1",
-            branch
         )
+        .bind(&branch)
         .fetch_all(repo.db.pool())
         .await?;
         if let Err(error) = self.qdrant_delete_branch(&branch).await {
@@ -892,15 +891,14 @@ impl NoteRepository {
 
     pub async fn get_embedding(&self, note_id: &str) -> Result<Option<NoteEmbeddingRecord>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            NoteEmbeddingRecord,
+        Ok(sqlx::query_as::<_, NoteEmbeddingRecord>(
             "SELECT m.note_id, m.content_hash, m.model_version, m.embedding_dim, m.embedded_at,
                     e.updated_at, m.extension_state, m.branch
              FROM note_embedding_meta m
              JOIN note_embeddings e ON e.note_id = m.note_id
              WHERE m.note_id = $1",
-            note_id
         )
+        .bind(note_id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -934,13 +932,13 @@ impl NoteRepository {
             .await?;
         let to_branch_c = canonical_embedding_branch(to_branch);
         let from_branch_c = canonical_embedding_branch(from_branch);
-        let result = sqlx::query!(
+        let result = sqlx::query(
             "UPDATE note_embedding_meta
              SET branch = $1
              WHERE branch = $2",
-            to_branch_c,
-            from_branch_c
         )
+        .bind(to_branch_c)
+        .bind(from_branch_c)
         .execute(self.db.pool())
         .await?;
         Ok(result.rows_affected().max(promoted))
@@ -953,25 +951,24 @@ impl NoteRepository {
 
     pub async fn embedding_branch_counts(&self) -> Result<Vec<(String, i64)>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query!(
-            r#"SELECT branch, COUNT(*) AS "count!: i64"
+        Ok(sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT branch, COUNT(*) AS count
                  FROM note_embedding_meta
                  GROUP BY branch
-                 ORDER BY branch"#
+                 ORDER BY branch"#,
         )
         .fetch_all(self.db.pool())
         .await?
         .into_iter()
-        .map(|r| (r.branch, r.count))
         .collect())
     }
 
     pub async fn embedding_branch_for_note(&self, note_id: &str) -> Result<Option<String>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_scalar!(
+        Ok(sqlx::query_scalar::<_, String>(
             "SELECT branch FROM note_embedding_meta WHERE note_id = $1",
-            note_id
         )
+        .bind(note_id)
         .fetch_optional(self.db.pool())
         .await?)
     }

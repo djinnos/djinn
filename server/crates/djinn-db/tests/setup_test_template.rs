@@ -1,3 +1,5 @@
+// Test helper: println used for migration progress output with --nocapture.
+#![allow(clippy::print_stdout)]
 //! One-shot setup helper: build the `djinn_test_template` database on the
 //! configured DJINN_TEST_DATABASE_URL (default = the cluster Postgres) and
 //! apply every `migrations_postgres/*.sql` file. Run with:

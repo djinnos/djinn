@@ -1729,6 +1729,7 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
 ///   are treated as not-fresh; everything else (the cache contains an entry
 ///   whose pinned commit is either known-current or
 ///   commit-check-failed) is treated as fresh so `await_fresh` does not spin.
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProcessGraphWarmer {
     use djinn_agent::warmer::{InProcessGraphWarmer, InProcessWarmerDeps};
     use djinn_db::ProjectRepository;

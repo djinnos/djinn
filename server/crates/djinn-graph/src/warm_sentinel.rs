@@ -46,6 +46,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -218,11 +219,12 @@ fn cleanup_tmp_files_recursive(dir: &Path) {
     }
 }
 
-/// Produce a simple UTC timestamp string. Uses `SystemTime` directly to
-/// avoid pulling in a `chrono` dependency.
+/// Produce a simple UTC timestamp string. Uses `djinn_core::clock::SystemClock`
+/// to keep all wall-clock reads inside the approved boundary.
 fn chrono_timestamp() -> String {
-    use std::time::SystemTime;
-    let dur = SystemTime::now()
+    use djinn_core::clock::{Clock, SystemClock};
+    let dur = SystemClock::new()
+        .now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     format!("+{}s", dur.as_secs())

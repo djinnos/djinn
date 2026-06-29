@@ -1122,6 +1122,8 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
+// scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 fn file_attr_for_metadata(metadata: &crate::memory_fs::MemoryEntryMetadata) -> fuser::FileAttr {
     let kind = match metadata.kind {
