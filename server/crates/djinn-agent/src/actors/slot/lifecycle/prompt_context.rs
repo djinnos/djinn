@@ -268,54 +268,82 @@ async fn load_sibling_tasks(
     }
 }
 
-/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
-async fn load_blocking_epics(
+/// Append `  - Delivered: <title>` sub-bullets for closed tasks owned by
+/// `blocker`. Logs and silently skips DB errors.
+async fn append_blocker_deliveries(
     epic_id: &str,
-    epic_repo: &djinn_db::EpicRepository,
+    blocker: &djinn_db::EpicBlockerRef,
     task_repo: &TaskRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    match epic_repo.list_blockers(epic_id).await {
-        Ok(blockers) if !blockers.is_empty() => {
-            ctx_lines.push("\n### Blocking Epics".to_string());
-            for blocker in &blockers {
-                ctx_lines.push(format!(
-                    "- **{}** ({}) — {}",
-                    blocker.title, blocker.short_id, blocker.status
-                ));
-                match task_repo
-                    .list_filtered(djinn_db::ListQuery {
-                        parent: Some(blocker.epic_id.clone()),
-                        status: Some("closed".to_string()),
-                        limit: 20,
-                        ..Default::default()
-                    })
-                    .await
-                {
-                    Ok(closed_tasks) => {
-                        for t in &closed_tasks.tasks {
-                            ctx_lines.push(format!("  - Delivered: {}", t.title));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            epic_id = %epic_id,
-                            blocking_epic_id = %blocker.epic_id,
-                            error = %e,
-                            "Lifecycle: failed to list closed tasks for blocking epic"
-                        );
-                    }
-                }
-            }
+    let closed_tasks = match task_repo
+        .list_filtered(djinn_db::ListQuery {
+            parent: Some(blocker.epic_id.clone()),
+            status: Some("closed".to_string()),
+            limit: 20,
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::debug!(
+                epic_id = %epic_id,
+                blocking_epic_id = %blocker.epic_id,
+                error = %e,
+                "Lifecycle: failed to list closed tasks for blocking epic"
+            );
+            return;
         }
-        Ok(_) => {}
+    };
+
+    for t in &closed_tasks.tasks {
+        ctx_lines.push(format!("  - Delivered: {}", t.title));
+    }
+}
+
+/// Fetch the list of blocking epics, returning `None` on empty or error.
+///
+/// Logs and silently swallows DB errors (same non-fatal semantics as the
+/// rest of the prompt-context loaders).
+async fn fetch_blockers(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+) -> Option<Vec<djinn_db::EpicBlockerRef>> {
+    match epic_repo.list_blockers(epic_id).await {
+        Ok(b) if !b.is_empty() => Some(b),
+        Ok(_) => None,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
                 error = %e,
                 "Lifecycle: failed to list blocking epics for prompt context"
             );
+            None
         }
+    }
+}
+
+/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
+///
+/// Delegates blocker list retrieval to [`fetch_blockers`].
+async fn load_blocking_epics(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    let Some(blockers) = fetch_blockers(epic_id, epic_repo).await else {
+        return;
+    };
+
+    ctx_lines.push("\n### Blocking Epics".to_string());
+    for blocker in &blockers {
+        ctx_lines.push(format!(
+            "- **{}** ({}) — {}",
+            blocker.title, blocker.short_id, blocker.status
+        ));
+        append_blocker_deliveries(epic_id, blocker, task_repo, ctx_lines).await;
     }
 }
 
