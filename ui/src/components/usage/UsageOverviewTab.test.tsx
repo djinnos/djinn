@@ -52,11 +52,11 @@ describe("UsageOverviewTab — split cost labels", () => {
       />,
     );
 
-    expect(screen.getByText("Actual API spend")).toBeInTheDocument();
-    expect(
-      screen.getByText("Projected subscription-equivalent cost"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Unpriced sessions")).toBeInTheDocument();
+    // Use stable data-testid selectors to avoid ambiguity with labels that
+    // appear in multiple DOM locations (KPI cards, chart section, disclosure).
+    expect(screen.getByTestId("usage-split-kpi-actual-spend")).toHaveTextContent("Actual API spend");
+    expect(screen.getByTestId("usage-split-kpi-projected-cost")).toHaveTextContent("Projected subscription-equivalent cost");
+    expect(screen.getByTestId("usage-split-kpi-unpriced-sessions")).toHaveTextContent("Unpriced sessions");
   });
 
   it("renders Actual API spend KPI value from split field", () => {
@@ -76,7 +76,7 @@ describe("UsageOverviewTab — split cost labels", () => {
       />,
     );
 
-    expect(screen.getByText("$68")).toBeInTheDocument();
+    expect(screen.getByTestId("usage-split-kpi-projected-cost")).toHaveTextContent("$67.89");
   });
 
   it("shows em dash for both cost KPIs when split fields are absent (pre-split response)", () => {
@@ -105,22 +105,25 @@ describe("UsageOverviewTab — split cost labels", () => {
       />,
     );
 
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // Use stable testId selector to scope to the unpriced card
+    const unpricedCard = screen.getByTestId("usage-split-kpi-unpriced-sessions");
+    expect(unpricedCard).toHaveTextContent("7");
     // The label should say "Unpriced sessions" not any dollar value
-    expect(screen.getByText("Unpriced sessions")).toBeInTheDocument();
-    expect(
-      screen.getByText("Excluded from both cost figures"),
-    ).toBeInTheDocument();
+    expect(unpricedCard).toHaveTextContent("Unpriced sessions");
+    expect(unpricedCard).toHaveTextContent("Excluded from both cost figures");
   });
 
   it("renders the chart section with separate actual and projected labels", () => {
     render(<UsageOverviewTab data={makeResponse({ kpis: [makeKpi()] })} />);
 
     expect(screen.getByText("Cost over time")).toBeInTheDocument();
-    expect(screen.getByText("Actual API spend")).toBeInTheDocument();
+    // "Actual API spend" and "Projected subscription-equivalent cost" appear in
+    // multiple DOM locations (KPI cards, chart section, disclosure), so assert
+    // at least one match exists via getAllByText.
+    expect(screen.getAllByText("Actual API spend").length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText("Projected subscription-equivalent cost"),
-    ).toBeInTheDocument();
+      screen.getAllByText("Projected subscription-equivalent cost").length,
+    ).toBeGreaterThanOrEqual(1);
     expect(
       screen.getByText(
         "Actual API spend and projected subscription-equivalent cost shown separately. Unpriced sessions are excluded from both figures.",
@@ -139,11 +142,12 @@ describe("UsageOverviewTab — split cost labels", () => {
     render(<UsageOverviewTab data={makeResponse({ kpis: [makeKpi()] })} />);
 
     expect(screen.getByText("How costs are calculated")).toBeInTheDocument();
-    expect(screen.getByText("Actual API spend")).toBeInTheDocument();
+    // Labels appear in multiple DOM locations; assert they exist via getAllByText
+    expect(screen.getAllByText("Actual API spend").length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText("Projected subscription-equivalent cost"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Unpriced sessions")).toBeInTheDocument();
+      screen.getAllByText("Projected subscription-equivalent cost").length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Unpriced sessions").length).toBeGreaterThanOrEqual(1);
     // Verify the methodology text explains list-price projection
     expect(
       screen.getByText(/is a list-price equivalent estimate/i),
@@ -186,9 +190,80 @@ describe("UsageOverviewTab — split cost time-series", () => {
     );
 
     expect(screen.getByText("Cost over time")).toBeInTheDocument();
-    expect(screen.getByText("Actual API spend")).toBeInTheDocument();
+    // Labels appear in multiple DOM locations; assert they exist via getAllByText
+    expect(screen.getAllByText("Actual API spend").length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText("Projected subscription-equivalent cost"),
-    ).toBeInTheDocument();
+      screen.getAllByText("Projected subscription-equivalent cost").length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("UsageOverviewTab — split KPI render smoke", () => {
+  /**
+   * Render smoke for proposal zhwn: a priced/mixed usage window must render
+   * Actual API spend, Projected subscription-equivalent cost, and Unpriced
+   * sessions as user-visible values rather than fallback placeholders.
+   *
+   * Fixture shape matches the repaired/generated `/api/admin/usage` contract
+   * from tp93 with separate KPI contributors carrying split fields.
+   */
+  it("renders all three split KPI cards with currency/count values from the repaired contract shape, not fallback placeholders", () => {
+    // Build a UsageAnalyticsResponse fixture matching the repaired contract
+    // shape with separate KPI contributors.
+    const actualKpi: UsageKpi = {
+      label: "Total Spend",
+      value: 69.12,
+      delta_pct: null,
+      formatted: "$69.12",
+      actual_spend_usd: 12.34,
+      projected_usd: 0,
+      unpriced_count: 0,
+    };
+
+    const projectedKpi: UsageKpi = {
+      label: "Projected Cost",
+      value: 56.78,
+      delta_pct: null,
+      formatted: "$56.78",
+      actual_spend_usd: 0,
+      projected_usd: 56.78,
+      unpriced_count: 0,
+    };
+
+    const unpricedKpi: UsageKpi = {
+      label: "Sessions",
+      value: 3,
+      delta_pct: null,
+      formatted: "3",
+      actual_spend_usd: 0,
+      projected_usd: 0,
+      unpriced_count: 3,
+    };
+
+    render(
+      <UsageOverviewTab
+        data={makeResponse({
+          kpis: [actualKpi, projectedKpi, unpricedKpi],
+          unpriced_session_count: 3,
+        })}
+      />,
+    );
+
+    // Use stable data-testid selectors scoped to each KPI card.
+    const actualCard = screen.getByTestId("usage-split-kpi-actual-spend");
+    const projectedCard = screen.getByTestId("usage-split-kpi-projected-cost");
+    const unpricedCard = screen.getByTestId("usage-split-kpi-unpriced-sessions");
+
+    // Actual API spend card renders currency from actual_spend_usd (not —)
+    expect(actualCard).toHaveTextContent("$12.34");
+    expect(actualCard).not.toHaveTextContent("—");
+
+    // Projected subscription-equivalent cost card renders currency from projected_usd (not —)
+    expect(projectedCard).toHaveTextContent("$56.78");
+    expect(projectedCard).not.toHaveTextContent("—");
+
+    // Unpriced sessions card renders the seeded backend count (not fallback 0)
+    expect(unpricedCard).toHaveTextContent("3");
+    expect(unpricedCard).not.toHaveTextContent("0");
   });
 });
