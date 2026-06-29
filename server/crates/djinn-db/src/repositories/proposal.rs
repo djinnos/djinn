@@ -3844,7 +3844,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reviewer_feedback_helper_ignores_stale_revision_feedback() {
         let repo = ProposalRepository::new(test_db(), EventBus::noop());
-        let p = repo.create(create_input("Reviewer Feedback")).await.unwrap();
+        let p = repo
+            .create(create_input("Reviewer Feedback"))
+            .await
+            .unwrap();
         let stale_feedback = "stale feedback from previous revision 019f0fed";
         let current_feedback = "current feedback for latest revision 019f0fed";
 
