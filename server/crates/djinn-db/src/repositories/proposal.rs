@@ -924,7 +924,11 @@ impl ProposalRepository {
                     )
                 })?;
                 let findings = EvidenceFindings::parse_stored(Some(&meta.to_string()))
-                    .map_err(Error::InvalidData)?
+                    .map_err(|e| {
+                        Error::InvalidData(format!(
+                            "evidence_findings body_metadata must contain structured findings: {e}"
+                        ))
+                    })?
                     .ok_or_else(|| {
                         Error::InvalidData(
                             "evidence_findings body_metadata must contain a non-empty \
