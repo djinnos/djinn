@@ -1022,6 +1022,35 @@ impl CoordinatorActor {
                 );
                 continue;
             }
+            // Final stale-snapshot/bypass guard: `ready` is assembled before the
+            // dispatch loop and also includes filtered status queues. Re-check
+            // blocker edges immediately before any role/model selection so a task
+            // that was parked behind an open remediation hold in the meantime —
+            // including `review`/`human-review-hold` blockers — cannot spawn a
+            // worker from an earlier ready vector or alternate status path.
+            match repo.list_blockers(&task.id).await {
+                Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        blocker_count = blockers.iter().filter(|b| b.status != "closed").count(),
+                        "CoordinatorActor: task has unresolved blockers, skipping dispatch"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        error = %e,
+                        "CoordinatorActor: failed to re-check blockers before dispatch; deferring task"
+                    );
+                    continue;
+                }
+            }
             // Proposal 1omc: every dispatch must run under a real user. Refuse to
             // dispatch a task with no resolved owner. Park it loudly rather than
             // silently consuming org-shared credentials under no identity — this
