@@ -302,24 +302,39 @@ async fn append_blocker_deliveries(
     }
 }
 
-/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
-async fn load_blocking_epics(
+/// Fetch the list of blocking epics, returning `None` on empty or error.
+///
+/// Logs and silently swallows DB errors (same non-fatal semantics as the
+/// rest of the prompt-context loaders).
+async fn fetch_blockers(
     epic_id: &str,
     epic_repo: &djinn_db::EpicRepository,
-    task_repo: &TaskRepository,
-    ctx_lines: &mut Vec<String>,
-) {
-    let blockers = match epic_repo.list_blockers(epic_id).await {
-        Ok(b) if !b.is_empty() => b,
-        Ok(_) => return,
+) -> Option<Vec<djinn_db::EpicBlockerRef>> {
+    match epic_repo.list_blockers(epic_id).await {
+        Ok(b) if !b.is_empty() => Some(b),
+        Ok(_) => None,
         Err(e) => {
             tracing::debug!(
                 epic_id = %epic_id,
                 error = %e,
                 "Lifecycle: failed to list blocking epics for prompt context"
             );
-            return;
+            None
         }
+    }
+}
+
+/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
+///
+/// Delegates blocker list retrieval to [`fetch_blockers`].
+async fn load_blocking_epics(
+    epic_id: &str,
+    epic_repo: &djinn_db::EpicRepository,
+    task_repo: &TaskRepository,
+    ctx_lines: &mut Vec<String>,
+) {
+    let Some(blockers) = fetch_blockers(epic_id, epic_repo).await else {
+        return;
     };
 
     ctx_lines.push("\n### Blocking Epics".to_string());
