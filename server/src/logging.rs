@@ -33,7 +33,7 @@ pub fn file_prefix() -> &'static str {
     LOG_FILE_PREFIX
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn prune_old_logs(dir: &std::path::Path) -> std::io::Result<()> {
     let now = SystemTime::now();
     let keep_for = Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);

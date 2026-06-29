@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::{Database, ProjectRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
@@ -261,7 +262,6 @@ impl SessionRuntime for KubernetesRuntime {
     ///
     /// Does NOT bind any listener — the launcher owns the TCP listener and
     /// advertises its address through `config.server_addr`.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn prepare(
         &self,
         spec: &TaskRunSpec,
@@ -446,7 +446,7 @@ impl SessionRuntime for KubernetesRuntime {
             task_run_id: task_run_id_str,
             container_id: None,
             pod_ref: Some(resource_name),
-            started_at: SystemTime::now(),
+            started_at: SystemClockTrait::new().now(),
         })
     }
 
@@ -926,7 +926,7 @@ fn job_failed_reason(job: &Job) -> Option<String> {
 
 /// Poll a `Job` until its `.status.succeeded` or `.status.failed` condition
 /// is non-zero, or [`TEARDOWN_POLL_TIMEOUT`] elapses.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn poll_job_terminal_state(
     client: &kube::Client,
     namespace: &str,

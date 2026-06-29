@@ -112,7 +112,7 @@ impl KubeClientJobWatcher {
 
 #[async_trait]
 impl WarmJobWatcher for KubeClientJobWatcher {
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn wait_terminal(&self, namespace: &str, job_name: &str) {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
         let deadline = Instant::now() + WATCH_DEADLINE;

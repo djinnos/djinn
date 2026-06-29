@@ -4,6 +4,7 @@ use crate::extension::github_search;
 // v10: canonical test-path classification, shared with the graph
 // builder's `RepoGraphNode::is_test` stamping.
 use djinn_control_plane::bridge::{ProjectCtx, RepoGraphOps, ResolveOutcome};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::test_paths::is_test_path;
 
 /// PR C2 mirror of the MCP-side dispatcher's pre-resolve. When the chat
@@ -251,7 +252,6 @@ pub(crate) async fn call_lsp(
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn call_code_graph(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
@@ -302,7 +302,7 @@ pub(crate) async fn call_code_graph(
     // `DJINN_CODE_GRAPH_DISPATCH_TIMEOUT_SECS`.
     let op = p.operation.clone();
     let project_id_for_log = ctx.id.clone();
-    let started = std::time::Instant::now();
+    let started = SystemClockTrait::new().now_instant();
     let span = tracing::info_span!(
         "code_graph_chat",
         op = %op,

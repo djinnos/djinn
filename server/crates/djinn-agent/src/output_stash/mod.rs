@@ -151,7 +151,7 @@ pub(crate) fn parse_durable_pointer(raw: &str) -> Result<DurablePointerRecord, S
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn unix_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -562,7 +562,7 @@ fn durable_write_at(
 /// Write `bytes` to `dest` atomically via a uniquely-named temp file in the same
 /// `dir` followed by a rename (atomic on the same filesystem). Avoids torn reads
 /// from a concurrent reader and only needs `std::fs` — no extra runtime dep.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn atomic_write(
     dir: &std::path::Path,
     dest: &std::path::Path,

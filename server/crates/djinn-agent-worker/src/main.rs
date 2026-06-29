@@ -693,7 +693,7 @@ fn resolve_cargo_workspace_dir(
 ///
 /// Best-effort throughout: a missing cargo workspace (non-Rust repo) or any
 /// compile failure logs and returns — it never fails the graph warm.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn warm_cargo_target_base(
     project_id: &str,
     project_root: &Path,

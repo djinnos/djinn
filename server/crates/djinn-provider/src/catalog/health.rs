@@ -128,7 +128,7 @@ struct ModelState {
 }
 
 impl ModelState {
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     fn is_available(&self) -> bool {
         if !self.auto_disabled {
             return true;
@@ -137,7 +137,7 @@ impl ModelState {
         matches!(self.cooldown_until, Some(until) if Instant::now() >= until)
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     fn cooldown_seconds_remaining(&self) -> Option<u64> {
         let until = self.cooldown_until?;
         let now = Instant::now();
@@ -260,7 +260,7 @@ impl HealthTracker {
 
     /// Record a failed invocation.  Trips the circuit breaker when the
     /// consecutive failure threshold is reached.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_failure(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
@@ -315,7 +315,7 @@ impl HealthTracker {
     ///   broken", the account is merely over quota until its window resets. We
     ///   still apply the `STALL_MIN_COOLDOWN` floor so failover still happens —
     ///   we just don't ratchet the cap.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_stall(&self, scope: Option<&str>, model_id: &str, escalate: bool) {
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
@@ -375,7 +375,7 @@ impl HealthTracker {
         health
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn debug_snapshot(&self) -> Vec<BreakerDebugEntry> {
         let entries: Vec<_> = {
             let map = self.inner.lock().unwrap();
@@ -466,7 +466,7 @@ impl HealthTracker {
     }
 
     /// Replace all tracked health state with a persisted snapshot.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
         let mut map = self.inner.lock().unwrap();
         map.clear();

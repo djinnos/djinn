@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use tokio::sync::{Mutex, RwLock};
 
 type SessionId = String;
@@ -25,10 +26,9 @@ impl FileTime {
         Self::default()
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     pub async fn read(&self, session_id: &str, path: &Path) -> Result<(), String> {
         let normalized = normalize(path);
-        let now = SystemTime::now();
+        let now = SystemClockTrait::new().now();
         let mtime = file_mtime(path)?;
         let mut guard = self.inner.write().await;
         let by_path = guard.entry(session_id.to_string()).or_default();

@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+
 use crate::context::ExtensionContext;
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
@@ -193,7 +195,6 @@ fn record_outcome(
 }
 
 /// Build the `<relevant-pitfalls>…</relevant-pitfalls>` hint block.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(crate) async fn maybe_pitfall_hint(
     ctx: &dyn ExtensionContext,
     session_id: &str,
@@ -256,7 +257,7 @@ pub(crate) async fn maybe_pitfall_hint(
         Some(project_id),
         touched_paths,
     );
-    let search_started = Instant::now();
+    let search_started = SystemClockTrait::new().now_instant();
 
     let notes = match note_repo
         .query_by_scope_overlap(project_id, touched_paths, &["pitfall", "pattern"], 0.3, 8)

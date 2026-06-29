@@ -106,7 +106,7 @@ impl GraphWarmerService for InProcessGraphWarmer {
         }
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn await_fresh(
         &self,
         project_id: &str,

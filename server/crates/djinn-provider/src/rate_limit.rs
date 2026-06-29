@@ -69,7 +69,6 @@ pub fn suppression_remaining(now: Instant) -> Option<Duration> {
 mod tests {
     use super::*;
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     #[test]
     fn suppression_window_extends_and_expires() {
         clear_suppression_window();

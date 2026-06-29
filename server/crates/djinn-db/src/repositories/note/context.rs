@@ -530,7 +530,6 @@ impl NoteRepository {
     }
 
     /// Get temporal scores for all notes in project.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     async fn temporal_scores_all(&self, project_id: &str) -> Result<Vec<(String, f64)>> {
         let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "SELECT id, access_count, created_at, updated_at
@@ -542,9 +541,9 @@ impl NoteRepository {
         .fetch_all(self.db.pool())
         .await?;
 
-        use std::time::SystemTime;
+        use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
-        let now = SystemTime::now();
+        let now = SystemClockTrait::new().now();
         const HALF_LIFE_DAYS: f64 = 7.0;
         const HOTNESS_ALPHA: f64 = 0.2;
 

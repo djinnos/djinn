@@ -655,7 +655,7 @@ pub mod dispatch {
         metrics::counter!(super::CROSS_MODEL_REVIEW_TOTAL, "result" => result).increment(1);
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_last_success_now() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

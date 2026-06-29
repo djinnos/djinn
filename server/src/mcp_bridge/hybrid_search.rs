@@ -34,6 +34,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use djinn_control_plane::bridge::{ProjectCtx, SearchHit};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::CodeChunkSearchHit;
 use djinn_db::repositories::note::rrf::rrf_fuse;
 use sha2::{Digest, Sha256};
@@ -81,7 +82,6 @@ fn read_cached(key: &str) -> Option<Vec<SearchHit>> {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn write_cache(key: String, hits: Vec<SearchHit>) {
     if let Ok(mut guard) = cache().write() {
         // Opportunistic GC: drop expired entries on every write so the
@@ -90,7 +90,7 @@ fn write_cache(key: String, hits: Vec<SearchHit>) {
         guard.insert(
             key,
             CacheEntry {
-                inserted_at: Instant::now(),
+                inserted_at: SystemClockTrait::new().now_instant(),
                 hits,
             },
         );

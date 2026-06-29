@@ -1,8 +1,9 @@
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::commands::{CommandResult, CommandSpec};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -16,7 +17,6 @@ async fn spawn_command(mut cmd: Command, timeout: Duration) -> io::Result<Output
     crate::process::output_with_kill(cmd, timeout).await
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub async fn run_commands(
     commands: &[CommandSpec],
     working_dir: &Path,
@@ -26,7 +26,7 @@ pub async fn run_commands(
     for spec in commands {
         let timeout_secs = spec.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS);
         let duration = Duration::from_secs(timeout_secs);
-        let start = Instant::now();
+        let start = SystemClockTrait::new().now_instant();
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&spec.command).current_dir(working_dir);

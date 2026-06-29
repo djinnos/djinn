@@ -240,7 +240,7 @@ async fn async_main() {
 
 /// Parse a postgres URL of the form `postgres://<user>[:<pw>]@<host>:<port>/<db>`
 /// and block until a TCP connection to host:port succeeds (up to ~60s).
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn wait_for_database_reachable(target: &str) {
     let host_port = target
         .strip_prefix("postgres://")

@@ -3,6 +3,8 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+
 /// Default outer timeout for per-tool dispatch in the chat loop.
 /// Defense-in-depth on top of op-specific inner timeouts (e.g. the 60s
 /// `code_graph` dispatcher cap). Override with
@@ -767,7 +769,6 @@ struct ChatLoopContext {
 /// Sends `tool_call` and `tool_result` SSE events.  Handles stash tools,
 /// chat-extension dispatch, allowed MCP dispatch (global + proposal-scoped),
 /// gated unavailable tools, timeout wrapping, and result rendering/stashing.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_tool_call(
     id: String,
@@ -792,7 +793,7 @@ async fn dispatch_tool_call(
         .await;
 
     let args = serde_json::Value::Object(input.as_object().cloned().unwrap_or_default());
-    let started_at = Instant::now();
+    let started_at = SystemClockTrait::new().now_instant();
 
     // `output_view` / `output_grep` are served in-process against the
     // per-request stash — they never hit tool dispatch, and their

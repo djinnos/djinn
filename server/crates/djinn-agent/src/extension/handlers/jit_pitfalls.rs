@@ -32,6 +32,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+
 use crate::context::AgentContext;
 
 const TELEMETRY_TARGET: &str = "djinn_agent::jit_pitfalls";
@@ -209,7 +211,6 @@ fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn record_outcome(
     outcome: JitPitfallOutcome,
     rollout_mode: JitPitfallRolloutMode,
@@ -239,7 +240,6 @@ fn record_outcome(
 /// `session_id` is the per-session key (the worktree path string).
 /// `project_id` scopes the note search. `touched_paths` are repo-relative
 /// paths of the files this modification touched.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) async fn maybe_pitfall_hint(
     state: &AgentContext,
     session_id: &str,
@@ -309,7 +309,7 @@ pub(super) async fn maybe_pitfall_hint(
         Some(project_id),
         touched_paths,
     );
-    let search_started = Instant::now();
+    let search_started = SystemClockTrait::new().now_instant();
 
     let notes = match note_repo
         .query_by_scope_overlap(

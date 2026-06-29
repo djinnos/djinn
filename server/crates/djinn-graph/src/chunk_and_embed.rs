@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::repositories::code_chunk::chunker::{
     ChunkConfig, FileInput, RepoMetadata, SymbolChunkKind, SymbolInput,
 };
@@ -47,7 +48,6 @@ pub fn code_chunks_backend_enabled() -> bool {
 /// Skips when:
 /// * `DJINN_CODE_CHUNKS_BACKEND` isn't `qdrant`.
 /// * Another pass for the same project is already in flight (coalesced).
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub fn spawn_chunk_and_embed_pass(
     db: Database,
     embeddings: Arc<dyn CodeChunkEmbeddingProvider>,
@@ -71,7 +71,7 @@ pub fn spawn_chunk_and_embed_pass(
             }
         };
 
-        let started = std::time::Instant::now();
+        let started = SystemClockTrait::new().now_instant();
         match run_chunk_and_embed_pass(
             &db,
             embeddings,

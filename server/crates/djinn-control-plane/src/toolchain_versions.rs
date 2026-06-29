@@ -43,7 +43,7 @@ fn cache() -> &'static Cache {
 
 /// Return available versions per language. Cached (TTL); fetches upstream on a
 /// cold/stale cache, falling back to static lists per source on error.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn fetch_toolchain_versions() -> BTreeMap<String, Vec<String>> {
     if let Ok(guard) = cache().lock()
         && let Some((at, map)) = guard.as_ref()

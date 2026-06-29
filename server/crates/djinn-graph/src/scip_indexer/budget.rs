@@ -210,7 +210,7 @@ pub(crate) fn remaining_deadline(deadline: &ActiveDeadline, now: Instant) -> Opt
 /// Combines the deterministic size-scaling formula with optional prior-timing
 /// scaling and an optional active-deadline clamp. See the module docs for the
 /// full formula.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(crate) fn budget_for_indexer(
     indexer: SupportedIndexer,
     size: &WorkspaceSizeHint,

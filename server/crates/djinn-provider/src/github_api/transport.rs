@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use reqwest::{Response, StatusCode};
 use thiserror::Error;
 
@@ -45,7 +46,6 @@ impl GitHubApiClient {
     /// this drops the cached installation token; for user-token clients
     /// there is nothing to invalidate (the row is reloaded on the next
     /// call).
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
     fn invalidate_cached_token(&self) {
         if let AuthMode::Installation { installation_id } = &self.auth {
             crate::github_app::installations::invalidate_cache(*installation_id);
@@ -131,7 +131,6 @@ impl GitHubApiClient {
 /// - If `X-RateLimit-Remaining` is `0`, sleep until `X-RateLimit-Reset`.
 /// - If status is `429 Too Many Requests` without rate-limit headers,
 ///   apply exponential back-off starting at [`BACKOFF_INITIAL_SECS`].
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 pub(super) async fn handle_rate_limit(resp: Response) -> Result<Response> {
     let status = resp.status();
     let remaining = resp
@@ -147,7 +146,8 @@ pub(super) async fn handle_rate_limit(resp: Response) -> Result<Response> {
 
     if remaining == Some(0) {
         let sleep_secs = if let Some(reset_epoch) = reset {
-            let now = std::time::SystemTime::now()
+            let now = SystemClockTrait::new()
+                .now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);

@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use async_stream::stream;
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use futures::{Stream, StreamExt};
 use reqwest::header::HeaderMap;
 use std::pin::Pin;
@@ -468,9 +469,9 @@ fn should_retry(attempt: u32, is_retryable: bool) -> bool {
 
 /// Simple pseudo-random f64 in [0, 1) using system time nanoseconds.
 /// Good enough for jitter — no need for a full RNG crate.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn pseudo_random_f64() -> f64 {
-    let nanos = std::time::SystemTime::now()
+    let nanos = SystemClockTrait::new()
+        .now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();

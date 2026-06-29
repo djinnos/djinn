@@ -27,6 +27,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use djinn_control_plane::bridge::{ProjectCtx, RankedNode, RepoGraphOps};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use tokio::time::timeout;
 
 /// Maximum total length of the rendered header (markdown). Keeps the
@@ -222,7 +223,6 @@ fn lookup_cache(key: &(String, String)) -> Option<String> {
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn insert_cache(key: (String, String), text: String) {
     if let Ok(mut guard) = header_cache().write() {
         // Opportunistic eviction: drop expired entries while we hold
@@ -233,7 +233,7 @@ fn insert_cache(key: (String, String), text: String) {
             key,
             CachedHeader {
                 text,
-                inserted_at: Instant::now(),
+                inserted_at: SystemClockTrait::new().now_instant(),
             },
         );
     }

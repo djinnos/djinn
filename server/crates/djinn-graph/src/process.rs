@@ -225,7 +225,8 @@ mod tests {
 
     /// A hung child (`sleep 30`) must be terminated within the grace window and
     /// the call must return promptly rather than hanging.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+    #[allow(clippy::disallowed_methods)]
+    // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_kills_hung_child_promptly() {
         let mut cmd = Command::new("sh");

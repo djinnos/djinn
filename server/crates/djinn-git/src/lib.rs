@@ -105,7 +105,7 @@ pub fn is_non_fast_forward_error(err: &GitError) -> bool {
     s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("rejected")
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub fn retry_delay(attempt: u32) -> std::time::Duration {
     let exp = attempt.saturating_sub(1).min(4);
     let base_ms = 200u64.saturating_mul(1u64 << exp);

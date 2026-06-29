@@ -19,6 +19,7 @@
 
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use reqwest::{Client, StatusCode};
 use serde::de::{self, Deserializer};
@@ -308,9 +309,9 @@ fn token_response_to_tokens(tr: TokenResponse, account_id: Option<String>) -> Co
     }
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
+    SystemClockTrait::new()
+        .now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
@@ -537,7 +538,7 @@ pub async fn start_codex_device_auth(
     Ok(Some(session))
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read pending Clock migration
+#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn poll_codex_device_auth(
     device_auth_id: &str,
     user_code: &str,
