@@ -915,9 +915,9 @@ async fn process_batch_claims(
 //
 // The helpers below are private seams for `process_batch_edges`. They isolate
 // the validation/decision logic (endpoint parsing & knownness, edge-kind parse,
-// proposal-evidence gating, wikilink-duplicate decision + drop accounting) so
-// the top-level orchestrator reads as a flat sequence of decisions followed by
-// persistence/report emission.
+// proposal-evidence gating, wikilink-duplicate decision + drop accounting),
+// association persistence, and final report mutation so the top-level
+// orchestrator reads as a flat sequence of named steps.
 //
 // All helpers emit the same non-fatal `tracing::debug!` events that the
 // inlined code did, preserving the current report/drop semantics that the
@@ -1029,17 +1029,138 @@ fn classify_wikilink_duplicate(
     false
 }
 
+/// Convert a validated endpoint into the owned reference shape used by the
+/// heterogeneous association table. This seam keeps the proposal-involving
+/// persistence path from open-coding source/target conversions.
+fn memory_entity_ref_for_endpoint(
+    entity_type: MemoryEntityType,
+    endpoint_id: &str,
+) -> MemoryEntityRef {
+    match entity_type {
+        MemoryEntityType::Note => MemoryEntityRef::note(endpoint_id),
+        MemoryEntityType::Proposal => MemoryEntityRef::proposal(endpoint_id),
+    }
+}
+
+/// Persist the association represented by an accepted LLM edge.
+///
+/// Returns `true` when persistence succeeded and report emission should proceed.
+/// Returns `false` when the edge should be skipped after preserving the previous
+/// non-fatal debug/warning behavior for association-write failures.
+async fn persist_edge_association(
+    project_id: &str,
+    llm_edge: &LlmEdge,
+    source_type: MemoryEntityType,
+    target_type: MemoryEntityType,
+    kind: NoteAssociationKind,
+    involves_proposal: bool,
+    note_repo: &NoteRepository,
+    report: &mut EnrichmentReport,
+) -> bool {
+    if involves_proposal {
+        persist_entity_edge_association(
+            project_id,
+            llm_edge,
+            source_type,
+            target_type,
+            note_repo,
+            report,
+        )
+        .await
+    } else {
+        persist_note_edge_association(project_id, llm_edge, kind, note_repo, report).await
+    }
+}
+
+async fn persist_entity_edge_association(
+    project_id: &str,
+    llm_edge: &LlmEdge,
+    source_type: MemoryEntityType,
+    target_type: MemoryEntityType,
+    note_repo: &NoteRepository,
+    report: &mut EnrichmentReport,
+) -> bool {
+    let entity_kind = match parse_edge_kind_entity(&llm_edge.kind) {
+        Some(k) => k,
+        None => return false,
+    };
+    let source_ref = memory_entity_ref_for_endpoint(source_type, &llm_edge.source_note_id);
+    let target_ref = memory_entity_ref_for_endpoint(target_type, &llm_edge.target_note_id);
+
+    if let Err(e) = note_repo
+        .upsert_typed_entity_association(source_ref, target_ref, entity_kind, llm_edge.confidence)
+        .await
+    {
+        tracing::debug!(
+            project_id = %project_id,
+            error = %e,
+            "memory_enrichment: typed entity association write failed (non-fatal)"
+        );
+        report.warnings.push(e.to_string());
+        return false;
+    }
+
+    true
+}
+
+async fn persist_note_edge_association(
+    project_id: &str,
+    llm_edge: &LlmEdge,
+    kind: NoteAssociationKind,
+    note_repo: &NoteRepository,
+    report: &mut EnrichmentReport,
+) -> bool {
+    if let Err(e) = note_repo
+        .upsert_typed_association(
+            &llm_edge.source_note_id,
+            &llm_edge.target_note_id,
+            kind,
+            llm_edge.confidence,
+        )
+        .await
+    {
+        tracing::debug!(
+            project_id = %project_id,
+            error = %e,
+            "memory_enrichment: typed association write failed (non-fatal)"
+        );
+        report.warnings.push(e.to_string());
+        return false;
+    }
+
+    true
+}
+
+/// Append the accepted edge to the enrichment report and update the per-batch
+/// persisted-edge counter in the same small seam that previously lived inline.
+fn append_report_edge(
+    report: &mut EnrichmentReport,
+    batch_edge_count: &mut usize,
+    llm_edge: &LlmEdge,
+    kind: NoteAssociationKind,
+) {
+    *batch_edge_count += 1;
+    report.edges.push(EnrichmentEdge {
+        source_note_id: llm_edge.source_note_id.clone(),
+        target_note_id: llm_edge.target_note_id.clone(),
+        kind: kind.as_str().to_string(),
+        confidence: llm_edge.confidence,
+        source_entity_type: llm_edge.source_entity_type.clone(),
+        target_entity_type: llm_edge.target_entity_type.clone(),
+        evidence_quote: llm_edge.evidence_quote.clone(),
+    });
+}
+
 /// Process edges from a parsed enrichment response, with wikilink dedup.
 ///
-/// Top-level orchestration (after the helpers above were extracted):
+/// Top-level orchestration:
 /// 1. load wikilink dedup state
 /// 2. iterate bounded candidate edges (`MAX_EDGES_PER_BATCH`)
 /// 3. validate endpoints (`classify_edge_endpoint` × 2)
 /// 4. validate edge kind (`parse_and_validate_edge_kind`)
 /// 5. apply proposal evidence / wikilink duplicate rules
-/// 6. persist association (persistence is inlined for now; will move to a
-///    follow-up helper in `twpx`)
-/// 7. append report edge
+/// 6. persist association (`persist_edge_association`)
+/// 7. append report edge (`append_report_edge`)
 async fn process_batch_edges(
     project_id: &str,
     llm_edges: &[LlmEdge],
@@ -1108,66 +1229,22 @@ async fn process_batch_edges(
             continue;
         }
 
-        if involves_proposal {
-            let entity_kind = match parse_edge_kind_entity(&llm_edge.kind) {
-                Some(k) => k,
-                None => continue,
-            };
-            let source_ref = match source_type {
-                MemoryEntityType::Note => MemoryEntityRef::note(&llm_edge.source_note_id),
-                MemoryEntityType::Proposal => MemoryEntityRef::proposal(&llm_edge.source_note_id),
-            };
-            let target_ref = match target_type {
-                MemoryEntityType::Note => MemoryEntityRef::note(&llm_edge.target_note_id),
-                MemoryEntityType::Proposal => MemoryEntityRef::proposal(&llm_edge.target_note_id),
-            };
-            if let Err(e) = note_repo
-                .upsert_typed_entity_association(
-                    source_ref,
-                    target_ref,
-                    entity_kind,
-                    llm_edge.confidence,
-                )
-                .await
-            {
-                tracing::debug!(
-                    project_id = %project_id,
-                    error = %e,
-                    "memory_enrichment: typed entity association write failed (non-fatal)"
-                );
-                report.warnings.push(e.to_string());
-                continue;
-            }
-        } else {
-            if let Err(e) = note_repo
-                .upsert_typed_association(
-                    &llm_edge.source_note_id,
-                    &llm_edge.target_note_id,
-                    kind,
-                    llm_edge.confidence,
-                )
-                .await
-            {
-                tracing::debug!(
-                    project_id = %project_id,
-                    error = %e,
-                    "memory_enrichment: typed association write failed (non-fatal)"
-                );
-                report.warnings.push(e.to_string());
-                continue;
-            }
+        if !persist_edge_association(
+            project_id,
+            llm_edge,
+            source_type,
+            target_type,
+            kind,
+            involves_proposal,
+            note_repo,
+            report,
+        )
+        .await
+        {
+            continue;
         }
 
-        batch_edge_count += 1;
-        report.edges.push(EnrichmentEdge {
-            source_note_id: llm_edge.source_note_id.clone(),
-            target_note_id: llm_edge.target_note_id.clone(),
-            kind: kind.as_str().to_string(),
-            confidence: llm_edge.confidence,
-            source_entity_type: llm_edge.source_entity_type.clone(),
-            target_entity_type: llm_edge.target_entity_type.clone(),
-            evidence_quote: llm_edge.evidence_quote.clone(),
-        });
+        append_report_edge(report, &mut batch_edge_count, llm_edge, kind);
     }
 }
 
@@ -1589,6 +1666,51 @@ mod tests {
         let drop = classify_wikilink_duplicate(&set, false, "n3", "n4", &mut report);
         assert!(!drop, "novel pair should not be flagged");
         assert_eq!(report.edges_dropped_wikilink_dup, 0);
+    }
+
+    #[test]
+    fn memory_entity_ref_for_endpoint_builds_expected_refs() {
+        assert_eq!(
+            memory_entity_ref_for_endpoint(MemoryEntityType::Note, "n1"),
+            MemoryEntityRef::note("n1")
+        );
+        assert_eq!(
+            memory_entity_ref_for_endpoint(MemoryEntityType::Proposal, "p1"),
+            MemoryEntityRef::proposal("p1")
+        );
+    }
+
+    #[test]
+    fn append_report_edge_updates_counter_and_report_edge() {
+        let edge = LlmEdge {
+            source_note_id: "n1".to_string(),
+            target_note_id: "n2".to_string(),
+            kind: "builds_on".to_string(),
+            confidence: 0.82,
+            source_entity_type: "note".to_string(),
+            target_entity_type: "note".to_string(),
+            evidence_quote: Some("clear evidence".to_string()),
+        };
+        let mut report = EnrichmentReport::default();
+        let mut batch_edge_count = 0;
+
+        append_report_edge(
+            &mut report,
+            &mut batch_edge_count,
+            &edge,
+            NoteAssociationKind::BuildsOn,
+        );
+
+        assert_eq!(batch_edge_count, 1);
+        assert_eq!(report.edges.len(), 1);
+        assert_eq!(report.edges[0].source_note_id, "n1");
+        assert_eq!(report.edges[0].target_note_id, "n2");
+        assert_eq!(report.edges[0].kind, "builds_on");
+        assert_eq!(report.edges[0].confidence, 0.82);
+        assert_eq!(
+            report.edges[0].evidence_quote.as_deref(),
+            Some("clear evidence")
+        );
     }
 
     #[test]
