@@ -8,12 +8,11 @@ use super::error_handling::{BudgetWindDownIgnored, supports_tool_choice_required
 use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
-use crate::actors::slot::finalize_handlers::handle_budget_park;
-use crate::actors::slot::helpers::extract_worker_context;
+use crate::finalize_handlers::handle_budget_park;
+use crate::helpers::extract_worker_context;
 use crate::output_parser::ParsedAgentOutput;
-use crate::output_stash::extract_stash_content;
-use crate::supervisor_impl::stage::test_session_settlement_for_stage_outcome;
 use crate::test_helpers;
+use crate::test_helpers::{extract_stash_content, test_session_settlement_for_stage_outcome};
 use djinn_core::message::Role;
 use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
@@ -177,7 +176,7 @@ impl LlmProvider for MockProvider {
 
 /// Returns (context, project_path, task_id, session_id, cancel).
 async fn make_context() -> (
-    crate::host::AgentContext,
+    crate::host::SlotContext,
     String,
     String,
     String,
@@ -200,7 +199,7 @@ async fn make_context() -> (
             metadata_json: None,
             task_run_id: None,
             pricing: None,
-                cost_basis: None,
+            cost_basis: None,
         })
         .await
         .expect("create session");
@@ -210,11 +209,8 @@ async fn make_context() -> (
     (ctx, project_path, task.id, session.id, cancel)
 }
 
-async fn count_persisted_messages(
-    app_state: &crate::host::AgentContext,
-    session_id: &str,
-) -> usize {
-    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+async fn count_persisted_messages(slot_ctx: &crate::host::SlotContext, session_id: &str) -> usize {
+    let repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     repo.load_conversation(session_id)
         .await
         .map(|c| c.messages.len())
@@ -281,8 +277,7 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
         MockResponse::text_only("Completed the task.", 300),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -303,9 +298,7 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -326,7 +319,7 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
     );
 
     // Messages were persisted to DB before compaction.
-    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
     assert!(
         persisted > 0,
         "expected session messages persisted before compaction, got 0"
@@ -372,8 +365,7 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
         MockResponse::text_only("Completed.", 100),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -394,9 +386,7 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -431,7 +421,7 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
 
     // Per-turn persistence: every non-system message is durably stored
     // (the system prompt is intentionally skipped).
-    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
     assert_eq!(
         persisted,
         conv.messages.len() - 1,
@@ -510,8 +500,7 @@ async fn reactive_compaction_on_context_length_error() {
         inner,
     };
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -532,9 +521,7 @@ async fn reactive_compaction_on_context_length_error() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -552,7 +539,7 @@ async fn reactive_compaction_on_context_length_error() {
 
     // Messages are persisted per-turn (independent of the reactive
     // compaction that fired on the context-length error).
-    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
     assert!(
         persisted > 0,
         "expected session messages persisted per-turn"
@@ -722,17 +709,57 @@ type ScriptedReplyLoopRun = (
     anyhow::Result<()>,
     ParsedAgentOutput,
     Conversation,
-    crate::host::AgentContext,
+    crate::host::SlotContext,
     String,
 );
 
 async fn run_scripted_reply_loop(
     provider: &MockProvider,
     tools: &[serde_json::Value],
-    mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
 ) -> ScriptedReplyLoopRun {
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    run_scripted_reply_loop_with_dispatcher(
+        provider,
+        tools,
+        Some(std::sync::Arc::new(test_helpers::MockToolDispatcher)),
+    )
+    .await
+}
+
+async fn run_scripted_reply_loop_with_dispatcher(
+    provider: &MockProvider,
+    tools: &[serde_json::Value],
+    tool_dispatcher: Option<std::sync::Arc<dyn crate::host::SlotToolDispatcher>>,
+) -> ScriptedReplyLoopRun {
+    let cancel = CancellationToken::new();
+    let db = test_helpers::create_test_db();
+    let slot_ctx = test_helpers::agent_context_from_db_with_dispatcher(
+        db.clone(),
+        cancel.clone(),
+        tool_dispatcher,
+    );
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let session_repo = SessionRepository::new(db.clone(), slot_ctx.event_bus.clone());
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "test/mock-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create session");
+    let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
+        .to_string_lossy()
+        .into_owned();
+    let task_id = task.id;
+    let session_id = session.id;
+
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -753,9 +780,7 @@ async fn run_scripted_reply_loop(
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -765,7 +790,7 @@ async fn run_scripted_reply_loop(
     )
     .await;
 
-    (result, output, conv, app_state, session_id)
+    (result, output, conv, slot_ctx, session_id)
 }
 
 /// Session ends immediately when the finalize tool is called.
@@ -785,8 +810,7 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         output_tokens: 10,
     }]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -807,9 +831,7 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -846,8 +868,7 @@ async fn text_only_without_finalize_triggers_nudge_then_fails() {
         // The 4th turn is never reached because we fail after 3 nudges.
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -868,9 +889,7 @@ async fn text_only_without_finalize_triggers_nudge_then_fails() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -919,8 +938,7 @@ async fn nudge_count_resets_after_tool_call() {
         },
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -941,9 +959,7 @@ async fn nudge_count_resets_after_tool_call() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -1014,8 +1030,7 @@ async fn tool_choice_required_for_supported_providers() {
         inner,
     };
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1036,9 +1051,7 @@ async fn tool_choice_required_for_supported_providers() {
             model_id: "openai/gpt-5.4",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -1099,10 +1112,10 @@ fn wind_down_directive_count(conv: &Conversation) -> usize {
 }
 
 async fn persisted_wind_down_directive_count(
-    app_state: &crate::host::AgentContext,
+    slot_ctx: &crate::host::SlotContext,
     session_id: &str,
 ) -> usize {
-    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     repo.load_conversation(session_id)
         .await
         .expect("load persisted conversation")
@@ -1141,8 +1154,7 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
         ),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1163,9 +1175,7 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: Some(3),
@@ -1253,8 +1263,7 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
         ),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1275,9 +1284,7 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: Some(3),
@@ -1339,8 +1346,7 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
     ));
     let provider = MockProvider::new(responses);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1361,9 +1367,7 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -1388,7 +1392,7 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         "token budget should inject the existing wind-down directive once"
     );
     assert_eq!(
-        persisted_wind_down_directive_count(&app_state, &session_id).await,
+        persisted_wind_down_directive_count(&slot_ctx, &session_id).await,
         1,
         "token-budget wind-down directive should be persisted"
     );
@@ -1418,8 +1422,7 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
     }
     let provider = MockProvider::new(responses);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1440,9 +1443,7 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -1471,7 +1472,7 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         "token-budget wind-down extension is strictly one turn"
     );
     assert_eq!(
-        persisted_wind_down_directive_count(&app_state, &session_id).await,
+        persisted_wind_down_directive_count(&slot_ctx, &session_id).await,
         1,
         "ignored token-budget directive should still be persisted once"
     );
@@ -1501,8 +1502,7 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         MockResponse::tool_call_with_input("tc4", "nonexistent_tool", same_args, 130),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1523,9 +1523,7 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -1575,7 +1573,7 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
     // The 4th attempt's tool-result message is also not persisted because
     // the loop returns from the guard before appending it — but it is
     // likewise absent from `conv.messages`, so the invariant still holds.
-    let persisted = count_persisted_messages(&app_state, &session_id).await;
+    let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
     let expected_persisted = conv.messages.len() - 1;
     assert_eq!(
         persisted,
@@ -1585,7 +1583,7 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         conv.messages.len()
     );
     let persisted_conversation =
-        SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+        SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
             .load_conversation(&session_id)
             .await
             .expect("load persisted conversation");
@@ -1606,19 +1604,23 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
 #[tokio::test]
 async fn permission_denial_tool_failure_trips_on_second_identical_attempt() {
     let tools = vec![dummy_tool_schema("secure_fetch")];
-    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
-        [("secure_fetch".to_string(), "secure-server".to_string())],
-        vec![serde_json::json!({"name": "secure_fetch"})],
-        |_tool_name, _arguments| Err("permission denied: token is not allowed".to_string()),
-    );
+    let dispatcher = std::sync::Arc::new(test_helpers::ConfigurableToolDispatcher::new(
+        vec!["secure_fetch".to_string()],
+        std::collections::HashMap::from([(
+            "secure_fetch".to_string(),
+            (|_args: Option<&serde_json::Map<String, serde_json::Value>>| -> Result<serde_json::Value, String> {
+                Err("permission denied: token is not allowed".to_string())
+            }) as test_helpers::ToolHandlerFn,
+        )]),
+    ));
     let args = serde_json::json!({"path": "/secret"});
     let provider = MockProvider::new(vec![
         MockResponse::tool_call_with_input("deny1", "secure_fetch", args.clone(), 100),
         MockResponse::tool_call_with_input("deny2", "secure_fetch", args, 110),
     ]);
 
-    let (result, _output, _conv, _app_state, _session_id) =
-        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+    let (result, _output, _conv, _slot_ctx, _session_id) =
+        run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
 
     let err = result.expect_err("second identical permission denial should trip guard");
     let guard_err = err
@@ -1654,8 +1656,8 @@ async fn repeated_assistant_output_signature_trips_on_fourth_repeat() {
         response("a4", 130),
     ]);
 
-    let (result, _output, _conv, _app_state, _session_id) =
-        run_scripted_reply_loop(&provider, &tools, None).await;
+    let (result, _output, _conv, _slot_ctx, _session_id) =
+        run_scripted_reply_loop(&provider, &tools).await;
 
     let err = result.expect_err("fourth identical assistant output should trip guard");
     let guard_err = err
@@ -1686,8 +1688,8 @@ async fn six_consecutive_tool_failures_across_different_signatures_trip_guard() 
             .collect(),
     );
 
-    let (result, _output, _conv, _app_state, _session_id) =
-        run_scripted_reply_loop(&provider, &tools, None).await;
+    let (result, _output, _conv, _slot_ctx, _session_id) =
+        run_scripted_reply_loop(&provider, &tools).await;
 
     let err = result.expect_err("six consecutive failures should trip guard");
     let guard_err = err
@@ -1708,22 +1710,26 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
         dummy_tool_schema("flaky_mcp"),
         dummy_tool_schema("submit_work"),
     ];
-    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
-        [("flaky_mcp".to_string(), "flaky-server".to_string())],
-        vec![serde_json::json!({"name": "flaky_mcp"})],
-        |_tool_name, arguments| {
-            if arguments
-                .as_ref()
-                .and_then(|args| args.get("ok"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                Ok(serde_json::json!({"ok": true}))
-            } else {
-                Err("ordinary tool failure".to_string())
-            }
-        },
-    );
+    fn flaky_mcp_handler(
+        args: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<serde_json::Value, String> {
+        if args
+            .and_then(|a| a.get("ok"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Ok(serde_json::json!({"ok": true}))
+        } else {
+            Err("ordinary tool failure".to_string())
+        }
+    }
+    let dispatcher = std::sync::Arc::new(test_helpers::ConfigurableToolDispatcher::new(
+        vec!["flaky_mcp".to_string()],
+        std::collections::HashMap::from([(
+            "flaky_mcp".to_string(),
+            flaky_mcp_handler as test_helpers::ToolHandlerFn,
+        )]),
+    ));
     let fail_args = serde_json::json!({"ok": false});
     let provider = MockProvider::new(vec![
         MockResponse::tool_call_with_input("f1", "flaky_mcp", fail_args.clone(), 100),
@@ -1739,8 +1745,8 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
         ),
     ]);
 
-    let (result, output, _conv, _app_state, _session_id) =
-        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+    let (result, output, _conv, _slot_ctx, _session_id) =
+        run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
 
     assert!(
         result.is_ok(),
@@ -1756,22 +1762,26 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
         dummy_tool_schema("flaky_mcp"),
         dummy_tool_schema("submit_work"),
     ];
-    let registry = crate::mcp_client::McpToolRegistry::with_dispatch(
-        [("flaky_mcp".to_string(), "flaky-server".to_string())],
-        vec![serde_json::json!({"name": "flaky_mcp"})],
-        |_tool_name, arguments| {
-            if arguments
-                .as_ref()
-                .and_then(|args| args.get("ok"))
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                Ok(serde_json::json!({"ok": true}))
-            } else {
-                Err("ordinary tool failure".to_string())
-            }
-        },
-    );
+    fn flaky_mcp_handler(
+        args: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<serde_json::Value, String> {
+        if args
+            .and_then(|a| a.get("ok"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            Ok(serde_json::json!({"ok": true}))
+        } else {
+            Err("ordinary tool failure".to_string())
+        }
+    }
+    let dispatcher = std::sync::Arc::new(test_helpers::ConfigurableToolDispatcher::new(
+        vec!["flaky_mcp".to_string()],
+        std::collections::HashMap::from([(
+            "flaky_mcp".to_string(),
+            flaky_mcp_handler as test_helpers::ToolHandlerFn,
+        )]),
+    ));
 
     let mut responses: Vec<MockResponse> = (0..5)
         .map(|idx| {
@@ -1808,8 +1818,8 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
     ));
     let provider = MockProvider::new(responses);
 
-    let (result, output, _conv, _app_state, _session_id) =
-        run_scripted_reply_loop(&provider, &tools, Some(&registry)).await;
+    let (result, output, _conv, _slot_ctx, _session_id) =
+        run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
 
     assert!(
         result.is_ok(),
@@ -1936,8 +1946,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         },
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -1964,9 +1973,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             // Drive production turn-cap path (we don't want max_turns to be
@@ -2018,7 +2025,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
 
     // The reminder is also persisted durably alongside the assistant/tool
     // transcript, not just pushed into the in-memory conversation.
-    let repo = SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let persisted = repo
         .load_conversation(&session_id)
         .await
@@ -2082,8 +2089,7 @@ async fn soft_budget_below_threshold_no_injection() {
         },
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -2104,9 +2110,7 @@ async fn soft_budget_below_threshold_no_injection() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -2166,8 +2170,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -2188,9 +2191,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -2215,7 +2216,7 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         output
             .budget_wind_down_details
             .as_deref()
-            .is_some_and(|details| details.contains("hard budget threshold reached")),
+            .is_some_and(|details| details.contains("hard token budget threshold reached")),
         "budget wind-down should preserve structured trigger details: {:?}",
         output.budget_wind_down_details
     );
@@ -2251,11 +2252,11 @@ async fn hard_budget_wind_down_captures_budget_summary() {
             .as_deref()
             .expect("budget details captured above"),
         &task_id,
-        &app_state,
+        &slot_ctx,
     )
     .await;
 
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let entries = repo.list_activity(&task_id).await.unwrap();
     let work_entries: Vec<_> = entries
         .iter()
@@ -2320,8 +2321,7 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
     ]);
 
-    let (app_state, project_path, task_id, session_id, cancel) = make_context().await;
-    let test_services = test_helpers::test_services();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
@@ -2342,9 +2342,7 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
             model_id: "test/mock-model",
             cancel: &cancel,
             global_cancel: &cancel,
-            app_state: &app_state,
-            services: &test_services,
-            mcp_registry: None,
+            ctx: &slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -2399,7 +2397,7 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         other => panic!("expected parked outcome, got {other:?}"),
     }
 
-    let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let entries = repo.list_activity(&task_id).await.unwrap();
     assert!(
         entries
