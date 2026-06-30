@@ -1023,6 +1023,50 @@ impl CoordinatorActor {
                 );
                 continue;
             }
+            // Final stale-snapshot/bypass guard: `ready` is assembled before the
+            // dispatch loop and also includes filtered status queues. Re-check
+            // blocker edges immediately before any role/model selection so a task
+            // that was parked behind an open remediation hold in the meantime —
+            // including `review`/`human-review-hold` blockers — cannot spawn a
+            // worker from an earlier ready vector or alternate status path.
+            match repo.list_blockers(&task.id).await {
+                Ok(blockers) if blockers.iter().any(|b| b.status != "closed") => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        blocker_count = blockers.iter().filter(|b| b.status != "closed").count(),
+                        "CoordinatorActor: task has unresolved blockers, skipping dispatch"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        task_uuid = %task.id,
+                        project_id = %task.project_id,
+                        error = %e,
+                        "CoordinatorActor: failed to re-check blockers before dispatch; deferring task"
+                    );
+                    continue;
+                }
+            }
+            // Human-review hold guard: a remediation task tagged with
+            // `human-review-hold` is a terminal escalation that requires a
+            // human to close it. No agent (planner, worker, reviewer) must
+            // ever be dispatched for it. Without this guard the planner
+            // review-claims rule (`open` + `issue_type=review`) matches the
+            // hold task and dispatches a planner session against it,
+            // defeating the park.
+            if task.labels.contains("human-review-hold") {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    "CoordinatorActor: skipping dispatch — task carries human-review-hold label (human-only hold)"
+                );
+                continue;
+            }
             // Proposal 1omc: every dispatch must run under a real user. Refuse to
             // dispatch a task with no resolved owner. Park it loudly rather than
             // silently consuming org-shared credentials under no identity — this
