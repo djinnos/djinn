@@ -145,6 +145,24 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }
+
+    fn touch_activity_rpc<'a>(
+        &'a self,
+        _task_id: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn flush_session_tokens_rpc<'a>(
+        &'a self,
+        _session_id: String,
+        _tokens_in: i64,
+        _tokens_out: i64,
+        _cache_read: i64,
+        _cache_write: i64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Convert `AgentContext` → `SlotContext` for extraction backfill.
@@ -167,6 +185,7 @@ pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::S
         repo_graph_ops: agent.repo_graph_ops.clone(),
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(ExtractionCallbacks),
+        tool_dispatcher: None,
     }
 }
 

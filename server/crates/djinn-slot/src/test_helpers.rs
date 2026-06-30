@@ -139,6 +139,22 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }
+        fn touch_activity_rpc<'a>(
+            &'a self,
+            _task_id: String,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn flush_session_tokens_rpc<'a>(
+            &'a self,
+            _session_id: String,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     SlotContext {
@@ -155,6 +171,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         repo_graph_ops: None,
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(NoopCallbacks),
+        tool_dispatcher: None,
     }
 }
 

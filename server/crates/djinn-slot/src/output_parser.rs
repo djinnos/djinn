@@ -9,21 +9,102 @@
 /// tracks runtime errors and reviewer feedback extracted from agent text.
 /// Worker completion is determined by session end (agent stops calling tools).
 /// Reviewer verdict is determined by acceptance criteria state on the task.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParsedAgentOutput {
+    captures_feedback: bool,
     pub runtime_error: Option<String>,
     pub reviewer_feedback: Option<String>,
     /// Payload from the finalize tool call (e.g. `submit_work`, `submit_review`).
+    /// Set when the reply loop exits via finalize-tool detection (ADR-036).
     pub finalize_payload: Option<serde_json::Value>,
-    /// Name of the finalize tool that was actually called.
+    /// Name of the finalize tool that was actually called (e.g. `"submit_work"`,
+    /// `"request_lead"`). Set alongside `finalize_payload`.
     pub finalize_tool_name: Option<String>,
     /// Text-only handoff captured after a budget-triggered wind-down directive.
-    pub handoff_text: Option<String>,
+    /// This is intentionally separate from normal assistant text so settlement
+    /// can park the run and persist an extractor-compatible `work_submitted`
+    /// activity without treating every text-only stop as a budget park.
+    pub budget_wind_down_summary: Option<String>,
+    /// Structured details describing why the budget wind-down was triggered.
+    /// Paired with `budget_wind_down_summary` so the handoff activity can record
+    /// `remaining_concerns: "budget-parked: <details>"` instead of a generic
+    /// placeholder.
+    pub budget_wind_down_details: Option<String>,
+}
+
+impl Default for ParsedAgentOutput {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 impl ParsedAgentOutput {
+    pub fn new(captures_feedback: bool) -> Self {
+        Self {
+            captures_feedback,
+            runtime_error: None,
+            reviewer_feedback: None,
+            finalize_payload: None,
+            finalize_tool_name: None,
+            budget_wind_down_summary: None,
+            budget_wind_down_details: None,
+        }
+    }
+
     /// Create an empty output (no errors, no feedback).
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn ingest_text(&mut self, text: &str) {
+        let normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n");
+        for raw_line in normalized.lines() {
+            let line = sanitize_line(raw_line);
+            if line.is_empty() {
+                continue;
+            }
+
+            // Extract reviewer feedback if present (still useful for logging).
+            if self.captures_feedback
+                && let Some(payload) = marker_payload(&line, "FEEDBACK")
+            {
+                let feedback = payload.trim();
+                if !feedback.is_empty() {
+                    self.reviewer_feedback = Some(feedback.to_string());
+                }
+            }
+
+            if self.runtime_error.is_none()
+                && let Some(error) = extract_runtime_error(&line)
+            {
+                self.runtime_error = Some(error.to_string());
+            }
+        }
+    }
+}
+
+fn marker_payload<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let upper = line.to_ascii_uppercase();
+    let needle = format!("{marker}:");
+    let index = upper.find(&needle)?;
+    let start = index + needle.len();
+    Some(line[start..].trim())
+}
+
+fn sanitize_line(line: &str) -> String {
+    line.trim().trim_start_matches(['>', ' ']).to_string()
+}
+
+fn extract_runtime_error(line: &str) -> Option<String> {
+    // Look for common runtime error patterns.
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("error:")
+        || lower.contains("panicked at")
+        || lower.contains("thread '")
+        || lower.contains("fatal:")
+    {
+        Some(line.to_string())
+    } else {
+        None
     }
 }
