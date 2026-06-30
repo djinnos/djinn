@@ -13,7 +13,254 @@ use djinn_provider::provider::{LlmProvider, StreamEvent, ToolChoice};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::SlotContext;
+use crate::host::{SlotContext, SlotToolDispatcher};
+
+// ─── MockToolDispatcher ────────────────────────────────────────────────────
+
+/// Minimal `SlotToolDispatcher` for tests that exercise the reply loop.
+/// Stash tools (`output_view`/`output_grep`) return stub text; extension
+/// and MCP tools return errors because tests should not reach them.
+pub struct MockToolDispatcher;
+
+impl SlotToolDispatcher for MockToolDispatcher {
+    fn is_stash_tool(&self, tool_name: &str) -> bool {
+        tool_name == "output_view" || tool_name == "output_grep"
+    }
+
+    fn handle_stash_call(
+        &self,
+        tool_name: &str,
+        _arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String> {
+        // Mock has no actual stash content — return "not found" error
+        // so tool results carry is_error: true (matching test expectations).
+        Err(format!("no stashed output for tool_use_id in {tool_name}"))
+    }
+
+    fn render_result(
+        &self,
+        _tool_use_id: &str,
+        _tool_name: &str,
+        value: &serde_json::Value,
+    ) -> String {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    }
+
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        _worktree_path: &'a std::path::Path,
+        _task_id: &'a str,
+        _role_name: &'a str,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            match tool_name {
+                // Return a successful stub for common test tools.
+                "shell" => Ok(serde_json::json!({
+                    "ok": true,
+                    "exit_code": 0,
+                    "stdout": "mock shell output\n",
+                    "stderr": "",
+                    "workdir": "/tmp"
+                })),
+                "read" | "code_search" | "write" | "edit" | "apply_patch" => {
+                    Ok(serde_json::json!({"ok": true}))
+                }
+                _ => Err(format!(
+                    "MockToolDispatcher: extension tool '{tool_name}' not implemented in test"
+                )),
+            }
+        })
+    }
+
+    fn is_mcp_tool(&self, _tool_name: &str) -> bool {
+        false
+    }
+
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            Err(format!(
+                "MockToolDispatcher: MCP tool '{tool_name}' not implemented in test"
+            ))
+        })
+    }
+
+    fn mcp_server_for_tool(&self, _tool_name: &str) -> Option<String> {
+        None
+    }
+
+    fn clear_stash(&self) {}
+}
+
+// ─── ConfigurableToolDispatcher ─────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+/// Handler function pointer for `ConfigurableToolDispatcher`.
+pub type ToolHandlerFn =
+    fn(Option<&serde_json::Map<String, serde_json::Value>>) -> Result<serde_json::Value, String>;
+
+/// A `SlotToolDispatcher` that routes specific tool names to closures.
+/// Useful for tests that need specific error messages (e.g., "permission denied")
+/// to trigger loop guard classifications.
+pub struct ConfigurableToolDispatcher {
+    /// Tool names that should be treated as MCP tools.
+    mcp_tools: Vec<String>,
+    /// Map from tool name → handler that returns the dispatch result.
+    /// Extension tools not in this map get a generic error.
+    handlers: HashMap<String, ToolHandlerFn>,
+}
+
+impl ConfigurableToolDispatcher {
+    pub fn new(mcp_tools: Vec<String>, handlers: HashMap<String, ToolHandlerFn>) -> Self {
+        Self {
+            mcp_tools,
+            handlers,
+        }
+    }
+}
+
+impl SlotToolDispatcher for ConfigurableToolDispatcher {
+    fn is_stash_tool(&self, tool_name: &str) -> bool {
+        tool_name == "output_view" || tool_name == "output_grep"
+    }
+
+    fn handle_stash_call(
+        &self,
+        tool_name: &str,
+        _arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String> {
+        Ok(format!("[mock stash result for {tool_name}]"))
+    }
+
+    fn render_result(
+        &self,
+        _tool_use_id: &str,
+        _tool_name: &str,
+        value: &serde_json::Value,
+    ) -> String {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    }
+
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        _worktree_path: &'a std::path::Path,
+        _task_id: &'a str,
+        _role_name: &'a str,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
+    {
+        let result = if let Some(handler) = self.handlers.get(tool_name) {
+            handler(arguments.as_ref())
+        } else {
+            Err(format!(
+                "ConfigurableToolDispatcher: tool '{tool_name}' not configured"
+            ))
+        };
+        Box::pin(async move { result })
+    }
+
+    fn is_mcp_tool(&self, tool_name: &str) -> bool {
+        self.mcp_tools.iter().any(|t| t == tool_name)
+    }
+
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>>
+    {
+        let result = if let Some(handler) = self.handlers.get(tool_name) {
+            handler(arguments.as_ref())
+        } else {
+            Err(format!(
+                "ConfigurableToolDispatcher: MCP tool '{tool_name}' not configured"
+            ))
+        };
+        Box::pin(async move { result })
+    }
+
+    fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
+        if self.mcp_tools.iter().any(|t| t == tool_name) {
+            Some(format!("mock-server-{tool_name}"))
+        } else {
+            None
+        }
+    }
+
+    fn clear_stash(&self) {}
+}
+
+// ─── Extract stash content (slot-local copy) ──────────────────────────────
+
+/// Extract concise text from a tool result for stashing/display.
+/// Returns `None` for non-shell tools.
+///
+/// This is a slot-local copy of the agent's `output_stash::extract_stash_content`
+/// so that reply-loop tests do not depend on `djinn-agent`.
+pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Option<String> {
+    if tool_name != "shell" {
+        return None;
+    }
+    let obj = value.as_object()?;
+    let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+    let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+
+    let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
+    if !stdout.is_empty() {
+        out.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("--- stderr ---\n");
+        out.push_str(stderr);
+    }
+    if exit_code != 0 {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("[exit code: {exit_code}]"));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+// ─── Session settlement helper (slot-local copy) ──────────────────────────
+
+/// Map a `StageOutcome` to `(SessionStatus, Option<park_reason>)`.
+///
+/// Slot-local copy of the agent's `session_settlement_for_stage_outcome` so
+/// reply-loop tests can exercise budget-park settlement without depending on
+/// `djinn-agent`.
+pub fn test_session_settlement_for_stage_outcome(
+    stage_outcome: &djinn_supervisor::StageOutcome,
+    final_result_ok: bool,
+) -> (djinn_core::models::SessionStatus, Option<String>) {
+    use djinn_core::models::SessionStatus;
+    use djinn_supervisor::{ParkReason, StageOutcome};
+
+    match stage_outcome {
+        StageOutcome::Parked {
+            reason: ParkReason::Budget,
+            ..
+        } => (SessionStatus::Completed, Some("budget".to_string())),
+        _ if final_result_ok => (SessionStatus::Completed, None),
+        _ => (SessionStatus::Failed, None),
+    }
+}
 
 pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("open in-memory test database")
@@ -42,6 +289,16 @@ pub fn test_path(prefix: &str) -> std::path::PathBuf {
 }
 
 pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotContext {
+    agent_context_from_db_with_dispatcher(db, _cancel, Some(Arc::new(MockToolDispatcher)))
+}
+
+/// Build a `SlotContext` from an in-memory DB with an explicit tool dispatcher.
+/// Pass `None` for `tool_dispatcher` to test the "no dispatcher" error path.
+pub fn agent_context_from_db_with_dispatcher(
+    db: Database,
+    _cancel: CancellationToken,
+    tool_dispatcher: Option<Arc<dyn SlotToolDispatcher>>,
+) -> SlotContext {
     let event_bus = test_events();
     let catalog = djinn_provider::catalog::CatalogService::new();
     let health_tracker = djinn_provider::catalog::HealthTracker::default();
@@ -171,7 +428,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         repo_graph_ops: None,
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(NoopCallbacks),
-        tool_dispatcher: None,
+        tool_dispatcher,
     }
 }
 
