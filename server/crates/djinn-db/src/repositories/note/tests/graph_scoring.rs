@@ -426,7 +426,11 @@ async fn graph_proximity_edge_kind_filter_limits_traversal() {
 
     let only_supersedes = vec!["supersedes".to_string()];
     let (scores, warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[canonical.id.clone()], 1, Some(&only_supersedes))
+        .graph_proximity_scores_with_edge_kinds(
+            std::slice::from_ref(&canonical.id),
+            1,
+            Some(&only_supersedes),
+        )
         .await
         .unwrap();
 
@@ -461,7 +465,11 @@ async fn graph_proximity_supersedes_source_to_target_returns_negative_score() {
 
     let only_supersedes = vec!["supersedes".to_string()];
     let (scores, _warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[old.id.clone()], 1, Some(&only_supersedes))
+        .graph_proximity_scores_with_edge_kinds(
+            std::slice::from_ref(&old.id),
+            1,
+            Some(&only_supersedes),
+        )
         .await
         .unwrap();
 
@@ -490,7 +498,7 @@ async fn graph_proximity_contradicts_returns_warning_without_score() {
         .unwrap();
 
     let (scores, warnings) = repo
-        .graph_proximity_scores_with_edge_kinds(&[a.id.clone()], 1, None)
+        .graph_proximity_scores_with_edge_kinds(std::slice::from_ref(&a.id), 1, None)
         .await
         .unwrap();
 
