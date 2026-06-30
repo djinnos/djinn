@@ -115,9 +115,37 @@ fn architect_dispatch_rule() -> DispatchRule {
     }
 }
 
+/// Label marking a task as a human-only review hold (auto-park terminal
+/// escalation). Tasks carrying it must NEVER be auto-dispatched to any
+/// agent role — they wait for a human. The auto-park mechanism (see
+/// `dispatch/retry.rs`) stamps this label on the `review`-type hold task
+/// it creates to break a CI/rework loop.
+pub(crate) const HUMAN_REVIEW_HOLD_LABEL: &str = "human-review-hold";
+
+/// Returns `true` if `task` carries the `human-review-hold` label.
+///
+/// `labels` is a JSON-array string (e.g. `["human-review-hold"]`); a
+/// substring match is sufficient and is the same shape used by the
+/// dispatch-time hold check in `dispatch/task_dispatch.rs`.
+pub(crate) fn is_human_review_hold(task: &Task) -> bool {
+    task.labels.contains(HUMAN_REVIEW_HOLD_LABEL)
+}
+
 /// Returns `true` if the task is an open/in-progress review task.
+///
+/// Excludes `human-review-hold` tasks: those are a terminal,
+/// human-only escalation and must never be claimed by the Planner.
+/// Without this guard a Planner session would claim the hold task,
+/// choose "escalate"/"skip", and close it — which fires the
+/// unblocked-tasks release and flips the parked source task back to
+/// `open`, defeating the auto-park safety mechanism (the exact loop the
+/// hold exists to break). Epic `pdn6` already excluded the blocked
+/// *source* task from worker dispatch; this closes the gap of the HOLD
+/// task itself being claimed by the Planner.
 fn planner_review_claims(task: &Task, _ctx: &DispatchContext) -> bool {
-    matches!(task.status.as_str(), "open" | "in_progress") && task.issue_type.as_str() == "review"
+    matches!(task.status.as_str(), "open" | "in_progress")
+        && task.issue_type.as_str() == "review"
+        && !is_human_review_hold(task)
 }
 
 fn planner_review_dispatch_rule() -> DispatchRule {
@@ -192,5 +220,111 @@ fn planner_dispatch_rule() -> DispatchRule {
     DispatchRule {
         role_name: "planner",
         claims: planner_claims,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `Task` for dispatch-rule unit tests.
+    fn task(issue_type: &str, status: &str, labels: &str) -> Task {
+        Task {
+            id: "task-id".to_owned(),
+            project_id: "project-id".to_owned(),
+            short_id: "task".to_owned(),
+            epic_id: None,
+            title: "Task".to_owned(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: issue_type.to_owned(),
+            status: status.to_owned(),
+            priority: 2,
+            owner: String::new(),
+            labels: labels.to_owned(),
+            acceptance_criteria: "[]".to_owned(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: "2026-06-30T00:00:00.000Z".to_owned(),
+            updated_at: "2026-06-30T00:00:00.000Z".to_owned(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_owned(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        }
+    }
+
+    /// A normal `review` task (no hold label) is still Planner-owned —
+    /// the human-review-hold exclusion must not regress the escalation/
+    /// intervention review dispatch path (ADR-051 §1 + §8).
+    #[test]
+    fn plain_review_task_is_claimed_by_planner() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        for status in ["open", "in_progress"] {
+            let t = task("review", status, "[]");
+            assert!(planner_review_claims(&t, &ctx));
+            assert_eq!(
+                registry.role_for_task(&t, &ctx),
+                Some("planner"),
+                "plain review task ({status}) must route to the planner"
+            );
+        }
+    }
+
+    /// Regression (this fix): a `human-review-hold`-labeled `review` task
+    /// must NOT be claimed by ANY dispatch rule — not planner, worker,
+    /// architect, reviewer, or lead. It is a human-only terminal hold and
+    /// must wait for a human; auto-dispatching + auto-closing it releases
+    /// the parked source task, defeating the auto-park safety mechanism.
+    #[test]
+    fn human_review_hold_task_is_claimed_by_no_role() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        let labels = r#"["human-review-hold"]"#;
+
+        for status in ["open", "in_progress"] {
+            let t = task("review", status, labels);
+
+            assert!(
+                is_human_review_hold(&t),
+                "fixture must carry the human-review-hold label"
+            );
+            // The planner review rule must reject it.
+            assert!(
+                !planner_review_claims(&t, &ctx),
+                "planner must not claim a human-review-hold task ({status})"
+            );
+            // No dispatch rule at all may claim it.
+            assert_eq!(
+                registry.role_for_task(&t, &ctx),
+                None,
+                "no role may claim a human-review-hold task ({status})"
+            );
+            // Defense check: each individual claims predicate is false.
+            assert!(!architect_claims(&t, &ctx));
+            assert!(!planning_claims(&t, &ctx));
+            assert!(!worker_claims(&t, &ctx));
+            assert!(!reviewer_claims(&t, &ctx));
+            assert!(!lead_claims(&t, &ctx));
+            assert!(!planner_claims(&t, &ctx));
+        }
     }
 }
