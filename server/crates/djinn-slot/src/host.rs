@@ -131,6 +131,28 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         kill: tokio_util::sync::CancellationToken,
         pause: tokio_util::sync::CancellationToken,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+
+    /// Touch activity for stall detection (best-effort RPC to host's
+    /// ActivityTracker).  On the host this is a local atomic write; on a
+    /// worker it routes over RPC.  Fire-and-forget — transient errors are
+    /// swallowed with a warn log because the local tracker still serves
+    /// worker diagnostics.
+    fn touch_activity_rpc<'a>(
+        &'a self,
+        task_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Flush session token counts to the session row (best-effort).
+    /// Used by the streaming loop to persist mid-flight counters so
+    /// long-running sessions don't read stale zeros until teardown.
+    fn flush_session_tokens_rpc<'a>(
+        &'a self,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
 // ─── ResolvedMcpTools ───────────────────────────────────────────────────────
@@ -149,6 +171,62 @@ pub trait ToolRegistryHandle: Send + Sync {
         tool_name: &'a str,
         arguments: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
+}
+
+// ─── SlotToolDispatcher ──────────────────────────────────────────────────
+
+/// Trait for dispatching tool calls from the reply loop.
+///
+/// The host implements this trait to route tool calls through its stash,
+/// MCP, and extension infrastructure.  The slot crate never imports
+/// `djinn-agent` internals — all host-only tool behaviour is behind this
+/// abstraction.
+pub trait SlotToolDispatcher: Send + Sync + 'static {
+    /// Check if a tool name is a stash-only tool (`output_view`, `output_grep`).
+    fn is_stash_tool(&self, tool_name: &str) -> bool;
+
+    /// Handle a stash tool call internally (`output_view`, `output_grep`).
+    fn handle_stash_call(
+        &self,
+        tool_name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String>;
+
+    /// Render a raw tool result through the host's truncation/stash pipeline.
+    fn render_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        value: &serde_json::Value,
+    ) -> String;
+
+    /// Dispatch a tool call through the host's extension layer (non-stash,
+    /// non-MCP tools).  The host resolves the tool, runs it, and returns
+    /// the raw JSON result.
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        worktree_path: &'a std::path::Path,
+        task_id: &'a str,
+        role_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
+
+    /// Check if a tool name is registered as an MCP tool.
+    fn is_mcp_tool(&self, tool_name: &str) -> bool;
+
+    /// Dispatch an MCP tool call.
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
+
+    /// Return the MCP server name for a tool, if known.
+    fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String>;
+
+    /// Clear the session's stash (used during compaction resets).
+    fn clear_stash(&self);
 }
 
 // ─── SlotContext ────────────────────────────────────────────────────────────
@@ -182,6 +260,9 @@ pub struct SlotContext {
     pub clock: Arc<dyn Clock>,
     /// Host-specific callbacks for complex operations.
     pub callbacks: Arc<dyn SlotHostCallbacks>,
+    /// Tool dispatch handle for the reply loop.  Routes stash, MCP, and
+    /// extension tool calls through the host's infrastructure.
+    pub tool_dispatcher: Option<Arc<dyn SlotToolDispatcher>>,
 }
 
 impl SlotContext {

@@ -29,7 +29,7 @@
 // ─── Public host seam ───────────────────────────────────────────────────────
 
 pub mod host;
-pub use host::{KnowledgeBranchTarget, SlotContext, SlotHostCallbacks};
+pub use host::{KnowledgeBranchTarget, SlotContext, SlotHostCallbacks, SlotToolDispatcher};
 
 // ─── Supporting types extracted from djinn-agent ────────────────────────────
 
@@ -108,6 +108,13 @@ pub use session_extraction::{
 // can call through the djinn-slot pathway from `actor.rs`.
 
 pub use supervisor_runner::run_supervisor_dispatch;
+
+// ─── Reply loop re-export ──────────────────────────────────────────────────
+// The canonical reply loop implementation now lives in djinn-slot.
+// Re-export the public surface so callers can use
+// `djinn_slot::reply_loop::{ReplyLoopContext, run_reply_loop}`.
+
+pub use reply_loop::{ReplyLoopContext, run_reply_loop};
 
 // ─── SlotEvent ──────────────────────────────────────────────────────────────
 
