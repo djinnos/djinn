@@ -187,6 +187,7 @@ impl CoordinatorActor {
                             vec![],
                             None,
                             0,
+                            None,
                         )
                         .await;
                     } else {
@@ -239,6 +240,7 @@ impl CoordinatorActor {
                         vec![],
                         None,
                         0,
+                        None,
                     )
                     .await;
                 }
@@ -472,6 +474,7 @@ impl CoordinatorActor {
                 blocking_names,
                 None,
                 0,
+                None,
             )
             .await;
 
@@ -587,6 +590,7 @@ impl CoordinatorActor {
         blocking_required_check_names: Vec<String>,
         failure_fingerprint: Option<String>,
         same_signature_count: i64,
+        last_remediation_base_sha: Option<String>,
     ) {
         let task_repo = self.task_repo();
         let input = TaskPrCiSnapshotInput {
@@ -597,7 +601,7 @@ impl CoordinatorActor {
             blocking_required_check_names,
             failure_fingerprint,
             same_signature_count,
-            last_remediation_base_sha: None,
+            last_remediation_base_sha,
         };
         if let Err(e) = task_repo.upsert_ci_snapshot(input).await {
             tracing::warn!(

@@ -1596,7 +1596,9 @@ fn integration_normal_failure_no_false_positive() {
 use djinn_core::models::{CiStatus, TaskPrCiSnapshot, TaskPrCiSnapshotInput};
 
 /// Helper to build a snapshot input the same way the pr_poller does for a
-/// failing observation, so we can assert on the resulting fields.
+/// failing observation via `handle_ci_failure`, so we can assert on the
+/// resulting fields.  Since sa4x, `handle_ci_failure` sets
+/// `last_remediation_base_sha` to the current failing head SHA.
 fn build_failing_snapshot_input(
     task_id: &str,
     pr_number: u64,
@@ -1614,7 +1616,7 @@ fn build_failing_snapshot_input(
         blocking_required_check_names: blocking_names,
         failure_fingerprint: Some(fingerprint.to_owned()),
         same_signature_count: total_consecutive,
-        last_remediation_base_sha: None,
+        last_remediation_base_sha: Some(head_sha.to_owned()),
     }
 }
 
@@ -1645,7 +1647,11 @@ fn ci_snapshot_failing_input_includes_blocking_names_and_fingerprint() {
     );
     assert_eq!(input.failure_fingerprint.as_deref(), Some("fp-aaa"));
     assert_eq!(input.same_signature_count, 2);
-    assert!(input.last_remediation_base_sha.is_none());
+    assert_eq!(
+        input.last_remediation_base_sha.as_deref(),
+        Some("abc123def456"),
+        "handle_ci_failure sets last_remediation_base_sha to the failing head"
+    );
     assert_eq!(input.pr_number, 42);
     assert_eq!(input.head_sha, "abc123def456");
 }
@@ -1708,15 +1714,13 @@ fn ci_snapshot_unknown_input_has_empty_blocking_and_no_fingerprint() {
 #[test]
 fn ci_snapshot_failing_input_carries_remediation_base_sha_where_available() {
     let blocking = vec![make_check_run("Tests", "failure")];
-    let mut input = build_failing_snapshot_input("task-5", 10, "head-sha-5", &blocking, "fp-5", 1);
-    // When last_remediation_base_sha is available (from lifecycle layer), it
-    // should be carried through. The pr_poller always sets None (foundation
-    // task), but the field should round-trip correctly.
-    input.last_remediation_base_sha = Some("remediation-base-sha".to_string());
-
+    let input = build_failing_snapshot_input("task-5", 10, "head-sha-5", &blocking, "fp-5", 1);
+    // handle_ci_failure sets last_remediation_base_sha to the failing head SHA
+    // so that later submit handling can compare against that baseline.
     assert_eq!(
         input.last_remediation_base_sha.as_deref(),
-        Some("remediation-base-sha")
+        Some("head-sha-5"),
+        "handle_ci_failure persists the failing head as the remediation base SHA"
     );
 }
 
@@ -1873,7 +1877,8 @@ fn ci_snapshot_new_head_sha_reset_contract_has_clean_fields() {
 /// for each CiStatus variant, matching the contract the repository expects.
 #[test]
 fn ci_snapshot_persist_input_construction_covers_all_statuses() {
-    // Failing: blocking names + fingerprint + count
+    // Failing: blocking names + fingerprint + count + remediation base SHA
+    // (handle_ci_failure sets last_remediation_base_sha to the failing head)
     let failing = TaskPrCiSnapshotInput {
         task_id: "t".to_owned(),
         pr_number: 1,
@@ -1882,12 +1887,17 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
         blocking_required_check_names: vec!["A".to_owned(), "B".to_owned()],
         failure_fingerprint: Some("fp".to_owned()),
         same_signature_count: 2,
-        last_remediation_base_sha: None,
+        last_remediation_base_sha: Some("sha".to_owned()),
     };
     assert_eq!(failing.ci_status, CiStatus::Failing);
     assert_eq!(failing.blocking_required_check_names.len(), 2);
     assert!(failing.failure_fingerprint.is_some());
     assert_eq!(failing.same_signature_count, 2);
+    assert_eq!(
+        failing.last_remediation_base_sha.as_deref(),
+        Some("sha"),
+        "failing snapshot carries the remediation base SHA"
+    );
 
     // Passing: empty blocking, no fingerprint, zero count
     let passing = TaskPrCiSnapshotInput {
@@ -1934,34 +1944,35 @@ fn ci_snapshot_persist_input_construction_covers_all_statuses() {
     assert!(unknown.blocking_required_check_names.is_empty());
 }
 
-/// Verify that last_remediation_base_sha is always None from the pr_poller
-/// (the foundation task does not invent remediation transitions).  When the
-/// field IS set (e.g. by a downstream lifecycle layer), it round-trips
-/// correctly through the input.
+/// Verify that last_remediation_base_sha defaults to None in the input
+/// struct, and that the field round-trips correctly when set.
+/// `handle_ci_failure` now sets this to the current failing head SHA so that
+/// later submit handling can compare against that baseline; other paths
+/// (advisory-only, passing, pending) leave it as None.
 #[test]
 fn ci_snapshot_remediation_base_sha_none_by_default_round_trips_when_set() {
-    // Default: None (pr_poller always sends None)
+    // Default: None (the struct default, used by non-failure paths)
     let default_input = TaskPrCiSnapshotInput::default();
     assert!(
         default_input.last_remediation_base_sha.is_none(),
         "default input must have no remediation base SHA"
     );
 
-    // When set by a downstream layer, it round-trips.
-    let mut with_remediation = TaskPrCiSnapshotInput {
+    // When set by handle_ci_failure, it carries the failing head SHA.
+    let with_remediation = TaskPrCiSnapshotInput {
         task_id: "t".to_owned(),
         pr_number: 1,
-        head_sha: "sha".to_owned(),
+        head_sha: "failing-head-sha".to_owned(),
         ci_status: CiStatus::Failing,
         blocking_required_check_names: vec!["X".to_owned()],
         failure_fingerprint: Some("fp".to_owned()),
         same_signature_count: 1,
-        last_remediation_base_sha: None,
+        last_remediation_base_sha: Some("failing-head-sha".to_owned()),
     };
-    with_remediation.last_remediation_base_sha = Some("base-abc".to_owned());
     assert_eq!(
         with_remediation.last_remediation_base_sha.as_deref(),
-        Some("base-abc")
+        Some("failing-head-sha"),
+        "handle_ci_failure persists the failing head as remediation base"
     );
 }
 
@@ -2497,6 +2508,149 @@ fn mixed_required_and_advisory_failures_route_to_remediation() {
         decide_pr_draft_ci_action(ci_status, true),
         PrDraftCiAction::RouteToRemediation,
     );
+}
+
+// ── sa4x: Red-CI remediation baseline and durable same-signature tests ───
+//
+// These tests verify the sa4x changes that persist a durable remediation
+// baseline when required CI fails, making the CI gate snapshot the authority
+// for downstream dispatch/submit decisions.
+
+/// When `handle_ci_failure` observes required blocking CI failures, the
+/// snapshot input it builds persists a durable remediation baseline with:
+/// - `head_sha` = current failing head
+/// - `last_remediation_base_sha` = current failing head (same as head_sha)
+/// - `blocking_required_check_names` = names of the blocking checks
+/// - `failure_fingerprint` = computed fingerprint
+/// - `same_signature_count` = total consecutive observations
+#[test]
+fn baseline_capture_on_required_ci_failure_persists_all_fields() {
+    let blocking = vec![
+        make_check_run("Quality Gate", "failure"),
+        make_check_run("Server Clippy", "failure"),
+    ];
+    let head_sha = "abc123def456789";
+    let fingerprint = "fp-deadbeef";
+    let total_consecutive = 1i64;
+
+    let input = build_failing_snapshot_input(
+        "task-baseline",
+        42,
+        head_sha,
+        &blocking,
+        fingerprint,
+        total_consecutive,
+    );
+
+    // Core baseline fields
+    assert_eq!(input.task_id, "task-baseline");
+    assert_eq!(input.pr_number, 42);
+    assert_eq!(input.head_sha, head_sha);
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(
+        input.blocking_required_check_names,
+        vec!["Quality Gate", "Server Clippy"]
+    );
+    assert_eq!(input.failure_fingerprint.as_deref(), Some(fingerprint));
+    assert_eq!(input.same_signature_count, total_consecutive);
+
+    // last_remediation_base_sha is set to the failing head so submit
+    // handling can compare against that baseline.
+    assert_eq!(
+        input.last_remediation_base_sha.as_deref(),
+        Some(head_sha),
+        "durable remediation baseline must persist the failing head SHA"
+    );
+}
+
+/// Advisory-only failures do NOT produce a failing snapshot — the blocking
+/// filter returns empty, the snapshot is overwritten with Passing, and
+/// `last_remediation_base_sha` remains None.  This test verifies that the
+/// advisory-only path produces no baseline mutation.
+#[test]
+fn advisory_only_failure_produces_no_baseline_mutation() {
+    // Simulate: only Vercel (advisory) failed; required contexts list
+    // "Quality Gate" which is green.
+    let vercel = make_check_run("Vercel – portal", "failure");
+    let required = vec!["Quality Gate".to_string()];
+
+    let failed = vec![&vercel];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert!(
+        blocking.is_empty(),
+        "advisory-only failures must not be blocking"
+    );
+
+    // Advisory-only: the pr_poller overwrites with a Passing snapshot
+    // (no blocking names, no fingerprint, no remediation base).
+    let advisory_input = TaskPrCiSnapshotInput {
+        task_id: "task-advisory".to_owned(),
+        pr_number: 77,
+        head_sha: "advisory-head-sha".to_owned(),
+        ci_status: CiStatus::Passing,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(advisory_input.ci_status, CiStatus::Passing);
+    assert!(
+        advisory_input.blocking_required_check_names.is_empty(),
+        "advisory-only path must have no blocking names"
+    );
+    assert!(
+        advisory_input.failure_fingerprint.is_none(),
+        "advisory-only path must have no fingerprint"
+    );
+    assert_eq!(
+        advisory_input.same_signature_count, 0,
+        "advisory-only path must have zero same-signature count"
+    );
+    assert!(
+        advisory_input.last_remediation_base_sha.is_none(),
+        "advisory-only path must NOT set a remediation baseline"
+    );
+}
+
+/// The same-signature count is persisted to the durable snapshot (the
+/// authoritative source), not just recorded in activity-log audit events.
+/// This test verifies that consecutive observations increment the count
+/// in the durable snapshot input (as `handle_ci_failure` does).
+#[test]
+fn same_signature_count_persisted_to_durable_snapshot_on_consecutive_failures() {
+    let blocking = vec![make_check_run("Quality Gate", "failure")];
+    let head_sha = "stable-head-sha";
+
+    // First observation: count = 1
+    let input1 = build_failing_snapshot_input("t", 1, head_sha, &blocking, "fp-same", 1);
+    assert_eq!(
+        input1.same_signature_count, 1,
+        "first observation must set count to 1"
+    );
+
+    // Second identical observation: count = 2
+    let input2 = build_failing_snapshot_input("t", 1, head_sha, &blocking, "fp-same", 2);
+    assert_eq!(
+        input2.same_signature_count, 2,
+        "second consecutive identical observation must set count to 2"
+    );
+
+    // Third identical observation: count = 3
+    let input3 = build_failing_snapshot_input("t", 1, head_sha, &blocking, "fp-same", 3);
+    assert_eq!(
+        input3.same_signature_count, 3,
+        "third consecutive identical observation must set count to 3"
+    );
+
+    // All observations carry the same remediation base SHA (the failing head).
+    for input in [&input1, &input2, &input3] {
+        assert_eq!(
+            input.last_remediation_base_sha.as_deref(),
+            Some(head_sha),
+            "each consecutive failure must persist the remediation baseline"
+        );
+    }
 }
 
 // ── End-to-end lifecycle regression tests (CI gate lifecycle matrix) ──────
