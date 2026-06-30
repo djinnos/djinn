@@ -9,6 +9,7 @@ use djinn_core::models::{
 
 mod activity;
 mod blockers;
+mod ci;
 mod queries;
 mod reads;
 mod status;
@@ -37,7 +38,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
-    use djinn_core::models::{Project, Task, TaskStatus, TransitionAction};
+    use djinn_core::models::{
+        CiStatus, Project, Task, TaskPrCiSnapshotInput, TaskStatus, TransitionAction,
+    };
 
     use crate::database::Database;
 
@@ -726,6 +729,123 @@ mod tests {
             "list_by_status_filtered(open, true) must include source after review hold is closed"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_snapshot_defaults_to_unknown_and_maps_on_task_reads() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        let fetched = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.ci_status, "unknown");
+        assert_eq!(fetched.ci_blocking_required_check_names, "[]");
+        assert_eq!(fetched.ci_same_signature_count, 0);
+        assert!(fetched.ci_head_sha.is_none());
+
+        let listed = repo
+            .list_by_project(&project.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == task.id)
+            .unwrap();
+        assert_eq!(listed.ci_status, "unknown");
+        assert_eq!(listed.ci_blocking_required_check_names, "[]");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_snapshot_upsert_read_and_task_mapping() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        let snapshot = repo
+            .upsert_ci_snapshot(TaskPrCiSnapshotInput {
+                task_id: task.id.clone(),
+                pr_number: 123,
+                head_sha: "abc123".to_string(),
+                ci_status: CiStatus::Failing,
+                blocking_required_check_names: vec![
+                    "Quality Gate".to_string(),
+                    "Tests".to_string(),
+                ],
+                failure_fingerprint: Some("fp-1".to_string()),
+                same_signature_count: 2,
+                last_remediation_base_sha: Some("base-1".to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.ci_status, CiStatus::Failing);
+        assert_eq!(
+            snapshot.blocking_required_check_names,
+            ["Quality Gate", "Tests"]
+        );
+
+        let read = repo
+            .get_ci_snapshot_for_task_pr(&task.id, 123)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.head_sha, "abc123");
+        assert_eq!(read.failure_fingerprint.as_deref(), Some("fp-1"));
+
+        let mapped = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(mapped.ci_status, "failing");
+        assert_eq!(mapped.ci_head_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&mapped.ci_blocking_required_check_names).unwrap(),
+            vec!["Quality Gate".to_string(), "Tests".to_string()]
+        );
+        assert_eq!(mapped.ci_same_signature_count, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ci_snapshot_stale_head_reset_clears_old_signature_state() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac"}]"#)).await;
+
+        repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+            task_id: task.id.clone(),
+            pr_number: 55,
+            head_sha: "old-head".to_string(),
+            ci_status: CiStatus::Failing,
+            blocking_required_check_names: vec!["Tests".to_string()],
+            failure_fingerprint: Some("old-fp".to_string()),
+            same_signature_count: 4,
+            last_remediation_base_sha: Some("old-base".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let reset = repo
+            .reset_ci_snapshot_for_head(&task.id, 55, "new-head")
+            .await
+            .unwrap();
+
+        assert_eq!(reset.head_sha, "new-head");
+        assert_eq!(reset.ci_status, CiStatus::Unknown);
+        assert!(reset.blocking_required_check_names.is_empty());
+        assert!(reset.failure_fingerprint.is_none());
+        assert_eq!(reset.same_signature_count, 0);
+        assert!(reset.last_remediation_base_sha.is_none());
+
+        let mapped = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(mapped.ci_status, "unknown");
+        assert_eq!(mapped.ci_blocking_required_check_names, "[]");
+        assert_eq!(mapped.ci_same_signature_count, 0);
+        assert!(mapped.ci_failure_fingerprint.is_none());
+    }
 }
 
 pub struct CreateTaskParams<'a> {
@@ -903,20 +1023,27 @@ impl TaskRepository {
 /// `query_as!` does not honor `#[sqlx(default)]`.
 macro_rules! task_select_where_id {
     ($id:expr) => {
-        ::sqlx::query_as!(
-            ::djinn_core::models::Task,
+        ::sqlx::query_as::<_, ::djinn_core::models::Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                 reopen_count, continuation_count,
                 total_reopen_count,
                 intervention_count, last_intervention_at,
                 created_at, updated_at, closed_at,
-                close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                 agent_type, created_by_user_id,
-                CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE id = $1"#,
-            $id
         )
+        .bind(&$id)
     };
 }
 pub(super) use task_select_where_id;

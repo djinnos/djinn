@@ -264,8 +264,17 @@ async fn migration_85_applies_on_fresh_database_and_sets_defaults() {
             .await
             .expect("insert default snapshot");
 
-        let row: (Option<String>, String, Value, Option<String>, String, String, i64, Option<String>) =
-            sqlx::query_as(
+        type DefaultSnapshotRow = (
+            Option<String>,
+            String,
+            Value,
+            Option<String>,
+            String,
+            String,
+            i64,
+            Option<String>,
+        );
+        let row: DefaultSnapshotRow = sqlx::query_as(
                 "SELECT head_sha, ci_status, blocking_required_check_names, failure_fingerprint, \
                         first_seen_at, last_seen_at, same_signature_count, last_remediation_base_sha \
                  FROM task_pr_ci_snapshots WHERE task_id = 'task-defaults' AND pr_number = 99",
@@ -339,7 +348,7 @@ async fn migration_85_backfills_open_pr_tasks_to_unknown_and_skips_closed_tasks(
             .expect("connect migrated database");
         assert_schema(&pool).await;
 
-        let rows: Vec<(
+        type BackfilledSnapshotRow = (
             String,
             i64,
             Option<String>,
@@ -350,7 +359,8 @@ async fn migration_85_backfills_open_pr_tasks_to_unknown_and_skips_closed_tasks(
             String,
             i64,
             Option<String>,
-        )> = sqlx::query_as(
+        );
+        let rows: Vec<BackfilledSnapshotRow> = sqlx::query_as(
             "SELECT task_id, pr_number, head_sha, ci_status, blocking_required_check_names, \
                         failure_fingerprint, first_seen_at, last_seen_at, same_signature_count, \
                         last_remediation_base_sha \

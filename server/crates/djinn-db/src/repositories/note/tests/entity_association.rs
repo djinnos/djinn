@@ -867,7 +867,7 @@ async fn proposal_derived_from_edges_via_epic_task_notes_fixture() {
     assert_eq!(from_written_note[0].kind, MemoryEntityKind::DerivedFrom);
 
     // 9. Confirm no proposal body leaked into `notes`.
-    assert_no_proposal_body_in_notes(&db, &[proposal_id.clone()]).await;
+    assert_no_proposal_body_in_notes(&db, std::slice::from_ref(&proposal_id)).await;
 
     // 10. Confirm existing task/epic memory_refs autolink behavior is
     //     unchanged: the note_associations (F5) substrate still works
