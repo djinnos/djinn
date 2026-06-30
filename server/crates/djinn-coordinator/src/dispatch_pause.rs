@@ -120,6 +120,14 @@ mod tests {
             pr_url: None,
             merge_conflict_metadata: None,
             agent_type: None,
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
             unresolved_blocker_count: 0,
         }
     }
