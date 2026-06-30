@@ -71,6 +71,10 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# Activate test-support on djinn-slot so agent tests can call
+# test-only methods (e.g. `SlotPoolHandle::test_set_token_override`)
+# on the canonical djinn-slot pool handle.
+djinn-slot = { path = "../djinn-slot", features = ["test-support"] }
 
 [lints]
 workspace = true

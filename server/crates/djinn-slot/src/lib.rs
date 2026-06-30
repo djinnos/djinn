@@ -54,7 +54,7 @@ pub mod helpers;
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
 pub(crate) mod memory_enrichment;
-mod pool;
+pub mod pool;
 pub(crate) mod reply_loop;
 pub(crate) mod session_extraction;
 mod supervisor_runner;
