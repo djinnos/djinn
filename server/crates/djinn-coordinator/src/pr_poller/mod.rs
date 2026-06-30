@@ -109,6 +109,7 @@ pub(crate) use pr_watcher::{PrDraftCiAction, decide_pr_draft_ci_action};
 use ci_helpers::compute_ci_failure_fingerprint;
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
+use ci_helpers::{CiMergeGateVerdict, ci_merge_gate_verdict};
 #[cfg(test)]
 use ci_helpers::{
     count_consecutive_identical, detect_scope_inversion, extract_crate_name, extract_crate_names,
