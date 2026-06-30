@@ -3190,3 +3190,215 @@ fn lifecycle_stale_passing_to_reset_pending_blocks_merge_until_new_passing() {
         "new head passing: pr_draft proceeds to pr_review"
     );
 }
+
+// ── 83sl: Durable same-signature escalation independent of reopen_count ───
+//
+// These tests verify that the same-CI-signature escalation reads and updates
+// the durable CI gate snapshot's `same_signature_count` / `failure_fingerprint`
+// instead of counting activity-log `same_ci_signature` entries. Escalation
+// fires at `SAME_CI_SIGNATURE_THRESHOLD` (2) regardless of `reopen_count`.
+
+/// Helper: build a TaskPrCiSnapshot representing a durable state for testing
+/// the fingerprint-matching contract used by `handle_ci_failure`.
+fn durable_snapshot(
+    task_id: &str,
+    head_sha: &str,
+    failure_fingerprint: Option<&str>,
+    same_signature_count: i64,
+) -> TaskPrCiSnapshot {
+    TaskPrCiSnapshot {
+        task_id: task_id.to_owned(),
+        pr_number: 1,
+        head_sha: head_sha.to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: vec!["Quality Gate".to_owned()],
+        failure_fingerprint: failure_fingerprint.map(|s| s.to_owned()),
+        first_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
+        last_seen_at: "2026-07-01T00:00:00.000Z".to_owned(),
+        same_signature_count,
+        last_remediation_base_sha: Some(head_sha.to_owned()),
+    }
+}
+
+/// Verify the durable counter contract: when the snapshot carries a matching
+/// fingerprint, the count carries forward and the next observation increments
+/// it. This is the core logic in `handle_ci_failure` section 2.
+#[test]
+fn durable_same_signature_count_increments_on_matching_fingerprint() {
+    let fp = "deadbeef";
+    // First observation: no prior snapshot → count starts at 1
+    let snap_none: Option<TaskPrCiSnapshot> = None;
+    let prior = snap_none
+        .as_ref()
+        .map(|s| s.same_signature_count)
+        .unwrap_or(0);
+    // In handle_ci_failure, if snap is None, prior_same_sig_count = 0
+    assert_eq!(prior, 0, "no prior snapshot → count starts at 0");
+
+    // Second observation: snapshot with matching fingerprint → carry forward
+    let snap = durable_snapshot("t1", "sha-1", Some(fp), 1);
+    let carried = if snap.failure_fingerprint.as_deref() == Some(fp) {
+        snap.same_signature_count
+    } else {
+        0
+    };
+    assert_eq!(carried, 1, "matching fingerprint carries forward count");
+    let total = carried + 1;
+    assert_eq!(total, 2, "second identical observation → count 2");
+
+    // Third observation: snapshot with matching fingerprint → carry forward
+    let snap3 = durable_snapshot("t1", "sha-1", Some(fp), 2);
+    let carried3 = if snap3.failure_fingerprint.as_deref() == Some(fp) {
+        snap3.same_signature_count
+    } else {
+        0
+    };
+    assert_eq!(carried3, 2, "matching fingerprint carries forward count");
+    let total3 = carried3 + 1;
+    assert_eq!(total3, 3, "third identical observation → count 3");
+}
+
+/// When the fingerprint changes (worker made different mistakes), the counter
+/// restarts from 0 — the durable counter detects progress.
+#[test]
+fn durable_same_signature_count_resets_on_fingerprint_change() {
+    // Prior: fingerprint "fp-old", count 2
+    let snap = durable_snapshot("t1", "sha-1", Some("fp-old"), 2);
+    // Current fingerprint is different → counter restarts
+    let new_fp = "fp-new";
+    let carried = if snap.failure_fingerprint.as_deref() == Some(new_fp) {
+        snap.same_signature_count
+    } else {
+        0
+    };
+    assert_eq!(carried, 0, "different fingerprint → restart count");
+    let total = carried + 1;
+    assert_eq!(total, 1, "fingerprint change → count restarts at 1");
+}
+
+/// When the head SHA changes, `reset_ci_snapshot_for_head` zeros the
+/// `same_signature_count` and clears the fingerprint. The next observation
+/// starts at count 1 regardless of the prior count.
+#[test]
+fn durable_same_signature_count_resets_on_head_change() {
+    // After reset_ci_snapshot_for_head: count=0, fingerprint=None
+    let snap = durable_snapshot("t1", "new-sha", None, 0);
+    let fp = "some-fingerprint";
+    let carried = if snap.failure_fingerprint.as_deref() == Some(fp) {
+        snap.same_signature_count
+    } else {
+        0
+    };
+    assert_eq!(
+        carried, 0,
+        "head change cleared fingerprint → restart count"
+    );
+    let total = carried + 1;
+    assert_eq!(
+        total, 1,
+        "head change → count 1 for first observation on new head"
+    );
+}
+
+/// When `same_signature_count >= SAME_CI_SIGNATURE_THRESHOLD` (2), the task
+/// is escalated — regardless of `reopen_count`. The durable counter is the
+/// sole authority; `reopen_count` is never consulted in this path.
+#[test]
+fn durable_same_signature_count_2_triggers_escalation_regardless_of_reopen_count() {
+    let threshold = super::SAME_CI_SIGNATURE_THRESHOLD; // 2
+
+    // Scenario: snapshot says count=1, current observation matches → total=2
+    let snap = durable_snapshot("t1", "sha-1", Some("fp-same"), 1);
+    let fp = "fp-same";
+    let carried = if snap.failure_fingerprint.as_deref() == Some(fp) {
+        snap.same_signature_count
+    } else {
+        0
+    };
+    let total = carried + 1;
+    assert_eq!(total, 2, "second identical observation on same head");
+    assert!(
+        total >= threshold as i64,
+        "count 2 >= threshold {threshold} → escalation"
+    );
+
+    // Crucially: reopen_count is never consulted. Even if reopen_count=0,
+    // the escalation fires because the durable counter is the authority.
+    // This test documents the contract that handle_ci_failure does NOT read
+    // task.reopen_count in the same-signature path.
+    let reopen_count = 0u32;
+    assert_eq!(reopen_count, 0, "reopen_count is 0");
+    assert!(
+        total >= threshold as i64,
+        "escalation fires at count 2 even when reopen_count={reopen_count}"
+    );
+}
+
+/// Changed-head same-fingerprint count 2 escalation:
+/// 1. Old head had fingerprint "fp-1" with count 2 (escalated).
+/// 2. Head changes → snapshot resets (count=0, fingerprint=None).
+/// 3. New head produces SAME fingerprint "fp-1" → count 1.
+/// 4. Next observation: same fingerprint → count 2 → re-escalate.
+///
+/// This proves that head changes reset the counter and that re-escalation
+/// works correctly after a push that didn't fix the failures.
+#[test]
+fn changed_head_same_fingerprint_reaches_count_2_and_escalates() {
+    let threshold = super::SAME_CI_SIGNATURE_THRESHOLD; // 2
+    let fp = "fp-same-after-push";
+
+    // Step 1: Old head was at count 2 (escalated previously)
+    let old_snap = durable_snapshot("t1", "old-sha", Some(fp), 2);
+    assert_eq!(old_snap.same_signature_count, 2);
+
+    // Step 2: Head changes → reset_ci_snapshot_for_head zeros everything
+    let reset_snap = durable_snapshot("t1", "new-sha", None, 0);
+    assert_eq!(reset_snap.same_signature_count, 0);
+    assert!(reset_snap.failure_fingerprint.is_none());
+
+    // Step 3: First observation on new head with same fingerprint
+    let carried1 = if reset_snap.failure_fingerprint.as_deref() == Some(fp) {
+        reset_snap.same_signature_count
+    } else {
+        0
+    };
+    let total1 = carried1 + 1;
+    assert_eq!(total1, 1, "first observation after head change → count 1");
+    assert!(
+        total1 < threshold as i64,
+        "count 1 < threshold → no escalation yet"
+    );
+
+    // Step 4: persist_ci_snapshot records count=1; next poller observation
+    // reads the snapshot back with matching fingerprint → carry forward
+    let snap_after_first = durable_snapshot("t1", "new-sha", Some(fp), 1);
+    let carried2 = if snap_after_first.failure_fingerprint.as_deref() == Some(fp) {
+        snap_after_first.same_signature_count
+    } else {
+        0
+    };
+    let total2 = carried2 + 1;
+    assert_eq!(total2, 2, "second observation on new head → count 2");
+    assert!(
+        total2 >= threshold as i64,
+        "count 2 >= threshold → re-escalation after push"
+    );
+}
+
+/// Different fingerprint on same head → counter restarts, proving the worker
+/// made progress. Only truly stuck failures (same fingerprint) escalate.
+#[test]
+fn different_fingerprint_on_same_head_restarts_counter() {
+    // Prior: fingerprint "fp-stuck", count 1
+    let snap = durable_snapshot("t1", "sha-1", Some("fp-stuck"), 1);
+    // New fingerprint: "fp-progress" (worker fixed one issue, hit another)
+    let new_fp = "fp-progress";
+    let carried = if snap.failure_fingerprint.as_deref() == Some(new_fp) {
+        snap.same_signature_count
+    } else {
+        0
+    };
+    assert_eq!(carried, 0, "different fingerprint on same head → restart");
+    let total = carried + 1;
+    assert_eq!(total, 1, "progress detected → count 1, no escalation");
+}

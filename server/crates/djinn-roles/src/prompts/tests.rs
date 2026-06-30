@@ -76,6 +76,7 @@ fn make_ctx() -> TaskContext {
         knowledge_context: None,
         code_graph_context: None,
         reviewer_diff_context: None,
+        ci_blocking_directive: None,
     }
 }
 
@@ -643,4 +644,123 @@ fn tribunal_roles_are_not_routed_through_reviewer() {
     assert_eq!(advocate_cfg.dispatch_role, "advocate");
     assert_eq!(adversary_cfg.dispatch_role, "adversary");
     assert_eq!(judge_cfg.dispatch_role, "judge");
+}
+
+// ── sa4x: CI blocking directive tests ──────────────────────────────────────
+
+#[test]
+fn ci_blocking_directive_rendered_when_present() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(
+            "**PR:** #42\n\
+             **Failing head SHA:** `abc123`\n\
+             **Blocking checks:** Quality Gate\n\n\
+             > REQUIRED CI is failing on the current PR head."
+                .into(),
+        ),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "prompt should include the BLOCKING section heading"
+    );
+    assert!(
+        prompt.contains("**PR:** #42"),
+        "prompt should include the concrete PR number"
+    );
+    assert!(
+        prompt.contains("**Failing head SHA:** `abc123`"),
+        "prompt should include the failing head SHA"
+    );
+    assert!(
+        prompt.contains("**Blocking checks:** Quality Gate"),
+        "prompt should include the blocking check names"
+    );
+    assert!(
+        !prompt.contains("{{ci_blocking_directive_section}}"),
+        "template placeholder should be replaced"
+    );
+}
+
+#[test]
+fn ci_blocking_directive_omitted_when_absent() {
+    let task = make_task();
+    let ctx = make_ctx(); // ci_blocking_directive: None
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("BLOCKING: Required CI Failing"),
+        "prompt should not include BLOCKING section when directive is None"
+    );
+    assert!(
+        !prompt.contains("{{ci_blocking_directive_section}}"),
+        "placeholder should be replaced with empty string"
+    );
+}
+
+#[test]
+fn ci_blocking_directive_appears_for_reviewer_role() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(
+            "**PR:** #99\n\
+             **Failing head SHA:** `def456`\n\
+             **Blocking checks:** unit tests, lint\n\n\
+             > REQUIRED CI is failing on the current PR head."
+                .into(),
+        ),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "reviewer prompt should include the BLOCKING section"
+    );
+    assert!(
+        prompt.contains("**PR:** #99"),
+        "reviewer prompt should include the concrete PR number"
+    );
+    assert!(
+        prompt.contains("**Blocking checks:** unit tests, lint"),
+        "reviewer prompt should include the blocking check names"
+    );
+}
+
+#[test]
+fn ci_blocking_directive_omitted_for_empty_string() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some("   ".into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("BLOCKING: Required CI Failing"),
+        "prompt should not include BLOCKING section for whitespace-only directive"
+    );
+}
+
+#[test]
+fn ci_blocking_directive_does_not_appear_in_activity_section() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some("**PR:** #42\n**Failing head SHA:** `abc123`".into()),
+        activity: Some("Some activity log text".into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    // The directive should be in its own section, not duplicated in the activity log
+    let blocking_count = prompt
+        .matches("## ⛔ BLOCKING: Required CI Failing")
+        .count();
+    assert_eq!(
+        blocking_count, 1,
+        "BLOCKING directive should appear exactly once, got {blocking_count}"
+    );
 }
