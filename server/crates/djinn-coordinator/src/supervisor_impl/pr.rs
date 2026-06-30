@@ -236,6 +236,20 @@ pub async fn supervisor_pr_open(
         }
     };
     let _ = &message;
+
+    // ── Unchanged-head red-CI remediation guard ─────────────────────────────
+    // When a durable CI gate snapshot has `last_remediation_base_sha` set for
+    // a failing required-CI baseline, compare the freshly-pushed head SHA
+    // against that baseline. If the SHA is unchanged the worker/reviewer
+    // remediation session produced no new commit for the red required-CI
+    // baseline — opening a PR would just spawn another advisory red-CI loop.
+    // Instead, keep the task in remediation (park it at `open` so its
+    // remediation blocker holds it), emit a blocking system activity event,
+    // and short-circuit the PR-open path with `Escalated`.
+    if let Some(outcome) = check_unchanged_remediation_head(task, &task_repo, &head_sha).await {
+        return outcome;
+    }
+
     let merge_result_commit_sha = head_sha;
 
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
@@ -919,6 +933,163 @@ pub(super) async fn close_noop(
     }
 }
 
+/// Event type emitted when a submit/PR-open attempt is rejected because the
+/// post-session PR head SHA is unchanged from the durable red-CI remediation
+/// baseline. Consumed by the activity log as a blocking system event.
+pub(crate) const UNCHANGED_HEAD_EVENT: &str = "unchanged_remediation_head";
+
+/// Pure predicate: should the submit be rejected because the PR head SHA is
+/// unchanged from the durable red-CI remediation baseline?
+///
+/// Returns `Some(reason)` when the head SHA matches the baseline (unchanged →
+/// reject). Returns `None` when the SHA changed or no baseline is active.
+///
+/// Factored out so the decision is unit-testable without a database; the
+/// async wrapper [`check_unchanged_remediation_head`] performs the side
+/// effects (activity event, comment, park transition).
+pub(super) fn unchanged_head_rejection_reason(
+    ci_last_remediation_base_sha: Option<&str>,
+    head_sha: &str,
+    _task_id: &str,
+    short_id: &str,
+    pr_number: Option<i64>,
+) -> Option<String> {
+    let remediation_base = ci_last_remediation_base_sha?;
+
+    if head_sha != remediation_base {
+        return None;
+    }
+
+    let pr_label = pr_number
+        .map(|n| format!("PR #{n}"))
+        .unwrap_or_else(|| "PR (unknown number)".to_string());
+
+    Some(format!(
+        "Submit rejected: PR head SHA `{head_sha}` is unchanged from the red required-CI \
+         remediation baseline `{remediation_base}`. No new commit was produced for the \
+         failing required-CI baseline ({pr_label}, task {short_id}). The task remains \
+         in remediation; a remediation attempt must push a new commit to advance.",
+    ))
+}
+
+/// Compare the post-session PR/branch head SHA with the durable
+/// `last_remediation_base_sha` whenever a red required-CI remediation baseline
+/// is active. If the SHA is unchanged, reject the submit attempt: keep the task
+/// in remediation (park at `open` so its remediation blocker holds it), emit a
+/// blocking system activity event, and return `Some(Escalated)` so the caller
+/// short-circuits the PR-open path. Returns `None` when the SHA changed or when
+/// no remediation baseline is active — the caller proceeds normally.
+///
+/// This cooperates with (does not replace) the existing zero-diff guard
+/// (`task_branch_commits_ahead == 0`) and the scope-inversion / cycle-cap
+/// protections: those run earlier or downstream and operate on independent
+/// signals. This guard fires only when a durable `last_remediation_base_sha`
+/// baseline is set (i.e. a prior pr_poller pass recorded a red required-CI
+/// failure and stamped the failing head as the remediation baseline).
+pub(crate) async fn check_unchanged_remediation_head(
+    task: &djinn_core::models::Task,
+    task_repo: &TaskRepository,
+    head_sha: &str,
+) -> Option<TaskRunOutcome> {
+    let remediation_base = task.ci_last_remediation_base_sha.as_deref()?;
+
+    let reason = unchanged_head_rejection_reason(
+        task.ci_last_remediation_base_sha.as_deref(),
+        head_sha,
+        &task.id,
+        &task.short_id,
+        task.ci_pr_number,
+    )?;
+
+    let pr_number = task.ci_pr_number;
+
+    // Emit a blocking system activity event with the full context.
+    let payload = serde_json::json!({
+        "task_id": task.id,
+        "short_id": task.short_id,
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "remediation_base_sha": remediation_base,
+        "reason": "no new commit was produced for the red required-CI baseline",
+    });
+    if let Err(e) = task_repo
+        .log_activity(
+            Some(&task.id),
+            "coordinator",
+            "system",
+            UNCHANGED_HEAD_EVENT,
+            &payload.to_string(),
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %e,
+            "supervisor PR-open: failed to emit unchanged-head remediation rejection event",
+        );
+    }
+
+    // Also emit a human-readable comment so the blocker is visible in the
+    // task activity stream alongside the structured event.
+    let comment_payload = serde_json::json!({
+        "body": format!(
+            "**⚠ Unchanged-head remediation rejection**\n\n{reason}\n\n\
+             The task is held in remediation. Re-dispatching will not help until a new \
+             commit addresses the failing required CI.",
+        )
+    });
+    if let Err(e) = task_repo
+        .log_activity(
+            Some(&task.id),
+            "coordinator",
+            "system",
+            "comment",
+            &comment_payload.to_string(),
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %e,
+            "supervisor PR-open: failed to emit unchanged-head remediation rejection comment",
+        );
+    }
+
+    // Park the task at `open` so it is held by any existing remediation
+    // blocker (not advanced toward pr_draft/pr_review where the pr_poller
+    // would re-poll the same red PR). `ParkForRemediation` is legal from
+    // all pre-terminal in-flight states and is a no-op when already `open`.
+    if let Err(e) = task_repo
+        .transition(
+            &task.id,
+            TransitionAction::ParkForRemediation,
+            "coordinator",
+            "system",
+            Some(&reason),
+            None,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            status = %task.status,
+            error = %e,
+            "supervisor PR-open: unchanged-head park_for_remediation transition skipped \
+             (task may not be in a parkable state — it stays where it is)",
+        );
+    }
+
+    tracing::warn!(
+        task_id = %task.short_id,
+        head_sha = %head_sha,
+        remediation_base_sha = %remediation_base,
+        pr_number = ?pr_number,
+        "supervisor PR-open: unchanged head SHA rejected — task kept in remediation, no PR opened",
+    );
+
+    Some(TaskRunOutcome::Escalated { reason })
+}
+
 /// Push the worker's task_branch from the mirror clone up to GitHub via
 /// the App-installation push URL. Returns the HEAD SHA on success.
 ///
@@ -1057,5 +1228,4 @@ fn is_concurrent_push_race(err: &GitError) -> bool {
 
 #[cfg(test)]
 #[path = "pr_tests.rs"]
-#[cfg(test)]
-mod tests {}
+mod tests;
