@@ -382,6 +382,14 @@ fn worker_task(project_id: &str) -> Task {
         memory_refs: "[]".to_string(),
         agent_type: None,
         created_by_user_id: None,
+        ci_status: "unknown".to_string(),
+        ci_head_sha: None,
+        ci_blocking_required_check_names: "[]".to_string(),
+        ci_failure_fingerprint: None,
+        ci_first_seen_at: None,
+        ci_last_seen_at: None,
+        ci_same_signature_count: 0,
+        ci_last_remediation_base_sha: None,
         unresolved_blocker_count: 0,
     }
 }

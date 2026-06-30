@@ -7,40 +7,52 @@ impl TaskRepository {
     /// List all tasks in a project (for peer reconciliation - SYNC-14).
     pub async fn list_by_project(&self, project_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE project_id = $1 ORDER BY priority, created_at"#,
-            project_id
-        )
+        ).bind(project_id)
         .fetch_all(self.db.pool())
         .await?)
     }
 
     pub async fn list_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE epic_id = $1 ORDER BY priority, created_at"#,
-            epic_id
-        )
+        ).bind(epic_id)
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -74,7 +86,15 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id
+                    agent_type, created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
              FROM tasks WHERE status = $1 {blocker_filter} ORDER BY priority, created_at"#
         );
         Ok(sqlx::query_as::<_, Task>(&sql)
@@ -92,20 +112,26 @@ impl TaskRepository {
 
     pub async fn get_by_short_id(&self, short_id: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE short_id = $1"#,
-            short_id
-        )
+        ).bind(short_id)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -113,21 +139,26 @@ impl TaskRepository {
     /// Resolve a task by UUID or short_id.
     pub async fn resolve(&self, id_or_short: &str) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE id = $1 OR short_id = $2"#,
-            id_or_short,
-            id_or_short
-        )
+        ).bind(id_or_short).bind(id_or_short)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -138,22 +169,26 @@ impl TaskRepository {
         id_or_short: &str,
     ) -> Result<Option<Task>> {
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE project_id = $1 AND (id = $2 OR short_id = $3)"#,
-            project_id,
-            id_or_short,
-            id_or_short
-        )
+        ).bind(project_id).bind(id_or_short).bind(id_or_short)
         .fetch_optional(self.db.pool())
         .await?)
     }
@@ -165,21 +200,27 @@ impl TaskRepository {
     pub async fn list_by_memory_ref(&self, permalink: &str) -> Result<Vec<Task>> {
         let probe = serde_json::Value::Array(vec![serde_json::Value::String(permalink.to_owned())]);
         self.db.ensure_initialized().await?;
-        Ok(sqlx::query_as!(
-            Task,
+        Ok(sqlx::query_as::<_, Task>(
             r#"SELECT id, project_id, short_id, epic_id, title, description, design, issue_type,
-                    status AS "status!", priority, owner, labels::text AS "labels!", acceptance_criteria::text AS "acceptance_criteria!",
+                    status, priority, owner, labels::text AS labels, acceptance_criteria::text AS acceptance_criteria,
                     reopen_count, continuation_count,
                     total_reopen_count,
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
-                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS "memory_refs!",
+                    close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
                     agent_type, created_by_user_id,
-                    CAST(0 AS BIGINT) AS "unresolved_blocker_count!: i64"
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
+                    CAST(0 AS BIGINT) AS unresolved_blocker_count
              FROM tasks WHERE memory_refs @> $1
              ORDER BY priority, created_at"#,
-            sqlx::types::Json(probe) as _,
-        )
+        ).bind(sqlx::types::Json(probe))
         .fetch_all(self.db.pool())
         .await?)
     }
@@ -200,7 +241,15 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id
+                    agent_type, created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
              FROM tasks
              WHERE project_id = $1
                AND (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
@@ -213,7 +262,15 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    agent_type, created_by_user_id
+                    agent_type, created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
              FROM tasks
              WHERE (status != 'closed' OR closed_at > to_char((now() at time zone 'utc') - interval '1 hour', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ORDER BY priority, created_at"#
