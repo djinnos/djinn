@@ -1,5 +1,6 @@
 use super::*;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
 
 impl CoordinatorActor {
     pub(crate) async fn poll_pr_statuses(&mut self) {
@@ -148,10 +149,30 @@ impl CoordinatorActor {
                     pr = pull_number,
                     "PR poller: no CI check-runs found after min-age guard — treating as passed"
                 );
+                self.persist_ci_snapshot(
+                    &task.id,
+                    pull_number,
+                    &pr.head.sha,
+                    CiStatus::Unknown,
+                    vec![],
+                    None,
+                    0,
+                )
+                .await;
             } else {
                 let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
                 if !all_completed {
                     // CI checks still running — skip, check next tick.
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &pr.head.sha,
+                        CiStatus::Pending,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
                     continue;
                 }
                 // All completed — check for failures.
@@ -197,6 +218,17 @@ impl CoordinatorActor {
             }
 
             // CI passed (or no CI configured). Check for merge conflicts before undrafting.
+            // Persist the passing CI snapshot before checking mergeability.
+            self.persist_ci_snapshot(
+                &task.id,
+                pull_number,
+                &pr.head.sha,
+                CiStatus::Passing,
+                vec![],
+                None,
+                0,
+            )
+            .await;
             if pr.mergeable == Some(false) {
                 // Clean-merge fast path (offloaded): try to resolve the conflict
                 // mechanically (merge target → task branch, push) in a background
@@ -389,6 +421,19 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // Persist the failing CI snapshot for the review-stuck observation.
+            let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+            self.persist_ci_snapshot(
+                &task.id,
+                pull_number,
+                &current_sha,
+                CiStatus::Failing,
+                blocking_names,
+                None,
+                0,
+            )
+            .await;
+
             let first_seen = match self.review_stuck_sha_first_seen.get(&task.id) {
                 Some((seen_sha, first_seen)) if seen_sha == &current_sha => *first_seen,
                 _ => {
@@ -484,6 +529,44 @@ impl CoordinatorActor {
             ));
         }
         sections.join("\n")
+    }
+
+    /// Persist a CI gate snapshot for the current PR head observation.
+    ///
+    /// Write-through only — no lifecycle policy.  Failures are logged as
+    /// warnings (consistent with existing pr_poller error patterns) and do
+    /// **not** block the caller's control flow.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn persist_ci_snapshot(
+        &self,
+        task_id: &str,
+        pr_number: u64,
+        head_sha: &str,
+        ci_status: CiStatus,
+        blocking_required_check_names: Vec<String>,
+        failure_fingerprint: Option<String>,
+        same_signature_count: i64,
+    ) {
+        let task_repo = self.task_repo();
+        let input = TaskPrCiSnapshotInput {
+            task_id: task_id.to_owned(),
+            pr_number: pr_number as i64,
+            head_sha: head_sha.to_owned(),
+            ci_status,
+            blocking_required_check_names,
+            failure_fingerprint,
+            same_signature_count,
+            last_remediation_base_sha: None,
+        };
+        if let Err(e) = task_repo.upsert_ci_snapshot(input).await {
+            tracing::warn!(
+                task_id = %task_id,
+                pr = pr_number,
+                ci_status = %ci_status,
+                error = %e,
+                "PR poller: failed to persist CI snapshot (non-fatal)"
+            );
+        }
     }
 
     // ── pr_review polling (review monitoring) ────────────────────────────────

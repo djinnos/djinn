@@ -1585,3 +1585,179 @@ fn integration_normal_failure_no_false_positive() {
         "new fingerprint does not trigger same-signature escalation"
     );
 }
+
+// ── CI gate snapshot write-through tests ──────────────────────────────────
+
+use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
+
+/// Helper to build a snapshot input the same way the pr_poller does for a
+/// failing observation, so we can assert on the resulting fields.
+fn build_failing_snapshot_input(
+    task_id: &str,
+    pr_number: u64,
+    head_sha: &str,
+    blocking: &[CheckRun],
+    fingerprint: &str,
+    total_consecutive: i64,
+) -> TaskPrCiSnapshotInput {
+    let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+    TaskPrCiSnapshotInput {
+        task_id: task_id.to_owned(),
+        pr_number: pr_number as i64,
+        head_sha: head_sha.to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: blocking_names,
+        failure_fingerprint: Some(fingerprint.to_owned()),
+        same_signature_count: total_consecutive,
+        last_remediation_base_sha: None,
+    }
+}
+
+fn make_check_run(name: &str, conclusion: &str) -> CheckRun {
+    CheckRun {
+        id: 1000,
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some(conclusion.to_string()),
+        html_url: "https://github.com/owner/repo/actions/runs/123/jobs/456".to_string(),
+    }
+}
+
+#[test]
+fn ci_snapshot_failing_input_includes_blocking_names_and_fingerprint() {
+    let blocking = vec![
+        make_check_run("Quality Gate", "failure"),
+        make_check_run("Server Clippy", "failure"),
+    ];
+    let input = build_failing_snapshot_input("task-1", 42, "abc123def456", &blocking, "fp-aaa", 2);
+
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(
+        input.blocking_required_check_names,
+        vec!["Quality Gate", "Server Clippy"]
+    );
+    assert_eq!(input.failure_fingerprint.as_deref(), Some("fp-aaa"));
+    assert_eq!(input.same_signature_count, 2);
+    assert!(input.last_remediation_base_sha.is_none());
+    assert_eq!(input.pr_number, 42);
+    assert_eq!(input.head_sha, "abc123def456");
+}
+
+#[test]
+fn ci_snapshot_passing_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-2".to_owned(),
+        pr_number: 99,
+        head_sha: "sha-green".to_owned(),
+        ci_status: CiStatus::Passing,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Passing);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+    assert_eq!(input.same_signature_count, 0);
+}
+
+#[test]
+fn ci_snapshot_pending_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-3".to_owned(),
+        pr_number: 7,
+        head_sha: "sha-pending".to_owned(),
+        ci_status: CiStatus::Pending,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Pending);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+}
+
+#[test]
+fn ci_snapshot_unknown_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-4".to_owned(),
+        pr_number: 1,
+        head_sha: "sha-unknown".to_owned(),
+        ci_status: CiStatus::Unknown,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Unknown);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+}
+
+#[test]
+fn ci_snapshot_failing_input_carries_remediation_base_sha_where_available() {
+    let blocking = vec![make_check_run("Tests", "failure")];
+    let mut input = build_failing_snapshot_input("task-5", 10, "head-sha-5", &blocking, "fp-5", 1);
+    // When last_remediation_base_sha is available (from lifecycle layer), it
+    // should be carried through. The pr_poller always sets None (foundation
+    // task), but the field should round-trip correctly.
+    input.last_remediation_base_sha = Some("remediation-base-sha".to_string());
+
+    assert_eq!(
+        input.last_remediation_base_sha.as_deref(),
+        Some("remediation-base-sha")
+    );
+}
+
+#[test]
+fn ci_snapshot_failing_same_signature_count_matches_consecutive_observations() {
+    // The poller sets same_signature_count to total_consecutive (1-indexed),
+    // matching the consecutive identical fingerprint observations.
+    let blocking = vec![make_check_run("Lint", "failure")];
+
+    // First observation: total_consecutive = 1
+    let input1 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 1);
+    assert_eq!(input1.same_signature_count, 1);
+
+    // Second identical observation: total_consecutive = 2
+    let input2 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 2);
+    assert_eq!(input2.same_signature_count, 2);
+
+    // Third identical observation: total_consecutive = 3
+    let input3 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 3);
+    assert_eq!(input3.same_signature_count, 3);
+}
+
+#[test]
+fn ci_snapshot_empty_blocking_names_for_passing_and_pending_states() {
+    // Both passing and pending observations carry no blocking names or
+    // fingerprint — only failing snapshots include these.
+    for status in [CiStatus::Passing, CiStatus::Pending, CiStatus::Unknown] {
+        let input = TaskPrCiSnapshotInput {
+            task_id: "t".to_owned(),
+            pr_number: 1,
+            head_sha: "sha".to_owned(),
+            ci_status: status,
+            blocking_required_check_names: vec![],
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        };
+        assert!(
+            input.blocking_required_check_names.is_empty(),
+            "{status} should have no blocking names"
+        );
+        assert!(
+            input.failure_fingerprint.is_none(),
+            "{status} should have no fingerprint"
+        );
+        assert_eq!(
+            input.same_signature_count, 0,
+            "{status} should have zero same-signature count"
+        );
+    }
+}

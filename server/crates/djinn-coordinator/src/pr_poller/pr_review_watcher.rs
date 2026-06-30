@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::models::CiStatus;
 
 impl CoordinatorActor {
     // Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
@@ -318,6 +319,29 @@ impl CoordinatorActor {
                 if all_completed {
                     self.pr_status_cache
                         .insert(task.id.clone(), current_sha.clone());
+                    // All required checks passed (or only advisory failed).
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &current_sha,
+                        CiStatus::Passing,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
+                } else {
+                    // Checks still running — persist pending status.
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &current_sha,
+                        CiStatus::Pending,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
                 }
             }
 

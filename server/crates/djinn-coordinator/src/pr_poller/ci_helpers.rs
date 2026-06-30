@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::models::CiStatus;
 
 impl CoordinatorActor {
     pub(crate) async fn resolve_required_contexts(
@@ -193,6 +194,19 @@ impl CoordinatorActor {
         let consecutive = count_consecutive_identical(&prior_signatures, &fingerprint);
         // The current failure is the (consecutive + 1)th identical fingerprint.
         let total_consecutive = consecutive + 1;
+
+        // Persist the failing CI snapshot before checking escalation thresholds.
+        let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+        self.persist_ci_snapshot(
+            task_id,
+            pull_number,
+            current_sha,
+            CiStatus::Failing,
+            blocking_names,
+            Some(fingerprint.clone()),
+            total_consecutive as i64,
+        )
+        .await;
 
         if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD {
             let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
