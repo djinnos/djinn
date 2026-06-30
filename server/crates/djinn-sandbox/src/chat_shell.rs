@@ -86,7 +86,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use djinn_core::clock::{Clock, SystemClock};
 
 use landlock::{
     ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
@@ -204,7 +206,6 @@ impl ChatShellSandbox {
     }
 
     /// Execute a shell request under the full layered policy.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn run(&self, req: ChatShellRequest) -> Result<ChatShellResult, ChatShellError> {
         validate_argv(&req.argv)?;
         let cwd = resolve_cwd(&self.clone_root, req.cwd.as_deref())?;
@@ -251,7 +252,7 @@ impl ChatShellSandbox {
             });
         }
 
-        let started = Instant::now();
+        let started = SystemClock::new().now_instant();
         let mut child = cmd.spawn().map_err(ChatShellError::SpawnFailed)?;
 
         if let Some(stdin_bytes) = req.stdin

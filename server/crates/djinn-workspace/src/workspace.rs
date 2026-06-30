@@ -2,7 +2,9 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
+
+use djinn_core::clock::{Clock, SystemClock};
 
 use tempfile::TempDir;
 use thiserror::Error;
@@ -665,9 +667,8 @@ pub async fn normalize_mtimes_at(root: &Path) {
 /// Synchronous core of [`Workspace::normalize_mtimes`]; see that method's docs
 /// for the rationale and algorithm. Uses blocking `std::process::Command` +
 /// `File::set_modified`, so it must run on a blocking thread.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn normalize_mtimes_blocking(root: &Path) -> Result<NormalizeStats, EphemeralWorkspaceError> {
-    let start = Instant::now();
+    let start = SystemClock::new().now_instant();
 
     // 1. Universe of tracked files (NUL-delimited so paths with newlines/spaces
     //    survive). This is the set we must cover.

@@ -39,10 +39,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{Database, ProjectRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
@@ -446,7 +446,7 @@ impl SessionRuntime for KubernetesRuntime {
             task_run_id: task_run_id_str,
             container_id: None,
             pod_ref: Some(resource_name),
-            started_at: SystemClockTrait::new().now(),
+            started_at: SystemClock::new().now(),
         })
     }
 
@@ -926,14 +926,13 @@ fn job_failed_reason(job: &Job) -> Option<String> {
 
 /// Poll a `Job` until its `.status.succeeded` or `.status.failed` condition
 /// is non-zero, or [`TEARDOWN_POLL_TIMEOUT`] elapses.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn poll_job_terminal_state(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
 ) -> JobTerminal {
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
-    let deadline = Instant::now() + TEARDOWN_POLL_TIMEOUT;
+    let deadline = SystemClock::new().now_instant() + TEARDOWN_POLL_TIMEOUT;
 
     loop {
         match jobs.get(job_name).await {
@@ -967,7 +966,7 @@ async fn poll_job_terminal_state(
             }
         }
 
-        if Instant::now() >= deadline {
+        if SystemClock::new().now_instant() >= deadline {
             return JobTerminal::TimedOut;
         }
         tokio::time::sleep(TEARDOWN_POLL_INTERVAL).await;
