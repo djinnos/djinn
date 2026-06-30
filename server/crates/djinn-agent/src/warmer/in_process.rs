@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use djinn_runtime::{GraphWarmerService, WarmerError};
@@ -106,7 +105,6 @@ impl GraphWarmerService for InProcessGraphWarmer {
         }
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn await_fresh(
         &self,
         project_id: &str,
@@ -131,12 +129,15 @@ impl GraphWarmerService for InProcessGraphWarmer {
         // the cache goes fresh or the timeout backstop fires.
         self.trigger(project_id).await;
 
-        let deadline = Instant::now() + timeout;
+        let deadline =
+            djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new()) + timeout;
         loop {
             if (self.deps.is_fresh)(project_id.to_string(), project_root.clone(), ttl).await {
                 return Ok(());
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = deadline.saturating_duration_since(
+                djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new()),
+            );
             if remaining.is_zero() {
                 tracing::info!(
                     project_id = %project_id,
@@ -156,6 +157,7 @@ impl GraphWarmerService for InProcessGraphWarmer {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     fn deps_with_counts(
         is_fresh_sequence: Arc<dyn Fn(usize) -> bool + Send + Sync>,
