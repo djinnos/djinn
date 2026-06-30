@@ -1,6 +1,5 @@
 ---
 source: src/server/tests/tool_schemas.rs
-assertion_line: 642
 expression: signatures
 ---
 [
@@ -14784,12 +14783,87 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "EvidenceLifecyclePhase": {
+          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "oneOf": [
+            {
+              "const": "awaiting_evidence",
+              "description": "Spike is running, no findings yet.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Spike returned structured findings; refinement can resume.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
         "NeedsEvidenceStatus": {
           "description": "Needs-evidence parking state for a proposal.",
           "properties": {
+            "against_revision_seq": {
+              "description": "Proposal revision sequence the demand targets.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "claim": {
-              "description": "The named feasibility claim that the Judge identified.",
+              "description": "The named feasibility claim that the Judge identified.\nFor structured claims this is the `question` field; for legacy\nplain-string claims this is the raw string.",
               "type": "string"
+            },
+            "created_by_task_id": {
+              "description": "The Judge task id that issued the demand.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence_phase": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvidenceLifecyclePhase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
+            },
+            "failure_reason": {
+              "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The feasibility question the spike must answer (from the structured\nclaim). `None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "round": {
+              "description": "Debate round when the demand was issued.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spec_unknown_anchor": {
+              "description": "What in the spec is unknown/unverified.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "spike_short_id": {
               "description": "The spike task short id (human-readable).",
@@ -14802,6 +14876,13 @@ expression: signatures
             "spike_task_id": {
               "description": "The spike task id (UUID).",
               "type": "string"
+            },
+            "target_subsystem": {
+              "description": "The subsystem or module under investigation.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -15009,12 +15090,87 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "EvidenceLifecyclePhase": {
+          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "oneOf": [
+            {
+              "const": "awaiting_evidence",
+              "description": "Spike is running, no findings yet.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Spike returned structured findings; refinement can resume.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
         "NeedsEvidenceStatus": {
           "description": "Needs-evidence parking state for a proposal.",
           "properties": {
+            "against_revision_seq": {
+              "description": "Proposal revision sequence the demand targets.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "claim": {
-              "description": "The named feasibility claim that the Judge identified.",
+              "description": "The named feasibility claim that the Judge identified.\nFor structured claims this is the `question` field; for legacy\nplain-string claims this is the raw string.",
               "type": "string"
+            },
+            "created_by_task_id": {
+              "description": "The Judge task id that issued the demand.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence_phase": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvidenceLifecyclePhase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
+            },
+            "failure_reason": {
+              "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The feasibility question the spike must answer (from the structured\nclaim). `None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "round": {
+              "description": "Debate round when the demand was issued.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spec_unknown_anchor": {
+              "description": "What in the spec is unknown/unverified.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "spike_short_id": {
               "description": "The spike task short id (human-readable).",
@@ -15027,6 +15183,13 @@ expression: signatures
             "spike_task_id": {
               "description": "The spike task id (UUID).",
               "type": "string"
+            },
+            "target_subsystem": {
+              "description": "The subsystem or module under investigation.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -15160,12 +15323,87 @@ expression: signatures
     },
     "output_schema": {
       "$defs": {
+        "EvidenceLifecyclePhase": {
+          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "oneOf": [
+            {
+              "const": "awaiting_evidence",
+              "description": "Spike is running, no findings yet.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Spike returned structured findings; refinement can resume.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
         "NeedsEvidenceStatus": {
           "description": "Needs-evidence parking state for a proposal.",
           "properties": {
+            "against_revision_seq": {
+              "description": "Proposal revision sequence the demand targets.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "claim": {
-              "description": "The named feasibility claim that the Judge identified.",
+              "description": "The named feasibility claim that the Judge identified.\nFor structured claims this is the `question` field; for legacy\nplain-string claims this is the raw string.",
               "type": "string"
+            },
+            "created_by_task_id": {
+              "description": "The Judge task id that issued the demand.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence_phase": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvidenceLifecyclePhase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
+            },
+            "failure_reason": {
+              "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The feasibility question the spike must answer (from the structured\nclaim). `None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "round": {
+              "description": "Debate round when the demand was issued.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spec_unknown_anchor": {
+              "description": "What in the spec is unknown/unverified.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "spike_short_id": {
               "description": "The spike task short id (human-readable).",
@@ -15178,6 +15416,13 @@ expression: signatures
             "spike_task_id": {
               "description": "The spike task id (UUID).",
               "type": "string"
+            },
+            "target_subsystem": {
+              "description": "The subsystem or module under investigation.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -15425,6 +15670,26 @@ expression: signatures
           ],
           "type": "object"
         },
+        "EvidenceLifecyclePhase": {
+          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "oneOf": [
+            {
+              "const": "awaiting_evidence",
+              "description": "Spike is running, no findings yet.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Spike returned structured findings; refinement can resume.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
         "GateFailureModel": {
           "description": "One DoR failure in the gate status.",
           "properties": {
@@ -15446,9 +15711,64 @@ expression: signatures
         "NeedsEvidenceStatus": {
           "description": "Needs-evidence parking state for a proposal.",
           "properties": {
+            "against_revision_seq": {
+              "description": "Proposal revision sequence the demand targets.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "claim": {
-              "description": "The named feasibility claim that the Judge identified.",
+              "description": "The named feasibility claim that the Judge identified.\nFor structured claims this is the `question` field; for legacy\nplain-string claims this is the raw string.",
               "type": "string"
+            },
+            "created_by_task_id": {
+              "description": "The Judge task id that issued the demand.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence_phase": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EvidenceLifecyclePhase"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
+            },
+            "failure_reason": {
+              "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "question": {
+              "description": "The feasibility question the spike must answer (from the structured\nclaim). `None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "round": {
+              "description": "Debate round when the demand was issued.",
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "spec_unknown_anchor": {
+              "description": "What in the spec is unknown/unverified.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "spike_short_id": {
               "description": "The spike task short id (human-readable).",
@@ -15461,6 +15781,13 @@ expression: signatures
             "spike_task_id": {
               "description": "The spike task id (UUID).",
               "type": "string"
+            },
+            "target_subsystem": {
+              "description": "The subsystem or module under investigation.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
