@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::models::CiStatus;
 
 impl CoordinatorActor {
     // Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
@@ -237,6 +238,24 @@ impl CoordinatorActor {
                         .copied()
                         .collect();
                     if !blocking.is_empty() {
+                        // Persist the failing CI snapshot for the
+                        // changes-requested + blocking-CI path.  No
+                        // fingerprint or same-signature tracking here —
+                        // this path intentionally avoids the
+                        // handle_ci_failure cycle-cap/diff-empty logic
+                        // (the reviewer's request is the primary driver).
+                        let snap_blocking_names: Vec<String> =
+                            blocking.iter().map(|cr| cr.name.clone()).collect();
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &current_sha,
+                            CiStatus::Failing,
+                            snap_blocking_names,
+                            None,
+                            0,
+                        )
+                        .await;
                         tracing::info!(
                             task_id = %task.short_id,
                             pr = pull_number,
@@ -338,6 +357,29 @@ impl CoordinatorActor {
                 if all_completed {
                     self.pr_status_cache
                         .insert(task.id.clone(), current_sha.clone());
+                    // All required checks passed (or only advisory failed).
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &current_sha,
+                        CiStatus::Passing,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
+                } else {
+                    // Checks still running — persist pending status.
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &current_sha,
+                        CiStatus::Pending,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
                 }
             }
 
