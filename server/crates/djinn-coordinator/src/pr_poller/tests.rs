@@ -1,14 +1,15 @@
 // djinn:allow-oversize
 use super::{
-    AutoMergeFastPathState, AutoMergeTickDecision, PrDraftCiAction, Task, advisory_checks_section,
-    blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,
-    count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
-    dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
-    effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
-    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
-    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
-    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
-    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
+    AutoMergeFastPathState, AutoMergeTickDecision, CiMergeGateVerdict, PrDraftCiAction, Task,
+    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
+    ci_merge_gate_verdict, compute_ci_failure_fingerprint, count_consecutive_identical,
+    decide_auto_merge_tick, decide_pr_draft_ci_action, dequeue_reason_is_failure,
+    dequeue_requires_rework, detect_scope_inversion, effective_review_decision, extract_crate_name,
+    extract_crate_names, is_advisory_check_name, is_conversation_resolution_block,
+    is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
+    pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
+    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
+    should_auto_resolve_conversations,
 };
 use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
@@ -2168,6 +2169,213 @@ fn snapshot_input_for_passing_status_has_no_fingerprint() {
     assert_eq!(snapshot.ci_status, CiStatus::Passing);
     assert!(snapshot.failure_fingerprint.is_none());
     assert!(snapshot.blocking_required_check_names.is_empty());
+}
+
+// ── CI merge gate verdict tests ──────────────────────────────────────────────
+//
+// These tests verify the pure `ci_merge_gate_verdict` function that gates
+// Djinn-initiated merge/close on the durable CI snapshot. The gate ensures:
+//   - Only `passing` CI on the current head SHA allows merge
+//   - `failing` blocks merge (remediation/intervention handles)
+//   - `pending`/`unknown` hold for later poller ticks
+//   - A stale `passing` snapshot for an older SHA cannot authorize merge
+//   - External merge observation (pr.merged == Some(true)) is unaffected
+
+/// Build a minimal snapshot for gate tests.
+fn gate_snapshot(task_id: &str, head_sha: &str, ci_status: CiStatus) -> TaskPrCiSnapshot {
+    TaskPrCiSnapshot {
+        task_id: task_id.to_owned(),
+        pr_number: 1,
+        head_sha: head_sha.to_owned(),
+        ci_status,
+        blocking_required_check_names: Vec::new(),
+        failure_fingerprint: None,
+        first_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
+        last_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    }
+}
+
+#[test]
+fn ci_merge_gate_allows_passing_with_matching_sha() {
+    let snap = gate_snapshot("t1", "sha-abc123", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-abc123"),
+        CiMergeGateVerdict::Allow,
+        "passing CI on current head must allow merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_blocks_failing_ci() {
+    let snap = gate_snapshot("t2", "sha-def456", CiStatus::Failing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-def456"),
+        CiMergeGateVerdict::Block,
+        "failing required CI must block merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_pending_ci() {
+    let snap = gate_snapshot("t3", "sha-pending", CiStatus::Pending);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-pending"),
+        CiMergeGateVerdict::Hold,
+        "pending CI must hold merge for next tick"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_unknown_ci() {
+    let snap = gate_snapshot("t4", "sha-unknown", CiStatus::Unknown);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-unknown"),
+        CiMergeGateVerdict::Hold,
+        "unknown CI must hold merge for next tick"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_passing_sha() {
+    // Snapshot says passing for OLD sha, but current head has moved.
+    let snap = gate_snapshot("t5", "sha-old", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale passing snapshot for older SHA must NOT authorize merge on newer head"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_failing_sha() {
+    // Even if the snapshot is failing, a SHA mismatch should hold (not block)
+    // because the snapshot data is stale and doesn't reflect the current head.
+    let snap = gate_snapshot("t6", "sha-old", CiStatus::Failing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale failing snapshot should hold (not block) when SHA has moved"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_when_no_snapshot_exists() {
+    assert_eq!(
+        ci_merge_gate_verdict(None, "sha-abc"),
+        CiMergeGateVerdict::Hold,
+        "missing CI snapshot must hold merge until snapshot is recorded"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_pending_sha() {
+    let snap = gate_snapshot("t7", "sha-old", CiStatus::Pending);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale pending snapshot holds on SHA mismatch"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_empty_head_sha() {
+    // Edge case: snapshot exists but head_sha is empty (e.g. initial state
+    // before any PR data). Must not match a real current SHA.
+    let snap = gate_snapshot("t8", "", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-real"),
+        CiMergeGateVerdict::Hold,
+        "empty snapshot head SHA must not authorize merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_allows_when_sha_matches_exactly() {
+    // Verify exact string match — not prefix or substring.
+    let snap = gate_snapshot("t9", "abc123def456", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123def456"),
+        CiMergeGateVerdict::Allow,
+        "exact SHA match with passing CI must allow merge"
+    );
+    // Substring must NOT match.
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123"),
+        CiMergeGateVerdict::Hold,
+        "substring SHA match must not authorize merge"
+    );
+    // Superset must NOT match.
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123def456000"),
+        CiMergeGateVerdict::Hold,
+        "superset SHA must not authorize merge"
+    );
+}
+
+/// The merge gate only applies to Djinn-initiated merge/close paths. External
+/// merge observation (pr.merged == Some(true)) is explicitly NOT gated — it
+/// records what GitHub reports regardless of CI status. This is a documentation
+/// test confirming the invariant; the actual separation is in pr_review_watcher
+/// where the "merged" check runs BEFORE the gate.
+#[test]
+fn ci_merge_gate_external_merge_observation_is_not_gated() {
+    // The gate function itself is never called for external merge observation.
+    // This test documents that the gate's "Block" verdict does NOT apply to
+    // the external path — the caller (pr_review_watcher) checks pr.merged
+    // before reaching the gate.
+    let snap = gate_snapshot("t10", "sha-head", CiStatus::Failing);
+    // The gate WOULD block on failing CI:
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-head"),
+        CiMergeGateVerdict::Block,
+        "gate blocks failing CI — but external merge observation bypasses this"
+    );
+    // This is correct: the gate returns Block, but the watcher's control flow
+    // checks pr.merged BEFORE reaching the gate, so external merges are
+    // recorded via apply_pr_merge without consulting the gate.
+}
+
+#[test]
+fn ci_merge_gate_verdict_variants_cover_all_ci_statuses() {
+    // Exhaustive coverage: every CiStatus variant produces the expected verdict
+    // when the SHA matches.
+    let sha = "current-sha";
+    let cases = [
+        (CiStatus::Passing, CiMergeGateVerdict::Allow),
+        (CiStatus::Failing, CiMergeGateVerdict::Block),
+        (CiStatus::Pending, CiMergeGateVerdict::Hold),
+        (CiStatus::Unknown, CiMergeGateVerdict::Hold),
+    ];
+    for (ci_status, expected) in &cases {
+        let snap = gate_snapshot("t-exhaustive", sha, *ci_status);
+        assert_eq!(
+            ci_merge_gate_verdict(Some(&snap), sha),
+            *expected,
+            "ci_status={ci_status:?} with matching SHA should produce {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn ci_merge_gate_stale_sha_overrides_status_in_all_variants() {
+    // When the SHA doesn't match, the verdict is always Hold regardless of
+    // ci_status. This prevents stale snapshot data from authorizing merge.
+    let cases = [
+        CiStatus::Passing,
+        CiStatus::Failing,
+        CiStatus::Pending,
+        CiStatus::Unknown,
+    ];
+    for ci_status in &cases {
+        let snap = gate_snapshot("t-stale", "old-sha", *ci_status);
+        assert_eq!(
+            ci_merge_gate_verdict(Some(&snap), "new-sha"),
+            CiMergeGateVerdict::Hold,
+            "stale SHA must hold regardless of ci_status={ci_status:?}"
+        );
+    }
 }
 
 // ── pr_draft CI gate transition matrix tests ──────────────────────────────

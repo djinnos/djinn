@@ -674,6 +674,59 @@ impl CoordinatorActor {
                 self.conversations_resolved.remove(&task.id);
             }
 
+            // ── CI merge gate ───────────────────────────────────────────────
+            // Block Djinn-initiated merge/close unless the durable CI snapshot
+            // for the current PR head is `passing`. This prevents merge when:
+            //   - Required checks are still running (pending/unknown) → hold
+            //   - Required checks are failing → block (remediation handles)
+            //   - Snapshot is stale (head SHA mismatch) → hold
+            //   - No snapshot exists yet → hold
+            //
+            // The "PR already merged" observation path (pr.merged == Some(true)
+            // above) is intentionally NOT gated — that records an external
+            // merge, not a Djinn-initiated one.
+            {
+                let ci_snapshot = match self
+                    .task_repo()
+                    .get_ci_snapshot_for_task_pr(&task.id, pr_number_i64)
+                    .await
+                {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            error = %e,
+                            "PR poller: failed to read CI snapshot — blocking merge conservatively"
+                        );
+                        continue;
+                    }
+                };
+                match ci_merge_gate_verdict(ci_snapshot.as_ref(), &current_sha) {
+                    CiMergeGateVerdict::Allow => { /* fall through to merge */ }
+                    CiMergeGateVerdict::Hold => {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            ci_status = ?ci_snapshot.as_ref().map(|s| s.ci_status),
+                            snapshot_sha = ?ci_snapshot.as_ref().map(|s| &s.head_sha),
+                            current_sha = %current_sha,
+                            "PR poller: CI merge gate: holding — not yet passing on current head"
+                        );
+                        continue;
+                    }
+                    CiMergeGateVerdict::Block => {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            ci_status = "failing",
+                            "PR poller: CI merge gate: blocking — required CI failing on current head"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             // Either approved or no reviews — attempt squash merge.
             tracing::info!(
                 task_id = %task.short_id,

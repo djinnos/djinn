@@ -1009,3 +1009,58 @@ pub(crate) fn extract_crate_names_from_sections(sections: &[String]) -> Vec<Stri
     result.sort();
     result
 }
+
+// ── CI merge gate ────────────────────────────────────────────────────────────
+
+/// Verdict of the CI merge gate — determines whether Djinn may initiate a
+/// merge or close action on a PR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CiMergeGateVerdict {
+    /// CI is passing on the current head — merge/close is allowed.
+    Allow,
+    /// CI state is not yet determined (pending/unknown) or the snapshot is
+    /// stale/missing — hold without escalation; the next poller tick will
+    /// re-evaluate.
+    Hold,
+    /// Required CI is actively failing on the current head — block merge.
+    /// Remediation/intervention behavior handles this case.
+    Block,
+}
+
+/// Check whether the durable CI snapshot allows Djinn to initiate a merge or
+/// close action.
+///
+/// Returns [`CiMergeGateVerdict::Allow`] only when **all** of:
+/// - A CI snapshot exists for the task/PR
+/// - The snapshot's `head_sha` matches `current_head_sha` (no stale data)
+/// - The snapshot's `ci_status` is `Passing`
+///
+/// | Snapshot state     | Verdict |
+/// |--------------------|---------|
+/// | `Passing` + fresh  | Allow   |
+/// | `Pending`          | Hold    |
+/// | `Unknown`          | Hold    |
+/// | `Failing`          | Block   |
+/// | Missing snapshot   | Hold    |
+/// | Stale SHA          | Hold    |
+///
+/// This function is pure and does not access the database — callers read the
+/// snapshot and pass it in.
+pub(crate) fn ci_merge_gate_verdict(
+    snapshot: Option<&djinn_core::models::TaskPrCiSnapshot>,
+    current_head_sha: &str,
+) -> CiMergeGateVerdict {
+    match snapshot {
+        None => CiMergeGateVerdict::Hold,
+        Some(snap) => {
+            if snap.head_sha != current_head_sha {
+                return CiMergeGateVerdict::Hold;
+            }
+            match snap.ci_status {
+                CiStatus::Passing => CiMergeGateVerdict::Allow,
+                CiStatus::Pending | CiStatus::Unknown => CiMergeGateVerdict::Hold,
+                CiStatus::Failing => CiMergeGateVerdict::Block,
+            }
+        }
+    }
+}
