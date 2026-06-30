@@ -3,7 +3,7 @@ use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert, UserRepository};
+use djinn_db::{DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -1740,5 +1740,160 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
         planner_comments[0].payload.contains(reason),
         "escalation reason must contain the original reason text; got: {}",
         planner_comments[0].payload
+    );
+}
+
+/// End-to-end regression (pdn6 release-side): the full lifecycle through the
+/// coordinator proves that closing the human-review hold task releases the
+/// parked source back into the dispatch readiness query — and that a normal
+/// (non-review) blocker has identical semantics.
+///
+/// This test exercises the real coordinator path (`route_loop_guard_planner_intervention`)
+/// and then queries `list_ready` — the same dispatch readiness query the
+/// coordinator's dispatch tick uses — to prove:
+/// 1. Source is NOT ready while the hold task is open.
+/// 2. Closing the hold restores readiness.
+/// 3. A normal (non-review) blocker also blocks and releases identically.
+/// 4. `emit_unblocked_tasks` fires a `TaskUpdated` event for the source on release.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // ── Phase 1: Create source task and trigger the hold via the coordinator ──
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    // Drive reopen count to the threshold so intervention fires.
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // Route to the loop guard second-strike path (the actual pdn6 hold mechanism).
+    let handled = actor
+        .route_loop_guard_planner_intervention(
+            &task.id,
+            "worker",
+            "Reply-loop guard `identical_tool_failure` tripped: offending_signature=`shell:cargo-test`, threshold=3, observed=4, turn_span=7..=12",
+        )
+        .await;
+    assert!(handled, "loop guard trip must be handled");
+
+    // Source is open (parked, NOT closed) and blocked by the hold.
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(parked.status, "open", "held source stays open");
+
+    // The review hold task was created.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "source must have exactly one hold blocker"
+    );
+    let hold_id = blockers[0].task_id.clone();
+    let hold = repo.get(&hold_id).await.unwrap().unwrap();
+    assert_eq!(hold.issue_type, "review", "hold must be review-type");
+
+    // ── Phase 2: Assert the source is NOT in dispatch readiness ──
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(parked.project_id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !ready.iter().any(|t| t.id == task.id),
+        "source must NOT be in list_ready while the review hold is open"
+    );
+
+    // ── Phase 3: Close the hold — source must reappear in list_ready ──
+    let mut events = tx.subscribe();
+    repo.transition(
+        &hold_id,
+        djinn_core::models::TransitionAction::Close,
+        "human",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The TaskUpdated event for the source must fire (from emit_unblocked_tasks).
+    let revived = wait_for_task_updated(&mut events, &task.id).await;
+    assert!(
+        revived,
+        "closing the review hold must emit TaskUpdated for the source via emit_unblocked_tasks"
+    );
+
+    // The dispatch readiness query must now return the source.
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(parked.project_id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        ready.iter().any(|t| t.id == task.id),
+        "source must be in list_ready after the review hold is closed"
+    );
+
+    // ── Phase 4: Prove a normal (non-review) blocker has identical semantics ──
+    // Add a normal blocker to the same source.
+    let normal_blocker = repo
+        .create_in_project(
+            &parked.project_id,
+            parked.epic_id.as_deref(),
+            "Normal blocker task",
+            "",
+            "",
+            "task",
+            0,
+            "system",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.add_blocker(&task.id, &normal_blocker.id)
+        .await
+        .unwrap();
+
+    // Source is NOT ready with the normal blocker.
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(parked.project_id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !ready.iter().any(|t| t.id == task.id),
+        "source must NOT be ready while a normal (non-review) blocker is open"
+    );
+
+    // Close the normal blocker — source is ready again.
+    // Use set_status (bypasses state machine) because a full-lifecycle `task`
+    // cannot be Close'd from `open`; we only need the blocker to be resolved
+    // for the readiness query. The review hold release via `transition(Close)`
+    // above already proved the emit_unblocked_tasks path.
+    repo.set_status(&normal_blocker.id, "closed").await.unwrap();
+
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(parked.project_id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        ready.iter().any(|t| t.id == task.id),
+        "source must be ready after the normal blocker is closed (identical semantics to review hold)"
     );
 }

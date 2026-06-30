@@ -641,14 +641,12 @@ mod tests {
             .unwrap();
         // Stamp the label via raw update so the hold carries the exact
         // human-review-hold marker the auto-park mechanism uses.
-        sqlx::query(
-            "UPDATE tasks SET labels = $1::jsonb WHERE id = $2",
-        )
-        .bind(r#"["human-review-hold"]"#)
-        .bind(&hold.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
+            .bind(r#"["human-review-hold"]"#)
+            .bind(&hold.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         // ── Pre-condition: source is ready before the blocker is wired ──
         let ready = repo
@@ -700,10 +698,7 @@ mod tests {
         );
 
         // ── list_by_status_filtered("open", true) dispatch path ──
-        let filtered = repo
-            .list_by_status_filtered("open", true)
-            .await
-            .unwrap();
+        let filtered = repo.list_by_status_filtered("open", true).await.unwrap();
         assert!(
             !filtered.iter().any(|t| t.id == source.id),
             "list_by_status_filtered(open, true) must exclude source while review hold is open"
@@ -725,13 +720,191 @@ mod tests {
             "source must be ready again after the review hold is closed"
         );
 
-        let filtered = repo
-            .list_by_status_filtered("open", true)
-            .await
-            .unwrap();
+        let filtered = repo.list_by_status_filtered("open", true).await.unwrap();
         assert!(
             filtered.iter().any(|t| t.id == source.id),
             "list_by_status_filtered(open, true) must include source after review hold is closed"
+        );
+    }
+
+    /// Regression (pdn6 release-side): prove that a review hold and a normal
+    /// (non-review) blocker have **identical** release semantics — the dispatch
+    /// readiness gate must not special-case either `issue_type`.
+    ///
+    /// The test wires BOTH a review hold blocker AND a normal task blocker onto
+    /// the same source, then releases them in sequence to prove:
+    /// 1. With both blockers open the source is NOT ready.
+    /// 2. Closing only the review hold does NOT release the source (normal blocker remains).
+    /// 3. Closing only the normal blocker DOES release the source (all blockers resolved).
+    /// 4. The order of release doesn't matter — all blockers must be closed.
+    ///
+    /// This guards against any predicate change that might accidentally
+    /// special-case only `review` blockers or alter release behavior for
+    /// ordinary task blockers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn review_hold_and_normal_blocker_have_identical_release_semantics() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        // Source task — a normal work item.
+        let source = make_task(&repo, &epic_id, "task", None).await;
+
+        // Human-review hold task (review type, matching the auto-park shape from pdn6).
+        let review_hold = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic_id),
+                "Human review hold",
+                "",
+                "",
+                "review",
+                0,
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Normal blocker task (a regular task that blocks the source).
+        let normal_blocker = make_task(&repo, &epic_id, "task", None).await;
+
+        // Wire both blocker edges.
+        repo.add_blocker(&source.id, &review_hold.id).await.unwrap();
+        repo.add_blocker(&source.id, &normal_blocker.id)
+            .await
+            .unwrap();
+
+        // ── With both blockers open, source is NOT ready ──
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "source must NOT be ready with both review hold and normal blocker open"
+        );
+
+        // ── Close only the review hold — source must still be NOT ready ──
+        repo.set_status(&review_hold.id, "closed").await.unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "source must still NOT be ready after closing review hold while normal blocker remains open"
+        );
+
+        // ── Close the normal blocker — now all blockers are resolved, source IS ready ──
+        repo.set_status(&normal_blocker.id, "closed").await.unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == source.id),
+            "source must be ready after ALL blockers (both review hold and normal) are closed"
+        );
+    }
+
+    /// Companion to the mixed-blocker test above, but releases in reverse order
+    /// (normal blocker first, then review hold). Proves the gate is symmetric —
+    /// the dispatch readiness predicate does not care about blocker issue_type
+    /// or release ordering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_blocker_release_then_review_hold_release_symmetric() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        let source = make_task(&repo, &epic_id, "task", None).await;
+
+        let review_hold = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic_id),
+                "Human review hold",
+                "",
+                "",
+                "review",
+                0,
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let normal_blocker = make_task(&repo, &epic_id, "task", None).await;
+
+        repo.add_blocker(&source.id, &review_hold.id).await.unwrap();
+        repo.add_blocker(&source.id, &normal_blocker.id)
+            .await
+            .unwrap();
+
+        // Source is NOT ready with both blockers.
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "source must NOT be ready with both blockers open"
+        );
+
+        // ── Close the normal blocker first — source still NOT ready (review hold open) ──
+        repo.set_status(&normal_blocker.id, "closed").await.unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "source must still NOT be ready after closing normal blocker while review hold remains"
+        );
+
+        // ── Close the review hold — NOW source IS ready ──
+        repo.set_status(&review_hold.id, "closed").await.unwrap();
+
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == source.id),
+            "source must be ready after all blockers are closed (regardless of release order)"
         );
     }
 }
