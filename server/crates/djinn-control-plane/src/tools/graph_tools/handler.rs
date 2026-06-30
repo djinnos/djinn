@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::clock::Clock;
 
 // ── Handler ─────────────────────────────────────────────────────────────────────
 
@@ -108,7 +109,6 @@ impl DjinnMcpServer {
     /// Both the MCP tool entry (`code_graph` below) and the chat
     /// extension (`djinn_agent::extension::handlers::code_intel`) call
     /// this method. Keep the per-op match here; do not duplicate it.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn dispatch_code_graph(
         &self,
         ctx: &ProjectCtx,
@@ -143,7 +143,7 @@ impl DjinnMcpServer {
         let timeout = code_graph_dispatch_timeout();
         let op = params.operation.clone();
         let project_id = params.project_id.clone();
-        let started = std::time::Instant::now();
+        let started = djinn_core::clock::SystemClock::new().now_instant();
 
         let span = tracing::info_span!(
             "code_graph",

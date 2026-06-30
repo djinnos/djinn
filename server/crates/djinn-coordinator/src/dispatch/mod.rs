@@ -6,7 +6,6 @@ mod task_dispatch;
 mod wave_dispatch;
 
 pub(crate) use admission::model_under_user_cap;
-pub(crate) use retry::RemediationKind;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use admission::{
@@ -15,3 +14,4 @@ pub(crate) use admission::{
     take_dispatch_cap_observations,
 };
 pub(crate) use outcome::DispatchOutcome;
+pub(crate) use retry::RemediationKind;

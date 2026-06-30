@@ -1287,6 +1287,7 @@ name = "djinn-git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "djinn-core",
  "git2",
  "libc",
  "tempfile",
@@ -1415,6 +1416,7 @@ name = "djinn-lsp"
 version = "0.1.0"
 dependencies = [
  "dirs 6.0.0",
+ "djinn-core",
  "libc",
  "serde_json",
  "tempfile",
@@ -1554,6 +1556,7 @@ name = "djinn-sandbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "djinn-core",
  "landlock",
  "libc",
  "seccompiler",
@@ -1738,6 +1741,7 @@ name = "djinn-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "djinn-core",
  "djinn-git",
  "git2",
  "tempfile",
