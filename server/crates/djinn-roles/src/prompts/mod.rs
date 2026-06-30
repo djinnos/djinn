@@ -115,6 +115,14 @@ pub struct TaskContext {
     /// allowlist, when no base/head SHAs could be resolved, or when the
     /// detected change set is empty. Capped at 2000 chars via `smart_truncate`.
     pub reviewer_diff_context: Option<String>,
+
+    // ── Red-CI blocking directive (sa4x) ──────────────────────────────────────
+    /// Promoted BLOCKING directive for red required CI. Contains concrete
+    /// PR number, failing head SHA, blocking check/job names, and failure
+    /// fingerprint. Deliberately separate from ordinary activity-log prose.
+    /// `None` when CI is not failing, when no remediation baseline exists,
+    /// or when failures are advisory-only.
+    pub ci_blocking_directive: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -199,6 +207,20 @@ pub fn render_prompt_for_role(
         _ => String::new(),
     };
     out = out.replace("{{setup_commands_section}}", &setup_section);
+
+    // sa4x: promoted BLOCKING directive for red required CI.
+    // Deliberately separate from ordinary activity-log prose and deduped
+    // by construction (derived from durable CI gate snapshot state).
+    let ci_blocking_directive_section = match &ctx.ci_blocking_directive {
+        Some(text) if !text.trim().is_empty() => {
+            format!("## ⛔ BLOCKING: Required CI Failing\n\n{text}\n")
+        }
+        _ => String::new(),
+    };
+    out = out.replace(
+        "{{ci_blocking_directive_section}}",
+        &ci_blocking_directive_section,
+    );
 
     let epic_context_section = match &ctx.epic_context {
         Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),

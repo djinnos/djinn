@@ -79,6 +79,7 @@ mod refinement_outcome;
 pub mod rules;
 mod types;
 mod wave;
+mod worker_lifecycle;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────
 
@@ -88,6 +89,15 @@ pub use types::{
     CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
     DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
     PrCleanupConfig,
+};
+pub use worker_lifecycle::{
+    AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
+    CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
+    CheckpointSafetyScanMetadata, DurableProgressDetectionMode, DurableProgressNoResetReason,
+    DurableProgressResetReason, DurableProgressRolloutConfig, ModelRotationLifecycleConfig,
+    ModelRotationLifecycleMetadata, ModelRotationReason, NoProgressEnforcementMode,
+    NoProgressThresholdConfig, ResumeLifecycleConfig, ResumeLifecycleMetadata,
+    ResumeSelectionReason, WorkerLifecycleConfig, WorkerLifecycleMetadata,
 };
 
 // Re-export orchestration-types debug DTOs so djinn-agent can re-export from here.

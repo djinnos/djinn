@@ -422,8 +422,8 @@ struct NoveltyCheckResult {
     existing_note_id: Option<String>,
 }
 
-#[cfg(test)]
-type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
+#[cfg(any(test, feature = "test-support"))]
+pub type CandidateLookupOverride = fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate>;
 
 struct ExtractionContext<'a> {
     note_repo: &'a NoteRepository,
@@ -437,17 +437,17 @@ struct ExtractionContext<'a> {
     task_description: &'a str,
     provenance: &'a str,
     session_scope_paths: &'a [String],
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     candidate_lookup: CandidateLookup,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy)]
 struct CandidateLookup {
     override_lookup: Option<CandidateLookupOverride>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl CandidateLookup {
     const fn production() -> Self {
         Self {
@@ -470,7 +470,7 @@ impl CandidateLookup {
 /// structured notes, and writes each note via `NoteRepository::create`.
 ///
 /// All errors are logged as warnings; nothing propagates to the caller.
-pub(crate) async fn run_llm_extraction(
+pub async fn run_llm_extraction(
     session_id: String,
     taxonomy: SessionTaxonomy,
     app_state: SlotContext,
@@ -480,7 +480,7 @@ pub(crate) async fn run_llm_extraction(
         taxonomy,
         app_state,
         None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         None,
     )
     .await;
@@ -488,8 +488,8 @@ pub(crate) async fn run_llm_extraction(
 
 /// Test-only entry point that injects a pre-built LLM provider, bypassing
 /// credential loading and memory provider resolution.
-#[cfg(test)]
-pub(crate) async fn run_llm_extraction_with_provider(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn run_llm_extraction_with_provider(
     session_id: String,
     taxonomy: SessionTaxonomy,
     app_state: SlotContext,
@@ -498,8 +498,8 @@ pub(crate) async fn run_llm_extraction_with_provider(
     run_llm_extraction_inner(session_id, taxonomy, app_state, Some(provider), None).await;
 }
 
-#[cfg(test)]
-pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn run_llm_extraction_with_provider_and_candidate_lookup(
     session_id: String,
     taxonomy: SessionTaxonomy,
     app_state: SlotContext,
@@ -525,7 +525,9 @@ async fn run_llm_extraction_inner(
     mut taxonomy: SessionTaxonomy,
     app_state: SlotContext,
     provider_override: Option<Arc<dyn LlmProvider>>,
-    #[cfg(test)] candidate_lookup_override: Option<CandidateLookupOverride>,
+    #[cfg(any(test, feature = "test-support"))] candidate_lookup_override: Option<
+        CandidateLookupOverride,
+    >,
 ) {
     // ── Load session ───────────────────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -900,7 +902,7 @@ async fn run_llm_extraction_inner(
         task_description: &task.description,
         provenance: &provenance,
         session_scope_paths: &session_scope_paths,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         candidate_lookup: candidate_lookup_override
             .map(|lookup| CandidateLookup::with_override(lookup))
             .unwrap_or_else(CandidateLookup::production),
