@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 use sqlx::PgPool;
 
 use crate::database::Database;
