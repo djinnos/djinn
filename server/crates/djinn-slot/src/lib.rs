@@ -52,11 +52,11 @@ pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
 pub(crate) mod lifecycle;
-pub(crate) mod llm_extraction;
-pub(crate) mod memory_enrichment;
+pub mod llm_extraction;
+pub mod memory_enrichment;
 pub mod pool;
-pub(crate) mod reply_loop;
-pub(crate) mod session_extraction;
+pub mod reply_loop;
+pub mod session_extraction;
 mod supervisor_runner;
 
 // ─── Test modules ───────────────────────────────────────────────────────────
@@ -82,6 +82,14 @@ pub use commands::{SlotCommand, SlotError, log_commands_run_event};
 pub use finalize_handlers::{apply_ac_verdicts, handle_budget_park, process_finalize_payload};
 pub use helpers::*;
 pub use pool::*;
+
+// ─── LLM extraction re-exports ──────────────────────────────────────────────
+
+pub use llm_extraction::run_llm_extraction;
+#[cfg(any(test, feature = "test-support"))]
+pub use llm_extraction::{
+    run_llm_extraction_with_provider, run_llm_extraction_with_provider_and_candidate_lookup,
+};
 
 // ─── Memory enrichment re-exports ───────────────────────────────────────────
 

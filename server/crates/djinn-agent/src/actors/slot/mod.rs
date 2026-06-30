@@ -28,6 +28,13 @@ pub use djinn_slot::{
     run_memory_enrichment_with_db,
 };
 
+// ─── LLM extraction re-exports (delegated to djinn-slot) ───────────────────
+// The canonical LLM extraction entry point now lives in `djinn-slot`.  Keep a
+// root-level facade export here so downstream cleanup can switch callers away
+// from the duplicate agent module without losing the historic agent facade path.
+
+pub use djinn_slot::run_llm_extraction;
+
 // ─── Submodules ────────────────────────────────────────────────────────────
 
 mod actor;
@@ -50,6 +57,7 @@ pub(crate) mod host_callbacks;
 // host callback dispatch path.
 pub(crate) mod lifecycle;
 pub(crate) mod llm_extraction;
+mod memory_enrichment;
 mod pool;
 pub(crate) mod reply_loop;
 #[cfg(test)]
