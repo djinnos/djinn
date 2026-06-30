@@ -5517,6 +5517,7 @@ What happens if D fails?
                 source_task_id: None,
                 against_revision_seq: proposal.latest_revision_seq,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -5651,6 +5652,7 @@ What happens if D fails?
                 source_task_id: None,
                 against_revision_seq: proposal.latest_revision_seq,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -5726,6 +5728,7 @@ What happens if D fails?
             source_task_id: None,
             against_revision_seq: proposal.latest_revision_seq,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -6167,6 +6170,7 @@ What happens if D fails?
             source_task_id: None,
             against_revision_seq: proposal.latest_revision_seq,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -6386,6 +6390,7 @@ What happens if D fails?
                 source_task_id: None,
                 against_revision_seq: proposal.latest_revision_seq,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -6508,6 +6513,7 @@ What happens if D fails?
             source_task_id: Some(&spike.id),
             against_revision_seq: proposal.latest_revision_seq,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -6578,6 +6584,7 @@ What happens if D fails?
             source_task_id: None,
             against_revision_seq: proposal.latest_revision_seq,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -6716,6 +6723,7 @@ What happens if D fails?
             source_task_id: Some(&spike.id),
             against_revision_seq: proposal.latest_revision_seq,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();

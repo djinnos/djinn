@@ -200,12 +200,12 @@ pub struct ProposalFeedback {
 pub struct ProposalDebateTrail {
     pub id: String,
     pub proposal_id: String,
-    /// `objection` | `rebuttal` | `verdict`.
+    /// `objection` | `rebuttal` | `verdict` | `needs_evidence` | `evidence_findings`.
     pub kind: String,
     pub body: String,
     /// When true, this entry blocks proposal readiness.
     pub blocking: bool,
-    /// Agent role (e.g. "advocate", "adversary", "judge").
+    /// Agent role (e.g. "advocate", "adversary", "judge", "spike").
     pub agent_role: String,
     /// `agent` or `user`.
     pub author_kind: String,
@@ -218,6 +218,10 @@ pub struct ProposalDebateTrail {
     pub against_revision_seq: i32,
     /// Debate round (1-based).
     pub round: i32,
+    /// Optional structured JSONB metadata. Required for `needs_evidence`
+    /// (linkage payload) and `evidence_findings` (structured findings);
+    /// `None` or ignored for `objection`/`rebuttal`/`verdict`.
+    pub body_metadata: Option<String>,
     /// When set, the entry has been resolved. `None` while open.
     pub resolved_at: Option<String>,
     /// User who resolved it (`None` for system/agent resolution).
@@ -228,4 +232,75 @@ pub struct ProposalDebateTrail {
     pub reopened_by_user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Structured payload for an `evidence_findings` debate-trail entry written
+/// by the spike (read-only investigation) when it closes. The schema is
+/// fixed so the advocate/coordinator can rely on every field being present
+/// on a well-formed findings entry.
+///
+/// Fields:
+/// - `answer`: a one-paragraph answer to the Judge's feasibility question.
+/// - `evidence`: list of concrete findings (commands run, file paths,
+///   measurements, links) backing the answer.
+/// - `code_paths_inspected`: explicit list of repo-relative code paths the
+///   spike actually read or scanned while gathering evidence.
+/// - `confidence`: self-rated confidence in the answer, in `[0.0, 1.0]`.
+/// - `residual_risks`: known unresolved risks the advocate should weigh
+///   before treating the spike as definitive.
+/// - `recommendation_for_advocate`: short suggestion for how the advocate
+///   should incorporate or caveat the findings.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceFindings {
+    pub answer: String,
+    pub evidence: Vec<String>,
+    pub code_paths_inspected: Vec<String>,
+    /// Self-rated confidence in `[0.0, 1.0]`. Constructed via
+    /// [`EvidenceFindings::validate`] which clamps out-of-range values and
+    /// returns a typed error.
+    pub confidence: f64,
+    pub residual_risks: Vec<String>,
+    pub recommendation_for_advocate: String,
+}
+
+impl EvidenceFindings {
+    /// Validate that every required field is well-formed. Returns
+    /// `Err(String)` describing the first failure so callers can surface a
+    /// clear message instead of a serde panic. Specifically:
+    /// - `answer`, `recommendation_for_advocate` must be non-empty after
+    ///   trimming.
+    /// - `confidence` must be a finite number in `[0.0, 1.0]`.
+    ///
+    /// Lists (`evidence`, `code_paths_inspected`, `residual_risks`) are
+    /// allowed to be empty (the spike may have found nothing to cite for
+    /// some of them); serde still enforces the array shape.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.answer.trim().is_empty() {
+            return Err("evidence_findings.answer must be non-empty".to_owned());
+        }
+        if self.recommendation_for_advocate.trim().is_empty() {
+            return Err(
+                "evidence_findings.recommendation_for_advocate must be non-empty".to_owned(),
+            );
+        }
+        if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
+            return Err(format!(
+                "evidence_findings.confidence must be finite and in [0.0, 1.0], got {}",
+                self.confidence
+            ));
+        }
+        Ok(())
+    }
+
+    /// Parse a stored JSON string (e.g. from a debate-trail `body_metadata`
+    /// blob) back into the typed struct, with the same `None`/`Err`
+    /// convention as [`NeedsEvidenceClaim::parse_stored`].
+    pub fn parse_stored(json: Option<&str>) -> Result<Option<Self>, String> {
+        match json {
+            None | Some("") => Ok(None),
+            Some(s) => serde_json::from_str(s)
+                .map(Some)
+                .map_err(|e| format!("invalid EvidenceFindings JSON: {e}")),
+        }
+    }
 }

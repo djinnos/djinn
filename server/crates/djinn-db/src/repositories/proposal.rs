@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback, ProposalRevision,
-    ProposalSignoff, ProposalTarget,
+    EvidenceFindings, NeedsEvidenceClaim, Proposal, ProposalDebateTrail, ProposalFeedback,
+    ProposalRevision, ProposalSignoff, ProposalTarget,
 };
 
 use crate::database::Database;
@@ -125,12 +125,12 @@ pub struct ProposalFeedbackCreateInput<'a> {
 
 pub struct ProposalDebateTrailCreateInput<'a> {
     pub proposal_id: &'a str,
-    /// `objection` | `rebuttal` | `verdict`.
+    /// `objection` | `rebuttal` | `verdict` | `needs_evidence` | `evidence_findings`.
     pub kind: &'a str,
     pub body: &'a str,
     /// When true, this entry blocks proposal readiness.
     pub blocking: bool,
-    /// Agent role (e.g. "advocate", "adversary", "judge").
+    /// Agent role (e.g. "advocate", "adversary", "judge", "spike").
     pub agent_role: &'a str,
     /// `agent` (default) or `user`.
     pub author_kind: &'a str,
@@ -141,6 +141,13 @@ pub struct ProposalDebateTrailCreateInput<'a> {
     pub against_revision_seq: i32,
     /// Debate round (1-based).
     pub round: i32,
+    /// Optional structured metadata persisted as JSONB in
+    /// `proposal_debate_trail.body_metadata`. Required for `needs_evidence`
+    /// (linkage to proposal/Judge task/spike task/round/revision) and for
+    /// `evidence_findings` (the structured findings payload). Optional and
+    /// ignored for `objection`/`rebuttal`/`verdict`, which only need the
+    /// `body` text.
+    pub body_metadata: Option<&'a serde_json::Value>,
 }
 
 /// A Planner-authored acceptance-criteria spec amendment. Unlike
@@ -187,6 +194,234 @@ struct ProposalRevisionSnapshot<'a> {
     /// need to attribute the revision to a specific source (e.g. a planner
     /// targeted block-patch attached to the active native-skill version).
     event_metadata: Option<&'a serde_json::Value>,
+}
+
+/// Linkage payload attached to a `needs_evidence` debate-trail entry's
+/// `body_metadata`. Persists the structured linkage so the Judge/spike/
+/// coordinator can recover the demand's identity from a debate row alone,
+/// without needing to read `proposals.needs_evidence_claim`.
+///
+/// Fields are intentionally the same identifiers the proposal substrate
+/// already uses (proposal id, Judge task id, spike task id, round, revision
+/// sequence) plus a marker `kind = "needs_evidence_link_v1"` so future
+/// schema versions can be distinguished.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct NeedsEvidenceClaimLink {
+    /// Schema marker; `needs_evidence_link_v1`.
+    pub kind: String,
+    /// Proposal id (UUID) the demand was issued against. Required.
+    pub proposal_id: String,
+    /// Judge task id (UUID) that issued the demand. Required.
+    pub judge_task_id: String,
+    /// Spike task id (UUID) created (or to be created) to satisfy the
+    /// demand. Required.
+    pub spike_task_id: String,
+    /// Refinement debate round when the demand was issued. Required.
+    pub round: i32,
+    /// Proposal revision sequence the demand targets. Required.
+    pub against_revision_seq: i32,
+}
+
+impl NeedsEvidenceClaimLink {
+    pub const KIND_MARKER: &'static str = "needs_evidence_link_v1";
+
+    /// Build the structured payload from a `NeedsEvidenceClaim` (the typed
+    /// claim produced by the Judge demand tool) plus the proposal id and
+    /// spike task id the substrate already knows about.
+    pub fn from_claim(proposal_id: &str, spike_task_id: &str, claim: &NeedsEvidenceClaim) -> Self {
+        Self {
+            kind: Self::KIND_MARKER.to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            judge_task_id: claim.created_by_task_id.clone(),
+            spike_task_id: spike_task_id.to_owned(),
+            round: claim.round,
+            against_revision_seq: claim.against_revision_seq,
+        }
+    }
+
+    /// Serialize this link to JSON for storage in `body_metadata`.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("NeedsEvidenceClaimLink is always serializable")
+    }
+
+    /// Parse + validate the linkage payload out of a `body_metadata` JSONB
+    /// value. Returns `Err(String)` on schema mismatch or missing required
+    /// fields so callers can surface a clear error message.
+    pub fn from_metadata(meta: &serde_json::Value) -> std::result::Result<Self, String> {
+        // First reject obvious shape problems up front.
+        let obj = meta
+            .as_object()
+            .ok_or_else(|| "needs_evidence body_metadata must be a JSON object".to_owned())?;
+        let kind = obj.get("kind").and_then(|v| v.as_str()).ok_or_else(|| {
+            "needs_evidence body_metadata missing required field \"kind\"".to_owned()
+        })?;
+        if kind != Self::KIND_MARKER {
+            return Err(format!(
+                "needs_evidence body_metadata kind mismatch: expected {:?}, got {:?}",
+                Self::KIND_MARKER,
+                kind
+            ));
+        }
+        // Then serde-deserialize to enforce the typed schema (this is what
+        // catches missing required string/int fields).
+        let link: Self = serde_json::from_value(meta.clone()).map_err(|e| {
+            format!("needs_evidence body_metadata failed to parse NeedsEvidenceClaimLink: {e}")
+        })?;
+        if link.proposal_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.proposal_id must be non-empty".to_owned());
+        }
+        if link.judge_task_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.judge_task_id must be non-empty".to_owned());
+        }
+        if link.spike_task_id.trim().is_empty() {
+            return Err("needs_evidence body_metadata.spike_task_id must be non-empty".to_owned());
+        }
+        if link.round <= 0 {
+            return Err("needs_evidence body_metadata.round must be >= 1".to_owned());
+        }
+        if link.against_revision_seq <= 0 {
+            return Err(
+                "needs_evidence body_metadata.against_revision_seq must be >= 1".to_owned(),
+            );
+        }
+        Ok(link)
+    }
+}
+
+/// Lifecycle event kinds for the evidence pipeline that build on
+/// `record_refinement_lifecycle`. Centralized so sibling code can pattern-
+/// match a single source of truth instead of stringly-typing the kinds at
+/// every call site.
+pub mod evidence_lifecycle_kind {
+    /// Refinement has been parked waiting for an evidence spike to close.
+    pub const AWAITING_EVIDENCE_STARTED: &str = "refinement_awaiting_evidence_started";
+    /// The spike returned structured findings and the substrate has accepted
+    /// the result; refinement resumes.
+    pub const EVIDENCE_RECEIVED: &str = "refinement_evidence_received";
+    /// The spike failed (cancelled, errored, or force-closed without
+    /// findings). Refinement resumes without the spike answer.
+    pub const EVIDENCE_FAILED: &str = "refinement_evidence_failed";
+}
+
+/// Builder for the structured `event_metadata` JSON used by the three
+/// evidence lifecycle events. Field names match the convention the
+/// `record_refinement_lifecycle` row already documents (round, revision,
+/// source task ids, etc.) and stay stable across sibling tasks.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct EvidenceLifecycleMetadata {
+    /// Discriminant field — values: `"awaiting_started"`, `"received"`,
+    /// `"failed"`. Stored under `event_metadata.phase` so downstream
+    /// readers don't need to know the lifecycle `event_kind` to interpret
+    /// the metadata.
+    pub phase: String,
+    /// Proposal id the lifecycle event applies to. Required.
+    pub proposal_id: String,
+    /// Spike task id this event is about (the spike that produced or
+    /// failed to produce evidence). Required.
+    pub spike_task_id: String,
+    /// Judge task id that originally issued the needs-evidence demand.
+    /// Required for `awaiting_started` and `received`; may be omitted for
+    /// `failed` if the Judge task was hard-deleted before this event.
+    pub judge_task_id: String,
+    /// Refinement round this event belongs to. Required.
+    pub round: i32,
+    /// Proposal revision sequence the spike was working against. Required.
+    pub against_revision_seq: i32,
+    /// For `evidence_failed`, the reason (`spike_cancelled`,
+    /// `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+    /// `None` for the other phases.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub failure_reason: Option<String>,
+}
+
+impl EvidenceLifecycleMetadata {
+    /// Build the metadata for `refinement_awaiting_evidence_started`.
+    pub fn awaiting_started(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Self {
+        Self {
+            phase: "awaiting_started".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: None,
+        }
+    }
+
+    /// Build the metadata for `refinement_evidence_received`.
+    pub fn received(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Self {
+        Self {
+            phase: "received".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: None,
+        }
+    }
+
+    /// Build the metadata for `refinement_evidence_failed`.
+    pub fn failed(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        failure_reason: &str,
+    ) -> Self {
+        Self {
+            phase: "failed".to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            judge_task_id: judge_task_id.to_owned(),
+            round,
+            against_revision_seq,
+            failure_reason: Some(failure_reason.to_owned()),
+        }
+    }
+
+    /// Serialize to the `serde_json::Value` shape `record_refinement_lifecycle`
+    /// expects, wrapped under the documented `metadata` key so reviewers can
+    /// see at a glance what the row carries.
+    pub fn to_event_metadata(&self) -> serde_json::Value {
+        serde_json::json!({"metadata": self})
+    }
+
+    /// Parse the `event_metadata` JSON back out of a stored lifecycle row.
+    /// Accepts both the legacy unwrapped shape (when `metadata` is the
+    /// object itself) and the new wrapped shape; returns the inner metadata.
+    pub fn parse_event_metadata(raw: Option<&str>) -> std::result::Result<Option<Self>, String> {
+        match raw {
+            None | Some("") => Ok(None),
+            Some(s) => {
+                let v: serde_json::Value = serde_json::from_str(s)
+                    .map_err(|e| format!("invalid lifecycle metadata JSON: {e}"))?;
+                // Try wrapped form first: `{"metadata": {...}}`.
+                if let Some(inner) = v.get("metadata") {
+                    return serde_json::from_value::<Self>(inner.clone())
+                        .map(Some)
+                        .map_err(|e| format!("invalid EvidenceLifecycleMetadata (wrapped): {e}"));
+                }
+                // Legacy unwrapped form: the metadata IS the object.
+                serde_json::from_value::<Self>(v)
+                    .map(Some)
+                    .map_err(|e| format!("invalid EvidenceLifecycleMetadata (unwrapped): {e}"))
+            }
+        }
+    }
 }
 
 pub struct ProposalRepository {
@@ -579,6 +814,7 @@ impl ProposalRepository {
             r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
                     author_user_id, author_model, source_task_id,
                     against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
                     resolved_at, resolved_by_user_id,
                     reopened_at, reopened_by_user_id,
                     created_at, updated_at
@@ -602,6 +838,7 @@ impl ProposalRepository {
             r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
                     author_user_id, author_model, source_task_id,
                     against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
                     resolved_at, resolved_by_user_id,
                     reopened_at, reopened_by_user_id,
                     created_at, updated_at
@@ -615,17 +852,99 @@ impl ProposalRepository {
 
     /// Append a debate-trail entry. Validates that the proposal exists and that
     /// `kind` is one of the allowed values. Emits a `proposal_debate_trail_created` event.
+    ///
+    /// Allowed kinds:
+    /// - `objection` | `rebuttal` | `verdict` — human-readable debate rows
+    ///   with `body` text; `body_metadata` is optional and ignored when set.
+    /// - `needs_evidence` — Judge's structured demand that refinement be
+    ///   parked for a spike. Requires `agent_role = "judge"`, `blocking =
+    ///   true` (so it participates in the open-blocking partial index used
+    ///   by readiness queries), and `body_metadata` containing the
+    ///   [`NeedsEvidenceClaimLink`] linkage payload (proposal id, Judge
+    ///   task id, spike task id, round, revision). The `body` field holds
+    ///   the human-readable question summary.
+    /// - `evidence_findings` — Spike's structured answer. Requires
+    ///   `agent_role = "spike"`, `blocking = false`, and `body_metadata`
+    ///   containing a well-formed [`EvidenceFindings`] payload (per the
+    ///   schema in the proposal acceptance criteria). Malformed findings
+    ///   are rejected with a clear error.
     pub async fn add_debate_trail_entry(
         &self,
         input: ProposalDebateTrailCreateInput<'_>,
     ) -> Result<ProposalDebateTrail> {
         self.db.ensure_initialized().await?;
-        // Validate kind.
+        // Validate kind + per-kind invariants.
         match input.kind {
-            "objection" | "rebuttal" | "verdict" => {}
+            "objection" | "rebuttal" | "verdict" => {
+                // No metadata required for the legacy kinds; `body_metadata`
+                // is silently ignored.
+            }
+            "needs_evidence" => {
+                if input.agent_role != "judge" {
+                    return Err(Error::InvalidData(format!(
+                        "needs_evidence debate entry requires agent_role = \"judge\", got {:?}",
+                        input.agent_role
+                    )));
+                }
+                if !input.blocking {
+                    return Err(Error::InvalidData(
+                        "needs_evidence debate entry must be blocking = true (it gates \
+                         refinement until the spike closes)"
+                            .to_owned(),
+                    ));
+                }
+                let meta = input.body_metadata.ok_or_else(|| {
+                    Error::InvalidData(
+                        "needs_evidence debate entry requires body_metadata with linkage \
+                         (proposal id, Judge task id, spike task id, round, revision)"
+                            .to_owned(),
+                    )
+                })?;
+                NeedsEvidenceClaimLink::from_metadata(meta).map_err(Error::InvalidData)?;
+            }
+            "evidence_findings" => {
+                if input.agent_role != "spike" {
+                    return Err(Error::InvalidData(format!(
+                        "evidence_findings debate entry requires agent_role = \"spike\", got {:?}",
+                        input.agent_role
+                    )));
+                }
+                if input.blocking {
+                    return Err(Error::InvalidData(
+                        "evidence_findings debate entry must be blocking = false (the spike \
+                         answer resolves the demand rather than blocking readiness)"
+                            .to_owned(),
+                    ));
+                }
+                let meta = input.body_metadata.ok_or_else(|| {
+                    Error::InvalidData(
+                        "evidence_findings debate entry requires body_metadata containing the \
+                         structured findings payload"
+                            .to_owned(),
+                    )
+                })?;
+                let findings = EvidenceFindings::parse_stored(Some(&meta.to_string()))
+                    .map_err(|e| {
+                        Error::InvalidData(format!(
+                            "evidence_findings body_metadata must contain structured findings: {e}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        Error::InvalidData(
+                            "evidence_findings body_metadata must contain a non-empty \
+                                 structured findings payload"
+                                .to_owned(),
+                        )
+                    })?;
+                findings.validate().map_err(|e| {
+                    Error::InvalidData(format!(
+                        "evidence_findings body_metadata must contain structured findings: {e}"
+                    ))
+                })?;
+            }
             other => {
                 return Err(Error::InvalidData(format!(
-                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, or verdict"
+                    "invalid debate trail kind: {other:?}; expected objection, rebuttal, verdict, needs_evidence, or evidence_findings"
                 )));
             }
         }
@@ -655,8 +974,8 @@ impl ProposalRepository {
             "INSERT INTO proposal_debate_trail
                 (id, proposal_id, kind, body, blocking, agent_role, author_kind,
                  author_user_id, author_model, source_task_id,
-                 against_revision_seq, round)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 against_revision_seq, round, body_metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             id,
             input.proposal_id,
             input.kind,
@@ -669,6 +988,7 @@ impl ProposalRepository {
             input.source_task_id,
             input.against_revision_seq,
             input.round,
+            input.body_metadata,
         )
         .execute(self.db.pool())
         .await?;
@@ -745,6 +1065,65 @@ impl ProposalRepository {
                 &entry,
             ));
         Ok(entry)
+    }
+
+    /// Return the unresolved blocking debate-trail entries for a proposal,
+    /// ordered by creation time. An entry is "unresolved blocking" when
+    /// `blocking = true` AND `resolved_at IS NULL`. Used by readiness gates
+    /// and the per-run needs-evidence cap (sibling task `g442`) to count
+    /// pending demands without scanning the full trail.
+    pub async fn unresolved_blocking_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND blocking = true
+               AND resolved_at IS NULL
+             ORDER BY created_at, id"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
+    }
+
+    /// Return the `needs_evidence` debate-trail entries for a proposal
+    /// (resolved or not), ordered by creation time. Used by the per-run cap
+    /// accounting to count accepted Judge demands; malformed/rejected
+    /// demands never reach this list because `add_debate_trail_entry`
+    /// refuses to persist them.
+    pub async fn needs_evidence_entries(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Vec<ProposalDebateTrail>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            ProposalDebateTrail,
+            r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                    author_user_id, author_model, source_task_id,
+                    against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
+                    resolved_at, resolved_by_user_id,
+                    reopened_at, reopened_by_user_id,
+                    created_at, updated_at
+             FROM proposal_debate_trail
+             WHERE proposal_id = $1
+               AND kind = 'needs_evidence'
+             ORDER BY created_at, id"#,
+            proposal_id
+        )
+        .fetch_all(self.db.pool())
+        .await?)
     }
 
     // ── Listing ──────────────────────────────────────────────────────────────
@@ -904,6 +1283,92 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         Ok(())
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_awaiting_evidence_started` row with the structured
+    /// `EvidenceLifecycleMetadata` already shaped. Returns the JSON that was
+    /// persisted so callers can echo it in tool responses / logs.
+    pub async fn record_awaiting_evidence_started(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::awaiting_started(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_evidence_received` row with the structured metadata.
+    pub async fn record_evidence_received(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::received(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_evidence_failed` row with the structured metadata,
+    /// including the failure reason.
+    pub async fn record_evidence_failed(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        failure_reason: &str,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::failed(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+            failure_reason,
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::EVIDENCE_FAILED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
     }
 
     /// Return the proposal IDs whose refinement is currently dangling — i.e.
@@ -2142,6 +2607,7 @@ impl ProposalRepository {
             r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
                     author_user_id, author_model, source_task_id,
                     against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
                     resolved_at, resolved_by_user_id,
                     reopened_at, reopened_by_user_id,
                     created_at, updated_at
@@ -2170,6 +2636,7 @@ impl ProposalRepository {
             r#"SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,
                     author_user_id, author_model, source_task_id,
                     against_revision_seq, round,
+                    body_metadata::text AS body_metadata,
                     resolved_at, resolved_by_user_id,
                     reopened_at, reopened_by_user_id,
                     created_at, updated_at
@@ -3968,6 +4435,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -3989,6 +4457,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -4006,6 +4475,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -4050,6 +4520,7 @@ mod tests {
             source_task_id: None,
             against_revision_seq: 1,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -4065,6 +4536,7 @@ mod tests {
             source_task_id: None,
             against_revision_seq: 1,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -4096,6 +4568,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap();
@@ -4143,6 +4616,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap_err();
@@ -4165,6 +4639,7 @@ mod tests {
                 source_task_id: None,
                 against_revision_seq: 1,
                 round: 1,
+                body_metadata: None,
             })
             .await
             .unwrap_err();
@@ -4188,6 +4663,7 @@ mod tests {
             source_task_id: None,
             against_revision_seq: 1,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -4204,6 +4680,7 @@ mod tests {
             source_task_id: None,
             against_revision_seq: 2,
             round: 2,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -4248,6 +4725,7 @@ mod tests {
             source_task_id: None,
             against_revision_seq: 1,
             round: 1,
+            body_metadata: None,
         })
         .await
         .unwrap();
@@ -4412,5 +4890,879 @@ mod tests {
         // but parse_stored returns an Err (not a panic).
         let result = NeedsEvidenceClaim::parse_stored(updated.needs_evidence_claim.as_deref());
         assert!(result.is_err(), "opaque string must fail structured parse");
+    }
+
+    // ── Needs-evidence debate entry tests ────────────────────────────────
+
+    /// A `needs_evidence` debate entry with valid linkage metadata is
+    /// accepted, persisted, and the body_metadata round-trips through the
+    /// stored row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_debate_entry_accepted_with_valid_metadata() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("NE Entry")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let judge_task_id = uuid::Uuid::now_v7().to_string();
+        let spike_task_id = uuid::Uuid::now_v7().to_string();
+
+        let link = NeedsEvidenceClaimLink {
+            kind: NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
+            proposal_id: p.id.clone(),
+            judge_task_id: judge_task_id.clone(),
+            spike_task_id: spike_task_id.clone(),
+            round: 2,
+            against_revision_seq: 3,
+        };
+        let meta_value = link.to_value();
+
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "Need to verify throughput claim",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: Some(&judge_task_id),
+                against_revision_seq: 3,
+                round: 2,
+                body_metadata: Some(&meta_value),
+            })
+            .await
+            .unwrap();
+
+        // Verify the entry persisted correctly.
+        assert_eq!(entry.kind, "needs_evidence");
+        assert!(entry.blocking);
+        assert_eq!(entry.agent_role, "judge");
+        assert_eq!(entry.round, 2);
+        assert_eq!(entry.against_revision_seq, 3);
+        assert_eq!(
+            entry.source_task_id.as_deref(),
+            Some(judge_task_id.as_str())
+        );
+        assert!(entry.resolved_at.is_none());
+
+        // Verify body_metadata round-trips.
+        let stored_meta_str = entry
+            .body_metadata
+            .as_ref()
+            .expect("body_metadata must be set on needs_evidence entry");
+        let stored_meta: serde_json::Value =
+            serde_json::from_str(stored_meta_str).expect("body_metadata must be valid JSON");
+        let parsed_link = NeedsEvidenceClaimLink::from_metadata(&stored_meta)
+            .expect("stored body_metadata must parse back to NeedsEvidenceClaimLink");
+        assert_eq!(parsed_link.proposal_id, p.id);
+        assert_eq!(parsed_link.judge_task_id, judge_task_id);
+        assert_eq!(parsed_link.spike_task_id, spike_task_id);
+        assert_eq!(parsed_link.round, 2);
+        assert_eq!(parsed_link.against_revision_seq, 3);
+        assert_eq!(parsed_link.kind, NeedsEvidenceClaimLink::KIND_MARKER);
+
+        // Verify it appears in unresolved_blocking_entries (blocking=true, resolved_at IS NULL).
+        let unresolved = repo.unresolved_blocking_entries(&p.id).await.unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].id, entry.id);
+
+        // Verify it appears in needs_evidence_entries.
+        let ne_entries = repo.needs_evidence_entries(&p.id).await.unwrap();
+        assert_eq!(ne_entries.len(), 1);
+        assert_eq!(ne_entries[0].id, entry.id);
+
+        // Events fired.
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "proposal_debate_trail");
+        assert_eq!(events[0].action, "created");
+    }
+
+    /// A `needs_evidence` entry with `agent_role != "judge"` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_rejects_wrong_agent_role() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Role Reject")).await.unwrap();
+
+        let link = NeedsEvidenceClaimLink {
+            kind: NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
+            proposal_id: p.id.clone(),
+            judge_task_id: uuid::Uuid::now_v7().to_string(),
+            spike_task_id: uuid::Uuid::now_v7().to_string(),
+            round: 1,
+            against_revision_seq: 1,
+        };
+        let meta_value = link.to_value();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&meta_value),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("agent_role = \"judge\""));
+    }
+
+    /// A `needs_evidence` entry with `blocking = false` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_rejects_non_blocking() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Block Reject")).await.unwrap();
+
+        let link = NeedsEvidenceClaimLink {
+            kind: NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
+            proposal_id: p.id.clone(),
+            judge_task_id: uuid::Uuid::now_v7().to_string(),
+            spike_task_id: uuid::Uuid::now_v7().to_string(),
+            round: 1,
+            against_revision_seq: 1,
+        };
+        let meta_value = link.to_value();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: false,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&meta_value),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("blocking = true"));
+    }
+
+    /// A `needs_evidence` entry without `body_metadata` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_rejects_missing_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("No Meta")).await.unwrap();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("body_metadata"));
+    }
+
+    /// A `needs_evidence` entry with malformed metadata (wrong kind marker,
+    /// missing fields, empty strings) is rejected with clear errors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn needs_evidence_rejects_malformed_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Malformed Meta")).await.unwrap();
+
+        // Wrong kind marker.
+        let bad_kind = serde_json::json!({
+            "kind": "wrong_kind",
+            "proposal_id": p.id,
+            "judge_task_id": "j1",
+            "spike_task_id": "s1",
+            "round": 1,
+            "against_revision_seq": 1,
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&bad_kind),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("kind mismatch"));
+
+        // Missing required field (no spike_task_id).
+        let missing_field = serde_json::json!({
+            "kind": NeedsEvidenceClaimLink::KIND_MARKER,
+            "proposal_id": p.id,
+            "judge_task_id": "j1",
+            "round": 1,
+            "against_revision_seq": 1,
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&missing_field),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("spike_task_id"));
+
+        // Empty proposal_id.
+        let empty_pid = serde_json::json!({
+            "kind": NeedsEvidenceClaimLink::KIND_MARKER,
+            "proposal_id": "  ",
+            "judge_task_id": "j1",
+            "spike_task_id": "s1",
+            "round": 1,
+            "against_revision_seq": 1,
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&empty_pid),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("non-empty"));
+
+        // round <= 0.
+        let bad_round = serde_json::json!({
+            "kind": NeedsEvidenceClaimLink::KIND_MARKER,
+            "proposal_id": p.id,
+            "judge_task_id": "j1",
+            "spike_task_id": "s1",
+            "round": 0,
+            "against_revision_seq": 1,
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "test",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&bad_round),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("round must be >= 1"));
+    }
+
+    // ── Evidence findings debate entry tests ──────────────────────────────
+
+    /// An `evidence_findings` debate entry with valid structured findings is
+    /// accepted and the body_metadata round-trips through the stored row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_findings_debate_entry_accepted_with_valid_payload() {
+        let (bus, captured) = capturing_bus();
+        let repo = ProposalRepository::new(test_db(), bus);
+        let p = repo.create(create_input("Findings")).await.unwrap();
+        captured.lock().unwrap().clear();
+
+        let spike_task_id = uuid::Uuid::now_v7().to_string();
+
+        let findings = EvidenceFindings {
+            answer: "The throughput requirement is achievable with the current architecture."
+                .to_owned(),
+            evidence: vec![
+                "Ran load test with k6: sustained 12k rps".to_owned(),
+                "Queue depth peaked at 200, well within limits".to_owned(),
+            ],
+            code_paths_inspected: vec![
+                "src/payment/handler.rs".to_owned(),
+                "src/queue/processor.rs".to_owned(),
+            ],
+            confidence: 0.85,
+            residual_risks: vec!["Untested under memory pressure".to_owned()],
+            recommendation_for_advocate:
+                "Cite the k6 results in the spec; note memory pressure gap.".to_owned(),
+        };
+        let findings_value = serde_json::to_value(&findings).unwrap();
+
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "Spike completed: throughput verified",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: Some("claude-opus-4-8"),
+                source_task_id: Some(&spike_task_id),
+                against_revision_seq: 3,
+                round: 2,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+
+        // Verify entry properties.
+        assert_eq!(entry.kind, "evidence_findings");
+        assert!(!entry.blocking);
+        assert_eq!(entry.agent_role, "spike");
+        assert_eq!(entry.round, 2);
+        assert_eq!(entry.against_revision_seq, 3);
+        assert_eq!(
+            entry.source_task_id.as_deref(),
+            Some(spike_task_id.as_str())
+        );
+        assert!(entry.resolved_at.is_none());
+
+        // Verify body_metadata round-trips to the typed findings struct.
+        let stored_meta_str = entry
+            .body_metadata
+            .as_ref()
+            .expect("body_metadata must be set on evidence_findings entry");
+        let parsed = EvidenceFindings::parse_stored(Some(stored_meta_str))
+            .expect("body_metadata must parse as EvidenceFindings")
+            .expect("must return Some");
+        assert_eq!(parsed, findings);
+        assert_eq!(parsed.confidence, 0.85);
+        assert_eq!(parsed.code_paths_inspected.len(), 2);
+        assert_eq!(parsed.evidence.len(), 2);
+
+        // Verify it does NOT appear in unresolved_blocking_entries (blocking=false).
+        let unresolved = repo.unresolved_blocking_entries(&p.id).await.unwrap();
+        assert!(
+            unresolved.is_empty(),
+            "evidence_findings is non-blocking, must not appear in unresolved blocking"
+        );
+
+        // Events fired.
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "proposal_debate_trail");
+        assert_eq!(events[0].action, "created");
+    }
+
+    /// An `evidence_findings` entry with `agent_role != "spike"` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_findings_rejects_wrong_agent_role() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Spike Role")).await.unwrap();
+
+        let findings = serde_json::json!({
+            "answer": "yes",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.9,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&findings),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("agent_role = \"spike\""));
+    }
+
+    /// An `evidence_findings` entry with `blocking = true` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_findings_rejects_blocking() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Block Spike")).await.unwrap();
+
+        let findings = serde_json::json!({
+            "answer": "yes",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.9,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: true,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&findings),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("blocking = false"));
+    }
+
+    /// An `evidence_findings` entry without `body_metadata` is rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_findings_rejects_missing_body_metadata() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("No Findings Meta")).await.unwrap();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("body_metadata"));
+    }
+
+    /// An `evidence_findings` entry with malformed findings is rejected.
+    /// Tests empty answer, missing fields, and out-of-range confidence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_findings_rejects_malformed_payload() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Bad Findings")).await.unwrap();
+
+        // Empty answer.
+        let empty_answer = serde_json::json!({
+            "answer": "  ",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.5,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&empty_answer),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("answer must be non-empty"));
+
+        // Out-of-range confidence (> 1.0).
+        let bad_confidence = serde_json::json!({
+            "answer": "valid answer",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 1.5,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&bad_confidence),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("confidence"));
+
+        // Negative confidence.
+        let neg_confidence = serde_json::json!({
+            "answer": "valid answer",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": -0.1,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&neg_confidence),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("confidence"));
+
+        // Empty recommendation_for_advocate.
+        let empty_rec = serde_json::json!({
+            "answer": "valid answer",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.8,
+            "residual_risks": [],
+            "recommendation_for_advocate": "   ",
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&empty_rec),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("recommendation_for_advocate must be non-empty"));
+
+        // Missing required field entirely (no answer field).
+        let missing_field = serde_json::json!({
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.8,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed",
+        });
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "test",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&missing_field),
+            })
+            .await
+            .unwrap_err();
+        // serde deserialization should fail because `answer` is missing.
+        assert!(format!("{err}").contains("structured findings"));
+    }
+
+    /// The `evidence_findings` required schema has all six fields:
+    /// `answer`, `evidence`, `code_paths_inspected`, `confidence`,
+    /// `residual_risks`, `recommendation_for_advocate`.
+    #[test]
+    fn evidence_findings_schema_has_all_required_fields() {
+        // Build a minimal valid payload and confirm every field is present.
+        let findings = EvidenceFindings {
+            answer: "The claim is verified.".to_owned(),
+            evidence: vec!["grep output shows X".to_owned()],
+            code_paths_inspected: vec!["src/main.rs".to_owned()],
+            confidence: 0.95,
+            residual_risks: vec!["Edge case Y not tested".to_owned()],
+            recommendation_for_advocate: "Add caveat Z to spec.".to_owned(),
+        };
+        findings
+            .validate()
+            .expect("minimal valid findings must pass validation");
+
+        // Round-trip through serde to verify the JSON shape has all six fields.
+        let json = serde_json::to_value(&findings).unwrap();
+        assert!(json.get("answer").is_some());
+        assert!(json.get("evidence").is_some());
+        assert!(json.get("code_paths_inspected").is_some());
+        assert!(json.get("confidence").is_some());
+        assert!(json.get("residual_risks").is_some());
+        assert!(json.get("recommendation_for_advocate").is_some());
+    }
+
+    /// Invalid kinds beyond the five recognized ones are still rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_debate_kind_still_rejected_after_ne_evidence_extension() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Unknown Kind")).await.unwrap();
+
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "observation",
+                body: "test",
+                blocking: false,
+                agent_role: "advocate",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("invalid debate trail kind"));
+        assert!(format!("{err}").contains("observation"));
+    }
+
+    // ── Evidence lifecycle metadata tests ─────────────────────────────────
+
+    /// `EvidenceLifecycleMetadata::awaiting_started` serializes correctly
+    /// and round-trips through `to_event_metadata` / `parse_event_metadata`.
+    #[test]
+    fn evidence_lifecycle_metadata_awaiting_started_round_trips() {
+        let meta = EvidenceLifecycleMetadata::awaiting_started(
+            "proposal-123",
+            "spike-456",
+            "judge-789",
+            2,
+            3,
+        );
+        assert_eq!(meta.phase, "awaiting_started");
+        assert_eq!(meta.proposal_id, "proposal-123");
+        assert_eq!(meta.spike_task_id, "spike-456");
+        assert_eq!(meta.judge_task_id, "judge-789");
+        assert_eq!(meta.round, 2);
+        assert_eq!(meta.against_revision_seq, 3);
+        assert!(meta.failure_reason.is_none());
+
+        // Serialize to event_metadata shape.
+        let value = meta.to_event_metadata();
+        assert!(value.get("metadata").is_some());
+
+        // Parse back.
+        let raw = serde_json::to_string(&value).unwrap();
+        let parsed = EvidenceLifecycleMetadata::parse_event_metadata(Some(&raw))
+            .expect("parse must succeed")
+            .expect("must return Some");
+        assert_eq!(parsed, meta);
+    }
+
+    /// `EvidenceLifecycleMetadata::received` serializes correctly.
+    #[test]
+    fn evidence_lifecycle_metadata_received_round_trips() {
+        let meta = EvidenceLifecycleMetadata::received("p1", "s1", "j1", 1, 1);
+        assert_eq!(meta.phase, "received");
+        assert!(meta.failure_reason.is_none());
+
+        let value = meta.to_event_metadata();
+        let raw = serde_json::to_string(&value).unwrap();
+        let parsed = EvidenceLifecycleMetadata::parse_event_metadata(Some(&raw))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, meta);
+    }
+
+    /// `EvidenceLifecycleMetadata::failed` serializes with failure_reason.
+    #[test]
+    fn evidence_lifecycle_metadata_failed_round_trips_with_reason() {
+        let meta = EvidenceLifecycleMetadata::failed("p1", "s1", "j1", 1, 1, "spike_cancelled");
+        assert_eq!(meta.phase, "failed");
+        assert_eq!(meta.failure_reason.as_deref(), Some("spike_cancelled"));
+
+        let value = meta.to_event_metadata();
+        let raw = serde_json::to_string(&value).unwrap();
+        let parsed = EvidenceLifecycleMetadata::parse_event_metadata(Some(&raw))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, meta);
+        assert_eq!(parsed.failure_reason.as_deref(), Some("spike_cancelled"));
+    }
+
+    /// `EvidenceLifecycleMetadata::parse_event_metadata` accepts both
+    /// the wrapped `{ "metadata": {...} }` shape and the legacy unwrapped shape.
+    #[test]
+    fn evidence_lifecycle_metadata_accepts_both_wrapped_and_unwrapped() {
+        let meta = EvidenceLifecycleMetadata::awaiting_started("p", "s", "j", 1, 1);
+
+        // Wrapped form.
+        let wrapped = serde_json::json!({"metadata": meta});
+        let raw = serde_json::to_string(&wrapped).unwrap();
+        let parsed = EvidenceLifecycleMetadata::parse_event_metadata(Some(&raw))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.phase, "awaiting_started");
+
+        // Unwrapped (legacy) form — the metadata IS the object.
+        let unwrapped = serde_json::to_value(&meta).unwrap();
+        let raw = serde_json::to_string(&unwrapped).unwrap();
+        let parsed = EvidenceLifecycleMetadata::parse_event_metadata(Some(&raw))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.phase, "awaiting_started");
+    }
+
+    /// `EvidenceLifecycleMetadata::parse_event_metadata` returns `Ok(None)`
+    /// on `None` or empty input, and `Err` on malformed JSON.
+    #[test]
+    fn evidence_lifecycle_metadata_parse_edge_cases() {
+        assert!(
+            EvidenceLifecycleMetadata::parse_event_metadata(None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            EvidenceLifecycleMetadata::parse_event_metadata(Some(""))
+                .unwrap()
+                .is_none()
+        );
+        assert!(EvidenceLifecycleMetadata::parse_event_metadata(Some("{bad")).is_err());
+        // Valid JSON but wrong shape (array instead of object).
+        assert!(EvidenceLifecycleMetadata::parse_event_metadata(Some("[1,2]")).is_err());
+    }
+
+    /// Lifecycle convenience wrappers (`record_awaiting_evidence_started`,
+    /// `record_evidence_received`, `record_evidence_failed`) persist
+    /// `proposal_revisions` rows with the correct event_kind and metadata,
+    /// without regressing existing refinement lifecycle events.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evidence_lifecycle_convenience_wrappers_persist_correctly() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Lifecycle")).await.unwrap();
+
+        // Start a refinement so lifecycle events are valid.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        // 1. Awaiting evidence started.
+        let awaiting_meta = repo
+            .record_awaiting_evidence_started(&p.id, "spike-1", "judge-1", 1, 1)
+            .await
+            .unwrap();
+        let inner = awaiting_meta
+            .get("metadata")
+            .expect("wrapped shape must have metadata key");
+        assert_eq!(inner["phase"], "awaiting_started");
+        assert_eq!(inner["proposal_id"], p.id);
+        assert_eq!(inner["spike_task_id"], "spike-1");
+        assert_eq!(inner["judge_task_id"], "judge-1");
+        assert_eq!(inner["round"], 1);
+        assert!(inner["failure_reason"].is_null());
+
+        // 2. Evidence received.
+        let received_meta = repo
+            .record_evidence_received(&p.id, "spike-1", "judge-1", 1, 1)
+            .await
+            .unwrap();
+        let inner = received_meta.get("metadata").unwrap();
+        assert_eq!(inner["phase"], "received");
+        assert!(inner["failure_reason"].is_null());
+
+        // 3. Evidence failed.
+        let failed_meta = repo
+            .record_evidence_failed(&p.id, "spike-1", "judge-1", 1, 1, "spike_errored")
+            .await
+            .unwrap();
+        let inner = failed_meta.get("metadata").unwrap();
+        assert_eq!(inner["phase"], "failed");
+        assert_eq!(inner["failure_reason"], "spike_errored");
+
+        // Verify the revision rows persisted with the correct event_kind.
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        // seed (seq 1) + refinement_start + awaiting + received + failed = 5 rows.
+        assert_eq!(revisions.len(), 5);
+
+        let awaiting_row = &revisions[2];
+        assert_eq!(
+            awaiting_row.event_kind,
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED
+        );
+        assert!(awaiting_row.event_metadata.is_some());
+
+        let received_row = &revisions[3];
+        assert_eq!(
+            received_row.event_kind,
+            evidence_lifecycle_kind::EVIDENCE_RECEIVED
+        );
+        assert!(received_row.event_metadata.is_some());
+
+        let failed_row = &revisions[4];
+        assert_eq!(
+            failed_row.event_kind,
+            evidence_lifecycle_kind::EVIDENCE_FAILED
+        );
+        assert!(failed_row.event_metadata.is_some());
+
+        // The existing refinement_start row is untouched.
+        assert_eq!(revisions[1].event_kind, "refinement_start");
+    }
+
+    /// `evidence_lifecycle_kind` constants match the expected string values.
+    #[test]
+    fn evidence_lifecycle_kind_constants_are_correct() {
+        assert_eq!(
+            evidence_lifecycle_kind::AWAITING_EVIDENCE_STARTED,
+            "refinement_awaiting_evidence_started"
+        );
+        assert_eq!(
+            evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            "refinement_evidence_received"
+        );
+        assert_eq!(
+            evidence_lifecycle_kind::EVIDENCE_FAILED,
+            "refinement_evidence_failed"
+        );
     }
 }

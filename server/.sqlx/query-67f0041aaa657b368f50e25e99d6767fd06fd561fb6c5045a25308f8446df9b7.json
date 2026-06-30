@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,\n                    author_user_id, author_model, source_task_id,\n                    against_revision_seq, round,\n                    resolved_at, resolved_by_user_id,\n                    reopened_at, reopened_by_user_id,\n                    created_at, updated_at\n             FROM proposal_debate_trail\n             WHERE id = $1",
+  "query": "SELECT id, proposal_id, kind, body, blocking, agent_role, author_kind,\n                    author_user_id, author_model, source_task_id,\n                    against_revision_seq, round,\n                    body_metadata::text AS body_metadata,\n                    resolved_at, resolved_by_user_id,\n                    reopened_at, reopened_by_user_id,\n                    created_at, updated_at\n             FROM proposal_debate_trail\n             WHERE proposal_id = $1\n               AND kind = 'needs_evidence'\n             ORDER BY created_at, id",
   "describe": {
     "columns": [
       {
@@ -65,31 +65,36 @@
       },
       {
         "ordinal": 12,
+        "name": "body_metadata",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
         "name": "resolved_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "resolved_by_user_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "reopened_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "reopened_by_user_id",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "created_at",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "updated_at",
         "type_info": "Varchar"
       }
@@ -112,6 +117,7 @@
       true,
       false,
       false,
+      null,
       true,
       true,
       true,
@@ -120,5 +126,5 @@
       false
     ]
   },
-  "hash": "f52f72ef8da9bb1de58d8d423c6acf8f854dcf5a03462d1476f072643d5770b1"
+  "hash": "67f0041aaa657b368f50e25e99d6767fd06fd561fb6c5045a25308f8446df9b7"
 }
