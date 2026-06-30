@@ -1,23 +1,1197 @@
-//! Reply loop turn orchestration (stub).
+// djinn:allow-oversize — reply loop orchestration remains intentionally co-located
+// while rrdr budget wind-down hooks land; split-out is a separate refactor.
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::SlotContext;
 use crate::output_parser::ParsedAgentOutput;
-use crate::roles_support::AgentRole;
-use std::sync::Arc;
+use djinn_compaction::{CompactionContext, compact_conversation, needs_compaction};
+use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::SessionMessageRepository;
+use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
+use djinn_provider::provider::LlmProvider;
+use djinn_provider::provider::telemetry;
 
-/// Context for the reply loop.
-pub(crate) struct ReplyLoopContext {
-    pub task_id: String,
-    pub session_id: String,
-    pub role: Arc<dyn AgentRole>,
-    pub ctx: SlotContext,
+use super::budget::{
+    SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
+};
+use super::error_handling::{
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff,
+    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
+    next_nudge_message, reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
+};
+use super::loop_guard::{
+    AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
+    ToolCallSignature, ToolFailureClass,
+};
+use super::persistence::{persist_session_message, serialize_llm_input, serialize_message};
+use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
+use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
+
+/// True when `model_id` (a `provider/model` string) is served by the Codex /
+/// OpenAI consumer backend that signals over-quota by answering a turn with an
+/// empty 200.
+fn is_codex_openai_family(model_id: &str) -> bool {
+    let provider = model_id
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(provider.as_str(), "openai" | "chatgpt_codex")
 }
 
-/// Run the reply loop for a session.
-/// This is a stub — the real implementation is in djinn-agent.
-pub(crate) async fn run_reply_loop(
-    _loop_ctx: ReplyLoopContext,
-    _kill: tokio_util::sync::CancellationToken,
-    _pause: tokio_util::sync::CancellationToken,
-) -> Result<ParsedAgentOutput, String> {
-    Err("reply_loop not yet implemented in djinn-slot; host should provide".to_string())
+/// Build the terminal error for a reply loop that gave up after the bounded
+/// empty/no-event-turn retries.
+fn empty_turn_terminal_error(
+    kind: &str,
+    retries: u32,
+    model_id: &str,
+    diag: String,
+) -> anyhow::Error {
+    let class = if is_codex_openai_family(model_id) {
+        djinn_provider::provider::ProviderError::EmptyCompletion
+    } else {
+        djinn_provider::provider::ProviderError::ProviderInternal { status: 500 }
+    };
+    anyhow::Error::new(class).context(format!(
+        "provider returned {retries} empty {kind} turns — the backend likely refused or \
+         throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
+         not 429s; verify provider/account status or switch to an API-key backend); {diag}"
+    ))
+}
+
+fn permission_denial_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("access denied")
+        || lower.contains("security denial")
+        || lower.contains("security denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("not allowed")
+        || lower.contains("not authorized")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
+}
+
+fn push_fragment(fragments: &mut Vec<String>, value: String) {
+    const MAX_FRAGMENTS: usize = 12;
+    let normalized = value.replace('\n', "\\n").trim().to_string();
+    if normalized.is_empty() {
+        return;
+    }
+    let snippet: String = normalized.chars().take(160).collect();
+    if fragments.len() >= MAX_FRAGMENTS {
+        fragments.remove(0);
+    }
+    fragments.push(snippet);
+}
+
+fn corrective_message_for_loop_guard(condition: &LoopGuardCondition) -> Message {
+    let signature = condition.offending_signature_label();
+    Message::user(format!(
+        "SYSTEM CORRECTION: You have repeated the same failing tool call signature \
+         {observed} times: `{signature}`. Do not call this exact tool with these \
+         exact normalized arguments again in this session. Choose a different \
+         approach, change the arguments materially, or use an appropriate \
+         finalize/escalation tool if you are blocked. Repeating this exact \
+         failing signature again will terminate the session through the loop guard.",
+        observed = condition.observed,
+    ))
+}
+
+fn tool_result_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(ContentBlock::as_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn classify_tool_failure(content: &[ContentBlock]) -> ToolFailureClass {
+    if permission_denial_text(&tool_result_text(content)) {
+        ToolFailureClass::PermissionOrSecurityDenial
+    } else {
+        ToolFailureClass::General
+    }
+}
+
+fn loop_guard_error(condition: LoopGuardCondition, turns: u32, session_id: &str) -> anyhow::Error {
+    let start_turn = turns.saturating_sub(condition.observed.saturating_sub(1));
+    anyhow::Error::new(LoopGuardError {
+        condition,
+        turn_span: (start_turn, turns),
+        session_id: session_id.to_string(),
+    })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum WindDownReason {
+    StepCap { max_turns: u32 },
+    Budget { details: String },
+}
+
+impl WindDownReason {
+    fn is_budget(&self) -> bool {
+        matches!(self, Self::Budget { .. })
+    }
+
+    fn as_str(&self) -> &'static str {
+        if self.is_budget() {
+            "token_budget"
+        } else {
+            "turn_cap"
+        }
+    }
+
+    fn details(&self) -> String {
+        match self {
+            Self::StepCap { max_turns } => format!("max turns ({max_turns}) reached"),
+            Self::Budget { details } => details.clone(),
+        }
+    }
+
+    fn hard_error(&self, max_turns: u32) -> anyhow::Error {
+        match self {
+            Self::StepCap { .. } => anyhow::anyhow!(
+                "max turns ({}) exceeded without text-only response (wind-down summary \
+                 directive was injected but the agent did not terminate)",
+                max_turns
+            ),
+            Self::Budget { details } => BudgetWindDownIgnored {
+                details: format!(
+                    "{details}; hard token budget wind-down directive was injected but the agent did not produce a text-only summary"
+                ),
+            }
+            .into(),
+        }
+    }
+}
+
+fn tool_call_signature_for_result(
+    result_index: usize,
+    tool_use_id: &str,
+    turn_tool_calls: &[ContentBlock],
+) -> Option<ToolCallSignature> {
+    let by_id = turn_tool_calls
+        .iter()
+        .find(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == tool_use_id));
+    let by_index = turn_tool_calls.get(result_index);
+    by_id.or(by_index).and_then(|block| match block {
+        ContentBlock::ToolUse { name, input, .. } => Some(ToolCallSignature::new(name, input)),
+        _ => None,
+    })
+}
+
+async fn inject_loop_guard_correction(
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    conversation: &mut Conversation,
+    condition: &LoopGuardCondition,
+) {
+    let msg = corrective_message_for_loop_guard(condition);
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+}
+
+/// One-shot soft-budget converge reminder.
+#[allow(clippy::too_many_arguments)]
+async fn maybe_inject_soft_budget_reminder(
+    injected: &mut bool,
+    session_budget: &super::budget::ResolvedSessionBudget,
+    msg_repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    turns: u32,
+    total_tokens_in: u32,
+    total_tokens_out: u32,
+    current_context_tokens: u32,
+    conversation: &mut Conversation,
+) -> bool {
+    if *injected
+        || !soft_budget_threshold_exceeded(
+            session_budget,
+            total_tokens_in,
+            total_tokens_out,
+            current_context_tokens,
+        )
+    {
+        return false;
+    }
+    *injected = true;
+    let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+    let soft_cap =
+        (session_budget.max_cumulative_tokens as f64) * session_budget.soft_threshold_ratio;
+    tracing::warn!(
+        task_id = %task_id,
+        agent_type = %role_name,
+        turns,
+        total_tokens_in,
+        total_tokens_out,
+        cumulative_spend,
+        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+        soft_cap = soft_cap as u64,
+        soft_threshold_ratio = session_budget.soft_threshold_ratio,
+        "ReplyLoop: soft budget threshold reached — injecting one-shot <system-reminder> \
+         converge directive"
+    );
+    let msg = soft_budget_converge_message();
+    persist_session_message(msg_repo, session_id, task_id, &msg).await;
+    conversation.push(msg);
+    true
+}
+
+/// Context for the reply loop, adapted for the slot crate.
+pub struct ReplyLoopContext<'a> {
+    pub provider: &'a dyn LlmProvider,
+    pub tools: &'a [serde_json::Value],
+    pub task_id: &'a str,
+    pub task_short_id: &'a str,
+    pub session_id: &'a str,
+    pub project_path: &'a str,
+    pub worktree_path: &'a std::path::Path,
+    pub role_name: &'a str,
+    pub finalize_tool_names: &'a [&'a str],
+    pub context_window: i64,
+    pub model_id: &'a str,
+    pub cancel: &'a tokio_util::sync::CancellationToken,
+    pub global_cancel: &'a tokio_util::sync::CancellationToken,
+    pub ctx: &'a SlotContext,
+    pub active_skill_names: &'a [String],
+    pub active_mcp_server_names: &'a [String],
+    pub max_turns_override: Option<u32>,
+}
+
+/// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
+/// calls via the extension layer, and continues until the assistant produces a
+/// text-only response or a termination condition is reached.
+pub async fn run_reply_loop(
+    ctx: ReplyLoopContext<'_>,
+    conversation: &mut Conversation,
+    is_resumed_session: bool,
+) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64) {
+    let ReplyLoopContext {
+        provider,
+        tools,
+        task_id,
+        task_short_id,
+        session_id,
+        project_path,
+        worktree_path,
+        role_name,
+        finalize_tool_names,
+        context_window,
+        model_id,
+        cancel,
+        global_cancel,
+        ctx: slot_ctx,
+        active_skill_names,
+        active_mcp_server_names,
+        max_turns_override,
+    } = ctx;
+
+    let tool_dispatcher = match slot_ctx.tool_dispatcher.as_ref() {
+        Some(d) => d.as_ref(),
+        None => {
+            return (
+                Err(anyhow::anyhow!(
+                    "reply loop requires a SlotToolDispatcher; none was provided in SlotContext"
+                )),
+                ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer"),
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+    };
+
+    let tool_metadata = tool_runtime_metadata(tools);
+
+    // Register activity tracker.
+    let activity_ts = slot_ctx.register_activity(task_id);
+    let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let last_token_flush = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let mut output =
+        ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
+
+    // Persist the conversation as it unfolds.
+    let msg_repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
+    if !is_resumed_session {
+        for msg in conversation
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+        {
+            persist_session_message(&msg_repo, session_id, task_id, msg).await;
+        }
+    }
+
+    let mut total_tokens_in: u32 = 0;
+    let mut total_tokens_out: u32 = 0;
+    let mut total_cache_read: u32 = 0;
+    let mut total_cache_write: u32 = 0;
+    let mut total_reasoning_out: u32 = 0;
+    let mut current_context_tokens: u32 = 0;
+    let mut final_assistant_text = String::new();
+
+    // ── Create session-level OTel span (root trace) ──────────────────────
+    let otel_session = if telemetry::is_active() {
+        let session = telemetry::SessionSpan::start(&telemetry::SessionSpanAttributes {
+            provider: provider.name(),
+            model: model_id,
+            task_short_id,
+            task_id,
+            agent_type: role_name,
+            session_id,
+        });
+        session.record_skills(active_skill_names);
+        session.record_mcp_servers(active_mcp_server_names);
+        if let Some(sys_msg) = conversation.messages.first()
+            && sys_msg.role == Role::System
+        {
+            let sys_text: String = sys_msg
+                .content
+                .iter()
+                .filter_map(|b| b.as_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !sys_text.is_empty() {
+                session.record_system_prompt(&sys_text);
+            }
+        }
+        let input_msg = if is_resumed_session {
+            conversation.messages.iter().rfind(|m| m.role == Role::User)
+        } else {
+            conversation.messages.iter().find(|m| m.role == Role::User)
+        };
+        if let Some(user_msg) = input_msg {
+            let input_text: String = user_msg
+                .content
+                .iter()
+                .filter_map(|b| b.as_text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !input_text.is_empty() {
+                session.record_trace_input(&input_text);
+            }
+        }
+        Some(session)
+    } else {
+        None
+    };
+
+    let run_result: anyhow::Result<()> = async {
+        let mut saw_any_event = false;
+        let mut assistant_message_count: usize = 0;
+        let mut assistant_fragments: Vec<String> = Vec::new();
+        let mut compaction_attempts: u32 = 0;
+        let mut empty_turn_retries: u32 = 0;
+        let mut consecutive_nudge_count: u32 = 0;
+
+        let mut tool_failure_guard_state = LoopGuardState::default();
+        let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
+        let mut last_assistant_text = String::new();
+
+        let mut turns: u32 = 0;
+        let session_budget = SessionBudgetPolicy::from_env()
+            .unwrap_or_else(|err| {
+                tracing::warn!(
+                    error = %err,
+                    "ReplyLoop: invalid session budget configuration; using defaults"
+                );
+                SessionBudgetPolicy::default()
+            })
+            .resolve(role_name, model_id, context_window, max_turns_override);
+        let max_turns = session_budget.effective_max_turns;
+        tracing::debug!(
+            task_id = %task_id,
+            session_id = %session_id,
+            agent_type = %session_budget.role_name,
+            model_id = %session_budget.model_id,
+            context_window_tokens = session_budget.context_window_tokens,
+            context_window_known = session_budget.context_window_known,
+            max_turns,
+            max_cumulative_tokens = session_budget.max_cumulative_tokens,
+            soft_threshold_ratio = session_budget.soft_threshold_ratio,
+            hard_threshold_ratio = session_budget.hard_threshold_ratio,
+            "ReplyLoop: resolved session budget policy"
+        );
+        let mut wind_down_injected = false;
+        let mut wind_down_reason: Option<WindDownReason> = None;
+        let mut budget_wind_down_final_turn_spent = false;
+        let mut soft_budget_reminder_injected = false;
+
+        loop {
+            let hard_budget_exceeded = hard_budget_threshold_exceeded(
+                &session_budget,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+            );
+            let budget_wind_down_should_stop = budget_wind_down_final_turn_spent
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget);
+            if turns >= max_turns
+                || (!wind_down_injected && hard_budget_exceeded)
+                || budget_wind_down_should_stop
+            {
+                if !wind_down_injected {
+                    let reason = if hard_budget_exceeded && turns < max_turns {
+                        let cumulative_spend = total_tokens_in.saturating_add(total_tokens_out);
+                        let hard_cap = (session_budget.max_cumulative_tokens as f64)
+                            * session_budget.hard_threshold_ratio;
+                        WindDownReason::Budget {
+                            details: format!(
+                                "hard token budget threshold reached: cumulative_tokens={cumulative_spend}, hard_cap={}, max_cumulative_tokens={}, hard_threshold_ratio={}",
+                                hard_cap as u64,
+                                session_budget.max_cumulative_tokens,
+                                session_budget.hard_threshold_ratio
+                            ),
+                        }
+                    } else {
+                        WindDownReason::StepCap { max_turns }
+                    };
+                    let wind_down_reason_label = reason.as_str();
+                    let budget_triggered = reason.is_budget();
+                    wind_down_reason = Some(reason);
+                    wind_down_injected = true;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        max_turns,
+                        wind_down_reason = wind_down_reason_label,
+                        budget_triggered,
+                        total_tokens_in,
+                        total_tokens_out,
+                        current_context_tokens,
+                        max_cumulative_tokens = session_budget.max_cumulative_tokens,
+                        hard_threshold_ratio = session_budget.hard_threshold_ratio,
+                        "ReplyLoop: wind-down threshold reached — injecting summary directive \
+                         (one final turn before hard stop)"
+                    );
+                    let msg = wind_down_message();
+                    persist_session_message(&msg_repo, session_id, task_id, &msg).await;
+                    conversation.push(msg);
+                } else {
+                    let reason = wind_down_reason
+                        .clone()
+                        .unwrap_or(WindDownReason::StepCap { max_turns });
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        agent_type = %role_name,
+                        turns,
+                        max_turns,
+                        wind_down_ignored = true,
+                        wind_down_reason = reason.as_str(),
+                        "ReplyLoop: wind-down directive ignored; stopping session"
+                    );
+                    return Err(reason.hard_error(max_turns));
+                }
+            }
+
+            maybe_inject_soft_budget_reminder(
+                &mut soft_budget_reminder_injected,
+                &session_budget,
+                &msg_repo,
+                session_id,
+                task_id,
+                role_name,
+                turns,
+                total_tokens_in,
+                total_tokens_out,
+                current_context_tokens,
+                conversation,
+            )
+            .await;
+            turns += 1;
+
+            let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %session_id,
+                turn = turns,
+                worktree = %worktree_path.display(),
+                "ReplyLoop: starting provider stream; {}",
+                env_diag
+            );
+
+            // ── Start OTel generation span for this turn ─────────────────────
+            let otel_llm = otel_session.as_ref().map(|session| {
+                let llm = telemetry::LlmSpan::start(
+                    session.context(),
+                    provider.name(),
+                    model_id,
+                    turns,
+                );
+                let input = serialize_llm_input(conversation, tools);
+                llm.record_input(&serde_json::to_string(&input).unwrap_or_default());
+                llm
+            });
+
+            let tool_choice = tool_choice_for_turn(model_id, tools);
+            let stream_result = provider.stream(conversation, tools, tool_choice).await;
+            let stream = match stream_result {
+                Ok(s) => s,
+                Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e))
+                    && compaction_attempts < MAX_COMPACTION_RETRIES =>
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        compaction_attempts,
+                        error = %e,
+                        "ReplyLoop: recoverable provider error on stream init; compacting reactively"
+                    );
+                    if let Some(llm) = otel_llm {
+                        llm.end_error("context_length_exceeded");
+                    }
+                    let compacted = compact_conversation(
+                        provider, conversation, session_id, task_id,
+                        CompactionContext::MidSession(role_name.to_string()),
+                        context_window,
+                    ).await;
+                    if compacted {
+                        total_tokens_in = 0;
+                        total_tokens_out = 0;
+                        current_context_tokens = 0;
+                        compaction_attempts += 1;
+                        tool_dispatcher.clear_stash();
+                        conversation.push(Message::user("Continue with the task."));
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!(
+                        "context_length_exceeded and reactive compaction failed"
+                    ));
+                }
+                Err(e) => {
+                    if let Some(llm) = otel_llm {
+                        llm.end_error(&e.to_string());
+                    }
+                    let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                    let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
+                    return Err(anyhow::anyhow!(
+                        "provider stream init failed: display={} debug={:?}; {}; {}",
+                        e, e, diag, env_diag
+                    ));
+                }
+            };
+
+            let dispatch_ctx = ToolDispatchContext {
+                ctx: slot_ctx,
+                task_id,
+                worktree_path,
+                role_name,
+                tool_metadata: &tool_metadata,
+                tool_dispatcher,
+                otel_session: otel_session.as_ref(),
+            };
+            let stream_state = consume_provider_stream(StreamLoopContext {
+                provider,
+                stream,
+                tool_metadata: &tool_metadata,
+                dispatch: &dispatch_ctx,
+                task_id,
+                session_id,
+                role_name,
+                project_path,
+                worktree_path,
+                context_window,
+                ctx: slot_ctx,
+                cancel,
+                global_cancel,
+                activity_ts: &activity_ts,
+                last_rpc_touch: &last_rpc_touch,
+                last_token_flush: &last_token_flush,
+                compaction_attempts,
+                current_context_tokens: &mut current_context_tokens,
+                total_tokens_in: &mut total_tokens_in,
+                total_tokens_out: &mut total_tokens_out,
+                total_cache_read: &mut total_cache_read,
+                total_cache_write: &mut total_cache_write,
+                total_reasoning_out: &mut total_reasoning_out,
+            })
+            .await?;
+
+            let StreamTurnState {
+                turn_text,
+                turn_thinking,
+                turn_provider_state,
+                turn_tool_calls,
+                turn_tokens_in,
+                turn_tokens_out,
+                turn_cache_read,
+                turn_cache_write,
+                turn_reasoning_out,
+                interrupted,
+                saw_round_event,
+                needs_reactive_compaction,
+                streaming_results,
+                streaming_dispatched,
+            } = stream_state;
+            saw_any_event |= saw_round_event;
+
+            // ── End OTel generation span for this turn ───────────────────────
+            if let Some(llm) = otel_llm {
+                if interrupted.is_some() {
+                    llm.end_error("interrupted");
+                } else {
+                    llm.record_usage(turn_tokens_in, turn_tokens_out);
+                    llm.record_cache_usage(
+                        turn_cache_read,
+                        turn_cache_write,
+                        turn_reasoning_out,
+                    );
+                    if !turn_text.is_empty() {
+                        llm.record_output(&turn_text);
+                    }
+                    if !turn_thinking.is_empty() {
+                        llm.record_thinking(&turn_thinking);
+                    }
+                    let tool_names: Vec<String> = turn_tool_calls
+                        .iter()
+                        .filter_map(|tc| {
+                            if let ContentBlock::ToolUse { name, .. } = tc {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    llm.record_tool_calls(&tool_names);
+                    llm.end_ok();
+                }
+            }
+
+            if let Some(reason) = interrupted {
+                return Err(anyhow::anyhow!(reason));
+            }
+
+            // ── Reactive compaction: mid-stream context overflow ─────────────
+            if needs_reactive_compaction {
+                tracing::warn!(
+                    task_id = %task_id,
+                    compaction_attempts,
+                    "ReplyLoop: context_length_exceeded mid-stream; compacting reactively"
+                );
+                let compacted = compact_conversation(
+                    provider, conversation, session_id, task_id,
+                    CompactionContext::MidSession(role_name.to_string()),
+                    context_window,
+                ).await;
+                if compacted {
+                    total_tokens_in = 0;
+                    total_tokens_out = 0;
+                    current_context_tokens = 0;
+                    compaction_attempts += 1;
+                    tool_dispatcher.clear_stash();
+                    conversation.push(Message::user("Continue with the task."));
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "context_length_exceeded and reactive compaction failed"
+                ));
+            }
+
+            if !saw_round_event {
+                if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries) {
+                    empty_turn_retries = next_retry;
+                    let backoff = empty_turn_backoff(empty_turn_retries);
+                    tracing::warn!(
+                        task_id = %task_id,
+                        retry = empty_turn_retries,
+                        backoff_secs = backoff.as_secs(),
+                        "ReplyLoop: provider stream ended without events; backing off then retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                return Err(empty_turn_terminal_error(
+                    "no-event",
+                    empty_turn_retries,
+                    model_id,
+                    diag,
+                ));
+            }
+
+            // ── Build the assistant message from this turn ───────────────────
+            let mut assistant_content: Vec<ContentBlock> = Vec::new();
+            assistant_content.extend(turn_provider_state);
+            if !turn_thinking.is_empty() {
+                assistant_content.push(ContentBlock::Thinking { thinking: turn_thinking.clone() });
+            }
+            if !turn_text.is_empty() {
+                push_fragment(&mut assistant_fragments, format!("text:{turn_text}"));
+                last_assistant_text = turn_text.clone();
+                final_assistant_text = turn_text.clone();
+                assistant_content.push(ContentBlock::Text { text: turn_text.clone() });
+            }
+            for tool_call in &turn_tool_calls {
+                if let ContentBlock::ToolUse { id, .. } = tool_call {
+                    push_fragment(&mut assistant_fragments, format!("tool_use:{id}"));
+                }
+                assistant_content.push(tool_call.clone());
+            }
+
+            if assistant_content.is_empty() {
+                if empty_turn_is_reasoning_only(turn_reasoning_out) {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        turn = turns,
+                        reasoning_tokens_out = turn_reasoning_out,
+                        "ReplyLoop: reasoning-only empty turn — nudging instead of failing over"
+                    );
+                    let nudge = reasoning_only_nudge_message();
+                    persist_session_message(&msg_repo, session_id, task_id, &nudge).await;
+                    conversation.push(nudge);
+                    continue;
+                }
+                if let Some(next_retry) =
+                    should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
+                {
+                    empty_turn_retries = next_retry;
+                    let backoff = empty_turn_backoff(empty_turn_retries);
+                    tracing::warn!(
+                        task_id = %task_id,
+                        retry = empty_turn_retries,
+                        backoff_secs = backoff.as_secs(),
+                        "ReplyLoop: provider returned empty assistant turn; backing off then retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                return Err(empty_turn_terminal_error(
+                    "assistant",
+                    empty_turn_retries,
+                    model_id,
+                    diag,
+                ));
+            }
+            empty_turn_retries = 0;
+
+            let assistant_msg = Message {
+                role: Role::Assistant,
+                content: assistant_content,
+                metadata: Some(MessageMeta {
+                    input_tokens: Some(turn_tokens_in),
+                    output_tokens: Some(turn_tokens_out),
+                    timestamp: Some(
+                        slot_ctx.clock.now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    ),
+                    provider_data: None,
+                }),
+            };
+
+            assistant_message_count += 1;
+
+            slot_ctx.event_bus.send(DjinnEventEnvelope::session_message(
+                session_id,
+                task_id,
+                role_name,
+                &serialize_message(&assistant_msg),
+            ));
+
+            persist_session_message(&msg_repo, session_id, task_id, &assistant_msg).await;
+            conversation.push(assistant_msg);
+
+            // ── Budget wind-down: park on budget ─────────────────────────────
+            if wind_down_injected
+                && wind_down_reason
+                    .as_ref()
+                    .is_some_and(WindDownReason::is_budget)
+            {
+                let summary = turn_text.trim();
+                if turn_tool_calls.is_empty() && !summary.is_empty() {
+                    output.budget_wind_down_summary = Some(summary.to_string());
+                    output.budget_wind_down_details =
+                        wind_down_reason.as_ref().map(WindDownReason::details);
+                    tracing::info!(
+                        task_id = %task_id,
+                        agent_type = %role_name,
+                        turns,
+                        assistant_message_count,
+                        wind_down_reason = "budget",
+                        "ReplyLoop: wind-down summary captured — session complete (graceful step-cap stop)"
+                    );
+                    break;
+                }
+
+                budget_wind_down_final_turn_spent = true;
+                continue;
+            }
+
+            // ── Compaction threshold check ────────────────────────────────────
+            if needs_compaction(current_context_tokens, context_window) {
+                tracing::info!(
+                    task_id = %task_id,
+                    current_context_tokens,
+                    context_window,
+                    usage_pct = current_context_tokens as f64 / context_window as f64,
+                    "ReplyLoop: compaction threshold reached, compacting"
+                );
+                let compacted = compact_conversation(
+                    provider,
+                    conversation,
+                    session_id,
+                    task_id,
+                    CompactionContext::MidSession(role_name.to_string()),
+                    context_window,
+                )
+                .await;
+                if compacted {
+                    total_tokens_in = 0;
+                    total_tokens_out = 0;
+                    current_context_tokens = 0;
+                    tool_dispatcher.clear_stash();
+
+                    if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {
+                        compaction_attempts += 1;
+                        conversation.push(Message::user("Continue with the task."));
+                        continue;
+                    }
+                }
+            }
+
+            // ── Finalize-tool detection (ADR-036) ────────────────────────────
+            let primary_finalize = finalize_tool_names.first().copied().unwrap_or("");
+            if let Some(finalize_call) = turn_tool_calls
+                .iter()
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if name == primary_finalize))
+            {
+                let payload = if let ContentBlock::ToolUse { input, .. } = finalize_call {
+                    input.clone()
+                } else {
+                    serde_json::Value::Null
+                };
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    finalize_tool = %primary_finalize,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: primary finalize tool called — session complete"
+                );
+                output.finalize_payload = Some(payload);
+                output.finalize_tool_name = Some(primary_finalize.to_string());
+                break;
+            }
+            let alternate_finalize = turn_tool_calls
+                .iter()
+                .find(|tc| matches!(tc, ContentBlock::ToolUse { name, .. } if finalize_tool_names[1..].contains(&name.as_str())))
+                .and_then(|tc| if let ContentBlock::ToolUse { name, input, .. } = tc {
+                    Some((name.clone(), input.clone()))
+                } else {
+                    None
+                });
+
+            if alternate_finalize.is_none() && !turn_text.trim().is_empty() {
+                let signature = AssistantOutputSignature::from_content_blocks(
+                    turn_text.trim().to_string(),
+                    &turn_tool_calls,
+                );
+                if let Some(condition) = tool_failure_guard_state.record_assistant_output(signature)
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        kind = ?condition.kind(),
+                        signature = %condition.offending_signature_label(),
+                        observed = condition.observed,
+                        threshold = condition.threshold,
+                        "ReplyLoop: repeated assistant-output signature reached threshold; terminating"
+                    );
+                    return Err(loop_guard_error(condition, turns, session_id));
+                }
+            }
+
+            // ── G9 wind-down: capture the one-shot summary and end gracefully ─
+            if wind_down_injected && turn_tool_calls.is_empty() {
+                let fallback_reason = WindDownReason::StepCap { max_turns };
+                let reason = wind_down_reason.as_ref().unwrap_or(&fallback_reason);
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    wind_down_reason = reason.as_str(),
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: wind-down summary captured — session complete"
+                );
+                break;
+            }
+            if wind_down_injected {
+                let reason = wind_down_reason
+                    .clone()
+                    .unwrap_or(WindDownReason::StepCap { max_turns });
+                return Err(reason.hard_error(max_turns));
+            }
+
+            // ── Nudge loop: text-only without finalize ────────────────────────
+            if let Some((next_nudge_count, nudge_message)) = next_nudge_message(
+                !turn_tool_calls.is_empty(),
+                !tools.is_empty(),
+                consecutive_nudge_count,
+                finalize_tool_names,
+            )? {
+                consecutive_nudge_count = next_nudge_count;
+                tracing::warn!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    nudge = consecutive_nudge_count,
+                    finalize_tools = %finalize_tool_names.join("` or `"),
+                    "ReplyLoop: text-only turn without finalize — injecting nudge"
+                );
+                conversation.push(nudge_message);
+                continue;
+            }
+            if turn_tool_calls.is_empty() && tools.is_empty() {
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: text-only turn (no tools) — session complete"
+                );
+                break;
+            }
+
+            consecutive_nudge_count = 0;
+
+            let tool_result_blocks = collect_tool_results(
+                &turn_tool_calls,
+                streaming_results,
+                &streaming_dispatched,
+                &tool_metadata,
+                &dispatch_ctx,
+            )
+            .await;
+
+            let signatures_corrected_before_dispatch = corrected_tool_failure_signatures.clone();
+            let mut loop_guard_condition_to_inject: Option<LoopGuardCondition> = None;
+            let tool_batch_has_success = tool_result_blocks.iter().any(|result_block| {
+                matches!(
+                    result_block,
+                    ContentBlock::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )
+            });
+            if tool_batch_has_success {
+                tool_failure_guard_state.record_tool_success();
+                corrected_tool_failure_signatures.clear();
+            }
+            for (result_index, result_block) in tool_result_blocks.iter().enumerate() {
+                let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } = result_block
+                else {
+                    continue;
+                };
+
+                let Some(signature) =
+                    tool_call_signature_for_result(result_index, tool_use_id, &turn_tool_calls)
+                else {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        tool_use_id = %tool_use_id,
+                        "ReplyLoop: tool result could not be correlated to a tool-use signature"
+                    );
+                    continue;
+                };
+
+                if *is_error {
+                    let failure_text = tool_result_text(content);
+                    let condition = if tool_batch_has_success {
+                        tool_failure_guard_state.record_tool_failure_after_progress(
+                            signature.clone(),
+                            classify_tool_failure(content),
+                        )
+                    } else {
+                        tool_failure_guard_state
+                            .record_tool_failure(signature.clone(), classify_tool_failure(content))
+                    };
+                    if let Some(condition) = condition {
+                        if matches!(&condition.reason, LoopGuardReason::RepeatedToolFailure { .. })
+                            && !signatures_corrected_before_dispatch.contains(&signature)
+                        {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                signature = %signature.display_label(),
+                                observed = condition.observed,
+                                threshold = condition.threshold,
+                                failure = %failure_text,
+                                "ReplyLoop: repeated failing tool-call signature reached threshold; injecting corrective message"
+                            );
+                            corrected_tool_failure_signatures.insert(signature);
+                            loop_guard_condition_to_inject.get_or_insert(condition);
+                        } else {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                signature = %signature.display_label(),
+                                kind = ?condition.kind(),
+                                observed = condition.observed,
+                                threshold = condition.threshold,
+                                failure = %failure_text,
+                                "ReplyLoop: tool-failure loop guard reached threshold; terminating"
+                            );
+                            return Err(loop_guard_error(condition, turns, session_id));
+                        }
+                    }
+                }
+            }
+
+            // Touch activity after tool execution.
+            {
+                let now = slot_ctx.clock.now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                activity_ts.store(now, Ordering::Relaxed);
+                last_rpc_touch.store(now, Ordering::Relaxed);
+                if let Err(e) = slot_ctx.callbacks.touch_activity_rpc(task_id.to_string()).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "reply_loop: post-tool touch_activity RPC failed; \
+                         host stall poller may see stale idle for this turn"
+                    );
+                }
+            }
+
+            let tool_result_msg = Message {
+                role: Role::User,
+                content: tool_result_blocks,
+                metadata: None,
+            };
+            persist_session_message(&msg_repo, session_id, task_id, &tool_result_msg).await;
+            conversation.push(tool_result_msg);
+
+            if let Some(condition) = loop_guard_condition_to_inject {
+                inject_loop_guard_correction(
+                    &msg_repo,
+                    session_id,
+                    task_id,
+                    conversation,
+                    &condition,
+                )
+                .await;
+            }
+
+            // ── Post-dispatch finalize check for alternate finalize tools ─────
+            if let Some((name, payload)) = alternate_finalize {
+                tracing::info!(
+                    task_id = %task_id,
+                    agent_type = %role_name,
+                    finalize_tool = %name,
+                    turns,
+                    assistant_message_count,
+                    "ReplyLoop: alternate finalize tool dispatched — session complete"
+                );
+                output.finalize_payload = Some(payload);
+                output.finalize_tool_name = Some(name);
+                break;
+            }
+        }
+
+        if !saw_any_event {
+            let diag = runtime_fs_diagnostics(project_path, worktree_path);
+            return Err(anyhow::anyhow!(
+                "provider session produced no events; {}",
+                diag
+            ));
+        }
+
+        if !last_assistant_text.is_empty() {
+            output.ingest_text(&last_assistant_text);
+        }
+
+        tracing::info!(
+            task_id = %task_id,
+            agent_type = %role_name,
+            saw_any_event,
+            assistant_message_count,
+            turns,
+            finalize_called = output.finalize_payload.is_some(),
+            "ReplyLoop: session completed normally"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    // ── End session-level OTel span ──────────────────────────────────────
+    if let Some(session) = otel_session {
+        session.record_usage(total_tokens_in, total_tokens_out);
+        session.record_cache_usage(total_cache_read, total_cache_write, total_reasoning_out);
+        if !final_assistant_text.is_empty() {
+            session.record_trace_output(&final_assistant_text);
+        }
+        match &run_result {
+            Ok(()) => session.end_ok(),
+            Err(e) => session.end_error(&e.to_string()),
+        }
+    }
+
+    slot_ctx.deregister_activity(task_id);
+
+    (
+        run_result,
+        output,
+        total_tokens_in as i64,
+        total_tokens_out as i64,
+        total_cache_read as i64,
+        total_cache_write as i64,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_provider::provider::ProviderError;
+
+    #[test]
+    fn empty_turn_terminal_error_is_breaker_classifiable() {
+        for kind in ["no-event", "assistant"] {
+            let err =
+                empty_turn_terminal_error(kind, 2, "kimi-for-coding/k2p7", "diag".to_string());
+            let typed = err
+                .downcast_ref::<ProviderError>()
+                .expect("terminal empty-turn error must carry a typed ProviderError source");
+            assert_eq!(*typed, ProviderError::ProviderInternal { status: 500 });
+            assert!(
+                typed.retryable(),
+                "{kind}: a server-internal empty-turn failure is transient/retryable"
+            );
+            let display = err.to_string();
+            assert!(display.contains("empty"), "{kind}: {display}");
+            assert!(display.contains("diag"), "{kind}: {display}");
+        }
+    }
+
+    #[test]
+    fn empty_turn_terminal_error_codex_family_is_throttle_not_failure() {
+        for kind in ["no-event", "assistant"] {
+            let err = empty_turn_terminal_error(kind, 2, "openai/gpt-5.4", "diag".to_string());
+            let typed = err
+                .downcast_ref::<ProviderError>()
+                .expect("Codex empty-turn error must carry EmptyCompletion");
+            assert_eq!(*typed, ProviderError::EmptyCompletion);
+        }
+    }
 }
