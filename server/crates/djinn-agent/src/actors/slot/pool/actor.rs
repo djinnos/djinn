@@ -292,7 +292,6 @@ impl SlotPool {
         skip(self, project_path),
         fields(slot_id = tracing::field::Empty, model_id = %model_id, task_id = %task_id)
     )]
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn dispatch(
         &mut self,
         task_id: String,
@@ -368,7 +367,10 @@ impl SlotPool {
             }
 
             self.task_to_slot.insert(task_id.clone(), slot_id);
-            self.task_started.insert(task_id.clone(), Instant::now());
+            self.task_started.insert(
+                task_id.clone(),
+                djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new()),
+            );
             if let Some(project_id) = self.project_id_for_task(&task_id).await {
                 self.task_projects.insert(task_id.clone(), project_id);
             }
@@ -955,7 +957,6 @@ impl SlotPool {
         self.retired_slots.insert(slot_id);
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn shutdown(&mut self) {
         let active_ids: Vec<usize> = self
             .slot_models
@@ -979,9 +980,10 @@ impl SlotPool {
             }
         }
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new())
+            + Duration::from_secs(30);
         while !self.task_to_slot.is_empty() {
-            let now = Instant::now();
+            let now = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
             if now >= deadline {
                 break;
             }
