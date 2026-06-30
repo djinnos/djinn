@@ -10,6 +10,7 @@ use super::admission::{
 use super::admission::{model_under_user_cap, overlay_inflight_ledger};
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert};
 
 fn record_dispatch_attempt(outcome: &'static str) {
@@ -869,7 +870,7 @@ impl CoordinatorActor {
         // fails on empty/throttled provider turns) are still attributed and
         // backed off, instead of slipping past a short window and re-dispatching
         // every tick.
-        let prune_now = StdInstant::now();
+        let prune_now = SystemClock::new().now_instant();
         let expired_cooldown_task_ids: Vec<String> = self
             .dispatch_cooldowns
             .iter()
@@ -1281,8 +1282,10 @@ impl CoordinatorActor {
                             cooldown_secs = effective_cooldown.as_secs(),
                             "CoordinatorActor: repeated task failure — backing off dispatch (escalating cooldown)"
                         );
-                        self.dispatch_cooldowns
-                            .insert(task.id.clone(), StdInstant::now() + effective_cooldown);
+                        self.dispatch_cooldowns.insert(
+                            task.id.clone(),
+                            SystemClock::new().now_instant() + effective_cooldown,
+                        );
                         self.persist_durable_dispatch_state_update(
                             &task.id,
                             Some(&task.short_id),
@@ -1404,7 +1407,7 @@ impl CoordinatorActor {
                         "CoordinatorActor: no eligible model for task owner — backing off"
                     );
                     self.dispatch_cooldowns
-                        .insert(task.id.clone(), StdInstant::now() + cooldown);
+                        .insert(task.id.clone(), SystemClock::new().now_instant() + cooldown);
                     self.persist_durable_dispatch_state_update(
                         &task.id,
                         Some(&task.short_id),
@@ -1535,7 +1538,7 @@ impl CoordinatorActor {
                     self.last_dispatched.insert(
                         task.id.clone(),
                         DispatchMarker {
-                            instant: StdInstant::now(),
+                            instant: SystemClock::new().now_instant(),
                             role: role.to_owned(),
                         },
                     );
