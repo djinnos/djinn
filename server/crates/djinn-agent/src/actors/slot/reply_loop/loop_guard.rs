@@ -222,6 +222,17 @@ impl fmt::Display for LoopGuardError {
 impl std::error::Error for LoopGuardError {}
 
 /// Pure in-memory guard state for one reply loop.
+///
+/// Guard state is split into two categories:
+///
+/// 1. **Tool-failure accounting** (`tool_failure_counts`,
+///    `permission_denial_counts`, `consecutive_tool_failures`):
+///    cleared by both [`record_tool_success`] and [`record_durable_progress`].
+///
+/// 2. **No-progress / durable-progress streak state**
+///    (`assistant_output_counts`, `no_progress_turn_count`):
+///    cleared **only** by [`record_durable_progress`].  Generic tool success
+///    does not touch these counters.
 #[derive(Clone, Debug)]
 pub(crate) struct LoopGuardState {
     config: LoopGuardConfig,
@@ -229,6 +240,12 @@ pub(crate) struct LoopGuardState {
     permission_denial_counts: HashMap<ToolCallSignature, u32>,
     assistant_output_counts: HashMap<AssistantOutputSignature, u32>,
     consecutive_tool_failures: u32,
+    /// Number of consecutive turns (assistant→tool-result cycles) without an
+    /// explicit durable-progress observation.  Generic tool success does NOT
+    /// reset this counter; only [`LoopGuardState::record_durable_progress`]
+    /// does.  The downstream detector increments this via
+    /// [`LoopGuardState::increment_no_progress_streak`].
+    no_progress_turn_count: u32,
 }
 
 impl Default for LoopGuardState {
@@ -245,6 +262,7 @@ impl LoopGuardState {
             permission_denial_counts: HashMap::new(),
             assistant_output_counts: HashMap::new(),
             consecutive_tool_failures: 0,
+            no_progress_turn_count: 0,
         }
     }
 
@@ -328,13 +346,49 @@ impl LoopGuardState {
         }
     }
 
-    /// Record tool success/progress. A successful novel tool call is progress,
-    /// so all repeat counters and the consecutive-failure streak reset.
+    /// Record generic tool success.  A successful tool call clears
+    /// tool-failure accounting (identical-failure counts, permission-denial
+    /// counts, and the consecutive-failure streak) because the tool did not
+    /// fail.
+    ///
+    /// This does **not** clear the no-progress / durable-progress streak
+    /// state (assistant output counts and the no-progress turn counter).
+    /// Use [`record_durable_progress`] when an explicit durable-progress
+    /// observation is made.
     pub(crate) fn record_tool_success(&mut self) {
+        self.tool_failure_counts.clear();
+        self.permission_denial_counts.clear();
+        self.consecutive_tool_failures = 0;
+    }
+
+    /// Record an explicit durable-progress observation.  Resets **all**
+    /// guard streak state: tool-failure accounting, assistant-output repeat
+    /// counts, the consecutive-failure streak, and the no-progress turn
+    /// counter.
+    ///
+    /// This is the only path that clears the no-progress streak.  The
+    /// downstream durable-progress detector calls this when it determines
+    /// that a turn produced meaningful, non-no-op progress.
+    pub(crate) fn record_durable_progress(&mut self) {
         self.tool_failure_counts.clear();
         self.permission_denial_counts.clear();
         self.assistant_output_counts.clear();
         self.consecutive_tool_failures = 0;
+        self.no_progress_turn_count = 0;
+    }
+
+    /// Current no-progress streak length.  Incremented externally via
+    /// [`increment_no_progress_streak`] and reset by
+    /// [`record_durable_progress`].
+    pub(crate) fn no_progress_turn_count(&self) -> u32 {
+        self.no_progress_turn_count
+    }
+
+    /// Increment the no-progress turn counter by one.  Called by the
+    /// downstream durable-progress detector when a turn is classified as
+    /// no-progress.
+    pub(crate) fn increment_no_progress_streak(&mut self) {
+        self.no_progress_turn_count = self.no_progress_turn_count.saturating_add(1);
     }
 
     pub(crate) fn consecutive_tool_failures(&self) -> u32 {
@@ -636,6 +690,134 @@ mod tests {
             LoopGuardReason::ConsecutiveToolFailures {
                 last_signature: final_sig
             }
+        );
+    }
+
+    // ── Durable-progress / no-progress split tests ──────────────────────
+
+    #[test]
+    fn tool_success_does_not_reset_assistant_output_counts() {
+        let mut state = LoopGuardState::default();
+        let sig = AssistantOutputSignature::new(
+            "same plan",
+            vec![ToolCallSignature::new(
+                "read",
+                &json!({ "file_path": "src/lib.rs" }),
+            )],
+        );
+
+        // Accumulate 3 identical assistant outputs.
+        for _ in 0..3 {
+            assert!(state.record_assistant_output(sig.clone()).is_none());
+        }
+
+        // A generic tool success should NOT clear the assistant output counts.
+        state.record_tool_success();
+
+        // The 4th identical assistant output should still trip the guard
+        // because the count was preserved (now at 4).
+        let condition = state
+            .record_assistant_output(sig)
+            .expect("assistant output count was preserved across generic tool success");
+        assert_eq!(condition.kind(), LoopGuardKind::RepeatedAssistantOutput);
+        assert_eq!(condition.observed, 4);
+        assert_eq!(condition.threshold, 4);
+    }
+
+    #[test]
+    fn durable_progress_resets_assistant_output_counts() {
+        let mut state = LoopGuardState::default();
+        let sig = AssistantOutputSignature::new(
+            "same plan",
+            vec![ToolCallSignature::new(
+                "read",
+                &json!({ "file_path": "src/lib.rs" }),
+            )],
+        );
+
+        // Accumulate 3 identical assistant outputs.
+        for _ in 0..3 {
+            assert!(state.record_assistant_output(sig.clone()).is_none());
+        }
+
+        // An explicit durable-progress observation resets all counters.
+        state.record_durable_progress();
+
+        // Fresh start: 1st observation should not trip.
+        assert!(state.record_assistant_output(sig.clone()).is_none());
+        assert_eq!(state.no_progress_turn_count(), 0);
+    }
+
+    #[test]
+    fn tool_success_does_not_reset_no_progress_turn_count() {
+        let mut state = LoopGuardState::default();
+
+        // Simulate 5 no-progress turns.
+        for _ in 0..5 {
+            state.increment_no_progress_streak();
+        }
+        assert_eq!(state.no_progress_turn_count(), 5);
+
+        // A generic tool success should NOT reset the no-progress counter.
+        state.record_tool_success();
+        assert_eq!(state.no_progress_turn_count(), 5);
+    }
+
+    #[test]
+    fn durable_progress_resets_no_progress_turn_count() {
+        let mut state = LoopGuardState::default();
+
+        // Simulate 10 no-progress turns.
+        for _ in 0..10 {
+            state.increment_no_progress_streak();
+        }
+        assert_eq!(state.no_progress_turn_count(), 10);
+
+        // Explicit durable-progress observation resets the counter.
+        state.record_durable_progress();
+        assert_eq!(state.no_progress_turn_count(), 0);
+    }
+
+    #[test]
+    fn tool_success_still_resets_tool_failure_counts_and_consecutive() {
+        let mut state = LoopGuardState::default();
+        let sig_a = ToolCallSignature::new("shell", &json!({ "command": "false" }));
+        let sig_b = ToolCallSignature::new("read", &json!({ "file_path": "missing" }));
+
+        // 2 failures on sig_a (below threshold of 3).
+        assert!(
+            state
+                .record_tool_failure(sig_a.clone(), ToolFailureClass::General)
+                .is_none()
+        );
+        assert!(
+            state
+                .record_tool_failure(sig_a.clone(), ToolFailureClass::General)
+                .is_none()
+        );
+
+        // 1 failure on sig_b.
+        assert!(
+            state
+                .record_tool_failure(sig_b.clone(), ToolFailureClass::General)
+                .is_none()
+        );
+        assert_eq!(state.consecutive_tool_failures(), 3);
+
+        // Generic success resets tool-failure counts and consecutive.
+        state.record_tool_success();
+        assert_eq!(state.consecutive_tool_failures(), 0);
+
+        // sig_a failure count is back to 0, so 2 more should not trip.
+        assert!(
+            state
+                .record_tool_failure(sig_a.clone(), ToolFailureClass::General)
+                .is_none()
+        );
+        assert!(
+            state
+                .record_tool_failure(sig_a, ToolFailureClass::General)
+                .is_none()
         );
     }
 }
