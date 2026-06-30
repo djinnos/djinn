@@ -1,5 +1,6 @@
 ---
 source: src/server/tests/tool_schemas.rs
+assertion_line: 642
 expression: signatures
 ---
 [
@@ -19415,6 +19416,95 @@ expression: signatures
           ],
           "type": "object"
         },
+        "CiGateSnapshot": {
+          "description": "Snapshot of the current-head required-CI gate for a task's PR.\n\nPopulated from the repository-backed CI snapshot (`task_pr_ci_snapshots`).\n`None` when no snapshot exists yet (e.g. task has no PR or has not been\npolled). Downstream lifecycle/API code reads these fields directly instead\nof scraping activity prose.",
+          "properties": {
+            "blocking_required_check_names": {
+              "description": "Names of required checks that are currently failing and blocking merge.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "failure_fingerprint": {
+              "description": "Stable fingerprint of the current failure signature (e.g. sorted\nfailing check names + head SHA). `None` when not failing.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "first_seen_at": {
+              "description": "ISO-8601 timestamp when this snapshot was first observed.",
+              "type": "string"
+            },
+            "head_sha": {
+              "description": "Git SHA of the PR head this snapshot describes.",
+              "type": "string"
+            },
+            "last_remediation_base_sha": {
+              "description": "Base SHA of the last remediation attempt for this failing signature.\n`None` when no remediation has been attempted yet.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_seen_at": {
+              "description": "ISO-8601 timestamp when this snapshot was last observed/updated.",
+              "type": "string"
+            },
+            "pr_number": {
+              "description": "GitHub PR number the CI snapshot belongs to, when available.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "same_signature_count": {
+              "description": "How many consecutive observations carried the same failure fingerprint\nfor the same head SHA.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/CiStatus",
+              "description": "Current required-CI status for the PR head."
+            }
+          },
+          "required": [
+            "status",
+            "head_sha",
+            "blocking_required_check_names",
+            "first_seen_at",
+            "last_seen_at",
+            "same_signature_count"
+          ],
+          "type": "object"
+        },
+        "CiStatus": {
+          "description": "Required-CI status for the current PR head.\n\nSerializes/deserializes to/from the exact wire strings consumed by the\nbackend DTOs and (eventually) the frontend. These values are intentionally\nindependent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is\nderived downstream, not encoded here.",
+          "oneOf": [
+            {
+              "const": "passing",
+              "description": "All required checks passed on the current head.",
+              "type": "string"
+            },
+            {
+              "const": "failing",
+              "description": "At least one required check failed on the current head.",
+              "type": "string"
+            },
+            {
+              "const": "pending",
+              "description": "Required checks are still running; no blocking failure yet.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "CI state is not known (e.g. PR not yet polled, no checks present).",
+              "type": "string"
+            }
+          ]
+        },
         "TaskListItem": {
           "properties": {
             "acceptance_criteria": {
@@ -19460,6 +19550,17 @@ expression: signatures
                 "string",
                 "null"
               ]
+            },
+            "ci": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CiGateSnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current-head required-CI gate snapshot for this task's PR, if any."
             },
             "close_reason": {
               "type": [
