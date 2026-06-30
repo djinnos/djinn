@@ -1943,3 +1943,134 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
         "source must be ready after the normal blocker is closed (identical semantics to review hold)"
     );
 }
+
+/// End-to-end regression (pdn6 release-side): prove that closing a normal
+/// (non-review) blocker via `transition(Close)` — the same path used for
+/// the review hold — fires `emit_unblocked_tasks` and releases the blocked
+/// source back into dispatch readiness.
+///
+/// The `review_hold_release_lifecycle_proves_dispatch_readiness_recovery`
+/// test above proves the `emit_unblocked_tasks` event path for review-type
+/// holds but uses `set_status` for the normal blocker (bypassing the event
+/// path). This test fills that gap so any future predicate change that
+/// special-cases `review` blockers or alters `emit_unblocked_tasks` for
+/// task blockers is caught.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normal_blocker_release_via_transition_fires_unblocked_event() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = EpicRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .create_for_project(
+            &project.id,
+            djinn_db::EpicCreateInput {
+                title: "Release lifecycle epic",
+                description: "",
+                emoji: "",
+                color: "",
+                owner: "",
+                memory_refs: None,
+                status: None,
+                auto_breakdown: None,
+                originating_adr_id: None,
+                blocked_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Source task — a normal full-lifecycle work item.
+    let source = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Source task",
+            "desc",
+            "",
+            "task",
+            0,
+            "",
+            Some("open"),
+            Some(r#"[{"title":"ac1"}]"#),
+        )
+        .await
+        .unwrap();
+
+    // Normal blocker — `spike` uses simple lifecycle (open → in_progress →
+    // closed) so `transition(Close)` from `open` is a valid state-machine
+    // move. This mirrors a real non-review blocker task.
+    let normal_blocker = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Dependency spike",
+            "",
+            "",
+            "spike",
+            0,
+            "system",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Wire the blocker edge: source is blocked by the normal blocker.
+    repo.add_blocker(&source.id, &normal_blocker.id)
+        .await
+        .unwrap();
+
+    // ── Pre-condition: source is NOT ready while the blocker is open ──
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(project.id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !ready.iter().any(|t| t.id == source.id),
+        "source must NOT be ready while the normal blocker is open"
+    );
+
+    // Subscribe to events before closing the blocker.
+    let mut events = tx.subscribe();
+
+    // Close the blocker via `transition(Close)` — the same path used for
+    // the review hold. This calls `emit_unblocked_tasks` internally, which
+    // must fire a `TaskUpdated` for the now-unblocked source.
+    repo.transition(
+        &normal_blocker.id,
+        djinn_core::models::TransitionAction::Close,
+        "system",
+        "coordinator",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // ── emit_unblocked_tasks must fire a TaskUpdated event for the source ──
+    let released = wait_for_task_updated(&mut events, &source.id).await;
+    assert!(
+        released,
+        "closing a normal blocker via transition(Close) must emit TaskUpdated \
+         for the blocked source via emit_unblocked_tasks (identical to review hold)"
+    );
+
+    // ── The dispatch readiness query must now return the source ──
+    let ready = repo
+        .list_ready(ReadyQuery {
+            project_id: Some(project.id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        ready.iter().any(|t| t.id == source.id),
+        "source must be ready after the normal blocker is closed via transition(Close)"
+    );
+}

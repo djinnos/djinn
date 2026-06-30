@@ -911,6 +911,113 @@ mod tests {
         );
     }
 
+    /// Regression (pdn6 release-side): prove that `emit_unblocked_tasks` fires
+    /// for a normal (non-review) blocker when closed via `transition(Close)`,
+    /// not just via the raw `set_status` path used in the tests above.
+    ///
+    /// The existing tests prove the SQL readiness predicate works for both
+    /// blocker types, and the coordinator-level test proves
+    /// `emit_unblocked_tasks` works for review holds. This test fills the
+    /// remaining gap: the db-level event-driven release path for normal
+    /// blockers, so any predicate change that special-cases `review` blockers
+    /// is caught at this layer too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn emit_unblocked_tasks_fires_for_normal_blocker_via_transition() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+
+        // Source task — a normal work item.
+        let source = make_task(&repo, &epic_id, "task", None).await;
+
+        // Normal blocker — `spike` uses simple lifecycle
+        // (open → in_progress → closed), so `transition(Close)` from `open`
+        // is a valid state-machine move.
+        let normal_blocker = repo
+            .create_in_project(
+                &project.id,
+                Some(&epic_id),
+                "Dependency spike",
+                "",
+                "",
+                "spike",
+                0,
+                "system",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Wire the blocker edge.
+        repo.add_blocker(&source.id, &normal_blocker.id)
+            .await
+            .unwrap();
+
+        // ── Pre-condition: source is NOT ready ──
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ready.iter().any(|t| t.id == source.id),
+            "source must NOT be ready while the normal blocker is open"
+        );
+
+        // Close the blocker via `transition(Close)` — this calls
+        // `emit_unblocked_tasks` internally.
+        repo.transition(
+            &normal_blocker.id,
+            TransitionAction::Close,
+            "system",
+            "coordinator",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // ── emit_unblocked_tasks must fire a TaskUpdated for the source ──
+        let source_released = {
+            let events = captured.lock().unwrap();
+            events.iter().any(|ev| {
+                ev.entity_type == "task"
+                    && ev.action == "updated"
+                    && ev
+                        .payload
+                        .get("task")
+                        .and_then(|t| t.get("id"))
+                        .and_then(|v| v.as_str())
+                        == Some(source.id.as_str())
+            })
+        };
+        assert!(
+            source_released,
+            "closing a normal blocker via transition(Close) must emit TaskUpdated \
+             for the blocked source via emit_unblocked_tasks"
+        );
+
+        // ── The dispatch readiness query must now return the source ──
+        let ready = repo
+            .list_ready(ReadyQuery {
+                project_id: Some(project.id.clone()),
+                limit: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            ready.iter().any(|t| t.id == source.id),
+            "source must be ready after the normal blocker is closed via transition(Close)"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ci_snapshot_defaults_to_unknown_and_maps_on_task_reads() {
         let db = Database::open_in_memory().unwrap();
