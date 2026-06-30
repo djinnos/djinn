@@ -13,6 +13,7 @@ use super::messages::CoordinatorMessage;
 use super::types::*;
 use crate::roles::RoleRegistry;
 use djinn_control_plane::bridge::RuntimeOps;
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_core::models::parse_json_array;
 use djinn_db::Database;
@@ -406,10 +407,10 @@ impl CoordinatorActor {
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
-            last_stale_sweep: StdInstant::now(),
-            last_auto_dispatch_sweep: StdInstant::now(),
-            last_proposal_review_sweep: StdInstant::now(),
-            last_graph_refresh: StdInstant::now(),
+            last_stale_sweep: SystemClock::new().now_instant(),
+            last_auto_dispatch_sweep: SystemClock::new().now_instant(),
+            last_proposal_review_sweep: SystemClock::new().now_instant(),
+            last_graph_refresh: SystemClock::new().now_instant(),
             graph_warmer,
             mirror,
             runtime_ops,
@@ -467,7 +468,7 @@ impl CoordinatorActor {
         let summary = self.apply_rehydrated_dispatch_state(
             records,
             ::time::OffsetDateTime::now_utc(),
-            StdInstant::now(),
+            SystemClock::new().now_instant(),
         );
         tracing::info!(
             records = summary.records,
@@ -553,7 +554,7 @@ impl CoordinatorActor {
     }
 
     pub fn dispatch_state_snapshot(&self) -> CoordinatorDebugSnapshot {
-        let instant_now = StdInstant::now();
+        let instant_now = SystemClock::new().now_instant();
         let wall_now = ::time::OffsetDateTime::now_utc();
 
         let mut cooldowns: Vec<_> = self
@@ -732,20 +733,20 @@ impl CoordinatorActor {
         if self.last_stale_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             let app_state = self.maintenance_context();
             health::sweep_stale_resources(&self.db, &app_state).await;
-            self.last_stale_sweep = StdInstant::now();
+            self.last_stale_sweep = SystemClock::new().now_instant();
         }
         if self.last_auto_dispatch_sweep.elapsed() >= AUTO_DISPATCH_SWEEP_INTERVAL {
             self.sweep_stale_auto_dispatches().await;
-            self.last_auto_dispatch_sweep = StdInstant::now();
+            self.last_auto_dispatch_sweep = SystemClock::new().now_instant();
         }
         if self.last_proposal_review_sweep.elapsed() >= STALE_SWEEP_INTERVAL {
             self.sweep_proposals_needing_review().await;
             self.sweep_proposals_needing_reconcile().await;
-            self.last_proposal_review_sweep = StdInstant::now();
+            self.last_proposal_review_sweep = SystemClock::new().now_instant();
         }
         if self.last_graph_refresh.elapsed() >= GRAPH_REFRESH_INTERVAL {
             self.refresh_canonical_graphs_if_stale().await;
-            self.last_graph_refresh = StdInstant::now();
+            self.last_graph_refresh = SystemClock::new().now_instant();
         }
         // Run association pruning once per ~hour (120 ticks at 30s intervals)
         self.prune_tick_counter += 1;
@@ -768,7 +769,7 @@ impl CoordinatorActor {
         {
             self.idle_consolidation_handle = None;
             self.idle_consolidation_cancel = None;
-            self.last_idle_consolidation = Some(StdInstant::now());
+            self.last_idle_consolidation = Some(SystemClock::new().now_instant());
             tracing::info!("CoordinatorActor: idle consolidation sweep completed");
         }
         // Only attempt a new sweep when no sweep is already running.
@@ -839,12 +840,13 @@ impl CoordinatorActor {
     }
 
     pub(super) fn current_rate_limited_until(&self) -> Option<StdInstant> {
-        suppression_remaining(std::time::Instant::now())
-            .map(|remaining| StdInstant::now() + remaining)
+        let now = SystemClock::new().now_instant();
+        suppression_remaining(now).map(|remaining| now + remaining)
     }
 
     pub(super) fn should_skip_background_llm_work(&self, operation: &str) -> bool {
-        if let Some(remaining) = suppression_remaining(std::time::Instant::now()) {
+        let now = SystemClock::new().now_instant();
+        if let Some(remaining) = suppression_remaining(now) {
             tracing::info!(
                 operation,
                 remaining_ms = remaining.as_millis(),
