@@ -23,7 +23,7 @@ use crate::context::AgentContext;
 /// logic (`dispatch_task_runtime`). Other `SlotHostCallbacks` methods are stubs
 /// because the host-side dispatch path uses `AgentContext` directly for MCP
 /// resolution, prompt rendering, etc.
-pub(super) fn agent_to_dispatch_slot_context(
+pub(crate) fn agent_to_dispatch_slot_context(
     agent: &AgentContext,
 ) -> djinn_slot::host::SlotContext {
     djinn_slot::host::SlotContext {
