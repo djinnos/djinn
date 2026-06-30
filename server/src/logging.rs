@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
 const LOG_FILE_PREFIX: &str = "djinn.log";
 const LOG_RETENTION_DAYS: u64 = 7;
@@ -33,9 +35,8 @@ pub fn file_prefix() -> &'static str {
     LOG_FILE_PREFIX
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn prune_old_logs(dir: &std::path::Path) -> std::io::Result<()> {
-    let now = SystemTime::now();
+    let now = SystemClockTrait::new().now();
     let keep_for = Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);
 
     for entry in fs::read_dir(dir)? {
