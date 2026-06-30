@@ -342,15 +342,15 @@ fn budget_for_indexer_at(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
+    use djinn_core::clock::{Clock, SystemClock};
 
     // --- Helpers -----------------------------------------------------------
 
     /// Build a deadline whose `started_at` is `now` so tests are deterministic.
     fn fresh_deadline(max_secs: u64, reserve_secs: u64) -> (ActiveDeadline, Instant) {
-        let now = Instant::now();
+        let now = SystemClock::new().now_instant();
         let deadline = ActiveDeadline {
             started_at: now,
             max_runtime: Duration::from_secs(max_secs),
@@ -628,7 +628,9 @@ mod tests {
         // Simulate a deadline where the elapsed time has already exceeded
         // max_runtime. We construct the deadline with `started_at` in the past
         // so `remaining_deadline` saturates to zero.
-        let started_at = Instant::now() - Duration::from_secs(10);
+        let clock = SystemClock::new();
+        let now = clock.now_instant();
+        let started_at = now - Duration::from_secs(10);
         let deadline = ActiveDeadline {
             started_at,
             max_runtime: Duration::from_secs(5),
@@ -640,7 +642,7 @@ mod tests {
             &size,
             None,
             Some(&deadline),
-            Instant::now(),
+            now,
         );
         assert_eq!(budget.total, Duration::ZERO);
         assert!(budget.reason.contains("deadline_exhausted"));
