@@ -149,7 +149,15 @@ impl TaskRepository {
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
-                    t.agent_type, t.created_by_user_id
+                    t.agent_type, t.created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -193,7 +201,15 @@ impl TaskRepository {
                     t.intervention_count, t.last_intervention_at,
                     t.created_at, t.updated_at, t.closed_at,
                     t.close_reason, t.merge_commit_sha, t.pr_url, t.merge_conflict_metadata, t.memory_refs::text AS memory_refs,
-                    t.agent_type, t.created_by_user_id
+                    t.agent_type, t.created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = t.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha
              FROM tasks t
              WHERE {where_sql}
              ORDER BY t.priority ASC, t.created_at ASC
@@ -292,7 +308,15 @@ impl TaskRepository {
                     intervention_count, last_intervention_at,
                     created_at, updated_at, closed_at,
                     close_reason, merge_commit_sha, pr_url, merge_conflict_metadata, memory_refs::text AS memory_refs,
-                    created_by_user_id,
+                    agent_type, created_by_user_id,
+                    COALESCE((SELECT s.ci_status FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 'unknown') AS ci_status,
+                    (SELECT s.head_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_head_sha,
+                    COALESCE((SELECT s.blocking_required_check_names::text FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), '[]') AS ci_blocking_required_check_names,
+                    (SELECT s.failure_fingerprint FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_failure_fingerprint,
+                    (SELECT s.first_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_first_seen_at,
+                    (SELECT s.last_seen_at FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_seen_at,
+                    COALESCE((SELECT s.same_signature_count FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1), 0) AS ci_same_signature_count,
+                    (SELECT s.last_remediation_base_sha FROM task_pr_ci_snapshots s WHERE s.task_id = tasks.id ORDER BY s.last_seen_at DESC LIMIT 1) AS ci_last_remediation_base_sha,
                     (SELECT COUNT(*) FROM blockers b
                      JOIN tasks bt ON b.blocking_task_id = bt.id
                      WHERE b.task_id = tasks.id AND bt.status != 'closed') AS unresolved_blocker_count
