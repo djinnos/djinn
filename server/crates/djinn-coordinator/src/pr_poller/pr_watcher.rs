@@ -114,19 +114,20 @@ impl CoordinatorActor {
 
             // ── Record CI snapshot (sole writer for GitHub-derived fields) ──
             let pr_number = pull_number as i64;
-            self.record_ci_snapshot(
-                &task.id,
-                &task.short_id,
-                pr_number,
-                &pr.head.sha,
-                &pr.base.ref_name,
-                pull_number,
-                gh_client,
-                &owner,
-                &repo,
-                &checks,
-            )
-            .await;
+            let ci_status = self
+                .record_ci_snapshot(
+                    &task.id,
+                    &task.short_id,
+                    pr_number,
+                    &pr.head.sha,
+                    &pr.base.ref_name,
+                    pull_number,
+                    gh_client,
+                    &owner,
+                    &repo,
+                    &checks,
+                )
+                .await;
 
             // ── Merged? ───────────────────────────────────────────────────────
             if pr.merged == Some(true) {
@@ -162,60 +163,54 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── CI checks ─────────────────────────────────────────────────────
-            if checks.check_runs.is_empty() {
-                // No checks exist — repo has no CI configured.  Since the
-                // minimum-age guard above already elapsed, treat as green.
-                tracing::info!(
-                    task_id = %task.short_id,
-                    pr = pull_number,
-                    "PR poller: no CI check-runs found after min-age guard — treating as passed"
-                );
-                self.persist_ci_snapshot(
-                    &task.id,
-                    pull_number,
-                    &pr.head.sha,
-                    CiStatus::Unknown,
-                    vec![],
-                    None,
-                    0,
-                )
-                .await;
-            } else {
-                let all_completed = checks.check_runs.iter().all(|cr| cr.status == "completed");
-                if !all_completed {
-                    // CI checks still running — skip, check next tick.
-                    self.persist_ci_snapshot(
-                        &task.id,
-                        pull_number,
-                        &pr.head.sha,
-                        CiStatus::Pending,
-                        vec![],
-                        None,
-                        0,
-                    )
-                    .await;
-                    continue;
-                }
-                // All completed — check for failures.
-                let failed_checks: Vec<&CheckRun> = checks
-                    .check_runs
-                    .iter()
-                    .filter(|cr| {
-                        matches!(
-                            cr.conclusion.as_deref(),
-                            Some("failure") | Some("timed_out") | Some("cancelled")
+            // ── CI gate decision (from durable snapshot) ──────────────────────
+            // The durable CI snapshot recorded above is the authority for
+            // whether the PR may advance.  Pending/Unknown hold in pr_draft
+            // (derived display state: awaiting_ci); Failing routes through
+            // remediation; Passing proceeds to merge-conflict check + undraft.
+            match ci_status {
+                CiStatus::Pending | CiStatus::Unknown => {
+                    // No-CI-configured fast path: after the min-age guard
+                    // elapses, an empty check-run list means the repo has
+                    // no CI configured — treat as green.
+                    if checks.check_runs.is_empty() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            "PR poller: no CI check-runs found after min-age guard — treating as passed"
+                        );
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &pr.head.sha,
+                            CiStatus::Passing,
+                            vec![],
+                            None,
+                            0,
                         )
-                    })
-                    .collect();
-                if !failed_checks.is_empty() {
-                    // Route through the shared CI-failure handler: it filters
-                    // to *blocking* (required) checks, short-circuits the
-                    // diff-empty re-emit, and caps the rework loop with
-                    // escalation. Returns `true` when it consumed the event
-                    // (reworked or force-closed); `false` when every failure
-                    // was non-blocking and we should fall through as if CI
-                    // passed.
+                        .await;
+                    } else {
+                        // CI checks still running or state unknown — hold
+                        // in pr_draft without failure escalation or re-dispatch.
+                        continue;
+                    }
+                }
+                CiStatus::Failing => {
+                    // Required checks have failed.  Route through the shared
+                    // CI-failure handler which filters to blocking (required)
+                    // checks, applies the same-signature/scope-inversion/
+                    // diff-empty/escalation logic, and either reworks the
+                    // task or parks it on a remediation blocker.
+                    let failed_checks: Vec<&CheckRun> = checks
+                        .check_runs
+                        .iter()
+                        .filter(|cr| {
+                            matches!(
+                                cr.conclusion.as_deref(),
+                                Some("failure") | Some("timed_out") | Some("cancelled")
+                            )
+                        })
+                        .collect();
                     let handled = self
                         .handle_ci_failure(
                             gh_client,
@@ -234,23 +229,27 @@ impl CoordinatorActor {
                         self.review_stuck_sha_first_seen.remove(&task.id);
                         continue;
                     }
-                    // else: only advisory checks failed — fall through to the
-                    // undraft path below as if CI is green.
+                    // Advisory-only failures slipped through (required checks
+                    // are green).  Overwrite the failing snapshot with passing.
+                    self.persist_ci_snapshot(
+                        &task.id,
+                        pull_number,
+                        &pr.head.sha,
+                        CiStatus::Passing,
+                        vec![],
+                        None,
+                        0,
+                    )
+                    .await;
+                }
+                CiStatus::Passing => {
+                    // All required checks passed — proceed to merge-conflict
+                    // check and undraft.
                 }
             }
 
-            // CI passed (or no CI configured). Check for merge conflicts before undrafting.
-            // Persist the passing CI snapshot before checking mergeability.
-            self.persist_ci_snapshot(
-                &task.id,
-                pull_number,
-                &pr.head.sha,
-                CiStatus::Passing,
-                vec![],
-                None,
-                0,
-            )
-            .await;
+            // CI passed (or no CI configured, or advisory-only failures).
+            // Check for merge conflicts before undrafting.
             if pr.mergeable == Some(false) {
                 // Clean-merge fast path (offloaded): try to resolve the conflict
                 // mechanically (merge target → task branch, push) in a background
@@ -635,7 +634,7 @@ impl CoordinatorActor {
         owner: &str,
         repo: &str,
         checks: &djinn_provider::github_api::CheckRunsResponse,
-    ) {
+    ) -> CiStatus {
         let task_repo = self.task_repo();
 
         // ── Head-sha change detection ───────────────────────────────────────
@@ -668,7 +667,7 @@ impl CoordinatorActor {
                     {
                         // Leave as `pending`; the next poll will re-evaluate
                         // when all checks complete.
-                        return;
+                        return CiStatus::Pending;
                     }
                     // Fall through to classify the completed checks below.
                 }
@@ -679,7 +678,7 @@ impl CoordinatorActor {
                         error = %e,
                         "PR poller: failed to reset CI snapshot for head change"
                     );
-                    return;
+                    return CiStatus::Unknown;
                 }
             }
         }
@@ -687,10 +686,11 @@ impl CoordinatorActor {
         // ── Classify check state ────────────────────────────────────────────
         let ci_status = if checks.check_runs.is_empty() {
             // No checks exist — repo has no CI configured. After the
-            // minimum-age guard elapses, treat as passing (preserves
-            // existing behavior). The snapshot records `pending` until
-            // then.
-            CiStatus::Pending
+            // minimum-age guard elapses, the poller treats this as green
+            // (see the no-CI fast path in `poll_pr_draft_tasks`). The
+            // snapshot records `unknown` to distinguish from "checks
+            // still running" (`pending`).
+            CiStatus::Unknown
         } else if checks.check_runs.iter().all(|cr| cr.status == "completed") {
             let failed_checks: Vec<&CheckRun> = checks
                 .check_runs
@@ -781,6 +781,8 @@ impl CoordinatorActor {
                 );
             }
         }
+
+        ci_status
     }
 
     /// Record `unknown` CI snapshot when GitHub PR/check data is unavailable.
@@ -833,4 +835,56 @@ impl CoordinatorActor {
     }
 
     // ── pr_review polling (review monitoring) ────────────────────────────────
+}
+
+/// Decision for a `pr_draft` task based on the durable CI snapshot status.
+///
+/// Encapsulates the transition matrix so the decision logic is testable in
+/// isolation from the async poller machinery.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PrDraftCiAction {
+    /// CI is passing (or no CI configured after the min-age guard) — proceed
+    /// to the merge-conflict check and undraft.
+    ///
+    /// `needs_passing_persist` is `true` when the caller should persist a
+    /// `Passing` snapshot before proceeding (e.g. the no-CI-configured fast
+    /// path or the advisory-only-failure fallthrough where the snapshot was
+    /// written as `Unknown`/`Failing` by `record_ci_snapshot` but the
+    /// lifecycle treats the PR as green).
+    Proceed { needs_passing_persist: bool },
+    /// CI is pending or unknown — hold in `pr_draft` without failure
+    /// escalation, force-close, or worker re-dispatch.
+    Hold,
+    /// Required CI checks have failed — route through the shared
+    /// `handle_ci_failure` remediation/intervention handler.
+    RouteToRemediation,
+}
+
+/// Decide the `pr_draft` CI gate action from the durable snapshot status and
+/// the raw check-run data.
+///
+/// This is the pure decision function tested in isolation; the poller calls
+/// it after `record_ci_snapshot()` to determine the next action.
+#[cfg(test)]
+pub(crate) fn decide_pr_draft_ci_action(
+    ci_status: CiStatus,
+    has_check_runs: bool,
+) -> PrDraftCiAction {
+    match ci_status {
+        CiStatus::Pending | CiStatus::Unknown => {
+            if !has_check_runs {
+                // No CI configured — treat as green after min-age guard.
+                PrDraftCiAction::Proceed {
+                    needs_passing_persist: true,
+                }
+            } else {
+                PrDraftCiAction::Hold
+            }
+        }
+        CiStatus::Failing => PrDraftCiAction::RouteToRemediation,
+        CiStatus::Passing => PrDraftCiAction::Proceed {
+            needs_passing_persist: false,
+        },
+    }
 }

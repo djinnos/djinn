@@ -1,14 +1,14 @@
 // djinn:allow-oversize
 use super::{
-    AutoMergeFastPathState, AutoMergeTickDecision, Task, advisory_checks_section,
+    AutoMergeFastPathState, AutoMergeTickDecision, PrDraftCiAction, Task, advisory_checks_section,
     blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,
-    count_consecutive_identical, decide_auto_merge_tick, dequeue_reason_is_failure,
-    dequeue_requires_rework, detect_scope_inversion, effective_review_decision, extract_crate_name,
-    extract_crate_names, is_advisory_check_name, is_conversation_resolution_block,
-    is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
-    pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
-    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
-    should_auto_resolve_conversations,
+    count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
+    dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
+    effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
+    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
+    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
+    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
 };
 use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
@@ -2167,4 +2167,125 @@ fn snapshot_input_for_passing_status_has_no_fingerprint() {
     assert_eq!(snapshot.ci_status, CiStatus::Passing);
     assert!(snapshot.failure_fingerprint.is_none());
     assert!(snapshot.blocking_required_check_names.is_empty());
+}
+
+// ── pr_draft CI gate transition matrix tests ──────────────────────────────
+
+#[test]
+fn pr_draft_ci_action_passing_proceeds() {
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Passing, true),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+    );
+}
+
+#[test]
+fn pr_draft_ci_action_pending_holds() {
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Pending, true),
+        PrDraftCiAction::Hold,
+    );
+}
+
+#[test]
+fn pr_draft_ci_action_unknown_holds() {
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Unknown, true),
+        PrDraftCiAction::Hold,
+    );
+}
+
+#[test]
+fn pr_draft_ci_action_pending_no_checks_proceeds_as_no_ci() {
+    // After the min-age guard elapses with no check-runs, the repo has no CI
+    // configured — treat as green.
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Pending, false),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: true
+        },
+    );
+}
+
+#[test]
+fn pr_draft_ci_action_unknown_no_checks_proceeds_as_no_ci() {
+    // Same for Unknown (record_ci_snapshot returns Unknown for empty checks).
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Unknown, false),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: true
+        },
+    );
+}
+
+#[test]
+fn pr_draft_ci_action_failing_routes_to_remediation() {
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Failing, true),
+        PrDraftCiAction::RouteToRemediation,
+    );
+}
+
+/// Advisory-only failures are non-blocking: when required checks are passing
+/// the CI status is Passing and the action is Proceed (not RouteToRemediation).
+#[test]
+fn advisory_only_failures_proceed_through_ci_gate() {
+    // Simulate: only Vercel (advisory) failed; required contexts list
+    // "Quality Gate" and "unit tests" which are green.
+    let vercel = check_run("Vercel – portal", 200);
+    let required = vec!["Quality Gate".to_string(), "unit tests".to_string()];
+
+    let failed = vec![&vercel];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert!(
+        blocking.is_empty(),
+        "advisory-only failures must not be blocking"
+    );
+
+    // The snapshot classifier treats empty blocking as Passing.
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else {
+        CiStatus::Failing
+    };
+    assert_eq!(ci_status, CiStatus::Passing);
+
+    // The gate decision is Proceed (no persist needed — snapshot is already
+    // Passing).
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+    );
+}
+
+/// Required failures route through remediation — the advisory + required
+/// mixed case.
+#[test]
+fn mixed_required_and_advisory_failures_route_to_remediation() {
+    let gate = check_run("Quality Gate", 100);
+    let vercel = check_run("Vercel – portal", 200);
+    let required = vec!["Quality Gate".to_string()];
+
+    let failed = vec![&gate, &vercel];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert_eq!(blocking.len(), 1, "only the required check is blocking");
+    assert_eq!(blocking[0].name, "Quality Gate");
+
+    // Snapshot classifier: blocking is non-empty → Failing.
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else {
+        CiStatus::Failing
+    };
+    assert_eq!(ci_status, CiStatus::Failing);
+
+    // Gate decision: RouteToRemediation (required check failed).
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::RouteToRemediation,
+    );
 }
