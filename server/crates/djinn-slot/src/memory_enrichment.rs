@@ -911,7 +911,135 @@ async fn process_batch_claims(
     }
 }
 
+// ── process_batch_edges: endpoint validation + dedup decision helpers ────────
+//
+// The helpers below are private seams for `process_batch_edges`. They isolate
+// the validation/decision logic (endpoint parsing & knownness, edge-kind parse,
+// proposal-evidence gating, wikilink-duplicate decision + drop accounting) so
+// the top-level orchestrator reads as a flat sequence of decisions followed by
+// persistence/report emission.
+//
+// All helpers emit the same non-fatal `tracing::debug!` events that the
+// inlined code did, preserving the current report/drop semantics that the
+// `m27o` characterization suite locks down.
+
+/// Validate that an LLM edge endpoint's `*_entity_type` is recognized *and*
+/// that the endpoint id is known to the current batch (notes) or to the wider
+/// proposal set (proposals).
+///
+/// Returns `Some(type)` when the endpoint is a valid known entity, `None`
+/// when the endpoint should be dropped. `None` always emits a debug event
+/// describing why the endpoint failed validation.
+fn classify_edge_endpoint(
+    project_id: &str,
+    endpoint_role: &str, // "source" or "target" — used in debug log wording
+    entity_type_str: &str,
+    endpoint_id: &str,
+    batch_ids: &[String],
+    proposal_ids: &HashSet<String>,
+) -> Option<MemoryEntityType> {
+    let entity_type = match parse_entity_type(entity_type_str) {
+        Some(t) => t,
+        None => {
+            tracing::debug!(
+                project_id = %project_id,
+                role = %endpoint_role,
+                entity_type = %entity_type_str,
+                "memory_enrichment: dropping edge with unrecognized entity_type",
+            );
+            return None;
+        }
+    };
+    let known = match entity_type {
+        MemoryEntityType::Note => batch_ids.contains(&endpoint_id.to_string()),
+        MemoryEntityType::Proposal => proposal_ids.contains(endpoint_id),
+    };
+    if !known {
+        tracing::debug!(
+            project_id = %project_id,
+            role = %endpoint_role,
+            entity_type = ?entity_type,
+            endpoint_id = %endpoint_id,
+            "memory_enrichment: dropping edge with unknown endpoint",
+        );
+        return None;
+    }
+    Some(entity_type)
+}
+
+/// Parse the LLM edge kind string into a `NoteAssociationKind`. `None` means
+/// the edge should be dropped; a debug event is emitted in that case to
+/// preserve the previous in-line behavior.
+fn parse_and_validate_edge_kind(project_id: &str, kind_str: &str) -> Option<NoteAssociationKind> {
+    match parse_edge_kind(kind_str) {
+        Some(k) => Some(k),
+        None => {
+            tracing::debug!(
+                project_id = %project_id,
+                kind = %kind_str,
+                "memory_enrichment: dropping edge with unrecognized kind"
+            );
+            None
+        }
+    }
+}
+
+/// Enforce the proposal-evidence rule: any edge that involves a proposal
+/// endpoint must carry an evidence quote.
+///
+/// `true` means the edge may proceed; `false` means it must be dropped
+/// (a debug event is emitted). For non-proposal edges this is always `true`.
+fn require_proposal_evidence(
+    project_id: &str,
+    involves_proposal: bool,
+    evidence_quote: Option<&str>,
+) -> bool {
+    if involves_proposal && evidence_quote.is_none() {
+        tracing::debug!(
+            project_id = %project_id,
+            "memory_enrichment: dropping proposal-involving edge without evidence_quote"
+        );
+        return false;
+    }
+    true
+}
+
+/// Decide whether a note-note edge duplicates an explicit wikilink between
+/// `source` and `target`. For proposal-involving edges, deduplication is
+/// skipped and the edge is allowed through.
+///
+/// When `true` is returned the edge should be dropped (the
+/// `edges_dropped_wikilink_dup` counter has already been incremented in one
+/// place, matching the previous in-line report-mutation semantics). `false`
+/// means the edge may proceed.
+fn classify_wikilink_duplicate(
+    wikilink_pairs: &HashSet<(String, String)>,
+    involves_proposal: bool,
+    source: &str,
+    target: &str,
+    report: &mut EnrichmentReport,
+) -> bool {
+    if involves_proposal {
+        return false;
+    }
+    if is_wikilink_duplicate(wikilink_pairs, source, target) {
+        report.edges_dropped_wikilink_dup += 1;
+        return true;
+    }
+    false
+}
+
 /// Process edges from a parsed enrichment response, with wikilink dedup.
+///
+/// Top-level orchestration (after the helpers above were extracted):
+/// 1. load wikilink dedup state
+/// 2. iterate bounded candidate edges (`MAX_EDGES_PER_BATCH`)
+/// 3. validate endpoints (`classify_edge_endpoint` × 2)
+/// 4. validate edge kind (`parse_and_validate_edge_kind`)
+/// 5. apply proposal evidence / wikilink duplicate rules
+/// 6. persist association (persistence is inlined for now; will move to a
+///    follow-up helper in `twpx`)
+/// 7. append report edge
 async fn process_batch_edges(
     project_id: &str,
     llm_edges: &[LlmEdge],
@@ -931,87 +1059,52 @@ async fn process_batch_edges(
             break;
         }
 
-        let source_type = match parse_entity_type(&llm_edge.source_entity_type) {
+        let source_type = match classify_edge_endpoint(
+            project_id,
+            "source",
+            &llm_edge.source_entity_type,
+            &llm_edge.source_note_id,
+            batch_ids,
+            proposal_ids,
+        ) {
             Some(t) => t,
-            None => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    source_entity_type = %llm_edge.source_entity_type,
-                    "memory_enrichment: dropping edge with unknown source_entity_type"
-                );
-                continue;
-            }
+            None => continue,
         };
-        let target_type = match parse_entity_type(&llm_edge.target_entity_type) {
+        let target_type = match classify_edge_endpoint(
+            project_id,
+            "target",
+            &llm_edge.target_entity_type,
+            &llm_edge.target_note_id,
+            batch_ids,
+            proposal_ids,
+        ) {
             Some(t) => t,
-            None => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    target_entity_type = %llm_edge.target_entity_type,
-                    "memory_enrichment: dropping edge with unknown target_entity_type"
-                );
-                continue;
-            }
+            None => continue,
         };
 
-        let source_known = match source_type {
-            MemoryEntityType::Note => batch_ids.contains(&llm_edge.source_note_id),
-            MemoryEntityType::Proposal => proposal_ids.contains(&llm_edge.source_note_id),
-        };
-        if !source_known {
-            tracing::debug!(
-                project_id = %project_id,
-                source_entity_type = ?source_type,
-                source_id = %llm_edge.source_note_id,
-                "memory_enrichment: dropping edge with unknown source endpoint"
-            );
-            continue;
-        }
-        let target_known = match target_type {
-            MemoryEntityType::Note => batch_ids.contains(&llm_edge.target_note_id),
-            MemoryEntityType::Proposal => proposal_ids.contains(&llm_edge.target_note_id),
-        };
-        if !target_known {
-            tracing::debug!(
-                project_id = %project_id,
-                target_entity_type = ?target_type,
-                target_id = %llm_edge.target_note_id,
-                "memory_enrichment: dropping edge with unknown target endpoint"
-            );
-            continue;
-        }
-
-        let kind = match parse_edge_kind(&llm_edge.kind) {
+        let kind = match parse_and_validate_edge_kind(project_id, &llm_edge.kind) {
             Some(k) => k,
-            None => {
-                tracing::debug!(
-                    project_id = %project_id,
-                    kind = %llm_edge.kind,
-                    "memory_enrichment: dropping edge with unrecognized kind"
-                );
-                continue;
-            }
+            None => continue,
         };
 
         let involves_proposal =
             source_type == MemoryEntityType::Proposal || target_type == MemoryEntityType::Proposal;
 
-        if involves_proposal && llm_edge.evidence_quote.is_none() {
-            tracing::debug!(
-                project_id = %project_id,
-                "memory_enrichment: dropping proposal-involving edge without evidence_quote"
-            );
+        if !require_proposal_evidence(
+            project_id,
+            involves_proposal,
+            llm_edge.evidence_quote.as_deref(),
+        ) {
             continue;
         }
 
-        if !involves_proposal
-            && is_wikilink_duplicate(
-                &wikilink_pairs,
-                &llm_edge.source_note_id,
-                &llm_edge.target_note_id,
-            )
-        {
-            report.edges_dropped_wikilink_dup += 1;
+        if classify_wikilink_duplicate(
+            &wikilink_pairs,
+            involves_proposal,
+            &llm_edge.source_note_id,
+            &llm_edge.target_note_id,
+            report,
+        ) {
             continue;
         }
 
@@ -1375,6 +1468,127 @@ mod tests {
         assert!(is_wikilink_duplicate(&set, "a", "b"));
         assert!(is_wikilink_duplicate(&set, "b", "a"));
         assert!(!is_wikilink_duplicate(&set, "a", "c"));
+    }
+
+    // ── Focused unit tests for process_batch_edges helpers (mygq/i37d) ─────
+
+    #[test]
+    fn classify_edge_endpoint_recognizes_note_in_batch() {
+        let batch = vec!["n1".to_string()];
+        let proposals = HashSet::new();
+        assert_eq!(
+            classify_edge_endpoint("proj", "source", "note", "n1", &batch, &proposals),
+            Some(MemoryEntityType::Note)
+        );
+    }
+
+    #[test]
+    fn classify_edge_endpoint_recognizes_proposal_in_proposal_set() {
+        let batch: Vec<String> = vec![];
+        let mut proposals = HashSet::new();
+        proposals.insert("p1".to_string());
+        assert_eq!(
+            classify_edge_endpoint("proj", "target", "proposal", "p1", &batch, &proposals),
+            Some(MemoryEntityType::Proposal)
+        );
+    }
+
+    #[test]
+    fn classify_edge_endpoint_drops_unknown_entity_type() {
+        let batch = vec!["n1".to_string()];
+        let proposals = HashSet::new();
+        assert_eq!(
+            classify_edge_endpoint("proj", "source", "wiki", "n1", &batch, &proposals),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_edge_endpoint_drops_unknown_note_endpoint() {
+        let batch = vec!["n1".to_string()];
+        let proposals = HashSet::new();
+        assert_eq!(
+            classify_edge_endpoint("proj", "source", "note", "missing", &batch, &proposals),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_edge_endpoint_drops_unknown_proposal_endpoint() {
+        let batch: Vec<String> = vec![];
+        let proposals = HashSet::new();
+        assert_eq!(
+            classify_edge_endpoint("proj", "target", "proposal", "missing", &batch, &proposals),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_edge_kind_accepts_recognized() {
+        assert_eq!(
+            parse_and_validate_edge_kind("proj", "builds_on"),
+            Some(NoteAssociationKind::BuildsOn)
+        );
+        assert_eq!(
+            parse_and_validate_edge_kind("proj", "contradicts"),
+            Some(NoteAssociationKind::Contradicts)
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_edge_kind_rejects_unknown() {
+        assert_eq!(parse_and_validate_edge_kind("proj", "related_to"), None);
+        assert_eq!(parse_and_validate_edge_kind("proj", ""), None);
+    }
+
+    #[test]
+    fn require_proposal_evidence_drops_proposal_edge_without_evidence() {
+        assert!(!require_proposal_evidence("proj", true, None));
+    }
+
+    #[test]
+    fn require_proposal_evidence_keeps_proposal_edge_with_evidence() {
+        assert!(require_proposal_evidence("proj", true, Some("quote")));
+    }
+
+    #[test]
+    fn require_proposal_evidence_keeps_non_proposal_edge() {
+        assert!(require_proposal_evidence("proj", false, None));
+        assert!(require_proposal_evidence("proj", false, Some("quote")));
+    }
+
+    #[test]
+    fn classify_wikilink_duplicate_skips_proposal_edges() {
+        let mut set = HashSet::new();
+        set.insert(("n1".to_string(), "n2".to_string()));
+        let mut report = EnrichmentReport::default();
+        // proposal-involving edge: never duplicate, never count.
+        let drop = classify_wikilink_duplicate(&set, true, "n1", "n2", &mut report);
+        assert!(
+            !drop,
+            "proposal-involving edges should not be classified as wikilink dups"
+        );
+        assert_eq!(report.edges_dropped_wikilink_dup, 0);
+    }
+
+    #[test]
+    fn classify_wikilink_duplicate_drops_note_dup_with_counter() {
+        let mut set = HashSet::new();
+        set.insert(("n1".to_string(), "n2".to_string()));
+        let mut report = EnrichmentReport::default();
+        let drop = classify_wikilink_duplicate(&set, false, "n1", "n2", &mut report);
+        assert!(drop, "duplicate pair should be flagged for drop");
+        assert_eq!(report.edges_dropped_wikilink_dup, 1);
+    }
+
+    #[test]
+    fn classify_wikilink_duplicate_keeps_note_nondup() {
+        let mut set = HashSet::new();
+        set.insert(("n1".to_string(), "n2".to_string()));
+        let mut report = EnrichmentReport::default();
+        let drop = classify_wikilink_duplicate(&set, false, "n3", "n4", &mut report);
+        assert!(!drop, "novel pair should not be flagged");
+        assert_eq!(report.edges_dropped_wikilink_dup, 0);
     }
 
     #[test]
