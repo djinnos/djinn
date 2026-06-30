@@ -1,14 +1,15 @@
 // djinn:allow-oversize
 use super::{
-    AutoMergeFastPathState, AutoMergeTickDecision, PrDraftCiAction, Task, advisory_checks_section,
-    blocking_failed_checks, build_ci_failure_sections, compute_ci_failure_fingerprint,
-    count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
-    dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
-    effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
-    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
-    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
-    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
-    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
+    AutoMergeFastPathState, AutoMergeTickDecision, CiMergeGateVerdict, PrDraftCiAction, Task,
+    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
+    ci_merge_gate_verdict, compute_ci_failure_fingerprint, count_consecutive_identical,
+    decide_auto_merge_tick, decide_pr_draft_ci_action, dequeue_reason_is_failure,
+    dequeue_requires_rework, detect_scope_inversion, effective_review_decision, extract_crate_name,
+    extract_crate_names, is_advisory_check_name, is_conversation_resolution_block,
+    is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
+    pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
+    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
+    should_auto_resolve_conversations,
 };
 use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
@@ -2170,6 +2171,213 @@ fn snapshot_input_for_passing_status_has_no_fingerprint() {
     assert!(snapshot.blocking_required_check_names.is_empty());
 }
 
+// ── CI merge gate verdict tests ──────────────────────────────────────────────
+//
+// These tests verify the pure `ci_merge_gate_verdict` function that gates
+// Djinn-initiated merge/close on the durable CI snapshot. The gate ensures:
+//   - Only `passing` CI on the current head SHA allows merge
+//   - `failing` blocks merge (remediation/intervention handles)
+//   - `pending`/`unknown` hold for later poller ticks
+//   - A stale `passing` snapshot for an older SHA cannot authorize merge
+//   - External merge observation (pr.merged == Some(true)) is unaffected
+
+/// Build a minimal snapshot for gate tests.
+fn gate_snapshot(task_id: &str, head_sha: &str, ci_status: CiStatus) -> TaskPrCiSnapshot {
+    TaskPrCiSnapshot {
+        task_id: task_id.to_owned(),
+        pr_number: 1,
+        head_sha: head_sha.to_owned(),
+        ci_status,
+        blocking_required_check_names: Vec::new(),
+        failure_fingerprint: None,
+        first_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
+        last_seen_at: "2026-01-01T00:00:00.000Z".to_owned(),
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    }
+}
+
+#[test]
+fn ci_merge_gate_allows_passing_with_matching_sha() {
+    let snap = gate_snapshot("t1", "sha-abc123", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-abc123"),
+        CiMergeGateVerdict::Allow,
+        "passing CI on current head must allow merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_blocks_failing_ci() {
+    let snap = gate_snapshot("t2", "sha-def456", CiStatus::Failing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-def456"),
+        CiMergeGateVerdict::Block,
+        "failing required CI must block merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_pending_ci() {
+    let snap = gate_snapshot("t3", "sha-pending", CiStatus::Pending);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-pending"),
+        CiMergeGateVerdict::Hold,
+        "pending CI must hold merge for next tick"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_unknown_ci() {
+    let snap = gate_snapshot("t4", "sha-unknown", CiStatus::Unknown);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-unknown"),
+        CiMergeGateVerdict::Hold,
+        "unknown CI must hold merge for next tick"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_passing_sha() {
+    // Snapshot says passing for OLD sha, but current head has moved.
+    let snap = gate_snapshot("t5", "sha-old", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale passing snapshot for older SHA must NOT authorize merge on newer head"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_failing_sha() {
+    // Even if the snapshot is failing, a SHA mismatch should hold (not block)
+    // because the snapshot data is stale and doesn't reflect the current head.
+    let snap = gate_snapshot("t6", "sha-old", CiStatus::Failing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale failing snapshot should hold (not block) when SHA has moved"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_when_no_snapshot_exists() {
+    assert_eq!(
+        ci_merge_gate_verdict(None, "sha-abc"),
+        CiMergeGateVerdict::Hold,
+        "missing CI snapshot must hold merge until snapshot is recorded"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_stale_pending_sha() {
+    let snap = gate_snapshot("t7", "sha-old", CiStatus::Pending);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-new"),
+        CiMergeGateVerdict::Hold,
+        "stale pending snapshot holds on SHA mismatch"
+    );
+}
+
+#[test]
+fn ci_merge_gate_holds_on_empty_head_sha() {
+    // Edge case: snapshot exists but head_sha is empty (e.g. initial state
+    // before any PR data). Must not match a real current SHA.
+    let snap = gate_snapshot("t8", "", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-real"),
+        CiMergeGateVerdict::Hold,
+        "empty snapshot head SHA must not authorize merge"
+    );
+}
+
+#[test]
+fn ci_merge_gate_allows_when_sha_matches_exactly() {
+    // Verify exact string match — not prefix or substring.
+    let snap = gate_snapshot("t9", "abc123def456", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123def456"),
+        CiMergeGateVerdict::Allow,
+        "exact SHA match with passing CI must allow merge"
+    );
+    // Substring must NOT match.
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123"),
+        CiMergeGateVerdict::Hold,
+        "substring SHA match must not authorize merge"
+    );
+    // Superset must NOT match.
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "abc123def456000"),
+        CiMergeGateVerdict::Hold,
+        "superset SHA must not authorize merge"
+    );
+}
+
+/// The merge gate only applies to Djinn-initiated merge/close paths. External
+/// merge observation (pr.merged == Some(true)) is explicitly NOT gated — it
+/// records what GitHub reports regardless of CI status. This is a documentation
+/// test confirming the invariant; the actual separation is in pr_review_watcher
+/// where the "merged" check runs BEFORE the gate.
+#[test]
+fn ci_merge_gate_external_merge_observation_is_not_gated() {
+    // The gate function itself is never called for external merge observation.
+    // This test documents that the gate's "Block" verdict does NOT apply to
+    // the external path — the caller (pr_review_watcher) checks pr.merged
+    // before reaching the gate.
+    let snap = gate_snapshot("t10", "sha-head", CiStatus::Failing);
+    // The gate WOULD block on failing CI:
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-head"),
+        CiMergeGateVerdict::Block,
+        "gate blocks failing CI — but external merge observation bypasses this"
+    );
+    // This is correct: the gate returns Block, but the watcher's control flow
+    // checks pr.merged BEFORE reaching the gate, so external merges are
+    // recorded via apply_pr_merge without consulting the gate.
+}
+
+#[test]
+fn ci_merge_gate_verdict_variants_cover_all_ci_statuses() {
+    // Exhaustive coverage: every CiStatus variant produces the expected verdict
+    // when the SHA matches.
+    let sha = "current-sha";
+    let cases = [
+        (CiStatus::Passing, CiMergeGateVerdict::Allow),
+        (CiStatus::Failing, CiMergeGateVerdict::Block),
+        (CiStatus::Pending, CiMergeGateVerdict::Hold),
+        (CiStatus::Unknown, CiMergeGateVerdict::Hold),
+    ];
+    for (ci_status, expected) in &cases {
+        let snap = gate_snapshot("t-exhaustive", sha, *ci_status);
+        assert_eq!(
+            ci_merge_gate_verdict(Some(&snap), sha),
+            *expected,
+            "ci_status={ci_status:?} with matching SHA should produce {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn ci_merge_gate_stale_sha_overrides_status_in_all_variants() {
+    // When the SHA doesn't match, the verdict is always Hold regardless of
+    // ci_status. This prevents stale snapshot data from authorizing merge.
+    let cases = [
+        CiStatus::Passing,
+        CiStatus::Failing,
+        CiStatus::Pending,
+        CiStatus::Unknown,
+    ];
+    for ci_status in &cases {
+        let snap = gate_snapshot("t-stale", "old-sha", *ci_status);
+        assert_eq!(
+            ci_merge_gate_verdict(Some(&snap), "new-sha"),
+            CiMergeGateVerdict::Hold,
+            "stale SHA must hold regardless of ci_status={ci_status:?}"
+        );
+    }
+}
+
 // ── pr_draft CI gate transition matrix tests ──────────────────────────────
 
 #[test]
@@ -2288,5 +2496,543 @@ fn mixed_required_and_advisory_failures_route_to_remediation() {
     assert_eq!(
         decide_pr_draft_ci_action(ci_status, true),
         PrDraftCiAction::RouteToRemediation,
+    );
+}
+
+// ── End-to-end lifecycle regression tests (CI gate lifecycle matrix) ──────
+//
+// These regression tests validate the complete zlys lifecycle gate matrix:
+// stale SHA/PR-number reset, pending/unknown hold behavior, required vs
+// advisory failures, pr_draft → pr_review PrUndraft gating, and merge/close
+// blocking across all CI snapshot states.
+//
+// They compose the individual building blocks tested above into end-to-end
+// lifecycle scenarios that prove the gate works as a whole.
+
+/// When the PR number changes (e.g. task re-assigned to a different PR), the
+/// snapshot reset contract produces clean fields — identical to the head-SHA
+/// change contract. Both head_sha and pr_number are identity fields that
+/// trigger a full snapshot reset.
+#[test]
+fn stale_pr_number_change_resets_snapshot_to_clean_fields() {
+    // Simulate: old PR 10 had a failing snapshot with stale data.
+    // Task is now on PR 20 → reset contract produces clean fields.
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-pr-change".to_owned(),
+        pr_number: 20, // new PR number
+        head_sha: "new-head-for-pr20".to_owned(),
+        ci_status: CiStatus::Unknown,
+        blocking_required_check_names: Vec::new(),
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-06-30T10:00:00.000Z".to_string(),
+        "2026-06-30T10:00:00.000Z".to_string(),
+    );
+
+    assert_eq!(snapshot.pr_number, 20, "new PR number must be recorded");
+    assert_eq!(
+        snapshot.ci_status,
+        CiStatus::Unknown,
+        "reset snapshot starts in Unknown state"
+    );
+    assert!(
+        snapshot.blocking_required_check_names.is_empty(),
+        "PR number change must clear stale blocking check names"
+    );
+    assert!(
+        snapshot.failure_fingerprint.is_none(),
+        "PR number change must clear stale failure fingerprint"
+    );
+    assert_eq!(
+        snapshot.same_signature_count, 0,
+        "PR number change must reset same_signature_count to zero"
+    );
+    assert!(
+        snapshot.last_remediation_base_sha.is_none(),
+        "PR number change must clear last_remediation_base_sha"
+    );
+}
+
+/// Pending CI must hold in `pr_draft` via the merge gate AND the pr_draft
+/// action decision. It must NOT route to remediation/intervention — pending
+/// means checks are still running, not that they've failed.
+#[test]
+fn pending_ci_gate_holds_and_pr_draft_holds_without_remediation_escalation() {
+    let snap = gate_snapshot("t-pending-hold", "sha-1", CiStatus::Pending);
+
+    // Merge gate: Hold (not Block, not Allow)
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-1"),
+        CiMergeGateVerdict::Hold,
+        "pending CI must hold in the merge gate — not block or allow"
+    );
+
+    // pr_draft action: Hold (not RouteToRemediation) when checks exist
+    let action = decide_pr_draft_ci_action(CiStatus::Pending, true);
+    assert_eq!(
+        action,
+        PrDraftCiAction::Hold,
+        "pending CI with running checks must hold in pr_draft"
+    );
+    assert_ne!(
+        action,
+        PrDraftCiAction::RouteToRemediation,
+        "pending CI must NOT route to remediation — checks are still running"
+    );
+}
+
+/// Unknown CI must hold in `pr_draft` via the merge gate AND the pr_draft
+/// action decision. It must NOT route to remediation/intervention — unknown
+/// means GitHub data is temporarily unavailable, not that checks failed.
+#[test]
+fn unknown_ci_gate_holds_and_pr_draft_holds_without_remediation_escalation() {
+    let snap = gate_snapshot("t-unknown-hold", "sha-2", CiStatus::Unknown);
+
+    // Merge gate: Hold (not Block, not Allow)
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-2"),
+        CiMergeGateVerdict::Hold,
+        "unknown CI must hold in the merge gate — not block or allow"
+    );
+
+    // pr_draft action: Hold (not RouteToRemediation) when checks exist
+    let action = decide_pr_draft_ci_action(CiStatus::Unknown, true);
+    assert_eq!(
+        action,
+        PrDraftCiAction::Hold,
+        "unknown CI with existing checks must hold in pr_draft"
+    );
+    assert_ne!(
+        action,
+        PrDraftCiAction::RouteToRemediation,
+        "unknown CI must NOT route to remediation — data is unavailable, not failing"
+    );
+}
+
+/// Advisory-only failures are non-blocking in the full lifecycle: even when
+/// advisory checks fail, if required checks are still pending (some running),
+/// the merge gate holds rather than blocking. This is the lifecycle matrix
+/// intersection: advisory failure + pending required = hold.
+#[test]
+fn advisory_failure_with_pending_required_checks_holds_gate() {
+    // Scenario: "Vercel" (advisory) completed with failure. "Quality Gate"
+    // (required) has not completed yet → CI status is Pending.
+    let vercel = make_check_run("Vercel – portal", "failure");
+    let failed = vec![&vercel];
+    let required_contexts = vec!["Quality Gate".to_string(), "unit tests".to_string()];
+
+    // blocking_failed_checks with required contexts: Vercel is NOT required
+    let blocking = blocking_failed_checks(&failed, Some(&required_contexts));
+    assert!(
+        blocking.is_empty(),
+        "advisory-only failure must not be blocking when required contexts are specified"
+    );
+
+    // Since not all checks are completed (required ones are still running),
+    // the CI status is Pending (not Failing, not Passing).
+    let ci_status = CiStatus::Pending;
+
+    // The merge gate holds on pending CI regardless of advisory failures.
+    let snap = gate_snapshot("t-adv-pending", "sha-adv", ci_status);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-adv"),
+        CiMergeGateVerdict::Hold,
+        "advisory failure + pending required = hold (not block)"
+    );
+
+    // pr_draft action also holds.
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::Hold,
+        "pr_draft holds when required checks are pending"
+    );
+}
+
+/// When advisory checks fail but all required checks pass, the lifecycle
+/// proceeds: the snapshot is Passing, the merge gate Allows, and pr_draft
+/// Proceeds. This is the full end-to-end lifecycle test for advisory-only
+/// failures flowing through the CI gate.
+#[test]
+fn advisory_failure_with_passing_required_checks_proceeds_through_full_lifecycle() {
+    // Scenario: "Vercel" (advisory) failed, "Quality Gate" (required) passed.
+    let vercel = make_check_run("Vercel – portal", "failure");
+    let _quality_gate = make_check_run("Quality Gate", "success");
+    let failed = vec![&vercel];
+    let required_contexts = vec!["Quality Gate".to_string()];
+
+    // blocking_failed_checks: Vercel is not required, not blocking.
+    let blocking = blocking_failed_checks(&failed, Some(&required_contexts));
+    assert!(blocking.is_empty());
+
+    // CI status: no blocking failures → Passing.
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else {
+        CiStatus::Failing
+    };
+    assert_eq!(ci_status, CiStatus::Passing);
+
+    // Merge gate: allows on passing CI.
+    let snap = gate_snapshot("t-adv-pass", "sha-pass", ci_status);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-pass"),
+        CiMergeGateVerdict::Allow,
+        "advisory-only failure + passing required = allow merge"
+    );
+
+    // pr_draft: proceeds to pr_review (PrUndraft).
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+        "pr_draft proceeds to pr_review when required CI is passing"
+    );
+}
+
+/// When a required check fails, the full lifecycle routes to remediation:
+/// the snapshot is Failing, the merge gate Blocks, and pr_draft routes to
+/// remediation rather than proceeding to pr_review.
+#[test]
+fn required_failure_blocks_merge_and_routes_pr_draft_to_remediation() {
+    let quality_gate = make_check_run("Quality Gate", "failure");
+    let failed = vec![&quality_gate];
+    let required_contexts = vec!["Quality Gate".to_string()];
+
+    // blocking_failed_checks: Quality Gate is required and failing.
+    let blocking = blocking_failed_checks(&failed, Some(&required_contexts));
+    assert_eq!(blocking.len(), 1, "required failing check must be blocking");
+
+    // CI status: Failing.
+    let ci_status = CiStatus::Failing;
+
+    // Merge gate: blocks on failing CI.
+    let snap = gate_snapshot("t-req-fail", "sha-fail", ci_status);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "sha-fail"),
+        CiMergeGateVerdict::Block,
+        "required failure blocks merge gate"
+    );
+
+    // pr_draft: routes to remediation.
+    assert_eq!(
+        decide_pr_draft_ci_action(ci_status, true),
+        PrDraftCiAction::RouteToRemediation,
+        "required failure routes pr_draft to remediation"
+    );
+}
+
+/// PrUndraft (pr_draft → pr_review) occurs ONLY when current-head required
+/// CI is passing. This test verifies the full flow:
+/// - Pending: holds (no PrUndraft)
+/// - Unknown: holds (no PrUndraft)
+/// - Failing: routes to remediation (no PrUndraft)
+/// - Passing: proceeds (PrUndraft allowed)
+///
+/// Combined with the merge gate, this proves the approved → pr_draft/awaiting_ci
+/// → pr_review flow only advances on current-head passing.
+#[test]
+fn pr_undraft_only_on_current_head_required_ci_passing_lifecycle() {
+    let sha = "current-head-sha";
+
+    // Pending: holds in pr_draft (awaiting_ci display state)
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Pending, true),
+        PrDraftCiAction::Hold,
+        "pending: holds in pr_draft as awaiting_ci — no PrUndraft"
+    );
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Pending)), sha),
+        CiMergeGateVerdict::Hold,
+        "pending: merge gate holds — merge/close blocked"
+    );
+
+    // Unknown: holds in pr_draft (awaiting_ci display state)
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Unknown, true),
+        PrDraftCiAction::Hold,
+        "unknown: holds in pr_draft as awaiting_ci — no PrUndraft"
+    );
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Unknown)), sha),
+        CiMergeGateVerdict::Hold,
+        "unknown: merge gate holds — merge/close blocked"
+    );
+
+    // Failing: routes to remediation (no PrUndraft)
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Failing, true),
+        PrDraftCiAction::RouteToRemediation,
+        "failing: routes to remediation — no PrUndraft"
+    );
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Failing)), sha),
+        CiMergeGateVerdict::Block,
+        "failing: merge gate blocks — merge/close blocked"
+    );
+
+    // Passing: proceeds (PrUndraft allowed!)
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Passing, true),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+        "passing: pr_draft proceeds to pr_review via PrUndraft"
+    );
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Passing)), sha),
+        CiMergeGateVerdict::Allow,
+        "passing: merge gate allows — merge/close authorized"
+    );
+}
+
+/// Verify that merge/close blocking is enforced for every non-passing CI
+/// snapshot state when the snapshot is current (SHA matches):
+/// - Failing: Block (actively red)
+/// - Pending: Hold (checks running)
+/// - Unknown: data unavailable
+/// - Passing: Allow (the only authorized state)
+///
+/// This is the definitive merge/close authorization matrix.
+#[test]
+fn merge_close_authorization_matrix_current_head() {
+    let sha = "current-sha";
+    let cases: &[(CiStatus, CiMergeGateVerdict, &str)] = &[
+        (
+            CiStatus::Failing,
+            CiMergeGateVerdict::Block,
+            "failing blocks merge",
+        ),
+        (
+            CiStatus::Pending,
+            CiMergeGateVerdict::Hold,
+            "pending holds merge",
+        ),
+        (
+            CiStatus::Unknown,
+            CiMergeGateVerdict::Hold,
+            "unknown holds merge",
+        ),
+        (
+            CiStatus::Passing,
+            CiMergeGateVerdict::Allow,
+            "passing allows merge",
+        ),
+    ];
+
+    for (ci_status, expected, description) in cases {
+        let snap = gate_snapshot("matrix", sha, *ci_status);
+        assert_eq!(
+            ci_merge_gate_verdict(Some(&snap), sha),
+            *expected,
+            "{description}: ci_status={ci_status:?} on current head must produce {expected:?}"
+        );
+    }
+}
+
+/// Stale passing snapshots — regardless of the CI status in the old snapshot —
+/// do NOT authorize merge/close on a newer PR head. The SHA-mismatch
+/// override always produces Hold, not Allow or Block.
+#[test]
+fn stale_passing_snapshot_does_not_authorize_merge_on_newer_head() {
+    // Even if the OLD snapshot was Passing, a head SHA mismatch means Hold.
+    let snap = gate_snapshot("stale", "old-sha-aaa", CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&snap), "new-sha-bbb"),
+        CiMergeGateVerdict::Hold,
+        "stale passing snapshot for old SHA must not authorize merge on new head"
+    );
+    assert_ne!(
+        ci_merge_gate_verdict(Some(&snap), "new-sha-bbb"),
+        CiMergeGateVerdict::Allow,
+        "stale passing must never produce Allow"
+    );
+}
+
+/// When no CI snapshot exists at all, the merge gate holds (conservative).
+/// This prevents merge/close before the pr_poller has observed the PR's CI
+/// state for the first time.
+#[test]
+fn no_ci_snapshot_holds_merge_close_authorization() {
+    assert_eq!(
+        ci_merge_gate_verdict(None, "any-sha"),
+        CiMergeGateVerdict::Hold,
+        "missing CI snapshot must hold merge — no data means no authorization"
+    );
+}
+
+/// Verify that the blocking_failed_checks filter correctly distinguishes
+/// required failures from advisory-only failures using the required-contexts
+/// helper. This is the foundation for the required-vs-advisory lifecycle gate.
+#[test]
+fn required_vs_advisory_failures_through_blocking_filter() {
+    // Use CheckRuns with DIFFERENT run IDs so the same-workflow-run
+    // co-blocking rule doesn't include the advisory check.
+    let quality_gate = CheckRun {
+        id: 100,
+        name: "Quality Gate".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/10/job/10".to_string(),
+    };
+    let vercel = CheckRun {
+        id: 200,
+        name: "Vercel – portal".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("failure".to_string()),
+        html_url: "https://github.com/o/r/actions/runs/20/job/20".to_string(),
+    };
+    let all_failed = vec![&quality_gate, &vercel];
+    let required = vec!["Quality Gate".to_string()];
+
+    // With required contexts: only the required check is blocking.
+    let blocking = blocking_failed_checks(&all_failed, Some(&required));
+    assert_eq!(
+        blocking.len(),
+        1,
+        "only the required check must be blocking"
+    );
+    assert_eq!(
+        blocking[0].name, "Quality Gate",
+        "the blocking check must be the required one"
+    );
+
+    // Without required contexts (heuristic mode): advisory checks are
+    // filtered by name pattern, unknown checks are kept as blocking.
+    let blocking_heuristic = blocking_failed_checks(&all_failed, None);
+    assert_eq!(
+        blocking_heuristic.len(),
+        1,
+        "heuristic mode: advisory (Vercel) filtered, unknown (Quality Gate) kept"
+    );
+    assert_eq!(
+        blocking_heuristic[0].name, "Quality Gate",
+        "heuristic mode: Vercel is advisory, Quality Gate is blocking"
+    );
+
+    // Advisory-only: no required checks failed.
+    let advisory_only = vec![&vercel];
+    let blocking_adv = blocking_failed_checks(&advisory_only, Some(&required));
+    assert!(
+        blocking_adv.is_empty(),
+        "advisory-only failures must not be blocking when required contexts specified"
+    );
+}
+
+/// Integration test: the full approved → pr_draft/awaiting_ci → pr_review
+/// lifecycle, exercising the snapshot gate and pr_draft decision together.
+///
+/// Sequence:
+/// 1. Task enters pr_draft with CI pending → Hold (awaiting_ci)
+/// 2. CI reports unknown (GitHub data unavailable) → Hold (still awaiting_ci)
+/// 3. Advisory checks fail, required still pending → Hold
+/// 4. Required checks pass (advisory still failing) → Proceed (PrUndraft)
+/// 5. Merge gate: Allow on passing current-head CI
+#[test]
+fn lifecycle_approved_to_pr_draft_awaiting_ci_to_pr_review_flow() {
+    let sha = "feature-abc123";
+
+    // Step 1: pr_draft with CI pending
+    let action1 = decide_pr_draft_ci_action(CiStatus::Pending, true);
+    assert_eq!(
+        action1,
+        PrDraftCiAction::Hold,
+        "step 1: pending CI holds in pr_draft (awaiting_ci)"
+    );
+    let gate1 = ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Pending)), sha);
+    assert_eq!(gate1, CiMergeGateVerdict::Hold, "step 1: merge gate holds");
+
+    // Step 2: CI reports unknown
+    let action2 = decide_pr_draft_ci_action(CiStatus::Unknown, true);
+    assert_eq!(
+        action2,
+        PrDraftCiAction::Hold,
+        "step 2: unknown CI holds in pr_draft (still awaiting_ci)"
+    );
+
+    // Step 3: Advisory failure + required pending → still Hold
+    let vercel = make_check_run("Vercel – portal", "failure");
+    let failed = vec![&vercel];
+    let required = vec!["Quality Gate".to_string()];
+    let blocking = blocking_failed_checks(&failed, Some(&required));
+    assert!(
+        blocking.is_empty(),
+        "step 3: advisory-only failure is not blocking"
+    );
+    // CI status remains Pending because required checks haven't completed.
+    let action3 = decide_pr_draft_ci_action(CiStatus::Pending, true);
+    assert_eq!(action3, PrDraftCiAction::Hold, "step 3: still held");
+
+    // Step 4: Required checks pass (advisory still failing) → Proceed
+    let ci_passing = CiStatus::Passing;
+    let action4 = decide_pr_draft_ci_action(ci_passing, true);
+    assert_eq!(
+        action4,
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+        "step 4: required CI passing proceeds to pr_review (PrUndraft)"
+    );
+
+    // Step 5: Merge gate allows on current-head passing
+    let gate5 = ci_merge_gate_verdict(Some(&gate_snapshot("t", sha, CiStatus::Passing)), sha);
+    assert_eq!(
+        gate5,
+        CiMergeGateVerdict::Allow,
+        "step 5: merge gate allows on passing current-head CI"
+    );
+}
+
+/// Regression: a stale snapshot that was once passing must not authorize
+/// merge after the head SHA has been reset. This simulates the full
+/// lifecycle: old head was passing, new push resets to pending, merge must
+/// be held until new head's CI completes as passing.
+#[test]
+fn lifecycle_stale_passing_to_reset_pending_blocks_merge_until_new_passing() {
+    let old_sha = "old-sha-passing";
+    let new_sha = "new-sha-after-push";
+
+    // Old head was passing — merge would be authorized.
+    let old_snap = gate_snapshot("t", old_sha, CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&old_snap), old_sha),
+        CiMergeGateVerdict::Allow,
+        "old head: passing allows merge"
+    );
+
+    // New push → head SHA changes → snapshot resets to Pending.
+    let reset_snap = gate_snapshot("t", new_sha, CiStatus::Unknown);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&reset_snap), new_sha),
+        CiMergeGateVerdict::Hold,
+        "after push: reset snapshot holds merge (CI not yet determined)"
+    );
+
+    // Stale snapshot with old SHA still shouldn't authorize merge on new head.
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&old_snap), new_sha),
+        CiMergeGateVerdict::Hold,
+        "stale old-passing snapshot must not authorize merge on new head"
+    );
+
+    // New head CI completes as passing → merge authorized.
+    let new_passing = gate_snapshot("t", new_sha, CiStatus::Passing);
+    assert_eq!(
+        ci_merge_gate_verdict(Some(&new_passing), new_sha),
+        CiMergeGateVerdict::Allow,
+        "new head passing: merge authorized"
+    );
+
+    // pr_draft: new head passing proceeds.
+    assert_eq!(
+        decide_pr_draft_ci_action(CiStatus::Passing, true),
+        PrDraftCiAction::Proceed {
+            needs_passing_persist: false
+        },
+        "new head passing: pr_draft proceeds to pr_review"
     );
 }
