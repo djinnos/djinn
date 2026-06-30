@@ -70,6 +70,9 @@ pub(crate) struct PromptContext {
     /// could be resolved from the worktree, or when the detected change
     /// set is empty.
     pub reviewer_diff_context: Option<String>,
+    /// sa4x: promoted BLOCKING directive for red required CI. `None` when
+    /// CI is not failing or no remediation baseline exists.
+    pub ci_blocking_directive: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
     /// Base prompt with role-level `system_prompt_extensions` + `learned_prompt`
@@ -570,6 +573,13 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     // ── Build knowledge context from scope-matched notes ─────────────
     let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
 
+    // ── CI blocking directive (sa4x) ─────────────────────────────────────
+    // Generate a promoted BLOCKING directive when the durable CI gate snapshot
+    // says the current PR head is failing required CI and a remediation baseline
+    // exists. Deliberately separate from ordinary activity-log prose and deduped
+    // by construction (derived from durable state, not from activity replay).
+    let ci_blocking_directive = build_ci_blocking_directive(task);
+
     // PR E2: auto-include `code_graph context` for worker / reviewer roles
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
     // task-scope-path inference already used by the knowledge context block.
@@ -634,6 +644,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             knowledge_context: knowledge_context.clone(),
             code_graph_context: code_graph_context.clone(),
             reviewer_diff_context: reviewer_diff_context.clone(),
+            ci_blocking_directive: ci_blocking_directive.clone(),
         },
     );
     // ── Final prompt: extensions → skills → read sources (canonical order) ──
@@ -659,11 +670,57 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         knowledge_context,
         code_graph_context,
         reviewer_diff_context,
+        ci_blocking_directive,
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,
         prompt_setup_commands,
     }
+}
+
+/// Build a promoted BLOCKING directive for red required CI.
+///
+/// Returns `Some(directive_text)` when:
+/// - `task.ci_status` is `"failing"` (required CI is red)
+/// - `task.ci_last_remediation_base_sha` is `Some(...)` (a remediation baseline exists)
+///
+/// Returns `None` for passing, pending, unknown, or advisory-only failure states.
+/// The directive includes concrete PR number, failing head SHA, blocking check/job
+/// names, and failure fingerprint. It is deliberately separate from ordinary
+/// activity-log prose and deduped by construction — the same durable baseline
+/// always produces identical text, and it appears exactly once in the prompt.
+fn build_ci_blocking_directive(task: &Task) -> Option<String> {
+    if task.ci_status != "failing" {
+        return None;
+    }
+    let base_sha = task.ci_last_remediation_base_sha.as_deref()?;
+    let head_sha = task.ci_head_sha.as_deref().unwrap_or("unknown");
+    let pr_number = task.ci_pr_number.unwrap_or(0);
+
+    let check_names: Vec<String> =
+        serde_json::from_str(&task.ci_blocking_required_check_names).unwrap_or_default();
+    let checks_display = if check_names.is_empty() {
+        "unknown".to_string()
+    } else {
+        check_names.join(", ")
+    };
+
+    let fingerprint_line = match &task.ci_failure_fingerprint {
+        Some(fp) => format!("**Failure fingerprint:** `{fp}`\n"),
+        None => String::new(),
+    };
+
+    Some(format!(
+        "**PR:** #{pr_number}\n\
+         **Failing head SHA:** `{head_sha}`\n\
+         **Blocking checks:** {checks_display}\n\
+         {fingerprint_line}\
+         **Remediation baseline SHA:** `{base_sha}`\n\n\
+         > REQUIRED CI is failing on the current PR head. You MUST fix the \
+         failing required checks listed above before this task can proceed. \
+         The task will remain in remediation until all blocking checks pass \
+         on a new commit pushed to the PR branch."
+    ))
 }
 
 /// Resolve `(from_sha, to_sha)` for PR E3's reviewer diff context by

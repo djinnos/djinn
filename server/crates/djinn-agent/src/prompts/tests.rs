@@ -115,6 +115,7 @@ fn make_ctx() -> TaskContext {
         knowledge_context: None,
         code_graph_context: None,
         reviewer_diff_context: None,
+        ci_blocking_directive: None,
     }
 }
 

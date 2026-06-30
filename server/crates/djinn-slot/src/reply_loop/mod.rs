@@ -24,10 +24,6 @@ pub use turn::{ReplyLoopContext, run_reply_loop};
 // duration of each async test so concurrent tests cannot race the shared
 // process env. Mirrors the `AUTO_CODE_CONTEXT_ENV_LOCK` pattern in
 // `helpers/tests.rs`.
-//
-// reply_loop_tests.rs: disabled — tests reference types and functions that
-// need adapted fixtures for the slot-owned reply loop (SlotContext,
-// SlotToolDispatcher mocks, etc.). Re-enable after the test migration task.
-// #[cfg(test)]
-// #[allow(clippy::await_holding_lock)]
-// mod tests;
+#[cfg(test)]
+#[allow(clippy::await_holding_lock)]
+mod tests;
