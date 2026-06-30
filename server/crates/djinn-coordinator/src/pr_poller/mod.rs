@@ -103,6 +103,8 @@ pub(crate) use pr_commands::{
 };
 use pr_review_handlers::effective_review_decision;
 pub use pr_review_handlers::parse_pr_url;
+#[cfg(test)]
+pub(crate) use pr_watcher::{PrDraftCiAction, decide_pr_draft_ci_action};
 
 use ci_helpers::compute_ci_failure_fingerprint;
 #[cfg(test)]
