@@ -322,7 +322,6 @@ pub(crate) struct ReplyLoopContext<'a> {
 ///
 /// Context-length-exceeded errors trigger reactive compaction and retry
 /// (up to `MAX_COMPACTION_RETRIES` times) before failing the session.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(crate) async fn run_reply_loop(
     ctx: ReplyLoopContext<'_>,
     conversation: &mut Conversation,
@@ -921,7 +920,7 @@ pub(crate) async fn run_reply_loop(
                     input_tokens: Some(turn_tokens_in),
                     output_tokens: Some(turn_tokens_out),
                     timestamp: Some(
-                        std::time::SystemTime::now()
+                        djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new())
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0),
@@ -1239,7 +1238,7 @@ pub(crate) async fn run_reply_loop(
             // Touch activity after tool execution — tool calls are legitimate
             // work and can take a while (e.g. cargo build).
             {
-                let now = std::time::SystemTime::now()
+                let now = djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new())
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);

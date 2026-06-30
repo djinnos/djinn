@@ -9,6 +9,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use djinn_agent::runtime_bridge::{RuntimeKind, runtime_kind};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_server::db::runtime::{DatabaseRuntimeConfig, DatabaseRuntimeManager};
 use djinn_server::logging;
 use djinn_server::server::{self, AppState};
@@ -240,7 +241,6 @@ async fn async_main() {
 
 /// Parse a postgres URL of the form `postgres://<user>[:<pw>]@<host>:<port>/<db>`
 /// and block until a TCP connection to host:port succeeds (up to ~60s).
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn wait_for_database_reachable(target: &str) {
     let host_port = target
         .strip_prefix("postgres://")
@@ -259,8 +259,9 @@ fn wait_for_database_reachable(target: &str) {
     let addr = host_port;
     tracing::info!(endpoint = %addr, "waiting for external database to accept TCP connections");
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while std::time::Instant::now() < deadline {
+    let clock = SystemClockTrait::new();
+    let deadline = clock.now_instant() + std::time::Duration::from_secs(60);
+    while clock.now_instant() < deadline {
         if let Ok(mut iter) = std::net::ToSocketAddrs::to_socket_addrs(&addr)
             && let Some(sock) = iter.next()
             && std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_millis(500))
