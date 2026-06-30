@@ -111,20 +111,15 @@ pub fn spawn_coordinator(deps: CoordinatorDeps) -> CoordinatorHandle {
 
 /// Convert an agent-side `SlotPoolHandle` to a djinn-slot `SlotPoolHandle`.
 ///
-/// Both types are `mpsc::Sender<PoolMessage>` where `PoolMessage` is
-/// structurally identical (same variants, same field types, same order).
-/// The underlying channel is the same — only the type-system wrapper differs.
+/// Production agent pool handles now wrap the canonical `djinn-slot` handle
+/// directly; unwrap that canonical handle for the coordinator crate. Test-only
+/// legacy factory handles are intentionally rejected because they do not own a
+/// canonical slot-pool actor.
 fn convert_pool_handle(handle: crate::actors::slot::SlotPoolHandle) -> djinn_slot::SlotPoolHandle {
-    // SAFETY: Both SlotPoolHandle types are repr(Rust) single-field structs
-    // wrapping `mpsc::Sender<PoolMessage>`.  Both PoolMessage enums have
-    // identical variant layouts (same discriminant assignment, same field
-    // types in the same order).  The mpsc::Sender<T> is a thin wrapper
-    // around Arc<Inner<T>> with identical representation for identical T.
-    // The only divergence is a #[cfg] attribute on one test-only variant,
-    // which does not affect layout in non-test builds and has the same
-    // layout in test builds since both crates compile with the same
-    // feature flags.
-    unsafe { std::mem::transmute(handle) }
+    handle.into_djinn_slot().expect(
+        "agent slot pool facade was constructed with a test-only legacy factory; \
+         coordinator facade requires the canonical djinn-slot pool handle",
+    )
 }
 
 /// Convert an agent-side `RoleRegistry` to a djinn-coordinator `RoleRegistry`.
