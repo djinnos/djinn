@@ -40,11 +40,27 @@ impl SlotPoolHandle {
     }
 
     pub(crate) fn into_djinn_slot(self) -> Option<djinn_slot::SlotPoolHandle> {
+        self.try_into_djinn_slot().ok()
+    }
+
+    /// Return the canonical `djinn-slot` pool handle wrapped by this agent
+    /// compatibility facade.
+    ///
+    /// Production agent pool entry points construct a `SlotContext` via
+    /// `host_callbacks::agent_to_dispatch_slot_context` and spawn the canonical
+    /// `djinn_slot::SlotPoolHandle` directly.  This accessor is the
+    /// compile-checkable handoff seam for downstream facades that are ready to
+    /// operate on the canonical slot-pool API.  Test-only `spawn_with_factory`
+    /// handles still use the legacy in-crate white-box actor so old agent tests
+    /// can inject an `AgentContext`-based slot factory; those handles cannot be
+    /// converted.
+    pub fn try_into_djinn_slot(self) -> Result<djinn_slot::SlotPoolHandle, PoolError> {
         match self.inner {
             SlotPoolInner::Canonical(handle) => Some(handle),
             #[cfg(any(test, feature = "test-support"))]
             SlotPoolInner::Legacy(_) => None,
         }
+        .ok_or(PoolError::ActorDead)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -262,5 +278,13 @@ impl SlotPoolHandle {
                     .await;
             }
         }
+    }
+}
+
+impl TryFrom<SlotPoolHandle> for djinn_slot::SlotPoolHandle {
+    type Error = PoolError;
+
+    fn try_from(handle: SlotPoolHandle) -> Result<Self, Self::Error> {
+        handle.try_into_djinn_slot()
     }
 }
