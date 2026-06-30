@@ -1051,6 +1051,21 @@ impl CoordinatorActor {
                     continue;
                 }
             }
+            // Human-review hold guard: a remediation task tagged with
+            // `human-review-hold` is a terminal escalation that requires a
+            // human to close it. No agent (planner, worker, reviewer) must
+            // ever be dispatched for it. Without this guard the planner
+            // review-claims rule (`open` + `issue_type=review`) matches the
+            // hold task and dispatches a planner session against it,
+            // defeating the park.
+            if task.labels.contains("human-review-hold") {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    task_uuid = %task.id,
+                    "CoordinatorActor: skipping dispatch — task carries human-review-hold label (human-only hold)"
+                );
+                continue;
+            }
             // Proposal 1omc: every dispatch must run under a real user. Refuse to
             // dispatch a task with no resolved owner. Park it loudly rather than
             // silently consuming org-shared credentials under no identity — this

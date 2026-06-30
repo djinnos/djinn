@@ -739,6 +739,8 @@ async fn run_llm_extraction_inner(
         };
 
     // ── Build prompt ───────────────────────────────────────────────────────
+    // Non-panicking fallback: `unwrap_or_else` provides a minimal `"{}"` payload if
+    // serialization fails, so prompt construction never aborts the extraction.
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
     // Load the actual conversation so the LLM has real content to distill —
     // the taxonomy is only event counts. Best-effort: an empty excerpt just
@@ -765,6 +767,7 @@ async fn run_llm_extraction_inner(
     let project_path = project_path_buf.to_string_lossy();
     let session_scope_paths =
         crate::session_extraction::derive_scope_paths(&taxonomy.changed_file_paths, &project_path);
+    // Non-panicking fallback: `"[]"` is the safe empty scope set.
     let scope_json =
         serde_json::to_string(&session_scope_paths).unwrap_or_else(|_| "[]".to_string());
     let prompt = build_extraction_prompt(
@@ -982,10 +985,14 @@ async fn persist_extraction_quality(
 }
 
 /// Return the current UTC time as an RFC 3339 string.
+///
+/// Formatting a UTC `OffsetDateTime` as RFC 3339 is infallible in practice.
+/// If it ever fails, fall back to the Unix epoch so the extraction path never
+/// panics.
 fn now_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
-        .expect("rfc3339 timestamp formatting should succeed")
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 async fn process_extracted_note(
@@ -1102,6 +1109,7 @@ async fn process_extracted_note(
     } else {
         note.scope_paths.clone()
     };
+    // Non-panicking fallback: `"[]"` is the safe empty scope set.
     let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
     let retrieval_anchor = note.normalized_anchor();
     if note
@@ -1174,6 +1182,7 @@ async fn persist_working_spec(
     } else {
         note.scope_paths.clone()
     };
+    // Non-panicking fallback: `"[]"` is the safe empty scope set.
     let scope_paths_json = serde_json::to_string(&scope_paths).unwrap_or_else(|_| "[]".to_string());
     let title = format!("Working Spec {}", extraction_context.task_short_id);
     let permalink = permalink_for("design", &title);

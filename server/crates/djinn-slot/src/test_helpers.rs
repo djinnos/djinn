@@ -153,6 +153,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         coordinator_trigger: None,
         runtime_ops: None,
         repo_graph_ops: None,
+        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(NoopCallbacks),
     }
 }
