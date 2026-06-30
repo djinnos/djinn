@@ -28,7 +28,8 @@ fn dummy_tool_schema_with_safety(name: &str, concurrent_safe: bool) -> serde_jso
 }
 
 async fn make_context() -> (
-    crate::context::AgentContext,
+    crate::host::SlotContext,
+    String,
     String,
     String,
     CancellationToken,
@@ -42,7 +43,14 @@ async fn make_context() -> (
     let project_path = djinn_core::paths::project_dir(&project.github_owner, &project.github_repo)
         .to_string_lossy()
         .into_owned();
-    (ctx, project_path, task.id, cancel)
+    // Use a dummy session id (session is not created in these smoke tests).
+    (
+        ctx,
+        project_path,
+        task.id,
+        "session-smoke".to_string(),
+        cancel,
+    )
 }
 
 fn base_conversation() -> Conversation {
@@ -52,13 +60,15 @@ fn base_conversation() -> Conversation {
     conversation
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_with_provider(
     provider: &dyn djinn_provider::provider::LlmProvider,
     tools: &[serde_json::Value],
     conversation: &mut Conversation,
-    app_state: &crate::context::AgentContext,
+    slot_ctx: &crate::host::SlotContext,
     project_path: &str,
     task_id: &str,
+    session_id: &str,
     cancel: &CancellationToken,
 ) -> (
     anyhow::Result<()>,
@@ -76,7 +86,7 @@ async fn run_with_provider(
             tools,
             task_id,
             task_short_id: "t1",
-            session_id: "session-1",
+            session_id,
             project_path,
             worktree_path,
             role_name: "worker",
@@ -85,9 +95,7 @@ async fn run_with_provider(
             model_id: "synthetic/test-model",
             cancel,
             global_cancel: cancel,
-            app_state,
-            services: &crate::test_helpers::test_services(),
-            mcp_registry: None,
+            ctx: slot_ctx,
             active_skill_names: &[],
             active_mcp_server_names: &[],
             max_turns_override: None,
@@ -106,16 +114,17 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
         }),
         StreamEvent::Done,
     ]]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -158,16 +167,17 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -205,16 +215,17 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
         }),
         StreamEvent::Done,
     ]]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -257,16 +268,17 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -304,16 +316,17 @@ async fn max_nudge_abort_returns_clean_error_path() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -330,16 +343,17 @@ async fn max_nudge_abort_returns_clean_error_path() {
 #[tokio::test]
 async fn provider_error_propagates_from_shared_failing_provider() {
     let provider = FailingProvider::new("scripted provider failure for reply loop");
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -376,16 +390,17 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -428,16 +443,17 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
@@ -490,16 +506,17 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
             StreamEvent::Done,
         ],
     ]);
-    let (app_state, project_path, task_id, cancel) = make_context().await;
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
 
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
         &mut conversation,
-        &app_state,
+        &slot_ctx,
         &project_path,
         &task_id,
+        &session_id,
         &cancel,
     )
     .await;
