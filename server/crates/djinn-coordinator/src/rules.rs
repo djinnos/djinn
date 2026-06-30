@@ -8,6 +8,7 @@
 
 use super::reentrance::{DispatchEvent, should_auto_dispatch_planner};
 use super::*;
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
 use djinn_db::{EpicRepository, ProposalRepository};
@@ -762,7 +763,7 @@ impl CoordinatorActor {
             .throughput_events
             .entry(epic_id.to_owned())
             .or_default();
-        events.push(StdInstant::now());
+        events.push(SystemClock::new().now_instant());
         // Eagerly evict events outside the rolling window to bound memory.
         events.retain(|t| t.elapsed() < THROUGHPUT_WINDOW);
     }

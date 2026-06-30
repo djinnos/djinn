@@ -1,4 +1,5 @@
 use super::*;
+use djinn_core::clock::{Clock, SystemClock};
 
 impl CoordinatorActor {
     pub(crate) async fn poll_pr_statuses(&mut self) {
@@ -50,7 +51,7 @@ impl CoordinatorActor {
             let first_seen = *self
                 .pr_draft_first_seen
                 .entry(task.id.clone())
-                .or_insert_with(StdInstant::now);
+                .or_insert_with(|| SystemClock::new().now_instant());
             let age = first_seen.elapsed();
             if age < Duration::from_secs(PR_DRAFT_MIN_AGE_SECS as u64) {
                 tracing::debug!(
@@ -391,7 +392,7 @@ impl CoordinatorActor {
             let first_seen = match self.review_stuck_sha_first_seen.get(&task.id) {
                 Some((seen_sha, first_seen)) if seen_sha == &current_sha => *first_seen,
                 _ => {
-                    let now = StdInstant::now();
+                    let now = SystemClock::new().now_instant();
                     self.review_stuck_sha_first_seen
                         .insert(task.id.clone(), (current_sha.clone(), now));
                     now
