@@ -563,10 +563,24 @@ pub struct ProposalRefinementStatusModel {
     pub needs_evidence: Option<NeedsEvidenceStatus>,
 }
 
+/// Evidence lifecycle phase for a needs-evidence parking.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceLifecyclePhase {
+    /// Spike is running, no findings yet.
+    AwaitingEvidence,
+    /// Spike returned structured findings; refinement can resume.
+    EvidenceReceived,
+    /// Spike failed (cancelled, errored, force-closed).
+    EvidenceFailed,
+}
+
 /// Needs-evidence parking state for a proposal.
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct NeedsEvidenceStatus {
     /// The named feasibility claim that the Judge identified.
+    /// For structured claims this is the `question` field; for legacy
+    /// plain-string claims this is the raw string.
     pub claim: String,
     /// The spike task id (UUID).
     pub spike_task_id: String,
@@ -574,6 +588,39 @@ pub struct NeedsEvidenceStatus {
     pub spike_short_id: String,
     /// Current status of the spike task.
     pub spike_status: String,
+
+    // ── Structured claim fields (None for legacy plain-string claims) ──────
+    /// The feasibility question the spike must answer (from the structured
+    /// claim). `None` when `needs_evidence_claim` is a legacy plain string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    /// The subsystem or module under investigation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_subsystem: Option<String>,
+    /// What in the spec is unknown/unverified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_unknown_anchor: Option<String>,
+    /// Debate round when the demand was issued.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i32>,
+    /// Proposal revision sequence the demand targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub against_revision_seq: Option<i32>,
+    /// The Judge task id that issued the demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_task_id: Option<String>,
+
+    // ── Evidence lifecycle phase (from persisted lifecycle events) ─────────
+    /// Current evidence lifecycle phase (awaiting, received, or failed).
+    /// Derived from persisted `proposal_revisions` lifecycle events.
+    /// `None` when no lifecycle event has been recorded yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_phase: Option<EvidenceLifecyclePhase>,
+    /// For `evidence_failed`, the failure reason (`spike_cancelled`,
+    /// `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+    /// `None` for other phases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 /// Response for `proposal_refinement_start`.

@@ -1043,6 +1043,14 @@ async fn build_gate_status(
                 spike_task_id: spike_id.to_string(),
                 spike_short_id: spike_id.to_string(),
                 spike_status: "open".to_string(),
+                question: None,
+                target_subsystem: None,
+                spec_unknown_anchor: None,
+                round: None,
+                against_revision_seq: None,
+                created_by_task_id: None,
+                evidence_phase: None,
+                failure_reason: None,
             })
         }
         Err(e) => {
