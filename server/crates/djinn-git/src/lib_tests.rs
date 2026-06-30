@@ -9,10 +9,11 @@
 
 use std::time::Duration;
 
-use crate::test_support::init_repo_with_main_commit;
+use crate::test_support::{checkout_branch, init_repo_with_main_commit, write_and_commit};
 use crate::{
-    GitError, is_non_fast_forward_error, is_retryable_git_command_error,
-    is_transient_network_error, retry_delay, run_git_command, run_git_command_with_timeout,
+    GitError, delete_branch, is_non_fast_forward_error, is_retryable_git_command_error,
+    is_transient_network_error, rebase_with_retry, retry_delay, run_git_command,
+    run_git_command_with_timeout, unmerged_files,
 };
 
 // ── Helper ──────────────────────────────────────────────────────────────────
@@ -377,5 +378,197 @@ fn retry_delay_is_bounded_and_increases_initially() {
         delay_0.as_millis() as u64 <= 200 + max_jitter,
         "retry_delay(0) should be <= {}ms",
         200 + max_jitter
+    );
+}
+
+// ── unmerged_files: conflict discovery ────────────────────────────────────────
+
+/// `unmerged_files(path)` returns exactly the paths with merge conflicts
+/// and excludes clean files.
+///
+/// Constructs a repo where two branches edit the same file differently,
+/// then merges to create a conflict.  A separate clean file is committed
+/// on both branches identically so it appears in the tree but must NOT
+/// appear in the unmerged-files list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmerged_files_returns_conflicted_paths() {
+    let fixture = init_repo_with_main_commit();
+
+    // Add a second file that will remain conflict-free.
+    write_and_commit(
+        fixture.path(),
+        "clean.txt",
+        "clean content\n",
+        "add clean file",
+    );
+
+    // Create a feature branch from main.
+    checkout_branch(fixture.path(), "feature", Some("main"));
+
+    // Edit conflict_file on the feature branch.
+    write_and_commit(
+        fixture.path(),
+        "conflict.txt",
+        "feature version\n",
+        "feature edit",
+    );
+    // Also edit clean.txt identically on both branches (no conflict).
+    write_and_commit(
+        fixture.path(),
+        "clean.txt",
+        "updated clean content\n",
+        "feature clean update",
+    );
+
+    // Switch back to main and edit conflict_file differently.
+    checkout_branch(fixture.path(), "main", None);
+    write_and_commit(
+        fixture.path(),
+        "conflict.txt",
+        "main version\n",
+        "main edit",
+    );
+    // Same clean.txt update on main (identical content → no conflict).
+    write_and_commit(
+        fixture.path(),
+        "clean.txt",
+        "updated clean content\n",
+        "main clean update",
+    );
+
+    // Attempt a merge that will conflict on conflict.txt.
+    let merge_out = std::process::Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("run git merge");
+    assert!(
+        !merge_out.status.success(),
+        "merge should conflict, but succeeded"
+    );
+
+    let unmerged = unmerged_files(fixture.path().to_path_buf())
+        .await
+        .expect("unmerged_files should succeed during conflict");
+
+    assert_eq!(
+        unmerged,
+        vec!["conflict.txt".to_string()],
+        "unmerged_files should return exactly the conflicted path; got: {unmerged:?}"
+    );
+}
+
+// ── rebase_with_retry: conflict produces CommandFailed ────────────────────────
+
+/// `rebase_with_retry` returns `GitError::CommandFailed` with conflict-related
+/// stderr when the upstream branch has incompatible changes.
+///
+/// The implementation attempts `rebase --abort` after non-retryable failures,
+/// so the repo should NOT be left in an active rebase state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rebase_with_retry_returns_command_failed_for_conflict() {
+    let fixture = init_repo_with_main_commit();
+
+    // Create a feature branch that edits conflict.txt.
+    checkout_branch(fixture.path(), "feature", Some("main"));
+    write_and_commit(
+        fixture.path(),
+        "conflict.txt",
+        "feature version\n",
+        "feature edit",
+    );
+
+    // Switch back to main and edit the same file differently.
+    checkout_branch(fixture.path(), "main", None);
+    write_and_commit(
+        fixture.path(),
+        "conflict.txt",
+        "main version\n",
+        "main edit",
+    );
+
+    // Now switch to feature and try to rebase onto main.
+    checkout_branch(fixture.path(), "feature", None);
+
+    let err = rebase_with_retry(fixture.path(), "main")
+        .await
+        .expect_err("rebase should fail due to conflict");
+
+    match &err {
+        GitError::CommandFailed {
+            code,
+            stderr,
+            command,
+            ..
+        } => {
+            assert_ne!(*code, 0, "exit code must be non-zero");
+            let lower = stderr.to_lowercase();
+            assert!(
+                lower.contains("conflict") || lower.contains("could not apply"),
+                "stderr should mention conflict, got: {stderr}"
+            );
+            assert!(
+                command.contains("rebase"),
+                "command should contain 'rebase', got: {command}"
+            );
+        }
+        other => panic!("expected CommandFailed, got: {other:?}"),
+    }
+
+    // Implementation calls `rebase --abort` on failure, so the repo
+    // should not be in rebase state.  Verify by checking .git/REBASE_HEAD
+    // does not exist.
+    assert!(
+        !fixture.path().join(".git/REBASE_HEAD").exists()
+            && !fixture.path().join(".git/rebase-merge").exists()
+            && !fixture.path().join(".git/rebase-apply").exists(),
+        "repo should not be left in active rebase state after conflict failure"
+    );
+}
+
+// ── delete_branch: local removal succeeds even when remote delete fails ──────
+
+/// `delete_branch` removes the local branch and returns `Ok(())` even when
+/// the remote `push --delete` fails (no origin configured).
+///
+/// The function's contract: `git branch -D <branch>` followed by a
+/// best-effort `git push origin --delete <branch>` whose error is ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_branch_removes_local_even_when_remote_delete_fails() {
+    // Use a repo with no origin remote so the push --delete fails.
+    let fixture = init_repo_with_main_commit();
+
+    // Create a local branch to delete.
+    checkout_branch(fixture.path(), "task/cleanup", Some("main"));
+    checkout_branch(fixture.path(), "main", None);
+
+    // Verify the branch exists before deletion.
+    let list_before = std::process::Command::new("git")
+        .args(["branch", "--list", "task/cleanup"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("git branch --list");
+    assert!(
+        String::from_utf8_lossy(&list_before.stdout).contains("task/cleanup"),
+        "branch should exist before deletion"
+    );
+
+    // delete_branch should return Ok(()) — the missing-origin push failure is ignored.
+    delete_branch(fixture.path().to_path_buf(), "task/cleanup".to_string())
+        .await
+        .expect("delete_branch should return Ok even when remote push fails");
+
+    // Verify the local branch no longer exists.
+    let list_after = std::process::Command::new("git")
+        .args(["branch", "--list", "task/cleanup"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("git branch --list");
+    assert!(
+        String::from_utf8_lossy(&list_after.stdout)
+            .trim()
+            .is_empty(),
+        "local branch should be deleted; list output: {}",
+        String::from_utf8_lossy(&list_after.stdout)
     );
 }
