@@ -17,7 +17,7 @@ pub use self::coordinator_bridge::{
     CoordinatorOps, CoordinatorStatus, ProposalRefinementStartRequest,
 };
 pub use self::git_bridge::GitOps;
-pub use self::graph_bridge::RepoGraphOps;
+pub use self::graph_bridge::{REPO_GRAPH_OPS_METHODS, RepoGraphOps};
 pub use self::graph_data::{
     ApiImpactEntry, ApiImpactResult, ApiSurfaceEntry, BoundaryRule, BoundaryViolation, CallerRef,
     Candidate, ChangeKind, ChangedRange, ChurnEntry, ComplexityMetrics, ComplexityResult,

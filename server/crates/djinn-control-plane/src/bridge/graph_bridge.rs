@@ -3,6 +3,78 @@ use async_trait::async_trait;
 use super::graph_data::*;
 use super::graph_query_data::*;
 
+/// Single declared identity surface for every `RepoGraphOps` trait method.
+///
+/// This is the canonical mapping between the trait surface in this
+/// module and the registry's `bridge_method` strings in
+/// `server/crates/djinn-control-plane/src/tools/graph_tools/operation_registry.rs`.
+/// Every entry in `CODE_GRAPH_REGISTRY::bridge_method` **must** appear
+/// here, and every name here **must** correspond to a real `async fn`
+/// on [`RepoGraphOps`].
+///
+/// When a new method is added to [`RepoGraphOps`]:
+/// 1. Add the `async fn` on the trait (this file).
+/// 2. Add the method name to [`REPO_GRAPH_OPS_METHODS`] below.
+/// 3. Optionally add a forwarding stub on `RepoGraphBridge` in the
+///    server crate.
+///
+/// When the registry needs to dispatch a new operation:
+/// 1. Add a registry entry with `bridge_method` set to one of the
+///    names below.
+/// 2. The `operation_registry` test-time check verifies the chosen
+///    name is in this surface; a typo (e.g. `"neigbors"`) fails the
+///    test rather than silently routing to a missing method.
+///
+/// Trait-level method identity is intentionally stringly typed here:
+/// `async_trait` + Rust's lack of stable trait-method reflection
+/// means there is no compile-time way to enumerate trait method
+/// names from the trait object itself. Keeping the canonical list
+/// next to the trait definition makes the contract obvious to a
+/// reviewer and ensures the list stays in lockstep with the trait
+/// during code review.
+pub const REPO_GRAPH_OPS_METHODS: &[&str] = &[
+    "workspaces",
+    "workspace_node_counts",
+    "workspace_hint",
+    "neighbors",
+    "ranked",
+    "implementations",
+    "impact",
+    "search",
+    "hybrid_search",
+    "query_subgraph",
+    "route_map",
+    "shape_check",
+    "api_impact",
+    "flow",
+    "cycles",
+    "orphans",
+    "path",
+    "edges",
+    "describe",
+    "context",
+    "status",
+    "snapshot",
+    "symbols_at",
+    "diff_touches",
+    "detect_changes",
+    "api_surface",
+    "boundary_check",
+    "hotspots",
+    "complexity",
+    "refactor_candidates",
+    "metrics_at",
+    "dead_symbols",
+    "deprecated_callers",
+    "touches_hot_path",
+    "coupling",
+    "churn",
+    "coupling_hotspots",
+    "coupling_hubs",
+    "resolve",
+    "crate_graph",
+];
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait RepoGraphOps: Send + Sync {
