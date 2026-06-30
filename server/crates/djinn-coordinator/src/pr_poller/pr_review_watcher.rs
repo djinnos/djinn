@@ -72,9 +72,29 @@ impl CoordinatorActor {
                         error = %e,
                         "PR poller: failed to fetch PR status"
                     );
+                    // Record `unknown` for existing snapshot.
+                    let pr_number = pull_number as i64;
+                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                        .await;
                     continue;
                 }
             };
+
+            // ── Record CI snapshot (sole writer for GitHub-derived fields) ──
+            let pr_number_i64 = pull_number as i64;
+            self.record_ci_snapshot(
+                &task.id,
+                &task.short_id,
+                pr_number_i64,
+                &pr.head.sha,
+                &pr.base.ref_name,
+                pull_number,
+                gh_client,
+                &owner,
+                &repo,
+                &checks,
+            )
+            .await;
 
             let current_sha = pr.head.sha.clone();
 
