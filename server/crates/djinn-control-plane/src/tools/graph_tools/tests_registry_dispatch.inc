@@ -54,6 +54,20 @@
         impact_result: Option<ImpactResult>,
         /// Programmable success response for `context`.
         context_result: Option<SymbolContext>,
+        /// Programmable success response for `route_map`.
+        route_map_result: Option<RouteMapResult>,
+        /// Programmable success response for `api_impact`.
+        api_impact_result: Option<ApiImpactResult>,
+        /// Programmable success response for `flow`.
+        flow_result: Option<FlowResult>,
+        /// Programmable success response for `detect_changes`.
+        detect_changes_result: Option<DetectedChangesResult>,
+        /// Programmable success response for `snapshot`.
+        snapshot_result: Option<SnapshotPayload>,
+        /// Programmable success response for `status`.
+        status_result: Option<GraphStatus>,
+        /// Programmable success response for `coupling`.
+        coupling_result: Option<Vec<CouplingEntry>>,
         /// Programmable success response for `coupling_hotspots`.
         coupling_hotspots_result: Option<Vec<CoupledPairEntry>>,
     }
@@ -65,6 +79,13 @@
                 neighbors_result: None,
                 impact_result: None,
                 context_result: None,
+                route_map_result: None,
+                api_impact_result: None,
+                flow_result: None,
+                detect_changes_result: None,
+                snapshot_result: None,
+                status_result: None,
+                coupling_result: None,
                 coupling_hotspots_result: None,
             }
         }
@@ -81,6 +102,41 @@
 
         fn with_context(mut self, result: SymbolContext) -> Self {
             self.context_result = Some(result);
+            self
+        }
+
+        fn with_route_map(mut self, result: RouteMapResult) -> Self {
+            self.route_map_result = Some(result);
+            self
+        }
+
+        fn with_api_impact(mut self, result: ApiImpactResult) -> Self {
+            self.api_impact_result = Some(result);
+            self
+        }
+
+        fn with_flow(mut self, result: FlowResult) -> Self {
+            self.flow_result = Some(result);
+            self
+        }
+
+        fn with_detect_changes(mut self, result: DetectedChangesResult) -> Self {
+            self.detect_changes_result = Some(result);
+            self
+        }
+
+        fn with_snapshot(mut self, result: SnapshotPayload) -> Self {
+            self.snapshot_result = Some(result);
+            self
+        }
+
+        fn with_status(mut self, result: GraphStatus) -> Self {
+            self.status_result = Some(result);
+            self
+        }
+
+        fn with_coupling(mut self, result: Vec<CouplingEntry>) -> Self {
+            self.coupling_result = Some(result);
             self
         }
 
@@ -209,6 +265,68 @@
             Ok(self.context_result.clone())
         }
 
+        async fn route_map(
+            &self,
+            _: &ProjectCtx,
+            route_id: Option<&str>,
+            method: Option<&str>,
+            path: Option<&str>,
+            path_glob: Option<&str>,
+            framework: Option<&str>,
+            limit: usize,
+        ) -> Result<RouteMapResult, String> {
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("route_map", route_id.or(path).map(str::to_string)));
+            assert!(route_id.is_some() || path_glob.is_some() || method.zip(path).is_some());
+            assert!(limit > 0, "registry dispatch: route_map limit must be > 0");
+            let _ = framework;
+            self.route_map_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: route_map_result not programmed".to_string()
+            })
+        }
+
+        async fn api_impact(
+            &self,
+            _: &ProjectCtx,
+            route_id: Option<&str>,
+            method: Option<&str>,
+            path: Option<&str>,
+            min_confidence: f64,
+            limit: usize,
+        ) -> Result<ApiImpactResult, String> {
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("api_impact", route_id.or(path).map(str::to_string)));
+            assert!(route_id.is_some() || method.zip(path).is_some());
+            assert!((0.0..=1.0).contains(&min_confidence));
+            assert!(limit > 0, "registry dispatch: api_impact limit must be > 0");
+            self.api_impact_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: api_impact_result not programmed".to_string()
+            })
+        }
+
+        async fn flow(
+            &self,
+            _: &ProjectCtx,
+            query: &str,
+            kind_filter: Option<&str>,
+            limit: usize,
+        ) -> Result<FlowResult, String> {
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("flow", Some(query.to_string())));
+            assert!(!query.is_empty());
+            assert!(kind_filter.is_none() || matches!(kind_filter, Some("process" | "step")));
+            assert!(limit > 0, "registry dispatch: flow limit must be > 0");
+            self.flow_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: flow_result not programmed".to_string()
+            })
+        }
+
 
         async fn coupling_hotspots(
             &self,
@@ -323,24 +441,31 @@
             unreachable!("registry dispatch smoke tests should not call describe")
         }
         async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
-            // `attach_graph_staleness` (called when the caller supplies
-            // `current_head`) pokes `status`. Returning `warmed: false`
-            // is fine — the dispatcher tolerates status failures and
-            // omits the `graph_staleness` field rather than erroring.
-            // Tests below don't supply `current_head`, so this stub is
-            // never reached in the dispatch smoke path; it lives here
-            // so the impl compiles.
-            unreachable!("registry dispatch smoke tests should not call status")
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("status", None));
+            self.status_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: status_result not programmed".to_string()
+            })
         }
         async fn snapshot(
             &self,
             _: &ProjectCtx,
-            _: Option<&str>,
-            _: SnapshotLevel,
-            _: usize,
+            workspace: Option<&str>,
+            level: SnapshotLevel,
+            node_cap: usize,
             _: &GraphExclusions,
         ) -> Result<SnapshotPayload, String> {
-            unreachable!("registry dispatch smoke tests should not call snapshot")
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("snapshot", workspace.map(str::to_string)));
+            assert!(matches!(level, SnapshotLevel::Symbol | SnapshotLevel::Community));
+            assert!(node_cap > 0, "registry dispatch: snapshot node_cap must be > 0");
+            self.snapshot_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: snapshot_result not programmed".to_string()
+            })
         }
         async fn symbols_at(
             &self,
@@ -361,11 +486,18 @@
         async fn detect_changes(
             &self,
             _: &ProjectCtx,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: &[String],
+            from_sha: Option<&str>,
+            to_sha: Option<&str>,
+            changed_files: &[String],
         ) -> Result<DetectedChangesResult, String> {
-            unreachable!("registry dispatch smoke tests should not call detect_changes")
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("detect_changes", from_sha.or(to_sha).map(str::to_string)));
+            assert!(from_sha.zip(to_sha).is_some() || !changed_files.is_empty());
+            self.detect_changes_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: detect_changes_result not programmed".to_string()
+            })
         }
         async fn api_surface(
             &self,
@@ -444,10 +576,18 @@
         async fn coupling(
             &self,
             _: &ProjectCtx,
-            _: &str,
-            _: usize,
+            file_path: &str,
+            limit: usize,
         ) -> Result<Vec<CouplingEntry>, String> {
-            unreachable!("registry dispatch smoke tests should not call coupling")
+            self.calls
+                .lock()
+                .expect("registry dispatch calls lock")
+                .push(("coupling", Some(file_path.to_string())));
+            assert!(!file_path.is_empty());
+            assert!(limit > 0, "registry dispatch: coupling limit must be > 0");
+            self.coupling_result.clone().ok_or_else(|| {
+                "registry dispatch fixture: coupling_result not programmed".to_string()
+            })
         }
         async fn churn(
             &self,
@@ -520,6 +660,71 @@
             incoming: Default::default(),
             outgoing: Default::default(),
             processes: Vec::new(),
+        }
+    }
+
+    fn canned_graph_status(pinned_commit: &str) -> GraphStatus {
+        GraphStatus {
+            project_id: "proj-vxmw-registry".to_string(),
+            warmed: true,
+            last_warm_at: Some("2026-06-30T00:00:00Z".to_string()),
+            pinned_commit: Some(pinned_commit.to_string()),
+            commits_since_pin: Some(0),
+            route_parity_enabled: true,
+            route_exclusion_config: serde_json::json!({}),
+        }
+    }
+
+    fn canned_snapshot_payload(project_id: &str) -> SnapshotPayload {
+        SnapshotPayload {
+            project_id: project_id.to_string(),
+            git_head: "abc123".to_string(),
+            generated_at: "2026-06-30T00:00:00Z".to_string(),
+            truncated: false,
+            total_nodes: 1,
+            total_edges: 0,
+            node_cap: 25,
+            nodes: vec![SnapshotNode {
+                id: "symbol:handler".to_string(),
+                uid: "symbol:handler".to_string(),
+                kind: "symbol".to_string(),
+                label: "handler".to_string(),
+                workspace: None,
+                workspace_kind: None,
+                member_count: None,
+                internal_edge_count: None,
+                symbol_kind: Some("function".to_string()),
+                file_path: Some("src/routes.rs".to_string()),
+                pagerank: 1.0,
+                community_id: None,
+                cognitive: None,
+                is_test: false,
+                x: 0.0,
+                y: 0.0,
+                keywords: Vec::new(),
+            }],
+            edges: Vec::new(),
+        }
+    }
+
+    fn canned_detect_changes_result() -> DetectedChangesResult {
+        let touched = DetectedTouchedSymbol {
+            uid: "symbol:changed".to_string(),
+            name: "changed".to_string(),
+            kind: "function".to_string(),
+            file_path: "src/changed.rs".to_string(),
+            start_line: 1,
+            end_line: 5,
+            pagerank_tier: PagerankTier::High,
+            change_kind: ChangeKind::Modified,
+        };
+        let mut by_file = std::collections::BTreeMap::new();
+        by_file.insert("src/changed.rs".to_string(), vec![touched.clone()]);
+        DetectedChangesResult {
+            from_sha: "base".to_string(),
+            to_sha: "head".to_string(),
+            touched_symbols: vec![touched],
+            by_file,
         }
     }
 
@@ -825,6 +1030,118 @@
         );
     }
 
+    #[tokio::test]
+    async fn route_api_flow_change_snapshot_and_coupling_routes_preserve_envelopes() {
+        let ctx = registry_dispatch_ctx();
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_route_map(RouteMapResult::default()),
+        );
+        let mut params = test_params("route_map");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.method = Some("GET".to_string());
+        params.path = Some("/api/users".to_string());
+        params.path_glob = Some("/api/**".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("route_map dispatch succeeds");
+        assert!(matches!(response, CodeGraphResponse::RouteMap(_)));
+        assert_eq!(ops.calls()[0].0, "route_map");
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_api_impact(ApiImpactResult::default()),
+        );
+        let mut params = test_params("api_impact");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.method = Some("GET".to_string());
+        params.path = Some("/api/users".to_string());
+        params.min_confidence = Some(0.75);
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("api_impact dispatch succeeds");
+        assert!(matches!(response, CodeGraphResponse::ApiImpact(_)));
+        assert_eq!(ops.calls()[0].0, "api_impact");
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_flow(FlowResult::default()),
+        );
+        let mut params = test_params("flow");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.query = Some("checkout".to_string());
+        params.kind_filter = Some("step".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("flow dispatch succeeds");
+        assert!(matches!(response, CodeGraphResponse::Flow(_)));
+        assert_eq!(ops.calls()[0].0, "flow");
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_detect_changes(canned_detect_changes_result()),
+        );
+        let mut params = test_params("detect_changes");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.from_sha = Some("base".to_string());
+        params.to_sha = Some("head".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("detect_changes dispatch succeeds");
+        assert!(matches!(response, CodeGraphResponse::DetectedChanges(_)));
+        assert_eq!(ops.calls()[0].0, "detect_changes");
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_snapshot(canned_snapshot_payload(&ctx.id)),
+        );
+        let mut params = test_params("snapshot");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.limit = Some(25);
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("snapshot dispatch succeeds");
+        match response {
+            CodeGraphResponse::Snapshot(snapshot) => {
+                assert_eq!(snapshot.snapshot.project_id, ctx.id);
+                assert_eq!(snapshot.snapshot.nodes.len(), 1);
+            }
+            other => panic!("expected Snapshot envelope, got {other:?}"),
+        }
+        assert_eq!(ops.calls()[0].0, "snapshot");
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_coupling(vec![CouplingEntry {
+                file_path: "src/paired.rs".to_string(),
+                co_edit_count: 2,
+                last_co_edit: "2026-06-30T00:00:00Z".to_string(),
+                supporting_commit_samples: vec!["abc123".to_string()],
+            }]),
+        );
+        let mut params = test_params("coupling");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.file = Some("src/lib.rs".to_string());
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("coupling dispatch succeeds");
+        match response {
+            CodeGraphResponse::Coupling(coupling) => {
+                assert_eq!(coupling.file, "src/lib.rs");
+                assert_eq!(coupling.coupled[0].file_path, "src/paired.rs");
+            }
+            other => panic!("expected Coupling envelope, got {other:?}"),
+        }
+        assert_eq!(ops.calls()[0].0, "coupling");
+    }
+
     // ─────────────────────────────────────────────────────────────────
     // Envelope-semantics regressions: errors, validation, pagination
     // ─────────────────────────────────────────────────────────────────
@@ -896,6 +1213,34 @@
         );
     }
 
+    #[tokio::test]
+    async fn api_impact_dispatch_preserves_missing_route_selector_validation_error() {
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new().with_api_impact(ApiImpactResult::default()),
+        );
+        let ctx = registry_dispatch_ctx();
+        let mut params = test_params("api_impact");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.route_id = None;
+        params.method = None;
+        params.path = None;
+
+        let err = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect_err("api_impact without a route selector must fail");
+
+        assert!(
+            err.contains("'route_id' or both 'method' and 'path' are required"),
+            "expected route selector validation error, got: {err}"
+        );
+        assert!(
+            ops.calls().is_empty(),
+            "registry dispatch: bridge must not be called when route selector validation fails"
+        );
+    }
+
     /// Acceptance criterion (do not weaken assertions): invalid
     /// `direction` for `neighbors` is rejected before the bridge is
     /// called. The pre-vxmw dispatcher's `validate_direction` hook
@@ -957,6 +1302,57 @@
             ops.calls().is_empty(),
             "registry dispatch: bridge must not be called when edge-kind validation fails"
         );
+    }
+
+    #[tokio::test]
+    async fn current_head_aliases_attach_graph_staleness_without_changing_payload() {
+        let parsed: CodeGraphParams = serde_json::from_value(serde_json::json!({
+            "operation": "impact",
+            "project": "owner/repo",
+            "key": "MyStruct",
+            "currentHead": "head-sha"
+        }))
+        .expect("currentHead alias parses");
+        assert_eq!(parsed.current_head.as_deref(), Some("head-sha"));
+        let parsed: CodeGraphParams = serde_json::from_value(serde_json::json!({
+            "operation": "impact",
+            "project": "owner/repo",
+            "key": "MyStruct",
+            "caller_commit": "caller-sha"
+        }))
+        .expect("caller_commit alias parses");
+        assert_eq!(parsed.current_head.as_deref(), Some("caller-sha"));
+
+        let (server, ops) = registry_dispatch_server(
+            RegistryDispatchOps::new()
+                .with_impact(ImpactResult::Detailed(Vec::new()))
+                .with_status(canned_graph_status("cached-sha")),
+        );
+        let ctx = registry_dispatch_ctx();
+        let mut params = test_params("impact");
+        params.project_id = ctx.id.clone();
+        params.project_path = ctx.clone_path.clone();
+        params.key = Some("MyStruct".to_string());
+        params.current_head = Some("caller-sha".to_string());
+
+        let response = server
+            .dispatch_code_graph(&ctx, &mut params)
+            .await
+            .expect("impact with caller head dispatch succeeds");
+        match response {
+            CodeGraphResponse::Impact(impact) => {
+                let stale = impact
+                    .graph_staleness
+                    .expect("caller head attaches graph staleness");
+                assert_eq!(stale.caller_commit, "caller-sha");
+                assert_eq!(stale.cached_commit.as_deref(), Some("cached-sha"));
+                assert!(stale.is_stale, "mismatched commits should be stale");
+            }
+            other => panic!("expected Impact envelope, got {other:?}"),
+        }
+        let calls = ops.calls();
+        assert_eq!(calls[0].0, "impact");
+        assert_eq!(calls[1].0, "status");
     }
 
     /// Acceptance criterion (preserve pagination behaviour): when the

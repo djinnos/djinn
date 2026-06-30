@@ -289,6 +289,25 @@ pub struct Task {
     /// only for tasks with neither a session user nor an owned epic.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub created_by_user_id: Option<String>,
+    /// Promoted current-head PR CI status from `task_pr_ci_snapshots`.
+    /// Defaults to `unknown` when no snapshot exists for the task PR.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_status: String,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_head_sha: Option<String>,
+    /// JSON array of blocking required check names for the current PR head.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_blocking_required_check_names: String,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_failure_fingerprint: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_first_seen_at: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_last_seen_at: Option<String>,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_same_signature_count: i64,
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_last_remediation_base_sha: Option<String>,
     /// Number of unresolved blocker tasks (blocking tasks not yet closed).
     /// Populated by list queries via subquery; defaults to 0 elsewhere.
     #[cfg_attr(feature = "sqlx", sqlx(default))]

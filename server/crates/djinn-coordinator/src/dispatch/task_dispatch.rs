@@ -19,10 +19,17 @@ fn record_dispatch_attempt(outcome: &'static str) {
 
 fn record_dispatch_outcome(outcome: &'static str) {
     if outcome == djinn_telemetry::dispatch::OUTCOME_OK {
-        djinn_telemetry::dispatch::record_success();
+        djinn_telemetry::dispatch::record_success_at(dispatch_success_timestamp_secs());
     } else {
         record_dispatch_attempt(outcome);
     }
+}
+
+fn dispatch_success_timestamp_secs() -> f64 {
+    SystemClock::new()
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
 }
 
 fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usize) {
@@ -1700,6 +1707,14 @@ mod inflight_ledger_tests {
             memory_refs: "[]".to_owned(),
             agent_type: None,
             created_by_user_id: creator.map(str::to_owned),
+            ci_status: "unknown".to_owned(),
+            ci_head_sha: None,
+            ci_blocking_required_check_names: "[]".to_owned(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
             unresolved_blocker_count: 0,
         }
     }
