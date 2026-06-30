@@ -388,6 +388,43 @@ impl TaskRepository {
         Ok(task)
     }
 
+    /// Update only the labels JSONB column for a task.
+    ///
+    /// Use this for system-maintained markers when callers must not rewrite the
+    /// task's editable fields or unrelated JSON columns as a side effect.
+    pub async fn update_labels(&self, id: &str, labels: &str) -> Result<Task> {
+        self.db.ensure_initialized().await?;
+        let labels_value = parse_json_array_column("labels", labels)?;
+        let id_owned = id.to_owned();
+
+        let task: Task = crate::retry::retry_on_serialization_failure(
+            crate::retry::DEFAULT_MAX_TX_RETRIES,
+            || {
+                let id = id_owned.clone();
+                let labels = labels_value.clone();
+                async move {
+                    sqlx::query(
+                        r#"UPDATE tasks SET
+                            labels = $1,
+                            updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                         WHERE id = $2"#,
+                    )
+                    .bind(labels)
+                    .bind(&id)
+                    .execute(self.db.pool())
+                    .await?;
+                    let task: Task = task_select_where_id!(id).fetch_one(self.db.pool()).await?;
+                    Ok::<_, crate::Error>(task)
+                }
+            },
+        )
+        .await?;
+
+        self.events
+            .send(DjinnEventEnvelope::task_updated(&task, false));
+        Ok(task)
+    }
+
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
         let id_owned = id.to_owned();

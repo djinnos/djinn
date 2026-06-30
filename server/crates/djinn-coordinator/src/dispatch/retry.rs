@@ -1,6 +1,7 @@
 use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
+use djinn_core::clock::{Clock, SystemClock};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
@@ -894,23 +895,15 @@ impl CoordinatorActor {
 
         // Tag the human-review remediation task with `human-review-hold` so the
         // UI can surface a "needs your review" indicator on it (the actual item
-        // a human must act on; closing it revives the held source task). Reuse
-        // the existing `update` writer (no new compile-time-checked query) —
-        // re-pass the freshly-created task's own fields and override only
-        // `labels`. Non-fatal: a failed label write still leaves the hold in
-        // place via the blocker + comment.
+        // a human must act on; closing it revives the held source task). Write
+        // only the labels column: reusing the broad `update` path here is more
+        // fragile because it reserializes unrelated JSON columns and can silently
+        // leave the hold unlabeled if any copied field fails validation.
+        // Non-fatal: a failed label write still leaves the hold in place via the
+        // blocker + comment, but tests assert this path stays healthy.
         if kind == RemediationKind::HumanReview
             && let Err(e) = task_repo
-                .update(
-                    &review_task.id,
-                    &review_task.title,
-                    &review_task.description,
-                    &review_task.design,
-                    review_task.priority,
-                    &review_task.owner,
-                    "[\"human-review-hold\"]",
-                    &review_task.acceptance_criteria,
-                )
+                .update_labels(&review_task.id, r#"["human-review-hold"]"#)
                 .await
         {
             tracing::warn!(
@@ -995,7 +988,7 @@ impl CoordinatorActor {
                 self.last_dispatched.insert(
                     review_task.id.clone(),
                     DispatchMarker {
-                        instant: StdInstant::now(),
+                        instant: SystemClock::new().now_instant(),
                         role: "planner".to_owned(),
                     },
                 );

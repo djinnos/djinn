@@ -641,14 +641,12 @@ mod tests {
             .unwrap();
         // Stamp the label via raw update so the hold carries the exact
         // human-review-hold marker the auto-park mechanism uses.
-        sqlx::query(
-            "UPDATE tasks SET labels = $1::jsonb WHERE id = $2",
-        )
-        .bind(r#"["human-review-hold"]"#)
-        .bind(&hold.id)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        sqlx::query("UPDATE tasks SET labels = $1::jsonb WHERE id = $2")
+            .bind(r#"["human-review-hold"]"#)
+            .bind(&hold.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         // ── Pre-condition: source is ready before the blocker is wired ──
         let ready = repo
@@ -700,10 +698,7 @@ mod tests {
         );
 
         // ── list_by_status_filtered("open", true) dispatch path ──
-        let filtered = repo
-            .list_by_status_filtered("open", true)
-            .await
-            .unwrap();
+        let filtered = repo.list_by_status_filtered("open", true).await.unwrap();
         assert!(
             !filtered.iter().any(|t| t.id == source.id),
             "list_by_status_filtered(open, true) must exclude source while review hold is open"
@@ -725,10 +720,7 @@ mod tests {
             "source must be ready again after the review hold is closed"
         );
 
-        let filtered = repo
-            .list_by_status_filtered("open", true)
-            .await
-            .unwrap();
+        let filtered = repo.list_by_status_filtered("open", true).await.unwrap();
         assert!(
             filtered.iter().any(|t| t.id == source.id),
             "list_by_status_filtered(open, true) must include source after review hold is closed"

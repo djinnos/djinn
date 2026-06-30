@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -150,9 +150,8 @@ pub enum PoolMessage {
     },
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(super) fn now_unix_string() -> String {
-    let secs = SystemTime::now()
+    let secs = djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new())
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
