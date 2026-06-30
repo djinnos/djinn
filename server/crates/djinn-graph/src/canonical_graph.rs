@@ -427,7 +427,8 @@ pub async fn run_warm_graph_command<C: WarmContext>(
         project_root = %project_root.display(),
         "run_warm_graph_command: starting warm pipeline"
     );
-    let started = SystemClock::new().now_instant();
+    let clock = SystemClock::new();
+    let started = clock.now_instant();
     let (_handle, graph) = ensure_canonical_graph(ctx, project_id, &project_root, token)
         .await
         .map_err(|e| anyhow::anyhow!("ensure_canonical_graph failed: {e}"))?;
@@ -607,7 +608,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
     let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
 
-    let t_indexers = SystemClock::new().now_instant();
+    let clock = SystemClock::new();
+    let t_indexers = clock.now_instant();
     let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         &output_dir,
@@ -628,7 +630,6 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
-            let clock = SystemClock::new();
             let t_parse = clock.now_instant();
             let parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
                 &artifacts,
