@@ -936,7 +936,11 @@ impl ProposalRepository {
                                 .to_owned(),
                         )
                     })?;
-                findings.validate().map_err(Error::InvalidData)?;
+                findings.validate().map_err(|e| {
+                    Error::InvalidData(format!(
+                        "evidence_findings body_metadata must contain structured findings: {e}"
+                    ))
+                })?;
             }
             other => {
                 return Err(Error::InvalidData(format!(
