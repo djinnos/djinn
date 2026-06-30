@@ -106,10 +106,10 @@ pub use pr_review_handlers::parse_pr_url;
 
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
+use ci_helpers::compute_ci_failure_fingerprint;
 #[cfg(test)]
 use ci_helpers::{
-    compute_ci_failure_fingerprint, count_consecutive_identical, detect_scope_inversion,
-    extract_crate_name, extract_crate_names,
+    count_consecutive_identical, detect_scope_inversion, extract_crate_name, extract_crate_names,
 };
 #[cfg(test)]
 use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
