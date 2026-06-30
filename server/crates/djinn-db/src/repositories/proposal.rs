@@ -424,6 +424,29 @@ impl EvidenceLifecycleMetadata {
     }
 }
 
+/// Cap status for needs-evidence demands in the current refinement run.
+///
+/// The count is derived entirely from persisted debate/lifecycle rows, so
+/// it survives restart-style reconstruction without in-memory state.
+/// Completed, failed, cancelled, and force-closed spikes still count
+/// because the accepted `needs_evidence` debate entry remains persisted
+/// regardless of later spike outcome.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NeedsEvidenceCapStatus {
+    /// Number of accepted `needs_evidence` debate entries after the
+    /// latest `refinement_start` for this proposal.
+    pub count: u32,
+    /// The Phase 1 cap value (always 2 for Phase 1).
+    pub cap: u32,
+    /// `true` when `count >= cap` — a third accepted demand must be
+    /// rejected before any spike/link write occurs.
+    pub cap_exceeded: bool,
+    /// `true` when no `refinement_start` lifecycle event exists for this
+    /// proposal, meaning cap accounting has no run boundary. Callers
+    /// should treat this as "not in refinement, cap not applicable".
+    pub no_refinement_run: bool,
+}
+
 pub struct ProposalRepository {
     db: Database,
     events: EventBus,
@@ -1124,6 +1147,87 @@ impl ProposalRepository {
         )
         .fetch_all(self.db.pool())
         .await?)
+    }
+
+    // ── Needs-evidence cap accounting ──────────────────────────────────────
+
+    /// Phase 1 cap: the maximum number of accepted `needs_evidence` debate
+    /// entries allowed per refinement run. The Judge demand tool should call
+    /// [`Self::needs_evidence_cap_status_for_current_run`] before creating a
+    /// new demand and reject if `cap_exceeded` is true.
+    pub const NEEDS_EVIDENCE_PHASE1_CAP: u32 = 2;
+
+    /// Count accepted `needs_evidence` debate entries that were created after
+    /// the latest `refinement_start` lifecycle event for the given proposal.
+    ///
+    /// Returns `None` when no `refinement_start` exists (no refinement run
+    /// boundary). Malformed/rejected demands never count because
+    /// `add_debate_trail_entry` refuses to persist them.
+    ///
+    /// The timestamp comparison uses `created_at` from the debate row versus
+    /// the `created_at` of the latest `refinement_start` revision row. This
+    /// is deterministic and survives restart because both are persisted.
+    pub async fn needs_evidence_count_for_current_run(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<u32>> {
+        self.db.ensure_initialized().await?;
+
+        // Find the latest refinement_start lifecycle event's created_at.
+        let revisions = self.revisions(proposal_id).await?;
+        let latest_start = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "refinement_start");
+
+        let Some(start) = latest_start else {
+            return Ok(None); // No refinement run — cap not applicable.
+        };
+
+        // Count needs_evidence debate entries created after the start.
+        let count: i64 = sqlx::query_scalar(
+            r#"SELECT COUNT(*) AS "n!: i64"
+               FROM proposal_debate_trail
+               WHERE proposal_id = $1
+                 AND kind = 'needs_evidence'
+                 AND created_at > $2"#,
+        )
+        .bind(proposal_id)
+        .bind(&start.created_at)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(Some(count as u32))
+    }
+
+    /// Return the full cap status for needs-evidence demands in the current
+    /// refinement run. This is the primary helper that the Judge demand tool
+    /// should call before creating/linking a spike.
+    ///
+    /// When `no_refinement_run` is true, the caller should not issue demands
+    /// (there is no active refinement to park). When `cap_exceeded` is true,
+    /// the caller must reject the demand before any spike/link write occurs.
+    pub async fn needs_evidence_cap_status_for_current_run(
+        &self,
+        proposal_id: &str,
+    ) -> Result<NeedsEvidenceCapStatus> {
+        let count = self
+            .needs_evidence_count_for_current_run(proposal_id)
+            .await?;
+        match count {
+            None => Ok(NeedsEvidenceCapStatus {
+                count: 0,
+                cap: Self::NEEDS_EVIDENCE_PHASE1_CAP,
+                cap_exceeded: false,
+                no_refinement_run: true,
+            }),
+            Some(count) => Ok(NeedsEvidenceCapStatus {
+                count,
+                cap: Self::NEEDS_EVIDENCE_PHASE1_CAP,
+                cap_exceeded: count >= Self::NEEDS_EVIDENCE_PHASE1_CAP,
+                no_refinement_run: false,
+            }),
+        }
     }
 
     // ── Listing ──────────────────────────────────────────────────────────────
@@ -5764,5 +5868,414 @@ mod tests {
             evidence_lifecycle_kind::EVIDENCE_FAILED,
             "refinement_evidence_failed"
         );
+    }
+
+    // ── Needs-evidence cap accounting tests ──────────────────────────────
+
+    /// Helper: add a `needs_evidence` debate entry with valid linkage metadata.
+    async fn add_needs_evidence_entry(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        body: &str,
+    ) -> ProposalDebateTrail {
+        let judge_task_id = uuid::Uuid::now_v7().to_string();
+        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let link = NeedsEvidenceClaimLink {
+            kind: NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
+            proposal_id: proposal_id.to_owned(),
+            judge_task_id,
+            spike_task_id,
+            round,
+            against_revision_seq,
+        };
+        let meta_value = link.to_value();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id,
+            kind: "needs_evidence",
+            body,
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("claude-opus-4-8"),
+            source_task_id: None,
+            against_revision_seq,
+            round,
+            body_metadata: Some(&meta_value),
+        })
+        .await
+        .unwrap()
+    }
+
+    /// No `refinement_start` → `needs_evidence_count_for_current_run` returns
+    /// `None` and cap status has `no_refinement_run = true`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_no_refinement_run_returns_none() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("No Refinement")).await.unwrap();
+
+        let count = repo
+            .needs_evidence_count_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert!(count.is_none(), "no refinement start → count is None");
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert!(status.no_refinement_run);
+        assert_eq!(status.count, 0);
+        assert_eq!(status.cap, ProposalRepository::NEEDS_EVIDENCE_PHASE1_CAP);
+        assert!(!status.cap_exceeded);
+    }
+
+    /// After `refinement_start`, zero demands → count = 0, not exceeded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_zero_demands_after_start() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Zero Demands")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        let count = repo
+            .needs_evidence_count_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(count, Some(0));
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert!(!status.no_refinement_run);
+        assert_eq!(status.count, 0);
+        assert!(!status.cap_exceeded);
+    }
+
+    /// One accepted demand → count = 1, not exceeded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_one_demand_not_exceeded() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("One Demand")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        add_needs_evidence_entry(&repo, &p.id, 1, 1, "verify X").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 1);
+        assert!(!status.cap_exceeded);
+    }
+
+    /// Two accepted demands → count = 2 = cap, cap_exceeded = true.
+    /// This is the Phase 1 boundary: a third demand must be rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_two_demands_cap_exceeded() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Two Demands")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        add_needs_evidence_entry(&repo, &p.id, 1, 1, "verify X").await;
+        add_needs_evidence_entry(&repo, &p.id, 2, 1, "verify Y").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 2);
+        assert!(
+            status.cap_exceeded,
+            "at count == cap, cap_exceeded must be true"
+        );
+        assert_eq!(status.cap, 2);
+    }
+
+    /// The count is reconstructed from persisted rows — simulating a restart
+    /// by creating a new `ProposalRepository` instance on the same database.
+    /// The count must survive the "restart" because it queries the DB.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_count_survives_restart_style_reconstruction() {
+        let db = test_db();
+        let proposal_id;
+        // Phase 1: create proposal, start refinement, add 2 demands.
+        {
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let p = repo.create(create_input("Restart")).await.unwrap();
+            proposal_id = p.id.clone();
+
+            repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+                .await
+                .unwrap();
+
+            add_needs_evidence_entry(&repo, &p.id, 1, 1, "first").await;
+            add_needs_evidence_entry(&repo, &p.id, 2, 1, "second").await;
+        }
+        // Phase 2: new repository instance (simulating restart).
+        {
+            let repo2 = ProposalRepository::new(db.clone(), EventBus::noop());
+            let status = repo2
+                .needs_evidence_cap_status_for_current_run(&proposal_id)
+                .await
+                .unwrap();
+            assert_eq!(
+                status.count, 2,
+                "count must survive restart-style reconstruction"
+            );
+            assert!(status.cap_exceeded);
+            assert!(!status.no_refinement_run);
+        }
+    }
+
+    /// After `refinement_stop` + new `refinement_start`, the count resets
+    /// to zero for the new run. Only entries after the latest start count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_resets_after_new_refinement_start() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Reset")).await.unwrap();
+
+        // First run: start → 2 demands → stop.
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+        add_needs_evidence_entry(&repo, &p.id, 1, 1, "run1-1").await;
+        add_needs_evidence_entry(&repo, &p.id, 2, 1, "run1-2").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 2);
+        assert!(status.cap_exceeded);
+
+        // Stop and start new run.
+        repo.record_refinement_lifecycle(&p.id, "refinement_stop", None)
+            .await
+            .unwrap();
+        // Small delay so created_at advances (lifecycle rows use now()).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 0, "new run must reset count to zero");
+        assert!(!status.cap_exceeded);
+
+        // Add one demand in the new run.
+        add_needs_evidence_entry(&repo, &p.id, 1, 2, "run2-1").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 1);
+        assert!(!status.cap_exceeded);
+    }
+
+    /// Malformed/rejected demands that fail validation in
+    /// `add_debate_trail_entry` do NOT count because no debate entry is
+    /// persisted. Only accepted entries count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_rejected_demands_do_not_count() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Rejected")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        // Attempt a malformed demand (wrong agent_role) — should fail.
+        let link = NeedsEvidenceClaimLink {
+            kind: NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
+            proposal_id: p.id.clone(),
+            judge_task_id: uuid::Uuid::now_v7().to_string(),
+            spike_task_id: uuid::Uuid::now_v7().to_string(),
+            round: 1,
+            against_revision_seq: 1,
+        };
+        let meta_value = link.to_value();
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "malformed",
+                blocking: true,
+                agent_role: "advocate", // wrong role
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: Some(&meta_value),
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("judge"));
+
+        // Attempt without metadata — should fail.
+        let err = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "needs_evidence",
+                body: "no meta",
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("body_metadata"));
+
+        // Count must be 0 — no entries were persisted.
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 0, "rejected demands must not count");
+        assert!(!status.cap_exceeded);
+
+        // Now accept a valid demand.
+        add_needs_evidence_entry(&repo, &p.id, 1, 1, "valid").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 1, "accepted demand must count");
+        assert!(!status.cap_exceeded);
+    }
+
+    /// Accepted entries continue to count regardless of later spike
+    /// completion/failure/cancellation. The count is from the debate entry
+    /// row, not from spike task status.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_entries_count_regardless_of_spike_outcome() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Spike Outcome")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        // Two accepted demands — cap reached.
+        add_needs_evidence_entry(&repo, &p.id, 1, 1, "spike-1").await;
+        add_needs_evidence_entry(&repo, &p.id, 2, 1, "spike-2").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 2);
+        assert!(status.cap_exceeded);
+
+        // Simulate spike outcomes: record lifecycle events for completion
+        // and failure. These should NOT affect the cap count because the
+        // count is from debate entries, not lifecycle events.
+        repo.record_evidence_received(&p.id, "spike-1", "judge-1", 1, 1)
+            .await
+            .unwrap();
+        repo.record_evidence_failed(&p.id, "spike-2", "judge-2", 2, 1, "spike_cancelled")
+            .await
+            .unwrap();
+
+        // Count must still be 2.
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 2, "spike outcomes must not change cap count");
+        assert!(
+            status.cap_exceeded,
+            "cap must remain exceeded after spike outcomes"
+        );
+    }
+
+    /// Non-`needs_evidence` debate entries (objection, rebuttal, verdict)
+    /// do not count toward the cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cap_non_needs_evidence_entries_do_not_count() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Non NE")).await.unwrap();
+
+        repo.record_refinement_lifecycle(&p.id, "refinement_start", None)
+            .await
+            .unwrap();
+
+        // Add objection, rebuttal, verdict — none should count.
+        for kind in &["objection", "rebuttal", "verdict"] {
+            repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind,
+                body: "test entry",
+                blocking: *kind == "objection",
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 1,
+                body_metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 0, "non-needs_evidence entries must not count");
+        assert!(!status.cap_exceeded);
+
+        // Add one accepted needs_evidence entry — now count = 1.
+        add_needs_evidence_entry(&repo, &p.id, 2, 1, "actual demand").await;
+
+        let status = repo
+            .needs_evidence_cap_status_for_current_run(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(status.count, 1);
+    }
+
+    /// `NEEDS_EVIDENCE_PHASE1_CAP` constant equals 2.
+    #[test]
+    fn needs_evidence_phase1_cap_is_two() {
+        assert_eq!(ProposalRepository::NEEDS_EVIDENCE_PHASE1_CAP, 2);
+    }
+
+    /// `NeedsEvidenceCapStatus` fields are consistent.
+    #[test]
+    fn needs_evidence_cap_status_serializes() {
+        let status = NeedsEvidenceCapStatus {
+            count: 2,
+            cap: 2,
+            cap_exceeded: true,
+            no_refinement_run: false,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["cap"], 2);
+        assert_eq!(json["cap_exceeded"], true);
+        assert_eq!(json["no_refinement_run"], false);
     }
 }

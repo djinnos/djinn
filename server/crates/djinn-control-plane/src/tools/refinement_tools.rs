@@ -720,5 +720,24 @@ async fn refinement_is_active(repo: &ProposalRepository, proposal_id: &str) -> b
         .unwrap_or(false)
 }
 
+/// Check the Phase 1 needs-evidence cap for the current refinement run.
+///
+/// This is the primary control-plane helper that the Judge demand tool
+/// (sibling epic `6tjy`) should call before creating/linking a spike.
+/// Returns the cap status reconstructed from persisted debate/lifecycle
+/// rows — no in-memory counters.
+///
+/// When `no_refinement_run` is true, the caller should not issue demands
+/// (there is no active refinement to park). When `cap_exceeded` is true,
+/// the caller must reject the demand before any spike/link write occurs.
+pub async fn check_needs_evidence_cap(
+    repo: &ProposalRepository,
+    proposal_id: &str,
+) -> Result<djinn_db::NeedsEvidenceCapStatus, String> {
+    repo.needs_evidence_cap_status_for_current_run(proposal_id)
+        .await
+        .map_err(|e| format!("failed to check needs-evidence cap: {e}"))
+}
+
 #[cfg(test)]
 mod tests;
