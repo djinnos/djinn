@@ -84,10 +84,16 @@ mod wave;
 
 pub use handle::CoordinatorHandle;
 pub use types::{
-    AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
-    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
-    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
-    PrCleanupConfig,
+    AutoMergeTracker, AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
+    BackgroundWorkTracker, BreakerDebugEntry, CheckpointLifecycleConfig,
+    CheckpointLifecycleMetadata, CheckpointRequestReason, CheckpointSafetyScanMetadata,
+    CoordinatorDebugSnapshot, CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown,
+    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
+    DispatchPauseView, DurableProgressDetectionMode, DurableProgressNoResetReason,
+    DurableProgressResetReason, DurableProgressRolloutConfig, ModelRotationLifecycleConfig,
+    ModelRotationLifecycleMetadata, ModelRotationReason, NoProgressEnforcementMode,
+    NoProgressThresholdConfig, PrCleanupConfig, ResumeLifecycleConfig, ResumeLifecycleMetadata,
+    ResumeSelectionReason, WorkerLifecycleConfig, WorkerLifecycleMetadata,
 };
 
 // Re-export orchestration-types debug DTOs so djinn-agent can re-export from here.
