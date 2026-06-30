@@ -17,9 +17,11 @@ use serde_json::json;
 use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    DemandRoundResponse, NeedsEvidenceStatus, ProposalRefinementStartResponse,
-    ProposalRefinementStatusModel, ProposalRefinementStatusResponse, VerdictOverrideResponse,
+    DemandRoundResponse, EvidenceLifecyclePhase, NeedsEvidenceStatus,
+    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
+    ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
+use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::ProposalRepository;
 use djinn_db::TaskRepository;
 
@@ -679,12 +681,87 @@ pub async fn build_refinement_status(
     {
         let task_repo = TaskRepository::new(repo.db().clone(), repo.events().clone());
         let spike = task_repo.get(spike_id).await.ok().flatten();
-        let claim = proposal
+
+        // Parse the stored claim: try structured JSON first, fall back to
+        // legacy plain-string claims without panicking.
+        let raw_claim = proposal
             .as_ref()
-            .and_then(|p| p.needs_evidence_claim.clone())
-            .unwrap_or_default();
+            .and_then(|p| p.needs_evidence_claim.as_deref())
+            .unwrap_or("");
+        let parsed_claim = NeedsEvidenceClaim::parse_stored(Some(raw_claim)).unwrap_or(None);
+
+        // Derive the display claim and structured fields.
+        let (
+            claim_str,
+            question,
+            target_subsystem,
+            spec_unknown_anchor,
+            round,
+            against_revision_seq,
+            created_by_task_id,
+        ) = if let Some(ref c) = parsed_claim {
+            (
+                c.question.clone(),
+                Some(c.question.clone()),
+                Some(c.target_subsystem.clone()),
+                Some(c.spec_unknown_anchor.clone()),
+                Some(c.round),
+                Some(c.against_revision_seq),
+                Some(c.created_by_task_id.clone()),
+            )
+        } else {
+            // Legacy plain-string claim or empty.
+            (raw_claim.to_string(), None, None, None, None, None, None)
+        };
+
+        // Derive the evidence lifecycle phase from persisted lifecycle events.
+        // Reuse the already-fetched revisions to avoid a second DB round trip.
+        // Walk backwards to find the latest evidence lifecycle event for this
+        // specific spike task id.
+        let spike_id_str = spike_id.to_string();
+        let mut evidence_phase = None;
+        let mut failure_reason = None;
+        for rev in revisions.iter().rev() {
+            if rev.event_kind != "refinement_awaiting_evidence_started"
+                && rev.event_kind != "refinement_evidence_received"
+                && rev.event_kind != "refinement_evidence_failed"
+            {
+                continue;
+            }
+            // Confirm this lifecycle event is for the current spike by
+            // parsing the wrapped metadata JSON.
+            let parsed_meta = rev
+                .event_metadata
+                .as_ref()
+                .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok());
+            let meta_inner = parsed_meta.as_ref().and_then(|v| v.get("metadata"));
+            let event_spike_id = meta_inner
+                .and_then(|m| m.get("spike_task_id"))
+                .and_then(|v| v.as_str());
+            if event_spike_id != Some(&spike_id_str) {
+                continue;
+            }
+            // Found the latest matching lifecycle event.
+            match rev.event_kind.as_str() {
+                "refinement_awaiting_evidence_started" => {
+                    evidence_phase = Some(EvidenceLifecyclePhase::AwaitingEvidence);
+                }
+                "refinement_evidence_received" => {
+                    evidence_phase = Some(EvidenceLifecyclePhase::EvidenceReceived);
+                }
+                "refinement_evidence_failed" => {
+                    evidence_phase = Some(EvidenceLifecyclePhase::EvidenceFailed);
+                    failure_reason = meta_inner
+                        .and_then(|m| m.get("failure_reason"))
+                        .and_then(|v| v.as_str().map(String::from));
+                }
+                _ => {}
+            }
+            break;
+        }
+
         Some(NeedsEvidenceStatus {
-            claim,
+            claim: claim_str,
             spike_task_id: spike_id.to_string(),
             spike_short_id: spike
                 .as_ref()
@@ -694,6 +771,14 @@ pub async fn build_refinement_status(
                 .as_ref()
                 .map(|t| t.status.clone())
                 .unwrap_or_else(|| "unknown".to_string()),
+            question,
+            target_subsystem,
+            spec_unknown_anchor,
+            round,
+            against_revision_seq,
+            created_by_task_id,
+            evidence_phase,
+            failure_reason,
         })
     } else {
         None
