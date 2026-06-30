@@ -23,6 +23,7 @@ expression: names
   "proposal_debate_list",
   "proposal_debate_resolve",
   "proposal_debate_append",
+  "proposal_refinement_demand_evidence",
   "task_comment_add",
   "submit_decision"
 ]

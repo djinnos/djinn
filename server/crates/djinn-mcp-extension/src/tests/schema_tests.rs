@@ -101,6 +101,7 @@ fn expected_safety_tuple(name: &str) -> Option<(bool, bool, bool, bool)> {
         | "proposal_update"
         | "proposal_block_patch"
         | "proposal_debate_append"
+        | "proposal_refinement_demand_evidence"
         | "submit_work"
         | "submit_review"
         | "submit_decision"

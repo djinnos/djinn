@@ -17,9 +17,9 @@ use serde_json::json;
 use crate::bridge::ProposalRefinementStartRequest;
 use crate::server::DjinnMcpServer;
 use crate::tools::proposal_ops::{
-    DemandRoundResponse, EvidenceLifecyclePhase, NeedsEvidenceStatus,
-    ProposalRefinementStartResponse, ProposalRefinementStatusModel,
-    ProposalRefinementStatusResponse, VerdictOverrideResponse,
+    DemandRoundResponse, EvidenceLifecyclePhase, NeedsEvidenceDemandResponse,
+    NeedsEvidenceDemandResult, NeedsEvidenceStatus, ProposalRefinementStartResponse,
+    ProposalRefinementStatusModel, ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::ProposalRepository;
@@ -91,6 +91,36 @@ pub struct ProposalVerdictOverrideParams {
     /// Optional debate-trail entry id of the verdict being overridden.
     #[serde(default)]
     pub overridden_verdict_entry_id: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalRefinementDemandEvidenceParams {
+    /// Proposal UUID or short_id.
+    pub proposal_id: String,
+    /// The debate round when the demand is issued (from the Judge's task
+    /// description).
+    pub round: i32,
+    /// The proposal revision sequence the demand targets.
+    pub against_revision_seq: i32,
+    /// The feasibility question the evidence spike must answer.
+    pub question: String,
+    /// The subsystem or module under investigation.
+    pub target_subsystem: String,
+    /// What in the spec is unknown or unverified.
+    pub spec_unknown_anchor: String,
+    /// Why in-session research was insufficient to resolve the claim.
+    pub insufficient_in_session_research: String,
+    /// What the evidence spike should produce to resolve the claim.
+    pub expected_findings: String,
+}
+
+fn err_demand_evidence(error: impl Into<String>) -> NeedsEvidenceDemandResponse {
+    NeedsEvidenceDemandResponse {
+        proposal_id: None,
+        accepted: false,
+        result: None,
+        error: Some(error.into()),
+    }
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -541,6 +571,147 @@ impl DjinnMcpServer {
             proposal_id: Some(proposal.id),
             overridden: true,
             override_on_revision_seq: Some(override_seq),
+            error: None,
+        })
+    }
+
+    /// Demand a read-only evidence spike for an insufficiently-evidenced
+    /// feasibility claim. The Judge calls this when in-session research is
+    /// not enough to resolve a load-bearing claim in the spec.
+    ///
+    /// Validates the proposal exists and is in refinement, checks the
+    /// per-run needs-evidence cap (Phase 1: max 2), records the structured
+    /// claim, and parks refinement until the spike findings arrive.
+    ///
+    /// Spike creation and linking are deferred to a subsequent task — this
+    /// tool records the demand and parks the proposal.
+    #[tool(
+        description = "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Validates the proposal and refinement state, checks the per-run needs-evidence cap, records the structured claim, and parks refinement until spike findings arrive. Spike creation is wired in a subsequent task."
+    )]
+    pub async fn proposal_refinement_demand_evidence(
+        &self,
+        Parameters(p): Parameters<ProposalRefinementDemandEvidenceParams>,
+    ) -> Json<NeedsEvidenceDemandResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+
+        let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
+            return Json(err_demand_evidence(format!(
+                "proposal not found: {}",
+                p.proposal_id
+            )));
+        };
+
+        // Verify refinement is active.
+        let refinement = match build_refinement_status(&repo, &proposal.id).await {
+            Ok(status) => status,
+            Err(e) => {
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(e),
+                });
+            }
+        };
+
+        if !refinement.active {
+            return Json(NeedsEvidenceDemandResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                result: None,
+                error: Some(
+                    "refinement is not active for this proposal; start refinement before demanding evidence"
+                        .to_string(),
+                ),
+            });
+        }
+
+        // Check the per-run needs-evidence cap.
+        match check_needs_evidence_cap(&repo, &proposal.id).await {
+            Ok(cap_status) => {
+                if cap_status.cap_exceeded {
+                    return Json(NeedsEvidenceDemandResponse {
+                        proposal_id: Some(proposal.id),
+                        accepted: false,
+                        result: None,
+                        error: Some(format!(
+                            "needs-evidence cap reached ({}/{}); no more demands allowed this run",
+                            cap_status.count, cap_status.cap,
+                        )),
+                    });
+                }
+                if cap_status.no_refinement_run {
+                    return Json(NeedsEvidenceDemandResponse {
+                        proposal_id: Some(proposal.id),
+                        accepted: false,
+                        result: None,
+                        error: Some(
+                            "no active refinement run for this proposal; cap accounting unavailable"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+            Err(e) => {
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(e),
+                });
+            }
+        }
+
+        // Build the structured claim for persistence. The claim JSON is stored
+        // on the proposal alongside the spike task id (wired in a later task).
+        let claim = djinn_core::models::NeedsEvidenceClaim {
+            question: p.question.clone(),
+            target_subsystem: p.target_subsystem.clone(),
+            spec_unknown_anchor: p.spec_unknown_anchor.clone(),
+            insufficient_in_session_research: p.insufficient_in_session_research.clone(),
+            expected_findings: p.expected_findings.clone(),
+            round: p.round,
+            against_revision_seq: p.against_revision_seq,
+            created_by_task_id: djinn_core::auth_context::current_user_id().unwrap_or_default(),
+        };
+
+        // Record the demand as a lifecycle event.
+        let demand_metadata = serde_json::json!({
+            "source": "judge_demand_evidence",
+            "round": p.round,
+            "against_revision_seq": p.against_revision_seq,
+            "question": p.question,
+            "target_subsystem": p.target_subsystem,
+            "spec_unknown_anchor": p.spec_unknown_anchor,
+            "insufficient_in_session_research": p.insufficient_in_session_research,
+            "expected_findings": p.expected_findings,
+        });
+
+        if let Err(e) = repo
+            .record_refinement_lifecycle(
+                &proposal.id,
+                "refinement_demand_evidence",
+                Some(&demand_metadata),
+            )
+            .await
+        {
+            return Json(NeedsEvidenceDemandResponse {
+                proposal_id: Some(proposal.id),
+                accepted: false,
+                result: None,
+                error: Some(format!("failed to record demand-evidence event: {e}")),
+            });
+        }
+
+        Json(NeedsEvidenceDemandResponse {
+            proposal_id: Some(proposal.id),
+            accepted: true,
+            result: Some(NeedsEvidenceDemandResult {
+                claim: claim.question.clone(),
+                spike_task_id: None, // Wired in a subsequent task.
+                against_revision_seq: p.against_revision_seq,
+                round: p.round,
+            }),
             error: None,
         })
     }

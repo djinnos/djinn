@@ -14755,6 +14755,135 @@ expression: signatures
     }
   },
   {
+    "name": "proposal_refinement_demand_evidence",
+    "read_only": false,
+    "destructive": true,
+    "idempotent": false,
+    "open_world": false,
+    "concurrent_safe": false,
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "against_revision_seq": {
+          "description": "The proposal revision sequence the demand targets.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "expected_findings": {
+          "description": "What the evidence spike should produce to resolve the claim.",
+          "type": "string"
+        },
+        "insufficient_in_session_research": {
+          "description": "Why in-session research was insufficient to resolve the claim.",
+          "type": "string"
+        },
+        "proposal_id": {
+          "description": "Proposal UUID or short_id.",
+          "type": "string"
+        },
+        "question": {
+          "description": "The feasibility question the evidence spike must answer.",
+          "type": "string"
+        },
+        "round": {
+          "description": "The debate round when the demand is issued (from the Judge's task\ndescription).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "spec_unknown_anchor": {
+          "description": "What in the spec is unknown or unverified.",
+          "type": "string"
+        },
+        "target_subsystem": {
+          "description": "The subsystem or module under investigation.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "round",
+        "against_revision_seq",
+        "question",
+        "target_subsystem",
+        "spec_unknown_anchor",
+        "insufficient_in_session_research",
+        "expected_findings"
+      ],
+      "type": "object"
+    },
+    "output_schema": {
+      "$defs": {
+        "NeedsEvidenceDemandResult": {
+          "description": "Accepted demand result for `proposal_refinement_demand_evidence`.\n\nReturned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand\npasses validation and is recorded. Spike creation is wired in a later\ntask — until then `spike_task_id` is `None` and the proposal is parked.",
+          "properties": {
+            "against_revision_seq": {
+              "description": "The pre-refinement snapshot revision seq the demand targets.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "claim": {
+              "description": "The recorded needs-evidence claim question.",
+              "type": "string"
+            },
+            "round": {
+              "description": "The debate round when the demand was issued.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "spike_task_id": {
+              "description": "The spike task id (UUID) once linked. `None` until spike creation is\nwired in a subsequent task.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "claim",
+            "against_revision_seq",
+            "round"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accepted": {
+          "description": "True when the demand was accepted and recorded.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "Error message for a rejected demand.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NeedsEvidenceDemandResult"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Details for an accepted demand."
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "proposal_refinement_demand_round",
     "read_only": false,
     "destructive": true,
