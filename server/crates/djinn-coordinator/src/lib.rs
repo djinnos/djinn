@@ -79,20 +79,24 @@ mod refinement_outcome;
 pub mod rules;
 mod types;
 mod wave;
+mod worker_lifecycle;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────
 
 pub use handle::CoordinatorHandle;
 pub use types::{
-    AutoMergeTracker, AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
-    BackgroundWorkTracker, BreakerDebugEntry, CheckpointLifecycleConfig,
-    CheckpointLifecycleMetadata, CheckpointRequestReason, CheckpointSafetyScanMetadata,
-    CoordinatorDebugSnapshot, CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown,
-    DebugDispatchState, DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals,
-    DispatchPauseView, DurableProgressDetectionMode, DurableProgressNoResetReason,
+    AutoMergeTracker, BackgroundWorkTracker, BreakerDebugEntry, CoordinatorDebugSnapshot,
+    CoordinatorDeps, CoordinatorError, CoordinatorStatus, DebugCooldown, DebugDispatchState,
+    DebugFailureStreak, DebugInflightEntry, DebugSlot, DebugTotals, DispatchPauseView,
+    PrCleanupConfig,
+};
+pub use worker_lifecycle::{
+    AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
+    CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
+    CheckpointSafetyScanMetadata, DurableProgressDetectionMode, DurableProgressNoResetReason,
     DurableProgressResetReason, DurableProgressRolloutConfig, ModelRotationLifecycleConfig,
     ModelRotationLifecycleMetadata, ModelRotationReason, NoProgressEnforcementMode,
-    NoProgressThresholdConfig, PrCleanupConfig, ResumeLifecycleConfig, ResumeLifecycleMetadata,
+    NoProgressThresholdConfig, ResumeLifecycleConfig, ResumeLifecycleMetadata,
     ResumeSelectionReason, WorkerLifecycleConfig, WorkerLifecycleMetadata,
 };
 
