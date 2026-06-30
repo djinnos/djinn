@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -7,6 +8,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream;
 use serde::Serialize;
 use tokio::sync::broadcast;
+
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 
 use crate::events::DjinnEventEnvelope;
 use crate::server::AppState;
@@ -35,14 +38,16 @@ struct BatchAccumulator {
     coalesced: HashMap<String, DjinnEventEnvelope>,
     throttled_pending: HashMap<&'static str, DjinnEventEnvelope>,
     throttled_last_sent: HashMap<&'static str, Instant>,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl BatchAccumulator {
-    fn new() -> Self {
+    fn new(clock: Arc<dyn Clock + Send + Sync>) -> Self {
         Self {
             coalesced: HashMap::new(),
             throttled_pending: HashMap::new(),
             throttled_last_sent: HashMap::new(),
+            clock,
         }
     }
 
@@ -74,7 +79,6 @@ impl BatchAccumulator {
         }
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     fn push(&mut self, envelope: DjinnEventEnvelope) -> Vec<DjinnEventEnvelope> {
         match Self::classify(&envelope) {
             EventTier::Immediate => vec![envelope],
@@ -89,7 +93,8 @@ impl BatchAccumulator {
                     .map(|last| last.elapsed() >= min_interval)
                     .unwrap_or(true);
                 if should_send_now {
-                    self.throttled_last_sent.insert(key, Instant::now());
+                    self.throttled_last_sent
+                        .insert(key, self.clock.now_instant());
                     vec![envelope]
                 } else {
                     self.throttled_pending.insert(key, envelope);
@@ -99,7 +104,6 @@ impl BatchAccumulator {
         }
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     fn flush(&mut self) -> Vec<DjinnEventEnvelope> {
         let mut out = Vec::new();
 
@@ -127,7 +131,8 @@ impl BatchAccumulator {
                     .throttled_pending
                     .remove(key)
                     .expect("pending throttled event exists");
-                self.throttled_last_sent.insert(key, Instant::now());
+                self.throttled_last_sent
+                    .insert(key, self.clock.now_instant());
                 out.push(envelope);
             } else {
                 let _ = envelope;
@@ -264,7 +269,7 @@ pub async fn events_handler(
     let stream = stream::unfold(
         (
             rx,
-            BatchAccumulator::new(),
+            BatchAccumulator::new(Arc::new(SystemClockTrait::new())),
             tokio::time::interval(FLUSH_INTERVAL),
             tokio::time::interval(PING_INTERVAL),
         ),
@@ -403,7 +408,7 @@ mod tests {
 
     #[test]
     fn adr_045_immediate_events_bypass_batching() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let ready = accumulator.push(DjinnEventEnvelope::task_deleted("t1"));
         assert_eq!(ready.len(), 1);
         assert!(accumulator.flush().is_empty());
@@ -433,7 +438,7 @@ mod tests {
             from_sync: false,
         };
 
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let ready = accumulator.push(envelope);
 
         assert_eq!(ready.len(), 1);
@@ -446,7 +451,7 @@ mod tests {
 
     #[test]
     fn adr_045_coalesced_task_updates_keep_latest_per_entity() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
 
         assert!(
             accumulator
@@ -466,7 +471,7 @@ mod tests {
 
     #[test]
     fn adr_045_coalesced_flush_keeps_latest_for_each_entity_type() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
 
         assert!(
             accumulator
@@ -509,7 +514,7 @@ mod tests {
 
     #[test]
     fn adr_045_throttled_session_messages_keep_latest_until_interval_elapses() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let first =
             DjinnEventEnvelope::session_message("s1", "t1", "worker", &json!({"content": "a"}));
         let second =
@@ -529,7 +534,7 @@ mod tests {
 
     #[test]
     fn adr_045_throttled_token_updates_stay_pending_before_interval_and_flush_afterwards() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let first = DjinnEventEnvelope {
             entity_type: "session",
             action: "token_update",
@@ -569,7 +574,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn adr_045_mixed_execution_traffic_reduces_frames_and_preserves_batching_contract() {
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
 
         let immediate = accumulator.push(DjinnEventEnvelope::task_deleted("task-1"));
         assert_eq!(immediate.len(), 1);
@@ -713,7 +718,7 @@ mod tests {
         // so the ping branch fires first; the production 25s cadence is
         // asserted separately in `ping_interval_constant_matches_browser_liveness_cadence`.
         let (_tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
         let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
 
@@ -755,7 +760,7 @@ mod tests {
         // proving the ping branch drains pending work before emitting
         // a ping.
         let (tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
         let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
 
@@ -823,7 +828,7 @@ mod tests {
         // the next call. This guards against the ping branch starving the
         // normal rx branch.
         let (tx, mut rx) = broadcast::channel::<DjinnEventEnvelope>(8);
-        let mut accumulator = BatchAccumulator::new();
+        let mut accumulator = BatchAccumulator::new(Arc::new(SystemClockTrait::new()));
         let mut flush_interval = tokio::time::interval(Duration::from_secs(5));
         let mut ping_interval = tokio::time::interval(Duration::from_millis(50));
 
