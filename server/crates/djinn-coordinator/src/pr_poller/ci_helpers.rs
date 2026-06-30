@@ -887,6 +887,7 @@ pub(crate) fn compute_ci_failure_fingerprint(
 /// Walk activity entries in reverse chronological order and count how many
 /// consecutive entries have a fingerprint matching `current_fp`.
 /// Stops at the first different fingerprint.
+#[cfg(test)]
 pub(crate) fn count_consecutive_identical(
     entries: &[djinn_core::models::ActivityEntry],
     current_fp: &str,
