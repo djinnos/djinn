@@ -656,6 +656,7 @@ async fn task_show_exposes_ci_gate_snapshot_fields() {
     assert!(ci["last_seen_at"].as_str().is_some());
     assert_eq!(ci["same_signature_count"], 2);
     assert_eq!(ci["last_remediation_base_sha"], "base1234");
+    assert_eq!(ci["pr_number"], 42);
 
     // task_list should surface the CI gate snapshot in list items.
     let list = harness
@@ -675,6 +676,7 @@ async fn task_show_exposes_ci_gate_snapshot_fields() {
         item["ci"]["head_sha"],
         "deadbeefcafebabe00000000000000000000ffff"
     );
+    assert_eq!(item["ci"]["pr_number"], 42);
 }
 
 #[tokio::test]

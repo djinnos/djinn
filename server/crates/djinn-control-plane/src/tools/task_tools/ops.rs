@@ -25,7 +25,7 @@ use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::types::{
-    task_ci_gate_snapshot, ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse,
+    ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse, task_ci_gate_snapshot,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::{EpicRepository, TaskRepository};

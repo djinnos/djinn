@@ -322,7 +322,7 @@ pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
         last_seen_at: t.ci_last_seen_at.clone().unwrap_or_default(),
         same_signature_count: t.ci_same_signature_count,
         last_remediation_base_sha: t.ci_last_remediation_base_sha.clone(),
-        pr_number: None,
+        pr_number: t.ci_pr_number,
     })
 }
 
@@ -876,6 +876,7 @@ mod tests {
             created_by_user_id: None,
             ci_status: "unknown".into(),
             ci_head_sha: None,
+            ci_pr_number: None,
             ci_blocking_required_check_names: "[]".into(),
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
@@ -902,8 +903,8 @@ mod tests {
         let mut task = task_with_merge_commit_sha(None);
         task.ci_status = "failing".into();
         task.ci_head_sha = Some("deadbeefcafebabe00000000000000000000ffff".into());
-        task.ci_blocking_required_check_names =
-            r#"["Server Size Guard","clippy"]"#.into();
+        task.ci_pr_number = Some(42);
+        task.ci_blocking_required_check_names = r#"["Server Size Guard","clippy"]"#.into();
         task.ci_failure_fingerprint = Some("sha:deadbeef|checks:clippy,size".into());
         task.ci_first_seen_at = Some("2026-06-14T00:00:00Z".into());
         task.ci_last_seen_at = Some("2026-06-14T00:05:00Z".into());
@@ -918,7 +919,9 @@ mod tests {
         let response = task_to_response(&task);
         let serialized = serde_json::to_value(&response).unwrap();
 
-        let ci = serialized["ci"].as_object().expect("ci should be an object");
+        let ci = serialized["ci"]
+            .as_object()
+            .expect("ci should be an object");
         assert_eq!(ci["status"], "failing");
         assert_eq!(ci["head_sha"], "deadbeefcafebabe00000000000000000000ffff");
         assert_eq!(ci["blocking_required_check_names"][0], "Server Size Guard");
@@ -928,8 +931,7 @@ mod tests {
         assert_eq!(ci["last_seen_at"], "2026-06-14T00:05:00Z");
         assert_eq!(ci["same_signature_count"], 3);
         assert_eq!(ci["last_remediation_base_sha"], "base1234567890");
-        // pr_number is skipped when None (not otherwise available from Task row).
-        assert!(ci.get("pr_number").is_none());
+        assert_eq!(ci["pr_number"], 42);
     }
 
     #[test]
@@ -958,21 +960,9 @@ mod tests {
 
     #[test]
     fn ci_status_enum_serializes_to_snake_case_wire_values() {
-        assert_eq!(
-            serde_json::to_value(CiStatus::Passing).unwrap(),
-            "passing"
-        );
-        assert_eq!(
-            serde_json::to_value(CiStatus::Failing).unwrap(),
-            "failing"
-        );
-        assert_eq!(
-            serde_json::to_value(CiStatus::Pending).unwrap(),
-            "pending"
-        );
-        assert_eq!(
-            serde_json::to_value(CiStatus::Unknown).unwrap(),
-            "unknown"
-        );
+        assert_eq!(serde_json::to_value(CiStatus::Passing).unwrap(), "passing");
+        assert_eq!(serde_json::to_value(CiStatus::Failing).unwrap(), "failing");
+        assert_eq!(serde_json::to_value(CiStatus::Pending).unwrap(), "pending");
+        assert_eq!(serde_json::to_value(CiStatus::Unknown).unwrap(), "unknown");
     }
 }
