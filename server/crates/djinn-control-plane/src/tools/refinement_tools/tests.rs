@@ -4,8 +4,9 @@ use super::*;
 use crate::server::DjinnMcpServer;
 use crate::state::stubs::test_mcp_state;
 use djinn_core::events::EventBus;
-use djinn_db::{Database, ProposalCreateInput};
+use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
 use std::sync::Arc;
 
 include!("tests_part1.inc");
 include!("tests_part2.inc");
+include!("tests_part3.inc");
