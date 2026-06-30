@@ -170,6 +170,9 @@ pub enum GitError {
 pub mod actor;
 pub use actor::{GitActorHandle, get_or_spawn};
 
+#[cfg(test)]
+mod test_support;
+
 #[derive(Debug, Clone)]
 pub struct StatusSummary {
     pub staged: Vec<String>,
