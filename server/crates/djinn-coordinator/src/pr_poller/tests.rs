@@ -1722,7 +1722,7 @@ fn ci_status_classifies_incomplete_checks_as_pending() {
         conclusion: None,
         html_url: "https://github.com/o/r/actions/runs/3/job/3".to_string(),
     };
-    let checks = vec![&running_check];
+    let checks = [&running_check];
     let all_completed = checks.iter().all(|cr| cr.status == "completed");
     assert!(!all_completed, "in_progress check is not completed");
 
