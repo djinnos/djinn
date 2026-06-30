@@ -78,7 +78,11 @@ impl TaskRepository {
                     blocking_required_check_names = EXCLUDED.blocking_required_check_names,
                     failure_fingerprint = EXCLUDED.failure_fingerprint,
                     last_seen_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                    same_signature_count = EXCLUDED.same_signature_count,
+                    same_signature_count = CASE
+                        WHEN EXCLUDED.same_signature_count > 0
+                        THEN EXCLUDED.same_signature_count
+                        ELSE task_pr_ci_snapshots.same_signature_count
+                    END,
                     last_remediation_base_sha = CASE
                         WHEN COALESCE(task_pr_ci_snapshots.head_sha, '') = COALESCE(EXCLUDED.head_sha, '')
                         THEN EXCLUDED.last_remediation_base_sha
