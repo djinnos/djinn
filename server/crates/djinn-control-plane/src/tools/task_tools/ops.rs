@@ -25,7 +25,7 @@ use std::collections::HashSet;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::types::{
-    ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse,
+    task_ci_gate_snapshot, ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::{EpicRepository, TaskRepository};
@@ -83,6 +83,7 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
             .map(crate::tools::AnyJson),
         pr_url: task.pr_url.clone(),
         warning: None,
+        ci: task_ci_gate_snapshot(task),
     }
 }
 

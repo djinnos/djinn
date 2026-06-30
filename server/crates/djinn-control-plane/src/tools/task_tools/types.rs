@@ -274,6 +274,58 @@ pub struct TaskClaimParams {
 
 // ── Response structs ──────────────────────────────────────────────────────────
 
+/// Snapshot of the current-head required-CI gate for a task's PR.
+///
+/// Populated from the repository-backed CI snapshot (`task_pr_ci_snapshots`).
+/// `None` when no snapshot exists yet (e.g. task has no PR or has not been
+/// polled). Downstream lifecycle/API code reads these fields directly instead
+/// of scraping activity prose.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct CiGateSnapshot {
+    /// Current required-CI status for the PR head.
+    pub status: CiStatus,
+    /// Git SHA of the PR head this snapshot describes.
+    pub head_sha: String,
+    /// Names of required checks that are currently failing and blocking merge.
+    pub blocking_required_check_names: Vec<String>,
+    /// Stable fingerprint of the current failure signature (e.g. sorted
+    /// failing check names + head SHA). `None` when not failing.
+    pub failure_fingerprint: Option<String>,
+    /// ISO-8601 timestamp when this snapshot was first observed.
+    pub first_seen_at: String,
+    /// ISO-8601 timestamp when this snapshot was last observed/updated.
+    pub last_seen_at: String,
+    /// How many consecutive observations carried the same failure fingerprint
+    /// for the same head SHA.
+    pub same_signature_count: i64,
+    /// Base SHA of the last remediation attempt for this failing signature.
+    /// `None` when no remediation has been attempted yet.
+    pub last_remediation_base_sha: Option<String>,
+    /// GitHub PR number the CI snapshot belongs to, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<i64>,
+}
+
+/// Build a `CiGateSnapshot` DTO from a task's repository-backed CI fields.
+///
+/// Returns `None` when no snapshot exists (signalled by an absent `head_sha`),
+/// preserving backward-compatible optional/null behavior for tasks without a
+/// PR snapshot.
+pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
+    let head_sha = t.ci_head_sha.as_deref()?;
+    Some(CiGateSnapshot {
+        status: CiStatus::parse(&t.ci_status).unwrap_or(CiStatus::Unknown),
+        head_sha: head_sha.to_string(),
+        blocking_required_check_names: parse_string_array(&t.ci_blocking_required_check_names),
+        failure_fingerprint: t.ci_failure_fingerprint.clone(),
+        first_seen_at: t.ci_first_seen_at.clone().unwrap_or_default(),
+        last_seen_at: t.ci_last_seen_at.clone().unwrap_or_default(),
+        same_signature_count: t.ci_same_signature_count,
+        last_remediation_base_sha: t.ci_last_remediation_base_sha.clone(),
+        pr_number: None,
+    })
+}
+
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct TaskListResponse {
     pub tasks: Vec<TaskListItem>,
@@ -362,6 +414,9 @@ pub struct TaskResponse {
     /// Set when force_close unblocks downstream tasks that may need replacement blockers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Current-head required-CI gate snapshot for this task's PR, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiGateSnapshot>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -664,6 +719,9 @@ pub struct TaskListItem {
     pub active_session: Option<ActiveSessionSummary>,
     /// Total number of sessions that have worked on this task.
     pub session_count: i64,
+    /// Current-head required-CI gate snapshot for this task's PR, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci: Option<CiGateSnapshot>,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -724,6 +782,7 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
         agent_type: t.agent_type.clone(),
         created_by_user_id: t.created_by_user_id.clone(),
         warning: None,
+        ci: task_ci_gate_snapshot(t),
     }
 }
 
@@ -764,6 +823,7 @@ pub fn task_to_list_item(
         created_by_user_id: base.created_by_user_id,
         active_session,
         session_count,
+        ci: base.ci,
     }
 }
 
@@ -836,5 +896,83 @@ mod tests {
 
         assert_eq!(list_item.merge_commit_sha.as_deref(), Some(sha));
         assert_eq!(serialized["merge_commit_sha"], sha);
+    }
+
+    fn task_with_ci_snapshot() -> Task {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "failing".into();
+        task.ci_head_sha = Some("deadbeefcafebabe00000000000000000000ffff".into());
+        task.ci_blocking_required_check_names =
+            r#"["Server Size Guard","clippy"]"#.into();
+        task.ci_failure_fingerprint = Some("sha:deadbeef|checks:clippy,size".into());
+        task.ci_first_seen_at = Some("2026-06-14T00:00:00Z".into());
+        task.ci_last_seen_at = Some("2026-06-14T00:05:00Z".into());
+        task.ci_same_signature_count = 3;
+        task.ci_last_remediation_base_sha = Some("base1234567890".into());
+        task
+    }
+
+    #[test]
+    fn task_response_exposes_ci_gate_snapshot_when_present() {
+        let task = task_with_ci_snapshot();
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+
+        let ci = serialized["ci"].as_object().expect("ci should be an object");
+        assert_eq!(ci["status"], "failing");
+        assert_eq!(ci["head_sha"], "deadbeefcafebabe00000000000000000000ffff");
+        assert_eq!(ci["blocking_required_check_names"][0], "Server Size Guard");
+        assert_eq!(ci["blocking_required_check_names"][1], "clippy");
+        assert_eq!(ci["failure_fingerprint"], "sha:deadbeef|checks:clippy,size");
+        assert_eq!(ci["first_seen_at"], "2026-06-14T00:00:00Z");
+        assert_eq!(ci["last_seen_at"], "2026-06-14T00:05:00Z");
+        assert_eq!(ci["same_signature_count"], 3);
+        assert_eq!(ci["last_remediation_base_sha"], "base1234567890");
+        // pr_number is skipped when None (not otherwise available from Task row).
+        assert!(ci.get("pr_number").is_none());
+    }
+
+    #[test]
+    fn task_response_omits_ci_when_snapshot_absent() {
+        // Default task has ci_head_sha = None → no snapshot.
+        let task = task_with_merge_commit_sha(None);
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+
+        assert!(serialized.get("ci").is_none() || serialized["ci"].is_null());
+        assert!(response.ci.is_none());
+    }
+
+    #[test]
+    fn task_list_item_exposes_ci_gate_snapshot_when_present() {
+        let task = task_with_ci_snapshot();
+        let list_item = task_to_list_item(&task, None, 0);
+        let serialized = serde_json::to_value(&list_item).unwrap();
+
+        assert_eq!(serialized["ci"]["status"], "failing");
+        assert_eq!(
+            serialized["ci"]["head_sha"],
+            "deadbeefcafebabe00000000000000000000ffff"
+        );
+    }
+
+    #[test]
+    fn ci_status_enum_serializes_to_snake_case_wire_values() {
+        assert_eq!(
+            serde_json::to_value(CiStatus::Passing).unwrap(),
+            "passing"
+        );
+        assert_eq!(
+            serde_json::to_value(CiStatus::Failing).unwrap(),
+            "failing"
+        );
+        assert_eq!(
+            serde_json::to_value(CiStatus::Pending).unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            serde_json::to_value(CiStatus::Unknown).unwrap(),
+            "unknown"
+        );
     }
 }

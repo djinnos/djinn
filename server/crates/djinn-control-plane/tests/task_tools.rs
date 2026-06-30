@@ -9,6 +9,7 @@ mod common;
 
 use djinn_control_plane::test_support::McpTestHarness;
 use djinn_core::events::EventBus;
+use djinn_core::models::{CiStatus, TaskPrCiSnapshotInput};
 use djinn_db::TaskRepository;
 use insta::assert_json_snapshot;
 use serde_json::json;
@@ -611,4 +612,89 @@ async fn task_comment_activity_blockers_blocked_memory_refs_shapes() {
         .await
         .expect("task_memory_refs should dispatch");
     assert!(refs["memory_refs"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn task_show_exposes_ci_gate_snapshot_fields() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+
+    // Seed a failing CI snapshot via the repository layer.
+    let repo = TaskRepository::new(db.clone(), EventBus::noop());
+    repo.upsert_ci_snapshot(TaskPrCiSnapshotInput {
+        task_id: task.id.clone(),
+        pr_number: 42,
+        head_sha: "deadbeefcafebabe00000000000000000000ffff".into(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: vec!["Server Size Guard".into(), "clippy".into()],
+        failure_fingerprint: Some("sha:dead|checks:clippy,size".into()),
+        same_signature_count: 2,
+        last_remediation_base_sha: Some("base1234".into()),
+    })
+    .await
+    .expect("upsert_ci_snapshot should succeed");
+
+    // task_show should surface the CI gate snapshot.
+    let show = harness
+        .call_tool(
+            "task_show",
+            json!({"project": project.slug(), "id": task.id}),
+        )
+        .await
+        .expect("task_show should dispatch");
+    let ci = &show["ci"];
+    let ci = ci.as_object().expect("ci should be an object");
+    assert_eq!(ci["status"], "failing");
+    assert_eq!(ci["head_sha"], "deadbeefcafebabe00000000000000000000ffff");
+    assert_eq!(ci["blocking_required_check_names"][0], "Server Size Guard");
+    assert_eq!(ci["blocking_required_check_names"][1], "clippy");
+    assert_eq!(ci["failure_fingerprint"], "sha:dead|checks:clippy,size");
+    assert!(ci["first_seen_at"].as_str().is_some());
+    assert!(ci["last_seen_at"].as_str().is_some());
+    assert_eq!(ci["same_signature_count"], 2);
+    assert_eq!(ci["last_remediation_base_sha"], "base1234");
+
+    // task_list should surface the CI gate snapshot in list items.
+    let list = harness
+        .call_tool(
+            "task_list",
+            json!({"project": project.slug(), "text": "test-task"}),
+        )
+        .await
+        .expect("task_list should dispatch");
+    let tasks = list["tasks"].as_array().unwrap();
+    let item = tasks
+        .iter()
+        .find(|t| t["id"] == show["id"])
+        .expect("task should appear in list");
+    assert_eq!(item["ci"]["status"], "failing");
+    assert_eq!(
+        item["ci"]["head_sha"],
+        "deadbeefcafebabe00000000000000000000ffff"
+    );
+}
+
+#[tokio::test]
+async fn task_show_omits_ci_when_no_snapshot() {
+    let harness = McpTestHarness::new().await;
+    let db = harness.db();
+    let project = common::create_test_project(db).await;
+    let epic = common::create_test_epic(db, &project.id).await;
+    let task = common::create_test_task(db, &project.id, &epic.id).await;
+
+    // No CI snapshot seeded → ci should be absent (null/skipped).
+    let show = harness
+        .call_tool(
+            "task_show",
+            json!({"project": project.slug(), "id": task.id}),
+        )
+        .await
+        .expect("task_show should dispatch");
+    assert!(
+        show.get("ci").is_none() || show["ci"].is_null(),
+        "ci should be absent for tasks with no CI snapshot, got: {show}"
+    );
 }

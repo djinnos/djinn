@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 /// backend DTOs and (eventually) the frontend. These values are intentionally
 /// independent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is
 /// derived downstream, not encoded here.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CiStatus {
     /// All required checks passed on the current head.
