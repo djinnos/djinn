@@ -911,7 +911,7 @@ async fn process_batch_claims(
     }
 }
 
-// ── process_batch_edges: endpoint validation + dedup decision helpers ────────
+// ── process_batch_edges helpers ──────────────────────────────────────────────
 //
 // The helpers below are private seams for `process_batch_edges`. They isolate
 // the validation/decision logic (endpoint parsing & knownness, edge-kind parse,
@@ -1042,36 +1042,16 @@ fn memory_entity_ref_for_endpoint(
     }
 }
 
-/// Persist the association represented by an accepted LLM edge.
+/// Persist a proposal-involving edge via the heterogeneous typed-entity
+/// association table.
 ///
-/// Returns `true` when persistence succeeded and report emission should proceed.
-/// Returns `false` when the edge should be skipped after preserving the previous
-/// non-fatal debug/warning behavior for association-write failures.
-async fn persist_edge_association(
-    project_id: &str,
-    llm_edge: &LlmEdge,
-    source_type: MemoryEntityType,
-    target_type: MemoryEntityType,
-    kind: NoteAssociationKind,
-    involves_proposal: bool,
-    note_repo: &NoteRepository,
-    report: &mut EnrichmentReport,
-) -> bool {
-    if involves_proposal {
-        persist_entity_edge_association(
-            project_id,
-            llm_edge,
-            source_type,
-            target_type,
-            note_repo,
-            report,
-        )
-        .await
-    } else {
-        persist_note_edge_association(project_id, llm_edge, kind, note_repo, report).await
-    }
-}
-
+/// Converts source/target to [`MemoryEntityRef`] via
+/// [`memory_entity_ref_for_endpoint`], parses the entity-level kind via
+/// [`parse_edge_kind_entity`], and calls
+/// `upsert_typed_entity_association`.
+///
+/// Returns `false` on kind-parse failure or on a non-fatal association-write
+/// error (warning pushed to `report`).
 async fn persist_entity_edge_association(
     project_id: &str,
     llm_edge: &LlmEdge,
@@ -1103,6 +1083,13 @@ async fn persist_entity_edge_association(
     true
 }
 
+/// Persist a note-note edge via the note-level typed association table.
+///
+/// Calls `upsert_typed_association` with the already-validated
+/// [`NoteAssociationKind`].
+///
+/// Returns `false` on a non-fatal association-write error (warning pushed to
+/// `report`), `true` on success.
 async fn persist_note_edge_association(
     project_id: &str,
     llm_edge: &LlmEdge,
@@ -1159,7 +1146,8 @@ fn append_report_edge(
 /// 3. validate endpoints (`classify_edge_endpoint` × 2)
 /// 4. validate edge kind (`parse_and_validate_edge_kind`)
 /// 5. apply proposal evidence / wikilink duplicate rules
-/// 6. persist association (`persist_edge_association`)
+/// 6. persist association (`persist_entity_edge_association` or
+///    `persist_note_edge_association`)
 /// 7. append report edge (`append_report_edge`)
 async fn process_batch_edges(
     project_id: &str,
@@ -1229,18 +1217,20 @@ async fn process_batch_edges(
             continue;
         }
 
-        if !persist_edge_association(
-            project_id,
-            llm_edge,
-            source_type,
-            target_type,
-            kind,
-            involves_proposal,
-            note_repo,
-            report,
-        )
-        .await
-        {
+        let persisted = if involves_proposal {
+            persist_entity_edge_association(
+                project_id,
+                llm_edge,
+                source_type,
+                target_type,
+                note_repo,
+                report,
+            )
+            .await
+        } else {
+            persist_note_edge_association(project_id, llm_edge, kind, note_repo, report).await
+        };
+        if !persisted {
             continue;
         }
 
