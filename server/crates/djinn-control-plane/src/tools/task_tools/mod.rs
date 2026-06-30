@@ -14,7 +14,7 @@ use crate::tools::validation::{
     validate_task_create_status, validate_title,
 };
 use djinn_core::models::SessionStatus;
-use djinn_core::models::{IssueType, Task, TaskStatus, TransitionAction};
+use djinn_core::models::{CiStatus, IssueType, Task, TaskStatus, TransitionAction};
 use djinn_db::EpicRepository;
 use djinn_db::SessionRepository;
 use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};

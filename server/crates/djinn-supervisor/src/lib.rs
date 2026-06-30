@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
+use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
     MirrorManager,
@@ -293,6 +293,32 @@ fn emit_stage_outcome_event(
         task_run_id = %task_run_id,
         "supervisor: stage outcome observed"
     );
+}
+
+/// Label marking a task as a human-only review hold — the auto-park
+/// terminal escalation. A task carrying it must NEVER be auto-closed by
+/// an agent decision; only a human (or an explicit human-driven API)
+/// closes it.
+const HUMAN_REVIEW_HOLD_LABEL: &str = "human-review-hold";
+
+/// Board transition a planner *terminal* outcome (execute / close /
+/// escalate) should fire for `task`, or `None` to fire no transition.
+///
+/// Defense in depth behind the coordinator dispatch-rule exclusion
+/// (`planner_review_claims`, which already stops the Planner from
+/// claiming the hold): a `human-review-hold` task is a human-only
+/// terminal hold and must NEVER be auto-closed by a planner decision —
+/// closing it fires the unblocked-tasks release that flips the parked
+/// source task back to `open`, defeating the auto-park safety mechanism.
+/// For every other planning-type issue the action is `close`.
+fn planner_terminal_close_action(task: &Task) -> Option<&'static str> {
+    if task.labels.contains(HUMAN_REVIEW_HOLD_LABEL) {
+        return None;
+    }
+    match task.issue_type.as_str() {
+        "planning" | "decomposition" | "review" | "epic_breakdown" => Some("close"),
+        _ => None,
+    }
 }
 
 /// Routing decision for [`apply_planner_escalate_route`].
@@ -1232,12 +1258,11 @@ impl TaskRunSupervisor {
                         //   planning|decomposition|review → close
                         //   other                         → no transition
                         if role_kind == RoleKind::Planner {
-                            let action = match task.issue_type.as_str() {
-                                "planning" | "decomposition" | "review" | "epic_breakdown" => {
-                                    Some("close")
-                                }
-                                _ => None,
-                            };
+                            // `planner_terminal_close_action` returns `None`
+                            // for a `human-review-hold` task so it is never
+                            // auto-closed here (defense in depth behind the
+                            // coordinator dispatch-rule exclusion).
+                            let action = planner_terminal_close_action(&task);
                             if let Some(action) = action
                                 && let Err(e) = self
                                     .services
@@ -1263,12 +1288,10 @@ impl TaskRunSupervisor {
                         // matches the run outcome. Same issue-type-aware
                         // routing as PlannerExecute.
                         if role_kind == RoleKind::Planner {
-                            let action = match task.issue_type.as_str() {
-                                "planning" | "decomposition" | "review" | "epic_breakdown" => {
-                                    Some("close")
-                                }
-                                _ => None,
-                            };
+                            // A `human-review-hold` task is never auto-closed
+                            // here — `planner_terminal_close_action` returns
+                            // `None` for it (defense in depth).
+                            let action = planner_terminal_close_action(&task);
                             if let Some(action) = action
                                 && let Err(e) = self
                                     .services
@@ -1327,6 +1350,22 @@ impl TaskRunSupervisor {
                         //     returned by the helper uses the same
                         //     surfaced reason so host/UI reporting
                         //     matches the persisted close reason.
+                        // Defense in depth: a `human-review-hold` task is a
+                        // human-only terminal hold — never auto-close it on a
+                        // planner escalate. Closing it would fire the
+                        // unblocked-tasks release and flip the parked source
+                        // task back to `open` (the exact loop the hold breaks).
+                        // Leave it parked (Escalated, no transition) for a human.
+                        if task.labels.contains(HUMAN_REVIEW_HOLD_LABEL) {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                issue_type = %task.issue_type,
+                                "supervisor: planner escalate on human-review-hold task — NOT closing; parking for human",
+                            );
+                            result = Some(TaskRunOutcome::Escalated { reason });
+                            break;
+                        }
                         let outcome = apply_planner_escalate_route(
                             role_kind,
                             &task.issue_type,
@@ -2007,6 +2046,7 @@ mod tests {
             created_by_user_id: None,
             ci_status: "unknown".into(),
             ci_head_sha: None,
+            ci_pr_number: None,
             ci_blocking_required_check_names: "[]".into(),
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
@@ -2689,6 +2729,44 @@ mod tests {
                 "planner escalate on non-planning issue {issue_type:?} must keep the legacy Escalated outcome"
             );
         }
+    }
+
+    /// Defense in depth: `planner_terminal_close_action` returns `None`
+    /// for a `human-review-hold` task regardless of its `issue_type`, so
+    /// the planner execute/close/escalate paths never auto-close the
+    /// human-only hold (closing it would release the parked source task).
+    /// Every other planning-type issue still maps to `close`.
+    #[test]
+    fn planner_terminal_close_action_never_closes_human_review_hold() {
+        // Hold label present → no transition, for ALL planning issue types.
+        for issue_type in PLANNING_ISSUE_TYPES {
+            let mut task = fixture_task("t1", "p1");
+            task.issue_type = (*issue_type).into();
+            task.labels = r#"["human-review-hold"]"#.into();
+            assert_eq!(
+                planner_terminal_close_action(&task),
+                None,
+                "a human-review-hold {issue_type} task must never be auto-closed"
+            );
+        }
+
+        // No hold label → planning-type issues still close.
+        for issue_type in PLANNING_ISSUE_TYPES {
+            let mut task = fixture_task("t2", "p1");
+            task.issue_type = (*issue_type).into();
+            task.labels = "[]".into();
+            assert_eq!(
+                planner_terminal_close_action(&task),
+                Some("close"),
+                "a plain {issue_type} task must still close on a planner terminal outcome"
+            );
+        }
+
+        // Non-planning issue → no transition (unchanged behavior).
+        let mut task = fixture_task("t3", "p1");
+        task.issue_type = "task".into();
+        task.labels = "[]".into();
+        assert_eq!(planner_terminal_close_action(&task), None);
     }
 
     /// The headline regression test for `ep1i`: planner + `planning`

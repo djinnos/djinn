@@ -11,7 +11,9 @@ use crate::error::{Error, Result};
 /// backend DTOs and (eventually) the frontend. These values are intentionally
 /// independent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is
 /// derived downstream, not encoded here.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CiStatus {
     /// All required checks passed on the current head.
@@ -295,6 +297,9 @@ pub struct Task {
     pub ci_status: String,
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_head_sha: Option<String>,
+    /// GitHub PR number for the promoted CI snapshot, when one exists.
+    #[cfg_attr(feature = "sqlx", sqlx(default))]
+    pub ci_pr_number: Option<i64>,
     /// JSON array of blocking required check names for the current PR head.
     #[cfg_attr(feature = "sqlx", sqlx(default))]
     pub ci_blocking_required_check_names: String,

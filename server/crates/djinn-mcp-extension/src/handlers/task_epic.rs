@@ -560,6 +560,7 @@ pub(crate) async fn call_proposal_debate_append(
             source_task_id: None,
             against_revision_seq: p.against_revision_seq,
             round: p.round,
+            body_metadata: None,
         })
         .await
         .map_err(|e| e.to_string())?;
