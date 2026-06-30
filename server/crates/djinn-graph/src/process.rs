@@ -221,18 +221,16 @@ pub async fn output_with_kill(mut cmd: Command, _timeout: Duration) -> io::Resul
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use djinn_core::clock::{Clock, SystemClock};
 
     /// A hung child (`sleep 30`) must be terminated within the grace window and
     /// the call must return promptly rather than hanging.
-    #[allow(clippy::disallowed_methods)]
-    // test: real time verifies timeout kill path returns promptly without sleeping 30s
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timeout_kills_hung_child_promptly() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("sleep 30");
 
-        let start = Instant::now();
+        let start = SystemClock::new().now_instant();
         let err = output_with_timeout(cmd, Duration::from_millis(200))
             .await
             .expect_err("hung child should surface as a timeout error");
