@@ -1,14 +1,22 @@
 use std::collections::HashMap;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, oneshot};
+#[cfg(any(test, feature = "test-support"))]
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
+#[cfg(any(test, feature = "test-support"))]
 use crate::context::AgentContext;
 use djinn_orchestration_types::coordinator::DebugSlot;
 
-use super::super::{SlotHandle, SlotPoolConfig};
+#[cfg(any(test, feature = "test-support"))]
+use super::super::SlotHandle;
+use super::super::SlotPoolConfig;
 
+#[cfg(any(test, feature = "test-support"))]
 pub type SlotFactory = Arc<
     dyn Fn(
             usize,
@@ -150,6 +158,7 @@ pub enum PoolMessage {
     },
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(super) fn now_unix_string() -> String {
     let secs = SystemTime::now()

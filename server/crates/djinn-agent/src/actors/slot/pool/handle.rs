@@ -1,3 +1,4 @@
+#[cfg(any(test, feature = "test-support"))]
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -9,7 +10,9 @@ use super::super::SlotPoolConfig;
 use super::actor::SlotPool;
 #[cfg(any(test, feature = "test-support"))]
 use super::types::SlotFactory;
-use super::types::{PoolError, PoolMessage, PoolStatus, Reply, RunningTaskInfo};
+use super::types::{PoolError, PoolStatus, RunningTaskInfo};
+#[cfg(any(test, feature = "test-support"))]
+use super::types::{PoolMessage, Reply};
 
 #[derive(Clone)]
 enum SlotPoolInner {
@@ -79,6 +82,7 @@ impl SlotPoolHandle {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     async fn request<T>(&self, f: impl FnOnce(Reply<T>) -> PoolMessage) -> Result<T, PoolError> {
         let (tx, rx) = oneshot::channel::<Result<T, PoolError>>();
         match &self.inner {
