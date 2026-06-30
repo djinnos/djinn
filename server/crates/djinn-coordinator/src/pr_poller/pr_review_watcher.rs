@@ -218,6 +218,24 @@ impl CoordinatorActor {
                         .copied()
                         .collect();
                     if !blocking.is_empty() {
+                        // Persist the failing CI snapshot for the
+                        // changes-requested + blocking-CI path.  No
+                        // fingerprint or same-signature tracking here —
+                        // this path intentionally avoids the
+                        // handle_ci_failure cycle-cap/diff-empty logic
+                        // (the reviewer's request is the primary driver).
+                        let snap_blocking_names: Vec<String> =
+                            blocking.iter().map(|cr| cr.name.clone()).collect();
+                        self.persist_ci_snapshot(
+                            &task.id,
+                            pull_number,
+                            &current_sha,
+                            CiStatus::Failing,
+                            snap_blocking_names,
+                            None,
+                            0,
+                        )
+                        .await;
                         tracing::info!(
                             task_id = %task.short_id,
                             pr = pull_number,
