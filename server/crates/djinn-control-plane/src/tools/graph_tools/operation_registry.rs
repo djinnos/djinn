@@ -40,6 +40,8 @@ pub use catalog::CODE_GRAPH_REGISTRY;
 
 use std::fmt;
 
+use crate::bridge::REPO_GRAPH_OPS_METHODS;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /// Classifies how a `code_graph` operation participates in the
@@ -336,11 +338,80 @@ const _: () = {
     }
 };
 
+/// Compile-time witness: every `OpEntry::bridge_method` value must
+/// name a method on the declared `RepoGraphOps` trait identity
+/// surface (`REPO_GRAPH_OPS_METHODS` in `graph_bridge.rs`).
+///
+/// This walks the registry at compile time and catches typos (e.g.
+/// `"neigbors"`) at `cargo check` time rather than at first
+/// dispatch.  The constraint here is the *opposite* direction of
+/// the `KNOWN_BRIDGE_METHODS` guard above: that one guards against
+/// stale entries in the known list; this one guards against
+/// forward additions to the registry that named a missing trait
+/// method.
+///
+/// If this fails to compile: a registry entry's `bridge_method`
+/// does not appear in `REPO_GRAPH_OPS_METHODS`.  Either:
+/// 1. Fix the typo on the registry entry, or
+/// 2. Add the method to the `RepoGraphOps` trait AND add its name
+///    to `REPO_GRAPH_OPS_METHODS`.
+const _: () = {
+    let mut ri = 0;
+    while ri < CODE_GRAPH_REGISTRY.len() {
+        let method = CODE_GRAPH_REGISTRY[ri].bridge_method;
+        let mut found = false;
+        let mut mi = 0;
+        while mi < REPO_GRAPH_OPS_METHODS.len() {
+            if str_eq(REPO_GRAPH_OPS_METHODS[mi], method) {
+                found = true;
+                break;
+            }
+            mi += 1;
+        }
+        assert!(
+            found,
+            "registry entry bridge_method not in REPO_GRAPH_OPS_METHODS surface"
+        );
+        ri += 1;
+    }
+};
+
+/// Compile-time witness: every `KNOWN_BRIDGE_METHODS` entry is a
+/// subset of the declared `RepoGraphOps` trait identity surface.
+/// `KNOWN_BRIDGE_METHODS` is the curated registry-routed subset
+/// (used by the server-side forwarding coverage test); the trait
+/// surface is the full set of bridge methods.  An entry in
+/// `KNOWN_BRIDGE_METHODS` that names a method not on the trait
+/// would be impossible to forward — this witness catches that
+/// drift at compile time.
+const _: () = {
+    let mut mi = 0;
+    while mi < KNOWN_BRIDGE_METHODS.len() {
+        let method = KNOWN_BRIDGE_METHODS[mi];
+        let mut found = false;
+        let mut ti = 0;
+        while ti < REPO_GRAPH_OPS_METHODS.len() {
+            if str_eq(REPO_GRAPH_OPS_METHODS[ti], method) {
+                found = true;
+                break;
+            }
+            ti += 1;
+        }
+        assert!(
+            found,
+            "KNOWN_BRIDGE_METHODS entry not in REPO_GRAPH_OPS_METHODS surface"
+        );
+        mi += 1;
+    }
+};
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::BTreeSet;
 
     /// Full catalog of operations supported by the `code_graph` tool.
     /// This is the source of truth for the registry coverage test.
@@ -588,5 +659,165 @@ mod tests {
                 "workspace behavior {expected:?} is not exercised by any registry entry"
             );
         }
+    }
+
+    // ── Bridge-to-trait coverage (control-plane half of `0bpa`) ──
+    //
+    // These tests are the focused replacement for the control-plane
+    // half of the stuck `0bpa` task. They assert that every registry
+    // entry's `bridge_method` value names a method declared on the
+    // `RepoGraphOps` trait identity surface
+    // (`REPO_GRAPH_OPS_METHODS` in `graph_bridge.rs`), and that the
+    // asserted set covers at least one explicit non-basic family
+    // beyond the vxmw basic slice (route / api / flow / change /
+    // coupling / snapshot).
+    //
+    // The compile-time witnesses above catch the same constraint at
+    // `cargo check` time; the tests below give the same check a name
+    // and a structured error message that lists the offending entry,
+    // and they exercise the non-basic family requirement that is
+    // awkward to express in a `const _: () = {}` block.
+
+    /// Focused coverage check: every `CODE_GRAPH_REGISTRY` entry's
+    /// `bridge_method` value names a method declared on the
+    /// `RepoGraphOps` trait identity surface.
+    ///
+    /// This is the contract the task asks for: a focused test-time
+    /// check that derives expected bridge identities from
+    /// `CODE_GRAPH_REGISTRY` and compares them against a single
+    /// declared `RepoGraphOps` method identity surface
+    /// (`REPO_GRAPH_OPS_METHODS`). A forward addition to the registry
+    /// that names a missing `RepoGraphOps` method fails this test
+    /// with a clear error message identifying the offending entry.
+    #[test]
+    fn registry_bridge_methods_resolve_to_repo_graph_ops_surface() {
+        let surface: BTreeSet<&str> = REPO_GRAPH_OPS_METHODS.iter().copied().collect();
+
+        // Sanity: the surface itself must be non-empty so the check
+        // has something to compare against. An accidentally emptied
+        // `REPO_GRAPH_OPS_METHODS` would silently pass a per-entry
+        // lookup against an empty set, so pin the lower bound here.
+        assert!(
+            !REPO_GRAPH_OPS_METHODS.is_empty(),
+            "REPO_GRAPH_OPS_METHODS surface is empty — the trait identity \
+             surface must declare every RepoGraphOps method name"
+        );
+
+        let mut missing: Vec<(&'static str, &'static str)> = Vec::new();
+        for entry in CODE_GRAPH_REGISTRY {
+            if !surface.contains(entry.bridge_method) {
+                missing.push((entry.name, entry.bridge_method));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "registry entries name a bridge_method that is NOT declared on \
+             the RepoGraphOps trait identity surface (REPO_GRAPH_OPS_METHODS): \
+             {:?}. Either fix the bridge_method typo or add the method to the \
+             trait and to REPO_GRAPH_OPS_METHODS.",
+            missing
+        );
+    }
+
+    /// Non-basic family coverage: at least one explicit non-basic
+    /// family — route, api, flow, change, coupling, or snapshot —
+    /// must be present in `CODE_GRAPH_REGISTRY` AND its
+    /// `bridge_method` must resolve through the trait identity
+    /// surface. The check would fail if any of these entries named a
+    /// missing `RepoGraphOps` method.
+    ///
+    /// Each tuple is `(canonical_name, expected_bridge_method)`; the
+    /// lookup confirms (a) the registry declares the entry and (b)
+    /// the `bridge_method` it carries appears in
+    /// `REPO_GRAPH_OPS_METHODS`. This deliberately goes beyond the
+    /// vxmw basic slice (`neighbors`, `impact`, `context`,
+    /// `coupling_hotspots`) so the coverage proof cannot regress to
+    /// only the vertical-slice operations.
+    #[test]
+    fn registry_non_basic_families_resolve_to_repo_graph_ops_surface() {
+        // Pick at least one explicit representative from each
+        // non-basic family the task calls out, so a forward addition
+        // that removes an entire family (or renames its bridge
+        // method) breaks this check. Each entry below is asserted to
+        // exist in the registry AND to resolve through the trait
+        // identity surface.
+        let non_basic_representatives: &[(&str, &str)] = &[
+            // route family
+            ("route_map", "route_map"),
+            ("shape_check", "shape_check"),
+            // api family
+            ("api_impact", "api_impact"),
+            ("api_surface", "api_surface"),
+            // flow family
+            ("flow", "flow"),
+            // change family
+            ("detect_changes", "detect_changes"),
+            ("diff_touches", "diff_touches"),
+            ("boundary_check", "boundary_check"),
+            // coupling family
+            ("coupling", "coupling"),
+            ("coupling_hubs", "coupling_hubs"),
+            ("churn", "churn"),
+            ("touches_hot_path", "touches_hot_path"),
+            // snapshot family
+            ("snapshot", "snapshot"),
+        ];
+
+        let surface: BTreeSet<&str> = REPO_GRAPH_OPS_METHODS.iter().copied().collect();
+
+        for (canonical_name, expected_bridge_method) in non_basic_representatives {
+            let entry = lookup_by_name(canonical_name).unwrap_or_else(|| {
+                panic!(
+                    "non-basic family coverage: registry is missing canonical \
+                     operation '{canonical_name}' — the task requires at least \
+                     one explicit non-basic family entry to be present"
+                )
+            });
+            assert_eq!(
+                entry.bridge_method, *expected_bridge_method,
+                "non-basic family coverage: registry entry '{canonical_name}' \
+                 carries bridge_method '{}' but the asserted non-basic \
+                 representative expects '{expected_bridge_method}'",
+                entry.bridge_method,
+            );
+            assert!(
+                surface.contains(entry.bridge_method),
+                "non-basic family coverage: registry entry '{canonical_name}' \
+                 has bridge_method '{}' which is NOT declared on the \
+                 RepoGraphOps trait identity surface (REPO_GRAPH_OPS_METHODS). \
+                 This is the 'would fail if registry entry named a missing \
+                 RepoGraphOps method' check the task requires.",
+                entry.bridge_method,
+            );
+        }
+    }
+
+    /// `KNOWN_BRIDGE_METHODS` (the registry-routed subset used by
+    /// the server-side forwarding coverage test) must be a subset of
+    /// the declared `RepoGraphOps` trait identity surface. This
+    /// pins the contract that any method the registry marks
+    /// "routed today" is also a method declared on the trait —
+    /// otherwise the server-side `RepoGraphBridge` could not
+    /// forward it.
+    ///
+    /// The same constraint is enforced at compile time by the
+    /// `const _: ()` witness above; this test surfaces the same
+    /// constraint with a structured error message.
+    #[test]
+    fn known_bridge_methods_subset_of_repo_graph_ops_surface() {
+        let surface: BTreeSet<&str> = REPO_GRAPH_OPS_METHODS.iter().copied().collect();
+        let mut not_in_surface: Vec<&str> = Vec::new();
+        for method in KNOWN_BRIDGE_METHODS {
+            if !surface.contains(method) {
+                not_in_surface.push(method);
+            }
+        }
+        assert!(
+            not_in_surface.is_empty(),
+            "KNOWN_BRIDGE_METHODS contains entries not declared on the \
+             RepoGraphOps trait identity surface (REPO_GRAPH_OPS_METHODS): \
+             {not_in_surface:?}. The registry-routed subset must be a \
+             subset of the trait surface or the server cannot forward it.",
+        );
     }
 }
