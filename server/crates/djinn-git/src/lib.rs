@@ -173,6 +173,9 @@ pub use actor::{GitActorHandle, get_or_spawn};
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod lib_tests;
+
 #[derive(Debug, Clone)]
 pub struct StatusSummary {
     pub staged: Vec<String>,
