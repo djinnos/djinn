@@ -1,6 +1,7 @@
 use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
+use djinn_core::clock::{Clock, SystemClock};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
@@ -995,7 +996,7 @@ impl CoordinatorActor {
                 self.last_dispatched.insert(
                     review_task.id.clone(),
                     DispatchMarker {
-                        instant: StdInstant::now(),
+                        instant: SystemClock::new().now_instant(),
                         role: "planner".to_owned(),
                     },
                 );
