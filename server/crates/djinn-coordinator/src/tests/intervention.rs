@@ -1519,7 +1519,7 @@ async fn second_strike_parks_task_after_prior_intervention() {
 
 /// `escalate_ci_failure_and_park` includes CI failure sections in both the
 /// visibility comment and the escalation reason passed to
-/// `dispatch_planner_escalation`.
+/// `create_remediation_task`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     let db = test_helpers::create_test_db();
@@ -1588,16 +1588,16 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
         escalation_comment.payload
     );
 
-    // The escalation reason passed to dispatch_planner_escalation also
-    // includes the sections (visible via the PLANNER_ESCALATION comment that
-    // dispatch_planner_escalation logs on the source task).
+    // The escalation reason passed to create_remediation_task also
+    // includes the sections (visible via the HUMAN_REVIEW_HOLD comment that
+    // create_remediation_task logs on the source task).
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+        "HUMAN_REVIEW_HOLD comment must be logged"
     );
     let planner_comment = &planner_comments[0];
     assert!(
@@ -1658,11 +1658,11 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
 
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+        "HUMAN_REVIEW_HOLD comment must be logged"
     );
     assert!(
         !planner_comments[0]
