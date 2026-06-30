@@ -866,6 +866,12 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
         shared_schemas::tool_proposal_debate_append(),
         mutation(),
     ));
+    // The Judge can demand a read-only evidence spike when in-session research
+    // is insufficient to resolve a load-bearing feasibility claim.
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_refinement_demand_evidence(),
+        mutation(),
+    ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_task_comment_add(),
         mutation(),
