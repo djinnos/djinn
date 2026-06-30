@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 
 use crate::WarmContext;
 use crate::architect::ArchitectWarmToken;
+use djinn_core::clock::{Clock, SystemClock};
 
 pub type CachedLayoutPositions =
     std::collections::BTreeMap<String, crate::layout::GraphLayoutPosition>;
@@ -393,7 +394,6 @@ fn run_route_extraction_post_processor(
 /// Pod is short-lived and has no inbound traffic, so spinning up the
 /// HTTP server + coordinator + RPC listener would be ~2.5s of wasted
 /// latency per warm run.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn run_warm_graph_command<C: WarmContext>(
     ctx: &C,
     project_id: &str,
@@ -427,7 +427,7 @@ pub async fn run_warm_graph_command<C: WarmContext>(
         project_root = %project_root.display(),
         "run_warm_graph_command: starting warm pipeline"
     );
-    let started = std::time::Instant::now();
+    let started = SystemClock::new().now_instant();
     let (_handle, graph) = ensure_canonical_graph(ctx, project_id, &project_root, token)
         .await
         .map_err(|e| anyhow::anyhow!("ensure_canonical_graph failed: {e}"))?;
@@ -441,7 +441,6 @@ pub async fn run_warm_graph_command<C: WarmContext>(
     Ok(())
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn ensure_canonical_graph<C: WarmContext>(
     ctx: &C,
     project_id: &str,
@@ -608,7 +607,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let stack_filter = resolve_stack_indexer_filter(ctx, project_id).await;
     let declared_workspaces = resolve_declared_workspaces(ctx, project_id).await;
 
-    let t_indexers = std::time::Instant::now();
+    let t_indexers = SystemClock::new().now_instant();
     let run = crate::scip_indexer::run_indexers_already_locked(
         handle.path(),
         &output_dir,
@@ -629,7 +628,8 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
     let effective_cache_reuse = resolve_canonical_warm_cache_reuse(force_full_rebuild);
     let blocking =
         tokio::task::spawn_blocking(move || -> Result<CanonicalGraphBuildOutput, String> {
-            let t_parse = std::time::Instant::now();
+            let clock = SystemClock::new();
+            let t_parse = clock.now_instant();
             let parsed = crate::scip_parser::parse_scip_artifacts_with_cache_reuse(
                 &artifacts,
                 effective_cache_reuse,
@@ -652,7 +652,7 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             // and build the graph from the store's file iterator. The
             // in-memory `parsed.files` vecs are dropped after sharding
             // to free memory.
-            let t_build = std::time::Instant::now();
+            let t_build = clock.now_instant();
             let mut graph = if let Some(ref ooc_config) = ooc_engaged {
                 match crate::out_of_core::OutOfCoreStore::open(&ooc_config.storage_path) {
                     Ok(mut ooc_store) => {
@@ -769,13 +769,13 @@ pub async fn ensure_canonical_graph<C: WarmContext>(
             let node_count = graph.node_count();
             let edge_count = graph.edge_count();
 
-            let t_derive = std::time::Instant::now();
+            let t_derive = clock.now_instant();
             let (pagerank, sccs, layout_positions, crate_map) =
                 derive_graph_caches_with_crate_map(&graph, crate_map_for_build);
             graph.set_layout_positions((*layout_positions).clone());
             let derive_ms = t_derive.elapsed().as_millis() as u64;
 
-            let t_serial = std::time::Instant::now();
+            let t_serial = clock.now_instant();
             let serialized = bincode::serialize(&graph.to_artifact())
                 .map_err(|e| format!("bincode serialize graph: {e}"))?;
             let serial_ms = t_serial.elapsed().as_millis() as u64;

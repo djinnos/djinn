@@ -7,9 +7,10 @@
 //! See: <https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app>
 
 use anyhow::{Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use super::{ENV_APP_ID, ENV_PRIVATE_KEY, ENV_PRIVATE_KEY_PATH};
 
@@ -76,11 +77,11 @@ pub fn private_key_pem() -> Result<String, AppJwtError> {
 
 /// Mint a short-lived RS256 JWT authenticating as the GitHub App itself
 /// (`iss = <app_id>`). Valid for ~9 minutes, backdated 60s for clock skew.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub fn mint_app_jwt() -> Result<String, AppJwtError> {
     let app_id = app_id()?;
     let pem = private_key_pem()?;
-    let now = SystemTime::now()
+    let now = SystemClock::new()
+        .now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AppJwtError::ClockSkew)?
         .as_secs();

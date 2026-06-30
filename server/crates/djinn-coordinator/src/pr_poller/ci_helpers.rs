@@ -487,11 +487,21 @@ impl CoordinatorActor {
                 ci_failure_sections.join("\n")
             )
         };
-        self.dispatch_planner_escalation(&task.id, &enriched_reason, &task.project_id)
-            .await;
+        // Create a HUMAN-review remediation task (not a Planner dispatch) that
+        // blocks the source.  A CI-loop park is a terminal escalation: the
+        // automated remediation has failed and a human must resolve it, so we
+        // use `HumanReview` kind which sets the `human-review-hold` label and
+        // intentionally does NOT dispatch any agent to the remediation task.
+        self.create_remediation_task(
+            &task.id,
+            &enriched_reason,
+            &task.project_id,
+            crate::dispatch::RemediationKind::HumanReview,
+        )
+        .await;
 
         // Park (hold) the source on the blocker just added — NOT force-close.
-        // The blocker was added by `dispatch_planner_escalation` BEFORE this
+        // The blocker was added by `create_remediation_task` BEFORE this
         // park, so the open task is never dispatchable without its blocker.
         self.park_source_open(&task.id, reason).await;
         self.pr_status_cache.remove(&task.id);

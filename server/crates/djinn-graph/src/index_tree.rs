@@ -30,6 +30,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use djinn_core::clock::{Clock, SystemClock};
 use tokio::process::Command;
 
 /// Reserved file-name prefix for server-managed entries under
@@ -124,7 +125,6 @@ impl IndexTreeHandle {
     /// Run `git fetch origin main` against the project root unless a fetch
     /// already happened within `cooldown`.  Tracks the last-fetch timestamp
     /// per project in a process-wide map.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn fetch_if_stale(&self, cooldown: Duration) -> Result<bool> {
         {
             let map = last_fetch_map().lock().expect("poisoned fetch map");
@@ -137,7 +137,7 @@ impl IndexTreeHandle {
         run_git(&self.project_root, &["fetch", "origin", "main"]).await?;
         {
             let mut map = last_fetch_map().lock().expect("poisoned fetch map");
-            map.insert(self.project_id.clone(), Instant::now());
+            map.insert(self.project_id.clone(), SystemClock::new().now_instant());
         }
         Ok(true)
     }

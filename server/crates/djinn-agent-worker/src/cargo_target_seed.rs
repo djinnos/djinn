@@ -155,13 +155,12 @@ pub fn seed_cargo_target_dir(
 /// Missing, invalid, or safely-detected clone failures return `Ok` with a
 /// fallback reason so dispatch can proceed with a cold private target dir. The
 /// only hard error is inability to prepare the destination directory itself.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub fn seed_cargo_target_dir_with_options(
     base_dir: impl AsRef<Path>,
     run_dir: impl AsRef<Path>,
     options: &CargoTargetSeedOptions,
 ) -> io::Result<CargoTargetSeedResult> {
-    let start = Instant::now();
+    let start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
     let base_dir = base_dir.as_ref();
     let run_dir = run_dir.as_ref();
 

@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::{Credential, Model, Pricing, Provider};
 use parking_lot::RwLock;
 use serde::Deserialize;
-
-use djinn_core::models::{Credential, Model, Pricing, Provider};
 
 use crate::catalog::builtin::BuiltinProvider;
 
@@ -130,7 +130,6 @@ impl CatalogService {
 
     /// Attempt a live fetch from models.dev.  Replaces cached data on success;
     /// preserves embedded/stale data on failure.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn refresh(&self) {
         match self.fetch_remote().await {
             Ok(raw) => {
@@ -138,7 +137,7 @@ impl CatalogService {
                 let mut data = self.inner.write();
                 data.providers = providers;
                 data.models_idx = models_idx;
-                data.fetched_at = Some(Instant::now());
+                data.fetched_at = Some(SystemClock::new().now_instant());
                 tracing::info!("provider catalog refreshed from models.dev");
             }
             Err(e) => {

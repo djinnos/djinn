@@ -3,9 +3,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use djinn_core::clock::{Clock, SystemClock};
 use serde_json::json;
 use tokio::sync::Mutex;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Duration, sleep};
 
 use crate::client::{LspClient, clone_client_refs, kill_client, spawn_client, write_lsp_message};
 use crate::diagnostics::{Diagnostic, clear_uri, collect_for_worktree};
@@ -85,7 +86,6 @@ impl LspManager {
         killed
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub async fn touch_file(&self, worktree: &Path, path: &Path, wait_for_diagnostics: bool) {
         let Some(server) = server_for_path(path) else {
             tracing::debug!(path = %path.display(), "lsp: no server configured for file extension");
@@ -209,6 +209,7 @@ impl LspManager {
         }
 
         if wait_for_diagnostics {
+            let clock = SystemClock::new();
             // While the server is still indexing it cannot produce
             // diagnostics for this file — waiting just stalls every
             // write/edit/patch by the full timeout for nothing.
@@ -216,14 +217,14 @@ impl LspManager {
                 tracing::info!(uri = %uri, "lsp: server still indexing, skipping diagnostic wait");
                 return;
             }
-            let start = Instant::now();
+            let start = clock.now_instant();
             let deadline = start + Duration::from_secs(3);
             let debounce = Duration::from_millis(150);
-            let mut last_change = Instant::now();
+            let mut last_change = clock.now_instant();
             let mut prev_snapshot: Option<usize> = None;
 
             loop {
-                let now = Instant::now();
+                let now = clock.now_instant();
                 if now >= deadline {
                     tracing::info!(
                         uri = %uri,
@@ -249,12 +250,12 @@ impl LspManager {
                             "lsp: first diagnostics arrived"
                         );
                         prev_snapshot = Some(len);
-                        last_change = Instant::now();
+                        last_change = clock.now_instant();
                     }
                     (Some(prev), Some(len)) if prev != len => {
                         tracing::debug!(uri = %uri, prev = prev, now = len, "lsp: diagnostic count changed");
                         prev_snapshot = Some(len);
-                        last_change = Instant::now();
+                        last_change = clock.now_instant();
                     }
                     (Some(_), Some(_)) => {
                         if now.duration_since(last_change) >= debounce {
@@ -270,7 +271,7 @@ impl LspManager {
                     (Some(_), None) => {
                         tracing::debug!(uri = %uri, "lsp: diagnostics were cleared unexpectedly");
                         prev_snapshot = None;
-                        last_change = Instant::now();
+                        last_change = clock.now_instant();
                     }
                 }
 
