@@ -9,6 +9,7 @@ doctest = false
 
 [dependencies]
 anyhow = "1"
+djinn-core = { path = "../djinn-core" }
 djinn-git = { path = "../djinn-git" }
 git2 = "0.20"
 tempfile = "3"

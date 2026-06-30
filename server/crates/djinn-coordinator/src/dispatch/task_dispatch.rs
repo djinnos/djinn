@@ -19,10 +19,17 @@ fn record_dispatch_attempt(outcome: &'static str) {
 
 fn record_dispatch_outcome(outcome: &'static str) {
     if outcome == djinn_telemetry::dispatch::OUTCOME_OK {
-        djinn_telemetry::dispatch::record_success();
+        djinn_telemetry::dispatch::record_success_at(dispatch_success_timestamp_secs());
     } else {
         record_dispatch_attempt(outcome);
     }
+}
+
+fn dispatch_success_timestamp_secs() -> f64 {
+    SystemClock::new()
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |duration| duration.as_secs_f64())
 }
 
 fn record_dispatch_live_state(cooldowns_active: usize, inflight_ledger_size: usize) {

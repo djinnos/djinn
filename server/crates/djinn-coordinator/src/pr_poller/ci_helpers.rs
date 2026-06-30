@@ -498,7 +498,7 @@ impl CoordinatorActor {
             &task.project_id,
             crate::dispatch::RemediationKind::HumanReview,
         )
-            .await;
+        .await;
 
         // Park (hold) the source on the blocker just added — NOT force-close.
         // The blocker was added by `create_remediation_task` BEFORE this

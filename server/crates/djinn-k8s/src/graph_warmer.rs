@@ -25,7 +25,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
+
+use djinn_core::clock::{Clock, SystemClock};
 
 use async_trait::async_trait;
 use djinn_db::{Database, ProjectRepository, RepoGraphCacheRepository};
@@ -112,10 +113,9 @@ impl KubeClientJobWatcher {
 
 #[async_trait]
 impl WarmJobWatcher for KubeClientJobWatcher {
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     async fn wait_terminal(&self, namespace: &str, job_name: &str) {
         let api: Api<Job> = Api::namespaced(self.client.clone(), namespace);
-        let deadline = Instant::now() + WATCH_DEADLINE;
+        let deadline = SystemClock::new().now_instant() + WATCH_DEADLINE;
         loop {
             match api.get(job_name).await {
                 Ok(job) => {
@@ -142,7 +142,7 @@ impl WarmJobWatcher for KubeClientJobWatcher {
                     );
                 }
             }
-            if Instant::now() >= deadline {
+            if SystemClock::new().now_instant() >= deadline {
                 warn!(
                     job = %job_name,
                     "K8sGraphWarmer watcher: deadline exceeded, notifying anyway"
