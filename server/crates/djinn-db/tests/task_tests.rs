@@ -106,6 +106,7 @@ pub(crate) fn make_peer_task(
         created_by_user_id: None,
         ci_status: "unknown".to_string(),
         ci_head_sha: None,
+        ci_pr_number: None,
         ci_blocking_required_check_names: "[]".to_string(),
         ci_failure_fingerprint: None,
         ci_first_seen_at: None,

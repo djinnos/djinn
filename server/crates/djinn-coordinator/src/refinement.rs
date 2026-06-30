@@ -501,6 +501,7 @@ pub fn build_objection_debate_params<'a>(
         source_task_id: None,
         against_revision_seq,
         round,
+        body_metadata: None,
     }
 }
 
@@ -523,6 +524,7 @@ pub fn build_verdict_debate_params<'a>(
         source_task_id: None,
         against_revision_seq,
         round,
+        body_metadata: None,
     }
 }
 

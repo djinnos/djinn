@@ -341,6 +341,7 @@ async fn sweep_stale_prs(db: &djinn_db::Database, app_state: &crate::context::Co
                         created_by_user_id: None,
                         ci_status: djinn_core::models::CiStatus::Unknown.to_string(),
                         ci_head_sha: None,
+                        ci_pr_number: None,
                         ci_blocking_required_check_names: "[]".to_string(),
                         ci_failure_fingerprint: None,
                         ci_first_seen_at: None,

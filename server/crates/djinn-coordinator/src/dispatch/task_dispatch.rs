@@ -1709,6 +1709,7 @@ mod inflight_ledger_tests {
             created_by_user_id: creator.map(str::to_owned),
             ci_status: "unknown".to_owned(),
             ci_head_sha: None,
+            ci_pr_number: None,
             ci_blocking_required_check_names: "[]".to_owned(),
             ci_failure_fingerprint: None,
             ci_first_seen_at: None,
