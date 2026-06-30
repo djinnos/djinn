@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use tokio::sync::{mpsc, oneshot};
 
 use crate::host::SlotContext;
+use djinn_core::clock::Clock;
 use djinn_orchestration_types::coordinator::DebugSlot;
 
 use super::super::{SlotHandle, SlotPoolConfig};
@@ -150,8 +151,12 @@ pub enum PoolMessage {
     },
 }
 
-pub(super) fn now_unix_string() -> String {
-    let secs = SystemTime::now()
+/// Format the current unix-seconds timestamp (read through the shared clock
+/// seam) as a decimal string.  Falls back to `"0"` when the wall-clock is
+/// before `UNIX_EPOCH`.
+pub(super) fn now_unix_string(clock: &dyn Clock) -> String {
+    let secs = clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);

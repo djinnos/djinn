@@ -8,11 +8,23 @@ pub(crate) fn derive_task_scope_paths(
     epic_context: Option<&str>,
 ) -> Vec<String> {
     use regex::Regex;
+    use std::sync::OnceLock;
+
     // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
     // Looking for patterns with at least 2 slash-separated segments
-    let re =
+    static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
+    let re = match TASK_SCOPE_PATH_RE.get_or_init(|| {
         Regex::new(r#"(?:^|[\s`"(])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_.-]+){1,6})(?:[\s`")\.,:]|$)"#)
-            .unwrap_or_else(|_| Regex::new(r"[a-z]+/[a-z]+").unwrap());
+    }) {
+        Ok(re) => re,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to compile task-scope path regex; skipping scope derivation"
+            );
+            return Vec::new();
+        }
+    };
 
     let mut paths = std::collections::HashSet::new();
 
