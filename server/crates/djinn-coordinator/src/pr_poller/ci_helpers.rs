@@ -54,11 +54,15 @@ impl CoordinatorActor {
     ///    required checks are green and the PR is fine to proceed.
     ///
     /// 2. **Same-CI-signature check.** A stable fingerprint is computed from the
-    ///    blocking check names and structured CI failure sections. If the same
+    ///    blocking check names and structured CI failure sections. The durable
+    ///    CI gate snapshot's `same_signature_count` is the authoritative counter
+    ///    (not activity-log entries). When the head SHA changes, the
+    ///    `record_ci_snapshot` path resets the counter via
+    ///    `reset_ci_snapshot_for_head`. When the fingerprint changes (different
+    ///    failures = progress), the counter restarts from 0. If the same
     ///    fingerprint appears `SAME_CI_SIGNATURE_THRESHOLD` times in a row,
     ///    we escalate to the Planner via `route_planner_intervention` faster
-    ///    than the blind cycle-count threshold. The counter resets when the
-    ///    fingerprint changes (different failures = progress).
+    ///    than the blind cycle-count threshold, independent of `reopen_count`.
     ///
     /// 3. **Scope-inversion check.** The PR's actual changed files are fetched
     ///    from GitHub and compared against the failing crates/files extracted
@@ -164,36 +168,45 @@ impl CoordinatorActor {
         // Compute a fingerprint from the blocking failures + structured CI
         // sections. If the same fingerprint appears K times in a row, escalate
         // to the Planner faster than the blind cycle-count threshold.
+        //
+        // The authoritative counter is the durable CI gate snapshot's
+        // `same_signature_count` field — NOT activity-log entries. The
+        // `record_ci_snapshot` path already calls `reset_ci_snapshot_for_head`
+        // when the head SHA changes, which zeros the counter and clears the
+        // fingerprint. If the fingerprint changed (different failures =
+        // progress), we also restart the count here. This makes escalation
+        // independent of `reopen_count`.
         let fingerprint = compute_ci_failure_fingerprint(&blocking, &ci_failure_sections);
 
         let task_repo = self.task_repo();
-        let prior_signatures = match task_repo
-            .query_activity(ActivityQuery {
-                task_id: Some(task_id.to_owned()),
-                event_type: Some(SAME_CI_SIGNATURE_EVENT.to_string()),
-                actor_role: Some("system".to_string()),
-                project_id: None,
-                from_time: None,
-                to_time: None,
-                limit: 100,
-                offset: 0,
-            })
+        let prior_same_sig_count = match task_repo
+            .get_ci_snapshot_for_task_pr(task_id, pull_number as i64)
             .await
         {
-            Ok(entries) => entries,
+            Ok(Some(snap)) => {
+                // Only carry forward the count when the fingerprint matches
+                // (same failures on the same head). A head change already
+                // reset the snapshot via `reset_ci_snapshot_for_head` in the
+                // `record_ci_snapshot` path; a fingerprint change means the
+                // worker made progress, so we restart the count.
+                if snap.failure_fingerprint.as_deref() == Some(&fingerprint) {
+                    snap.same_signature_count
+                } else {
+                    0
+                }
+            }
+            Ok(None) => 0,
             Err(e) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     error = %e,
-                    "PR poller: failed to query same_ci_signature markers; assuming none"
+                    "PR poller: failed to read CI snapshot for same-signature count; assuming 0"
                 );
-                Vec::new()
+                0
             }
         };
-
-        let consecutive = count_consecutive_identical(&prior_signatures, &fingerprint);
-        // The current failure is the (consecutive + 1)th identical fingerprint.
-        let total_consecutive = consecutive + 1;
+        // The current failure is the (prior + 1)th identical fingerprint.
+        let total_consecutive = prior_same_sig_count + 1;
 
         // Persist the failing CI snapshot before checking escalation thresholds.
         // Set last_remediation_base_sha to the current failing head so later
@@ -211,7 +224,7 @@ impl CoordinatorActor {
         )
         .await;
 
-        if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD {
+        if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD as i64 {
             let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
             let reason = format!(
                 "PR #{pull_number}: CI has failed with the identical fingerprint {total_consecutive} \
@@ -238,7 +251,10 @@ impl CoordinatorActor {
             return true;
         }
 
-        // Record this fingerprint marker so future rounds can detect repeats.
+        // Record this fingerprint marker as an audit trail. Since sa4x the
+        // durable snapshot's `same_signature_count` is the authoritative
+        // counter; the activity-log entry is retained for operator visibility
+        // only.
         let signature_payload = serde_json::json!({
             "fingerprint": fingerprint,
             "round": total_consecutive,
