@@ -78,7 +78,6 @@ pub async fn load_environment_config(path: &Path) -> Result<Option<EnvironmentCo
 /// `${containerWorkspaceFolder}` substitution resolves to this path, and
 /// each command runs with its CWD set here. Callers derived it from
 /// `DJINN_PROJECT_ROOT` or the hard-coded `/workspace` fallback.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub async fn run_phase(
     project_root: &Path,
     phase_name: &str,
@@ -101,7 +100,7 @@ pub async fn run_phase(
     );
     for (idx, cmd) in commands.iter().enumerate() {
         let sub_phase = format!("{phase_name}[{idx}]");
-        let start = std::time::Instant::now();
+        let start = djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
         run_command(&sub_phase, cmd, &ctx)
             .await
             .with_context(|| format!("{sub_phase} failed"))?;
