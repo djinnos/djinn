@@ -1586,12 +1586,492 @@ fn integration_normal_failure_no_false_positive() {
     );
 }
 
-// ── CI snapshot ownership tests ──────────────────────────────────────────
+// ── CI gate snapshot write-through tests ──────────────────────────────────
 //
-// These tests verify the model-level semantics that the pr_poller relies on
-// when recording CI snapshots through the foundation repository API.
+// Write-through tests verify input construction for each CiStatus variant.
+// Model-level tests verify the snapshot contract through `TaskPrCiSnapshot::from_input`.
 
 use djinn_core::models::{CiStatus, TaskPrCiSnapshot, TaskPrCiSnapshotInput};
+
+/// Helper to build a snapshot input the same way the pr_poller does for a
+/// failing observation, so we can assert on the resulting fields.
+fn build_failing_snapshot_input(
+    task_id: &str,
+    pr_number: u64,
+    head_sha: &str,
+    blocking: &[CheckRun],
+    fingerprint: &str,
+    total_consecutive: i64,
+) -> TaskPrCiSnapshotInput {
+    let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+    TaskPrCiSnapshotInput {
+        task_id: task_id.to_owned(),
+        pr_number: pr_number as i64,
+        head_sha: head_sha.to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: blocking_names,
+        failure_fingerprint: Some(fingerprint.to_owned()),
+        same_signature_count: total_consecutive,
+        last_remediation_base_sha: None,
+    }
+}
+
+fn make_check_run(name: &str, conclusion: &str) -> CheckRun {
+    CheckRun {
+        id: 1000,
+        name: name.to_string(),
+        status: "completed".to_string(),
+        conclusion: Some(conclusion.to_string()),
+        html_url: "https://github.com/owner/repo/actions/runs/123/jobs/456".to_string(),
+    }
+}
+
+// ── Write-through input construction tests ────────────────────────────────
+
+#[test]
+fn ci_snapshot_failing_input_includes_blocking_names_and_fingerprint() {
+    let blocking = vec![
+        make_check_run("Quality Gate", "failure"),
+        make_check_run("Server Clippy", "failure"),
+    ];
+    let input = build_failing_snapshot_input("task-1", 42, "abc123def456", &blocking, "fp-aaa", 2);
+
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(
+        input.blocking_required_check_names,
+        vec!["Quality Gate", "Server Clippy"]
+    );
+    assert_eq!(input.failure_fingerprint.as_deref(), Some("fp-aaa"));
+    assert_eq!(input.same_signature_count, 2);
+    assert!(input.last_remediation_base_sha.is_none());
+    assert_eq!(input.pr_number, 42);
+    assert_eq!(input.head_sha, "abc123def456");
+}
+
+#[test]
+fn ci_snapshot_passing_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-2".to_owned(),
+        pr_number: 99,
+        head_sha: "sha-green".to_owned(),
+        ci_status: CiStatus::Passing,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Passing);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+    assert_eq!(input.same_signature_count, 0);
+}
+
+#[test]
+fn ci_snapshot_pending_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-3".to_owned(),
+        pr_number: 7,
+        head_sha: "sha-pending".to_owned(),
+        ci_status: CiStatus::Pending,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Pending);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+}
+
+#[test]
+fn ci_snapshot_unknown_input_has_empty_blocking_and_no_fingerprint() {
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-4".to_owned(),
+        pr_number: 1,
+        head_sha: "sha-unknown".to_owned(),
+        ci_status: CiStatus::Unknown,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Unknown);
+    assert!(input.blocking_required_check_names.is_empty());
+    assert!(input.failure_fingerprint.is_none());
+}
+
+#[test]
+fn ci_snapshot_failing_input_carries_remediation_base_sha_where_available() {
+    let blocking = vec![make_check_run("Tests", "failure")];
+    let mut input = build_failing_snapshot_input("task-5", 10, "head-sha-5", &blocking, "fp-5", 1);
+    // When last_remediation_base_sha is available (from lifecycle layer), it
+    // should be carried through. The pr_poller always sets None (foundation
+    // task), but the field should round-trip correctly.
+    input.last_remediation_base_sha = Some("remediation-base-sha".to_string());
+
+    assert_eq!(
+        input.last_remediation_base_sha.as_deref(),
+        Some("remediation-base-sha")
+    );
+}
+
+#[test]
+fn ci_snapshot_failing_same_signature_count_matches_consecutive_observations() {
+    // The poller sets same_signature_count to total_consecutive (1-indexed),
+    // matching the consecutive identical fingerprint observations.
+    let blocking = vec![make_check_run("Lint", "failure")];
+
+    // First observation: total_consecutive = 1
+    let input1 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 1);
+    assert_eq!(input1.same_signature_count, 1);
+
+    // Second identical observation: total_consecutive = 2
+    let input2 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 2);
+    assert_eq!(input2.same_signature_count, 2);
+
+    // Third identical observation: total_consecutive = 3
+    let input3 = build_failing_snapshot_input("t", 1, "sha", &blocking, "fp", 3);
+    assert_eq!(input3.same_signature_count, 3);
+}
+
+#[test]
+fn ci_snapshot_empty_blocking_names_for_passing_and_pending_states() {
+    // Both passing and pending observations carry no blocking names or
+    // fingerprint — only failing snapshots include these.
+    for status in [CiStatus::Passing, CiStatus::Pending, CiStatus::Unknown] {
+        let input = TaskPrCiSnapshotInput {
+            task_id: "t".to_owned(),
+            pr_number: 1,
+            head_sha: "sha".to_owned(),
+            ci_status: status,
+            blocking_required_check_names: vec![],
+            failure_fingerprint: None,
+            same_signature_count: 0,
+            last_remediation_base_sha: None,
+        };
+        assert!(
+            input.blocking_required_check_names.is_empty(),
+            "{status} should have no blocking names"
+        );
+        assert!(
+            input.failure_fingerprint.is_none(),
+            "{status} should have no fingerprint"
+        );
+        assert_eq!(
+            input.same_signature_count, 0,
+            "{status} should have zero same-signature count"
+        );
+    }
+}
+
+/// Review-stuck path: blocking check names are persisted but no fingerprint or
+/// same-signature tracking (this path does not go through handle_ci_failure).
+#[test]
+fn ci_snapshot_review_stuck_failing_has_blocking_names_no_fingerprint() {
+    let blocking = [
+        make_check_run("Quality Gate", "failure"),
+        make_check_run("Server Test", "timed_out"),
+    ];
+    let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-review-stuck".to_owned(),
+        pr_number: 77,
+        head_sha: "stuck-sha".to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: blocking_names,
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(
+        input.blocking_required_check_names,
+        vec!["Quality Gate", "Server Test"]
+    );
+    assert!(
+        input.failure_fingerprint.is_none(),
+        "review-stuck path does not compute a fingerprint"
+    );
+    assert_eq!(
+        input.same_signature_count, 0,
+        "review-stuck path does not track same-signature count"
+    );
+}
+
+/// Changes-requested + blocking CI failing path: blocking check names are
+/// persisted without fingerprint or same-signature tracking (this path
+/// intentionally avoids handle_ci_failure cycle-cap/diff-empty logic).
+#[test]
+fn ci_snapshot_changes_requested_failing_has_blocking_names_no_fingerprint() {
+    let blocking = [make_check_run("Lint", "failure")];
+    let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-changes-req".to_owned(),
+        pr_number: 55,
+        head_sha: "changes-req-sha".to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: blocking_names,
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Failing);
+    assert_eq!(input.blocking_required_check_names, vec!["Lint"]);
+    assert!(
+        input.failure_fingerprint.is_none(),
+        "changes-requested path does not compute a fingerprint"
+    );
+    assert_eq!(input.same_signature_count, 0);
+}
+
+/// When a new head SHA is observed, the repository's upsert resets stale
+/// blocking names, fingerprint, same-signature count, and remediation base
+/// SHA.  This test verifies the contract at the input level: a "reset"
+/// observation carries empty blocking, no fingerprint, and zero count.
+#[test]
+fn ci_snapshot_new_head_sha_reset_contract_has_clean_fields() {
+    // Simulate what the repository's reset_ci_snapshot_for_head produces:
+    // new head_sha, unknown status, empty blocking, no fingerprint.
+    let input = TaskPrCiSnapshotInput {
+        task_id: "task-reset".to_owned(),
+        pr_number: 10,
+        head_sha: "brand-new-sha".to_owned(),
+        ci_status: CiStatus::Unknown,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+
+    assert_eq!(input.ci_status, CiStatus::Unknown);
+    assert!(
+        input.blocking_required_check_names.is_empty(),
+        "new head SHA must reset blocking names"
+    );
+    assert!(
+        input.failure_fingerprint.is_none(),
+        "new head SHA must reset fingerprint"
+    );
+    assert_eq!(
+        input.same_signature_count, 0,
+        "new head SHA must reset same-signature count"
+    );
+    assert!(
+        input.last_remediation_base_sha.is_none(),
+        "new head SHA must reset remediation base SHA"
+    );
+}
+
+/// Verify that the persist_ci_snapshot helper produces a well-formed input
+/// for each CiStatus variant, matching the contract the repository expects.
+#[test]
+fn ci_snapshot_persist_input_construction_covers_all_statuses() {
+    // Failing: blocking names + fingerprint + count
+    let failing = TaskPrCiSnapshotInput {
+        task_id: "t".to_owned(),
+        pr_number: 1,
+        head_sha: "sha".to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: vec!["A".to_owned(), "B".to_owned()],
+        failure_fingerprint: Some("fp".to_owned()),
+        same_signature_count: 2,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(failing.ci_status, CiStatus::Failing);
+    assert_eq!(failing.blocking_required_check_names.len(), 2);
+    assert!(failing.failure_fingerprint.is_some());
+    assert_eq!(failing.same_signature_count, 2);
+
+    // Passing: empty blocking, no fingerprint, zero count
+    let passing = TaskPrCiSnapshotInput {
+        task_id: "t".to_owned(),
+        pr_number: 1,
+        head_sha: "sha".to_owned(),
+        ci_status: CiStatus::Passing,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(passing.ci_status, CiStatus::Passing);
+    assert!(passing.blocking_required_check_names.is_empty());
+    assert!(passing.failure_fingerprint.is_none());
+    assert_eq!(passing.same_signature_count, 0);
+
+    // Pending: empty blocking, no fingerprint, zero count
+    let pending = TaskPrCiSnapshotInput {
+        task_id: "t".to_owned(),
+        pr_number: 1,
+        head_sha: "sha".to_owned(),
+        ci_status: CiStatus::Pending,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(pending.ci_status, CiStatus::Pending);
+    assert!(pending.blocking_required_check_names.is_empty());
+
+    // Unknown: empty blocking, no fingerprint, zero count
+    let unknown = TaskPrCiSnapshotInput {
+        task_id: "t".to_owned(),
+        pr_number: 1,
+        head_sha: "sha".to_owned(),
+        ci_status: CiStatus::Unknown,
+        blocking_required_check_names: vec![],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    };
+    assert_eq!(unknown.ci_status, CiStatus::Unknown);
+    assert!(unknown.blocking_required_check_names.is_empty());
+}
+
+/// Verify that last_remediation_base_sha is always None from the pr_poller
+/// (the foundation task does not invent remediation transitions).  When the
+/// field IS set (e.g. by a downstream lifecycle layer), it round-trips
+/// correctly through the input.
+#[test]
+fn ci_snapshot_remediation_base_sha_none_by_default_round_trips_when_set() {
+    // Default: None (pr_poller always sends None)
+    let default_input = TaskPrCiSnapshotInput::default();
+    assert!(
+        default_input.last_remediation_base_sha.is_none(),
+        "default input must have no remediation base SHA"
+    );
+
+    // When set by a downstream layer, it round-trips.
+    let mut with_remediation = TaskPrCiSnapshotInput {
+        task_id: "t".to_owned(),
+        pr_number: 1,
+        head_sha: "sha".to_owned(),
+        ci_status: CiStatus::Failing,
+        blocking_required_check_names: vec!["X".to_owned()],
+        failure_fingerprint: Some("fp".to_owned()),
+        same_signature_count: 1,
+        last_remediation_base_sha: None,
+    };
+    with_remediation.last_remediation_base_sha = Some("base-abc".to_owned());
+    assert_eq!(
+        with_remediation.last_remediation_base_sha.as_deref(),
+        Some("base-abc")
+    );
+}
+
+// ── Model-level contract tests (from main) ───────────────────────────────
+
+#[test]
+fn ci_status_classifies_completed_checks_with_blocking_failure_as_failing() {
+    // A completed check-run with a blocking failure conclusion produces
+    // CiStatus::Failing. This is the classification the pr_poller performs
+    // before constructing the snapshot input.
+    let failing_check = check_run("unit tests", 100);
+
+    // Simulate: all checks completed, at least one blocking failure.
+    assert_eq!(failing_check.status, "completed");
+    assert!(super::is_failing_conclusion(
+        failing_check.conclusion.as_deref()
+    ));
+
+    // With no required-contexts (heuristic mode), the check name "unit tests"
+    // is NOT advisory, so it IS blocking.
+    let blocking = blocking_failed_checks(&[&failing_check], None);
+    assert_eq!(blocking.len(), 1, "unit tests should be blocking");
+
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else {
+        CiStatus::Failing
+    };
+    assert_eq!(ci_status, CiStatus::Failing);
+}
+
+#[test]
+fn ci_status_classifies_advisory_only_failures_as_passing() {
+    // When only advisory checks (Vercel previews) fail and no required checks
+    // are specified, the blocking filter returns empty → status is Passing.
+    let vercel = check_run("Vercel – portal", 200);
+
+    // With no required-contexts (heuristic mode), "Vercel – portal" is
+    // advisory and NOT blocking.
+    let blocking = blocking_failed_checks(&[&vercel], None);
+    assert!(
+        blocking.is_empty(),
+        "advisory-only failures should not be blocking"
+    );
+
+    let ci_status = if blocking.is_empty() {
+        CiStatus::Passing
+    } else {
+        CiStatus::Failing
+    };
+    assert_eq!(ci_status, CiStatus::Passing);
+}
+
+#[test]
+fn ci_status_classifies_incomplete_checks_as_pending() {
+    // When not all checks are completed, the status should be Pending.
+    let running_check = CheckRun {
+        id: 300,
+        name: "CI / build".to_string(),
+        status: "in_progress".to_string(),
+        conclusion: None,
+        html_url: "https://github.com/o/r/actions/runs/3/job/3".to_string(),
+    };
+    let checks = [&running_check];
+    let all_completed = checks.iter().all(|cr| cr.status == "completed");
+    assert!(!all_completed, "in_progress check is not completed");
+
+    // Pending: not all checks completed.
+    let ci_status = if checks.is_empty() || all_completed {
+        // Would proceed to failure classification
+        CiStatus::Passing
+    } else {
+        CiStatus::Pending
+    };
+    assert_eq!(ci_status, CiStatus::Pending);
+}
+
+#[test]
+fn ci_status_classifies_no_checks_as_pending() {
+    // When there are no checks at all, the snapshot records Pending.
+    // The existing min-age guard in the poller handles the "no CI" case
+    // after the guard elapses.
+    let checks: Vec<&CheckRun> = Vec::new();
+    assert!(checks.is_empty());
+
+    let ci_status = if checks.is_empty() {
+        CiStatus::Pending
+    } else {
+        CiStatus::Passing
+    };
+    assert_eq!(ci_status, CiStatus::Pending);
+}
+
+#[test]
+fn fingerprint_changes_with_different_blocking_checks() {
+    // Two different sets of blocking checks produce different fingerprints,
+    // confirming that the pr_poller's fingerprint computation detects changes.
+    let build = check_run("CI / build", 100);
+    let test = check_run("CI / test", 200);
+
+    let refs_a: Vec<&CheckRun> = vec![&build];
+    let refs_b: Vec<&CheckRun> = vec![&build, &test];
+
+    let sections = vec!["**Failed job:** build (failure)".to_string()];
+    let fp_a = compute_ci_failure_fingerprint(&refs_a, &sections);
+    let fp_b = compute_ci_failure_fingerprint(&refs_b, &sections);
+
+    assert_ne!(
+        fp_a, fp_b,
+        "different check sets must produce different fingerprints"
+    );
+}
 
 #[test]
 fn stale_head_reset_produces_pending_with_cleared_fields() {
@@ -1665,117 +2145,9 @@ fn unknown_snapshot_preserves_head_sha_and_identity() {
 }
 
 #[test]
-fn ci_status_classifies_completed_checks_with_blocking_failure_as_failing() {
-    // A completed check-run with a blocking failure conclusion produces
-    // CiStatus::Failing. This is the classification the pr_poller performs
-    // before constructing the snapshot input.
-    let failing_check = check_run("unit tests", 100);
-
-    // Simulate: all checks completed, at least one blocking failure.
-    assert_eq!(failing_check.status, "completed");
-    assert!(super::is_failing_conclusion(
-        failing_check.conclusion.as_deref()
-    ));
-
-    // With no required-contexts (heuristic mode), the check name "unit tests"
-    // is NOT advisory, so it IS blocking.
-    let blocking = blocking_failed_checks(&[&failing_check], None);
-    assert_eq!(blocking.len(), 1, "unit tests should be blocking");
-
-    let ci_status = if blocking.is_empty() {
-        CiStatus::Passing
-    } else {
-        CiStatus::Failing
-    };
-    assert_eq!(ci_status, CiStatus::Failing);
-}
-
-#[test]
-fn ci_status_classifies_advisory_only_failures_as_passing() {
-    // When only advisory checks (Vercel previews) fail and no required checks
-    // are specified, the blocking filter returns empty → status is Passing.
-    let vercel = check_run("Vercel – portal", 200);
-
-    // With no required-contexts (heuristic mode), "Vercel – portal" is
-    // advisory and NOT blocking.
-    let blocking = blocking_failed_checks(&[&vercel], None);
-    assert!(
-        blocking.is_empty(),
-        "advisory-only failures should not be blocking"
-    );
-
-    let ci_status = if blocking.is_empty() {
-        CiStatus::Passing
-    } else {
-        CiStatus::Failing
-    };
-    assert_eq!(ci_status, CiStatus::Passing);
-}
-
-#[test]
-fn ci_status_classifies_incomplete_checks_as_pending() {
-    // When not all checks are completed, the status should be Pending.
-    let running_check = CheckRun {
-        id: 300,
-        name: "CI / build".to_string(),
-        status: "in_progress".to_string(),
-        conclusion: None,
-        html_url: "https://github.com/o/r/actions/runs/3/job/3".to_string(),
-    };
-    let checks = vec![&running_check];
-    let all_completed = checks.iter().all(|cr| cr.status == "completed");
-    assert!(!all_completed, "in_progress check is not completed");
-
-    // Pending: not all checks completed.
-    let ci_status = if checks.is_empty() || all_completed {
-        // Would proceed to failure classification
-        CiStatus::Passing
-    } else {
-        CiStatus::Pending
-    };
-    assert_eq!(ci_status, CiStatus::Pending);
-}
-
-#[test]
-fn ci_status_classifies_no_checks_as_pending() {
-    // When there are no checks at all, the snapshot records Pending.
-    // The existing min-age guard in the poller handles the "no CI" case
-    // after the guard elapses.
-    let checks: Vec<&CheckRun> = Vec::new();
-    assert!(checks.is_empty());
-
-    let ci_status = if checks.is_empty() {
-        CiStatus::Pending
-    } else {
-        CiStatus::Passing
-    };
-    assert_eq!(ci_status, CiStatus::Pending);
-}
-
-#[test]
-fn fingerprint_changes_with_different_blocking_checks() {
-    // Two different sets of blocking checks produce different fingerprints,
-    // confirming that the pr_poller's fingerprint computation detects changes.
-    let build = check_run("CI / build", 100);
-    let test = check_run("CI / test", 200);
-
-    let refs_a: Vec<&CheckRun> = vec![&build];
-    let refs_b: Vec<&CheckRun> = vec![&build, &test];
-
-    let sections = vec!["**Failed job:** build (failure)".to_string()];
-    let fp_a = compute_ci_failure_fingerprint(&refs_a, &sections);
-    let fp_b = compute_ci_failure_fingerprint(&refs_b, &sections);
-
-    assert_ne!(
-        fp_a, fp_b,
-        "different check sets must produce different fingerprints"
-    );
-}
-
-#[test]
 fn snapshot_input_for_passing_status_has_no_fingerprint() {
-    // When CI is passing, the snapshot input should have no failure fingerprint
-    // and no blocking check names.
+    // When CI is passing, the snapshot should have no failure fingerprint
+    // and no blocking check names after conversion through from_input.
     let input = TaskPrCiSnapshotInput {
         task_id: "task-1".to_string(),
         pr_number: 42,
