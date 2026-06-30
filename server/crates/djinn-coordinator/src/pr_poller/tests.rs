@@ -1609,8 +1609,11 @@ fn stale_head_reset_produces_pending_with_cleared_fields() {
         same_signature_count: 0,
         last_remediation_base_sha: None,
     };
-    let snapshot =
-        TaskPrCiSnapshot::from_input(input, "2026-06-30T10:00:00.000Z".to_string(), "2026-06-30T10:00:00.000Z".to_string());
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-06-30T10:00:00.000Z".to_string(),
+        "2026-06-30T10:00:00.000Z".to_string(),
+    );
 
     // The reset snapshot has empty blocking checks, no fingerprint, zero
     // same-signature count, and no remediation base SHA.
@@ -1646,8 +1649,11 @@ fn unknown_snapshot_preserves_head_sha_and_identity() {
         same_signature_count: 0,
         last_remediation_base_sha: None,
     };
-    let snapshot =
-        TaskPrCiSnapshot::from_input(input, "2026-06-30T09:00:00.000Z".to_string(), "2026-06-30T10:00:00.000Z".to_string());
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-06-30T09:00:00.000Z".to_string(),
+        "2026-06-30T10:00:00.000Z".to_string(),
+    );
 
     assert_eq!(snapshot.ci_status, CiStatus::Unknown);
     assert_eq!(snapshot.head_sha, "existing-sha");
@@ -1667,7 +1673,9 @@ fn ci_status_classifies_completed_checks_with_blocking_failure_as_failing() {
 
     // Simulate: all checks completed, at least one blocking failure.
     assert_eq!(failing_check.status, "completed");
-    assert!(super::is_failing_conclusion(failing_check.conclusion.as_deref()));
+    assert!(super::is_failing_conclusion(
+        failing_check.conclusion.as_deref()
+    ));
 
     // With no required-contexts (heuristic mode), the check name "unit tests"
     // is NOT advisory, so it IS blocking.
@@ -1758,7 +1766,10 @@ fn fingerprint_changes_with_different_blocking_checks() {
     let fp_a = compute_ci_failure_fingerprint(&refs_a, &sections);
     let fp_b = compute_ci_failure_fingerprint(&refs_b, &sections);
 
-    assert_ne!(fp_a, fp_b, "different check sets must produce different fingerprints");
+    assert_ne!(
+        fp_a, fp_b,
+        "different check sets must produce different fingerprints"
+    );
 }
 
 #[test]
@@ -1775,8 +1786,11 @@ fn snapshot_input_for_passing_status_has_no_fingerprint() {
         same_signature_count: 0,
         last_remediation_base_sha: None,
     };
-    let snapshot =
-        TaskPrCiSnapshot::from_input(input, "2026-06-30T10:00:00.000Z".to_string(), "2026-06-30T10:00:00.000Z".to_string());
+    let snapshot = TaskPrCiSnapshot::from_input(
+        input,
+        "2026-06-30T10:00:00.000Z".to_string(),
+        "2026-06-30T10:00:00.000Z".to_string(),
+    );
 
     assert_eq!(snapshot.ci_status, CiStatus::Passing);
     assert!(snapshot.failure_fingerprint.is_none());

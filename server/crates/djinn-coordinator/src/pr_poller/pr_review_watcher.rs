@@ -73,12 +73,8 @@ impl CoordinatorActor {
                     );
                     // Record `unknown` for existing snapshot.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(
-                        &task.id,
-                        &task.short_id,
-                        pr_number,
-                    )
-                    .await;
+                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                        .await;
                     continue;
                 }
             };

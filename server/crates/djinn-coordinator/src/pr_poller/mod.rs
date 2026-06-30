@@ -104,9 +104,9 @@ pub(crate) use pr_commands::{
 use pr_review_handlers::effective_review_decision;
 pub use pr_review_handlers::parse_pr_url;
 
+use ci_helpers::compute_ci_failure_fingerprint;
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
-use ci_helpers::compute_ci_failure_fingerprint;
 #[cfg(test)]
 use ci_helpers::{
     count_consecutive_identical, detect_scope_inversion, extract_crate_name, extract_crate_names,

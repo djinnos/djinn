@@ -106,12 +106,8 @@ impl CoordinatorActor {
                     // tasks see updated observation timestamps without
                     // escalating to remediation.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(
-                        &task.id,
-                        &task.short_id,
-                        pr_number,
-                    )
-                    .await;
+                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                        .await;
                     continue;
                 }
             };
@@ -382,12 +378,8 @@ impl CoordinatorActor {
                     );
                     // Record `unknown` for existing snapshot.
                     let pr_number = pull_number as i64;
-                    self.record_ci_snapshot_unavailable(
-                        &task.id,
-                        &task.short_id,
-                        pr_number,
-                    )
-                    .await;
+                    self.record_ci_snapshot_unavailable(&task.id, &task.short_id, pr_number)
+                        .await;
                     continue;
                 }
             };
@@ -590,10 +582,7 @@ impl CoordinatorActor {
                     // If there are no completed checks, the snapshot is now
                     // `pending` for the new head — nothing more to classify.
                     if checks.check_runs.is_empty()
-                        || !checks
-                            .check_runs
-                            .iter()
-                            .all(|cr| cr.status == "completed")
+                        || !checks.check_runs.iter().all(|cr| cr.status == "completed")
                     {
                         // Leave as `pending`; the next poll will re-evaluate
                         // when all checks complete.
@@ -620,11 +609,7 @@ impl CoordinatorActor {
             // existing behavior). The snapshot records `pending` until
             // then.
             CiStatus::Pending
-        } else if checks
-            .check_runs
-            .iter()
-            .all(|cr| cr.status == "completed")
-        {
+        } else if checks.check_runs.iter().all(|cr| cr.status == "completed") {
             let failed_checks: Vec<&CheckRun> = checks
                 .check_runs
                 .iter()
@@ -639,8 +624,7 @@ impl CoordinatorActor {
             let required_contexts = self
                 .resolve_required_contexts(gh_client, owner, repo, base_ref, pull_number)
                 .await;
-            let blocking =
-                blocking_failed_checks(&failed_checks, required_contexts.as_deref());
+            let blocking = blocking_failed_checks(&failed_checks, required_contexts.as_deref());
 
             if blocking.is_empty() {
                 // All required checks passed (or no CI configured).
@@ -670,12 +654,10 @@ impl CoordinatorActor {
             let required_contexts = self
                 .resolve_required_contexts(gh_client, owner, repo, base_ref, pull_number)
                 .await;
-            let blocking =
-                blocking_failed_checks(&failed_checks, required_contexts.as_deref());
+            let blocking = blocking_failed_checks(&failed_checks, required_contexts.as_deref());
 
             // Build failure sections for fingerprint computation.
-            let (sections, _) =
-                ci_helpers::build_ci_failure_sections(None, &blocking);
+            let (sections, _) = ci_helpers::build_ci_failure_sections(None, &blocking);
             let fp = compute_ci_failure_fingerprint(&blocking, &sections);
             let names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
             (Some(fp), names)
