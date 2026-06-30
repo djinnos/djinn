@@ -1,6 +1,6 @@
 use super::*;
+use crate::test_support::{checkout_branch, init_repo_with_bare_origin};
 use std::path::PathBuf;
-use tempfile::TempDir;
 
 /// Walk up from `start` to find the nearest ancestor directory containing `.git`.
 fn find_git_root(start: &std::path::Path) -> PathBuf {
@@ -42,84 +42,11 @@ async fn run_command_git_log() {
 
 // ── Branch management tests ───────────────────────────────────────────────
 
-/// Create a local repo with an initial commit on `main` and a local bare remote.
-/// Both TempDirs must be kept alive for the test duration.
-fn setup_git_repo() -> (TempDir, TempDir) {
-    let remote_dir = tempfile::tempdir().unwrap();
-    let local_dir = tempfile::tempdir().unwrap();
-
-    // Init bare remote.
-    std::process::Command::new("git")
-        .args(["init", "--bare"])
-        .current_dir(remote_dir.path())
-        .output()
-        .unwrap();
-
-    // Init local repo.
-    std::process::Command::new("git")
-        .args(["init"])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-
-    // Set identity and disable GPG signing (required for `git commit` in CI).
-    for (k, v) in [
-        ("user.email", "test@test.com"),
-        ("user.name", "Test User"),
-        ("commit.gpgsign", "false"),
-    ] {
-        std::process::Command::new("git")
-            .args(["config", k, v])
-            .current_dir(local_dir.path())
-            .output()
-            .unwrap();
-    }
-
-    // Initial commit.
-    std::fs::write(local_dir.path().join("README.md"), "hello").unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["commit", "-m", "init"])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-
-    // Rename default branch to `main`.
-    std::process::Command::new("git")
-        .args(["branch", "-m", "main"])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-
-    // Wire up local bare remote and push.
-    std::process::Command::new("git")
-        .args([
-            "remote",
-            "add",
-            "origin",
-            remote_dir.path().to_str().unwrap(),
-        ])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["push", "-u", "origin", "main"])
-        .current_dir(local_dir.path())
-        .output()
-        .unwrap();
-
-    (local_dir, remote_dir)
-}
-
 /// `create_branch` creates `task/{short_id}` from `main` and pushes to origin (GIT-01).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_branch_creates_and_pushes() {
-    let (local, _remote) = setup_git_repo();
-    let handle = GitActorHandle::spawn(local.path().to_path_buf()).unwrap();
+    let fixture = init_repo_with_bare_origin();
+    let handle = fixture.spawn_handle();
 
     handle.create_branch("abc1", "main").await.unwrap();
 
@@ -138,22 +65,14 @@ async fn create_branch_creates_and_pushes() {
 /// `delete_branch` removes the local branch (GIT-03 post-merge cleanup).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_branch_removes_local() {
-    let (local, _remote) = setup_git_repo();
-    let path = local.path();
+    let fixture = init_repo_with_bare_origin();
+    let path = fixture.path();
 
     // Create a branch manually and return to main.
-    std::process::Command::new("git")
-        .args(["checkout", "-b", "task/del1", "main"])
-        .current_dir(path)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["checkout", "main"])
-        .current_dir(path)
-        .output()
-        .unwrap();
+    checkout_branch(path, "task/del1", Some("main"));
+    checkout_branch(path, "main", None);
 
-    let handle = GitActorHandle::spawn(path.to_path_buf()).unwrap();
+    let handle = fixture.spawn_handle();
     handle.delete_branch("task/del1").await.unwrap();
 
     // Branch should no longer exist locally.
