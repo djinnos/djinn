@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use djinn_core::clock::{Clock, SystemClock};
 use serde::{Deserialize, Serialize};
 
 /// Number of consecutive failures before circuit breaker trips.
@@ -128,19 +129,16 @@ struct ModelState {
 }
 
 impl ModelState {
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
-    fn is_available(&self) -> bool {
+    fn is_available(&self, now: Instant) -> bool {
         if !self.auto_disabled {
             return true;
         }
         // Cooldown expired → model auto-re-enables on next availability check.
-        matches!(self.cooldown_until, Some(until) if Instant::now() >= until)
+        matches!(self.cooldown_until, Some(until) if now >= until)
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
-    fn cooldown_seconds_remaining(&self) -> Option<u64> {
+    fn cooldown_seconds_remaining(&self, now: Instant) -> Option<u64> {
         let until = self.cooldown_until?;
-        let now = Instant::now();
         if until > now {
             Some((until - now).as_secs())
         } else {
@@ -148,17 +146,17 @@ impl ModelState {
         }
     }
 
-    fn to_health(&self, key: &HealthKey) -> ModelHealth {
+    fn to_health(&self, key: &HealthKey, now: Instant) -> ModelHealth {
         ModelHealth {
             model_id: key.model_id.clone(),
             scope: key.scope.clone(),
             // Report as disabled only when cooldown has not yet expired.
-            auto_disabled: self.auto_disabled && !self.is_available(),
+            auto_disabled: self.auto_disabled && !self.is_available(now),
             consecutive_failures: self.consecutive_failures,
             total_failures: self.total_failures,
             total_successes: self.total_successes,
             disable_ttl_trips: self.disable_ttl_trips,
-            cooldown_seconds_remaining: self.cooldown_seconds_remaining(),
+            cooldown_seconds_remaining: self.cooldown_seconds_remaining(now),
         }
     }
 
@@ -248,11 +246,12 @@ impl HealthTracker {
     /// Record a successful invocation.  Resets consecutive failure counter;
     /// clears auto-disable state if the cooldown has expired.
     pub fn record_success(&self, scope: Option<&str>, model_id: &str) {
+        let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
         state.total_successes += 1;
-        if state.auto_disabled && state.is_available() {
+        if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
         }
@@ -260,8 +259,8 @@ impl HealthTracker {
 
     /// Record a failed invocation.  Trips the circuit breaker when the
     /// consecutive failure threshold is reached.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_failure(&self, scope: Option<&str>, model_id: &str) {
+        let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -269,7 +268,7 @@ impl HealthTracker {
         state.total_failures += 1;
 
         // If the previous cooldown expired, clear the flag so we can re-trip.
-        if state.auto_disabled && state.is_available() {
+        if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
         }
@@ -277,7 +276,7 @@ impl HealthTracker {
         if !state.auto_disabled && state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
             let cooldown = state.compute_cooldown();
             state.auto_disabled = true;
-            state.cooldown_until = Some(Instant::now() + cooldown);
+            state.cooldown_until = Some(now + cooldown);
             state.disable_ttl_trips += 1;
             djinn_telemetry::breaker::increment_trip();
             tracing::warn!(
@@ -315,8 +314,8 @@ impl HealthTracker {
     ///   broken", the account is merely over quota until its window resets. We
     ///   still apply the `STALL_MIN_COOLDOWN` floor so failover still happens —
     ///   we just don't ratchet the cap.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn record_stall(&self, scope: Option<&str>, model_id: &str, escalate: bool) {
+        let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
         let key = HealthKey::new(scope, model_id);
         let state = map.entry(key.clone()).or_default();
@@ -325,7 +324,7 @@ impl HealthTracker {
 
         // If the previous cooldown expired, clear the flag so we can re-trip
         // (and so `disable_ttl_trips` keeps escalating across stalls).
-        if state.auto_disabled && state.is_available() {
+        if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
         }
@@ -339,7 +338,7 @@ impl HealthTracker {
         // outlasts the task's redispatch cooldown and forces failover.
         let cooldown = state.compute_cooldown().max(STALL_MIN_COOLDOWN);
         state.auto_disabled = true;
-        state.cooldown_until = Some(Instant::now() + cooldown);
+        state.cooldown_until = Some(now + cooldown);
         // A throttle resets on a clock, not on model health — don't ratchet the
         // escalating cooldown cap for it (idea 6). Genuine failures still do.
         if escalate {
@@ -358,15 +357,17 @@ impl HealthTracker {
     /// Returns `true` when the `(scope, model)` bucket is not circuit-breaker
     /// disabled (or when its cooldown has expired).
     pub fn is_available(&self, scope: Option<&str>, model_id: &str) -> bool {
+        let now = SystemClock::new().now_instant();
         let map = self.inner.lock().unwrap();
         map.get(&HealthKey::new(scope, model_id))
-            .is_none_or(|s| s.is_available())
+            .is_none_or(|s| s.is_available(now))
     }
 
     /// Return health state for all tracked buckets, sorted by `(scope, model)`.
     pub fn all_health(&self) -> Vec<ModelHealth> {
+        let now = SystemClock::new().now_instant();
         let map = self.inner.lock().unwrap();
-        let mut health: Vec<_> = map.iter().map(|(key, s)| s.to_health(key)).collect();
+        let mut health: Vec<_> = map.iter().map(|(key, s)| s.to_health(key, now)).collect();
         health.sort_by(|a, b| {
             a.scope
                 .cmp(&b.scope)
@@ -375,7 +376,6 @@ impl HealthTracker {
         health
     }
 
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn debug_snapshot(&self) -> Vec<BreakerDebugEntry> {
         let entries: Vec<_> = {
             let map = self.inner.lock().unwrap();
@@ -391,7 +391,7 @@ impl HealthTracker {
                 .collect()
         };
 
-        let now = Instant::now();
+        let now = SystemClock::new().now_instant();
         let wall_now = ::time::OffsetDateTime::now_utc();
         let mut snapshot: Vec<_> = entries
             .into_iter()
@@ -435,13 +435,14 @@ impl HealthTracker {
     /// `djinn_breaker_state{scope,model}` gauge as Closed=`0.0`, HalfOpen=`0.5`,
     /// Open=`1.0`.
     pub fn breaker_metric_snapshot(&self) -> Vec<BreakerMetricSnapshot> {
+        let now = SystemClock::new().now_instant();
         let map = self.inner.lock().unwrap();
         let mut snapshot: Vec<_> = map
             .iter()
             .map(|(key, state)| {
                 let breaker_state = if !state.auto_disabled {
                     BreakerState::Closed
-                } else if state.is_available() {
+                } else if state.is_available(now) {
                     BreakerState::HalfOpen
                 } else {
                     BreakerState::Open
@@ -466,8 +467,8 @@ impl HealthTracker {
     }
 
     /// Replace all tracked health state with a persisted snapshot.
-    #[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
     pub fn restore_all(&self, snapshot: Vec<ModelHealth>) {
+        let now = SystemClock::new().now_instant();
         let mut map = self.inner.lock().unwrap();
         map.clear();
         for health in snapshot {
@@ -483,7 +484,7 @@ impl HealthTracker {
             if health.auto_disabled {
                 if let Some(seconds) = health.cooldown_seconds_remaining {
                     if seconds > 0 {
-                        state.cooldown_until = Some(Instant::now() + Duration::from_secs(seconds));
+                        state.cooldown_until = Some(now + Duration::from_secs(seconds));
                     } else {
                         state.auto_disabled = false;
                     }
@@ -502,10 +503,11 @@ impl HealthTracker {
     /// Return health state for a single `(scope, model)` bucket (returns zero
     /// state if untracked).
     pub fn model_health(&self, scope: Option<&str>, model_id: &str) -> ModelHealth {
+        let now = SystemClock::new().now_instant();
         let key = HealthKey::new(scope, model_id);
         let map = self.inner.lock().unwrap();
         map.get(&key)
-            .map(|s| s.to_health(&key))
+            .map(|s| s.to_health(&key, now))
             .unwrap_or(ModelHealth {
                 model_id: model_id.to_owned(),
                 scope: scope.map(str::to_owned),

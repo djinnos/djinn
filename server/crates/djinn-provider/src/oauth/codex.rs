@@ -25,7 +25,7 @@ use reqwest::{Client, StatusCode};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::repos::CredentialRepository;
 
@@ -538,7 +538,6 @@ pub async fn start_codex_device_auth(
     Ok(Some(session))
 }
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 async fn poll_codex_device_auth(
     device_auth_id: &str,
     user_code: &str,
@@ -547,7 +546,7 @@ async fn poll_codex_device_auth(
 ) -> Result<CodexTokens> {
     let client = Client::new();
     let url = format!("{DEVICE_API_BASE}/deviceauth/token");
-    let start = Instant::now();
+    let start = SystemClockTrait::new().now_instant();
 
     let code_resp: CodeSuccessResp = loop {
         let resp = client
