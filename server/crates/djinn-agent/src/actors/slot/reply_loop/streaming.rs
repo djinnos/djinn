@@ -123,7 +123,6 @@ const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
 /// the teardown `update_session_status` remains the authoritative total.
 const TOKEN_FLUSH_INTERVAL_SECS: u64 = 30;
 
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(super) async fn consume_provider_stream(
     mut ctx: StreamLoopContext<'_>,
 ) -> anyhow::Result<StreamTurnState> {
@@ -177,7 +176,7 @@ pub(super) async fn consume_provider_stream(
 
                 state.saw_round_event = true;
 
-                let now = std::time::SystemTime::now()
+                let now = djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new())
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);

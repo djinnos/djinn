@@ -43,7 +43,6 @@ pub(crate) struct SetupError {
 ///
 /// The caller is responsible for all task-status transitions and worktree
 /// teardown on error — this function does not touch either.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,
@@ -62,7 +61,8 @@ pub(crate) async fn resolve_setup_context(
     let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     if !setup_specs.is_empty() {
-        let setup_start = std::time::Instant::now();
+        let setup_start =
+            djinn_core::clock::Clock::now_instant(&djinn_core::clock::SystemClock::new());
         tracing::info!(
             task_id = %task_short_id,
             command_count = setup_specs.len(),

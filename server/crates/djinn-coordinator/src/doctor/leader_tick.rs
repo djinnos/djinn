@@ -23,8 +23,7 @@
 //! same 30s window. It is intentionally a non-blocking observation: no
 //! dispatch, no fix, no state mutation outside of inserts.
 
-use std::time::Instant as StdInstant;
-
+use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::doctor::{
     DoctorCheckRun, DoctorRegistry, Finding, FindingSeverity, run_cheap_subset,
 };
@@ -195,7 +194,7 @@ pub async fn run_cheap_doctor_checks(
     events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
     run_id: Option<&str>,
 ) -> Vec<DoctorCheckRun> {
-    let started = StdInstant::now();
+    let started = SystemClock::new().now_instant();
     let runs = match run_cheap_subset(registry) {
         Ok(runs) => runs,
         Err(error) => {
@@ -226,7 +225,7 @@ pub async fn run_cheap_doctor_checks(
     for run in &runs {
         let check_name = run.check_name;
         let findings_count = run.findings.len();
-        let run_started = StdInstant::now();
+        let run_started = SystemClock::new().now_instant();
 
         persist_findings(&finding_repo, run_id, &run.findings).await;
 

@@ -27,7 +27,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant as StdInstant;
 
 #[cfg(test)]
 use djinn_core::events::DjinnEventEnvelope;
@@ -60,15 +62,10 @@ pub(crate) mod truncate;
 
 // ─── Coordinator actor tree (was actors::coordinator in djinn-agent) ──────
 
-#[allow(clippy::disallowed_methods)]
-// legacy coordinator sweep timers; tracked by mzdj clock follow-up audit
 mod actor;
-#[allow(clippy::disallowed_methods)] // test helpers in this module seed real monotonic timestamps
 mod consolidation;
 pub mod dispatch;
 mod evidence;
-#[allow(clippy::disallowed_methods)]
-// status-wait timeout uses tokio::time::Instant for runtime deadline
 pub mod handle;
 mod health;
 pub mod messages;
@@ -77,17 +74,10 @@ mod prompt_eval;
 mod reentrance;
 #[allow(dead_code)]
 pub(crate) mod refinement;
-#[allow(clippy::disallowed_methods)]
-// dispatch ledger timestamps still use monotonic instants pending clock plumb-through
 mod refinement_dispatch;
 mod refinement_outcome;
-#[allow(clippy::disallowed_methods)]
-// rule tests and throughput fixtures use real monotonic timestamps
 pub mod rules;
-#[allow(clippy::disallowed_methods)]
-// debug DTO defaults preserve existing real-time snapshot semantics
 mod types;
-#[allow(clippy::disallowed_methods)] // wave orchestration waits use tokio::time deadlines
 mod wave;
 
 // ─── Public re-exports (matching djinn-agent facade paths) ───────────────

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant as StdInstant};
 use super::refinement::{RefinementPhase, StopReason};
 
 use super::actor::CoordinatorActor;
+use djinn_core::clock::{Clock, SystemClock};
 
 /// How long to wait for a refinement session to start producing output
 /// before treating it as stalled (conservative — sessions can take 5+ min).
@@ -501,7 +502,7 @@ impl CoordinatorActor {
                     RefinementSession {
                         task_id,
                         phase,
-                        dispatched_at: StdInstant::now(),
+                        dispatched_at: SystemClock::new().now_instant(),
                         model_id,
                     },
                 );
