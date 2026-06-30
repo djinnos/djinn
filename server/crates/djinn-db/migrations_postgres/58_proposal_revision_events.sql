@@ -4,10 +4,7 @@
 -- proposals.latest_revision_seq.
 
 ALTER TABLE proposal_revisions
-    -- Longest current lifecycle event kind is
-    -- `refinement_awaiting_evidence_started` (38 chars), so fresh databases
-    -- need the base column wider than the original status-event names.
-    ADD COLUMN event_kind VARCHAR(64) NOT NULL DEFAULT 'spec_revision',
+    ADD COLUMN event_kind VARCHAR(32) NOT NULL DEFAULT 'spec_revision',
     ADD COLUMN status_from VARCHAR(64) NULL,
     ADD COLUMN status_to VARCHAR(64) NULL,
     ADD COLUMN event_metadata JSONB NULL;

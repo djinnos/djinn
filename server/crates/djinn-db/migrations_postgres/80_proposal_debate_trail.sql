@@ -14,10 +14,8 @@
 CREATE TABLE proposal_debate_trail (
     id                    VARCHAR(36)  NOT NULL PRIMARY KEY,
     proposal_id           VARCHAR(36)  NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
-    -- Row kind: objection | rebuttal | verdict | needs_evidence | evidence_findings.
-    -- Keep the base schema wide enough for the longest accepted kind so fresh
-    -- test databases do not depend on a later ALTER before inserting rows.
-    kind                  VARCHAR(32)  NOT NULL,
+    -- Row kind: objection | rebuttal | verdict.
+    kind                  VARCHAR(16)  NOT NULL,
     -- Body text (markdown).
     body                  TEXT         NOT NULL DEFAULT '',
     -- When true, this entry blocks proposal readiness (e.g. a standing objection).
