@@ -1069,7 +1069,7 @@ async fn loop_guard_second_strike_parks_task() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ci_loop_park_holds_source_open_and_revives_on_remediation_close() {
+async fn ci_loop_human_review_hold_excludes_source_from_ready_dispatch_tick() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -1109,10 +1109,56 @@ async fn ci_loop_park_holds_source_open_and_revives_on_remediation_close() {
     );
     let remediation_id = blockers[0].task_id.clone();
     let remediation = repo.get(&remediation_id).await.unwrap().unwrap();
+    assert_eq!(remediation.issue_type, "review");
+    assert!(
+        remediation.labels.contains("human-review-hold"),
+        "human-review remediation must carry the dispatch-hold label; labels={}",
+        remediation.labels
+    );
     assert!(
         remediation.title.starts_with("Planner remediation ["),
         "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
         remediation.title
+    );
+
+    let ready = repo
+        .list_ready(djinn_db::ReadyQuery {
+            project_id: Some(task.project_id.clone()),
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !ready.iter().any(|candidate| candidate.id == task.id),
+        "same list_ready path used by dispatch must exclude the source while the human-review hold is open"
+    );
+
+    actor.dispatch_ready_tasks(Some(&task.project_id)).await;
+
+    assert_eq!(
+        actor.dispatched, 0,
+        "ready-dispatch tick must not spawn a worker for the source while the human-review hold is open"
+    );
+    assert!(
+        !actor.last_dispatched.contains_key(&task.id),
+        "dispatch tick must not record a worker dispatch marker for the held source"
+    );
+    let still_parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        still_parked.status, "open",
+        "dispatch tick must leave the held source open, not transition it for worker execution"
+    );
+    let active_sessions =
+        djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+            .list_active()
+            .await
+            .unwrap();
+    assert!(
+        !active_sessions
+            .iter()
+            .any(|session| session.task_id.as_deref() == Some(task.id.as_str())),
+        "dispatch tick must not create an active worker session for the held source"
     );
 
     // Closing the remediation revives the held source via emit_unblocked_tasks.
@@ -1473,7 +1519,7 @@ async fn second_strike_parks_task_after_prior_intervention() {
 
 /// `escalate_ci_failure_and_park` includes CI failure sections in both the
 /// visibility comment and the escalation reason passed to
-/// `dispatch_planner_escalation`.
+/// `create_remediation_task`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
     let db = test_helpers::create_test_db();
@@ -1542,16 +1588,16 @@ async fn escalate_ci_failure_includes_sections_in_comment_and_reason() {
         escalation_comment.payload
     );
 
-    // The escalation reason passed to dispatch_planner_escalation also
-    // includes the sections (visible via the PLANNER_ESCALATION comment that
-    // dispatch_planner_escalation logs on the source task).
+    // The escalation reason passed to create_remediation_task also
+    // includes the sections (visible via the HUMAN_REVIEW_HOLD comment that
+    // create_remediation_task logs on the source task).
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+        "HUMAN_REVIEW_HOLD comment must be logged"
     );
     let planner_comment = &planner_comments[0];
     assert!(
@@ -1612,11 +1658,11 @@ async fn escalate_ci_failure_with_empty_sections_omits_details() {
 
     let planner_comments: Vec<_> = comments
         .iter()
-        .filter(|c| c.payload.contains("PLANNER_ESCALATION"))
+        .filter(|c| c.payload.contains("HUMAN_REVIEW_HOLD"))
         .collect();
     assert!(
         !planner_comments.is_empty(),
-        "PLANNER_ESCALATION comment must be logged"
+        "HUMAN_REVIEW_HOLD comment must be logged"
     );
     assert!(
         !planner_comments[0]

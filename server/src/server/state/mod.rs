@@ -14,6 +14,7 @@ use djinn_agent::file_time::FileTime;
 use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_agent::runtime_bridge::{K8sTokenReviewValidator, RuntimeKind, runtime_kind};
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_db::{
     Database, NoopNoteVectorStore, NoteVectorStore, ProjectRepository, QdrantCodeChunkConfig,
     QdrantCodeChunkVectorStore, QdrantConfig, QdrantNoteVectorStore, SettingsRepository,
@@ -1729,7 +1730,6 @@ impl CanonicalGraphRefreshProbe for AppStateCanonicalGraphRefreshProbe {
 ///   are treated as not-fresh; everything else (the cache contains an entry
 ///   whose pinned commit is either known-current or
 ///   commit-check-failed) is treated as fresh so `await_fresh` does not spin.
-#[allow(clippy::disallowed_methods)] // scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProcessGraphWarmer {
     use djinn_agent::warmer::{InProcessGraphWarmer, InProcessWarmerDeps};
     use djinn_db::ProjectRepository;
@@ -1779,7 +1779,7 @@ fn build_in_process_graph_warmer(state: AppState) -> djinn_agent::warmer::InProc
                 "AppStateGraphWarmer: spawning background warm task"
             );
             tokio::spawn(async move {
-                let started = std::time::Instant::now();
+                let started = SystemClockTrait::new().now_instant();
                 // Architect-only warm path: this closure is only wired in
                 // via `GraphWarmerService::trigger`, which dispatch.rs gates
                 // on `role == "architect"` (plus the mirror-fetcher tick,

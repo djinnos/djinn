@@ -44,6 +44,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(all(target_os = "linux", feature = "memory-mount"))]
+use djinn_core::clock::{Clock, SystemClock as SystemClockTrait};
 use djinn_core::models::DjinnSettings;
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 use djinn_db::NoteRepository;
@@ -1122,8 +1124,6 @@ impl fuser::Filesystem for LinuxMemoryFilesystem {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
-// scoped: direct wall-clock read; migration tracked by lint-ratchet task 70y0 (Clock abstraction already lands in 8bcj/m5g4)
 #[cfg(all(target_os = "linux", feature = "memory-mount"))]
 fn file_attr_for_metadata(metadata: &crate::memory_fs::MemoryEntryMetadata) -> fuser::FileAttr {
     let kind = match metadata.kind {
@@ -1134,7 +1134,7 @@ fn file_attr_for_metadata(metadata: &crate::memory_fs::MemoryEntryMetadata) -> f
         MemoryEntryKind::Directory => 0o755,
         MemoryEntryKind::File => 0o644,
     };
-    let now = SystemTime::now();
+    let now = SystemClockTrait::new().now();
     fuser::FileAttr {
         ino: LinuxMemoryFilesystem::inode_for_path(&metadata.path),
         size: metadata.size,

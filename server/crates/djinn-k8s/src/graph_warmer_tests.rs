@@ -5,6 +5,7 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_db::RepoGraphCacheInsert;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 type CapturedJobs = Arc<Mutex<Vec<(String, Job)>>>;
 

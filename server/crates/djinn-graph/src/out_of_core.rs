@@ -653,9 +653,9 @@ impl std::error::Error for OutOfCoreError {}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test: real time for timing assertions
 mod tests {
     use super::*;
+    use djinn_core::clock::{Clock, SystemClock};
 
     // -- Helper to create a tempdir under target/test-tmp --
 
@@ -1411,7 +1411,7 @@ mod tests {
             accessor.store.put(entry).unwrap();
         }
 
-        let start = std::time::Instant::now();
+        let start = SystemClock::new().now_instant();
         let mut visited = 0usize;
         accessor
             .for_each_scope(|_entry| {
