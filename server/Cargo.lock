@@ -1731,7 +1731,6 @@ dependencies = [
 name = "djinn-telemetry"
 version = "0.1.0"
 dependencies = [
- "djinn-core",
  "metrics",
  "metrics-exporter-prometheus",
  "workspace-hack",

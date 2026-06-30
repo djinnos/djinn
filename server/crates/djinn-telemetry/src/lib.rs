@@ -630,8 +630,6 @@ fn register_metrics() {
 }
 
 pub mod dispatch {
-    use djinn_core::clock::{Clock, SystemClock};
-
     pub const OUTCOME_OK: &str = "ok";
     pub const OUTCOME_COOLDOWN: &str = "cooldown";
     pub const OUTCOME_CAP: &str = "cap";
@@ -657,12 +655,8 @@ pub mod dispatch {
         metrics::counter!(super::CROSS_MODEL_REVIEW_TOTAL, "result" => result).increment(1);
     }
 
-    pub fn record_last_success_now() {
-        let ts = SystemClock::new()
-            .now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0.0, |duration| duration.as_secs_f64());
-        metrics::gauge!(super::DISPATCH_LAST_SUCCESS_TIMESTAMP).set(ts);
+    pub fn record_last_success_timestamp(timestamp_secs: f64) {
+        metrics::gauge!(super::DISPATCH_LAST_SUCCESS_TIMESTAMP).set(timestamp_secs);
     }
 
     pub fn set_cooldowns_active(count: usize) {
@@ -687,9 +681,9 @@ pub mod dispatch {
         metrics::gauge!(super::USER_CAP_UTILIZATION, "user" => user.to_owned(), "model" => model.to_owned()).set(utilization);
     }
 
-    pub fn record_success() {
+    pub fn record_success_at(timestamp_secs: f64) {
         increment_attempt(OUTCOME_OK);
-        record_last_success_now();
+        record_last_success_timestamp(timestamp_secs);
     }
 
     pub fn increment_ok() {
@@ -867,7 +861,7 @@ mod tests {
 
         init().unwrap();
         assert_sync_unit(|| dispatch::increment_attempt(dispatch::OUTCOME_ERROR));
-        assert_sync_unit(dispatch::record_last_success_now);
+        assert_sync_unit(|| dispatch::record_last_success_timestamp(1.0));
         assert_sync_unit(|| dispatch::set_cooldowns_active(0));
         assert_sync_unit(|| dispatch::set_inflight_ledger_size(0));
         assert_sync_unit(|| dispatch::set_user_cap_utilization("user-sync", "model-sync", 0, 1));

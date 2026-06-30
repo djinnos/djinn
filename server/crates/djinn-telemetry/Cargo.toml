@@ -8,7 +8,6 @@ edition = "2024"
 doctest = false
 
 [dependencies]
-djinn-core = { path = "../djinn-core" }
 metrics = "=0.24.6"
 metrics-exporter-prometheus = { version = "=0.18.3", default-features = false }
 workspace-hack.workspace = true
