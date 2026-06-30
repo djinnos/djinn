@@ -196,6 +196,8 @@ impl CoordinatorActor {
         let total_consecutive = consecutive + 1;
 
         // Persist the failing CI snapshot before checking escalation thresholds.
+        // Set last_remediation_base_sha to the current failing head so later
+        // submit handling can compare against that baseline.
         let blocking_names: Vec<String> = blocking.iter().map(|cr| cr.name.clone()).collect();
         self.persist_ci_snapshot(
             task_id,
@@ -205,6 +207,7 @@ impl CoordinatorActor {
             blocking_names,
             Some(fingerprint.clone()),
             total_consecutive as i64,
+            Some(current_sha.to_owned()),
         )
         .await;
 
