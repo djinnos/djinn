@@ -1064,3 +1064,254 @@ async fn load_epic_context_includes_blocker_and_sibling_sections() {
         "blocking epics should appear before proposal sibling epics"
     );
 }
+
+// ── sa4x: build_ci_blocking_directive tests ────────────────────────────────
+
+/// Helper to build a minimal Task with CI fields for directive tests.
+fn make_task_with_ci(
+    ci_status: &str,
+    ci_head_sha: Option<&str>,
+    ci_pr_number: Option<i64>,
+    ci_blocking_checks: &str,
+    ci_failure_fingerprint: Option<&str>,
+    ci_last_remediation_base_sha: Option<&str>,
+) -> djinn_core::models::Task {
+    djinn_core::models::Task {
+        id: "task-ci-test".into(),
+        project_id: "project-1".into(),
+        short_id: "t-ci".into(),
+        epic_id: None,
+        title: "CI test task".into(),
+        description: "Test task for CI directive".into(),
+        design: "".into(),
+        issue_type: "task".into(),
+        status: "open".into(),
+        priority: 1,
+        owner: "test@example.com".into(),
+        labels: "[]".into(),
+        acceptance_criteria: "[]".into(),
+        reopen_count: 0,
+        continuation_count: 0,
+        total_reopen_count: 0,
+        intervention_count: 0,
+        last_intervention_at: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        closed_at: None,
+        close_reason: None,
+        merge_commit_sha: None,
+        pr_url: None,
+        merge_conflict_metadata: None,
+        memory_refs: "[]".into(),
+        agent_type: None,
+        created_by_user_id: None,
+        ci_status: ci_status.into(),
+        ci_head_sha: ci_head_sha.map(Into::into),
+        ci_pr_number,
+        ci_blocking_required_check_names: ci_blocking_checks.into(),
+        ci_failure_fingerprint: ci_failure_fingerprint.map(Into::into),
+        ci_first_seen_at: None,
+        ci_last_seen_at: None,
+        ci_same_signature_count: 0,
+        ci_last_remediation_base_sha: ci_last_remediation_base_sha.map(Into::into),
+        unresolved_blocker_count: 0,
+    }
+}
+
+#[test]
+fn build_ci_blocking_directive_returns_none_for_passing_ci() {
+    let task = make_task_with_ci(
+        "passing",
+        Some("abc123"),
+        Some(42),
+        "[]",
+        None,
+        Some("abc123"),
+    );
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "directive should be None for passing CI"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_returns_none_for_pending_ci() {
+    let task = make_task_with_ci(
+        "pending",
+        Some("abc123"),
+        Some(42),
+        "[]",
+        None,
+        Some("abc123"),
+    );
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "directive should be None for pending CI"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_returns_none_for_unknown_ci() {
+    let task = make_task_with_ci("unknown", None, None, "[]", None, None);
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "directive should be None for unknown CI"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_returns_none_when_no_remediation_baseline() {
+    let task = make_task_with_ci(
+        "failing",
+        Some("abc123"),
+        Some(42),
+        r#"["Quality Gate"]"#,
+        Some("fp-xyz"),
+        None, // no remediation baseline
+    );
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "directive should be None when no remediation baseline exists"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_returns_some_for_failing_ci_with_baseline() {
+    let task = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        Some(42),
+        r#"["Quality Gate", "unit tests"]"#,
+        Some("fp-abc789"),
+        Some("base-sha-123"),
+    );
+    let directive = build_ci_blocking_directive(&task).expect("directive should be Some");
+
+    assert!(
+        directive.contains("**PR:** #42"),
+        "directive should contain concrete PR number"
+    );
+    assert!(
+        directive.contains("**Failing head SHA:** `head-sha-456`"),
+        "directive should contain failing head SHA"
+    );
+    assert!(
+        directive.contains("Quality Gate"),
+        "directive should contain blocking check names"
+    );
+    assert!(
+        directive.contains("unit tests"),
+        "directive should contain all blocking check names"
+    );
+    assert!(
+        directive.contains("**Failure fingerprint:** `fp-abc789`"),
+        "directive should contain failure fingerprint"
+    );
+    assert!(
+        directive.contains("**Remediation baseline SHA:** `base-sha-123`"),
+        "directive should contain remediation baseline SHA"
+    );
+    assert!(
+        directive.contains("REQUIRED CI is failing"),
+        "directive should contain the blocking instruction"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_deduplication_same_baseline_produces_same_text() {
+    let task1 = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        Some(42),
+        r#"["Quality Gate"]"#,
+        Some("fp-abc"),
+        Some("base-sha-123"),
+    );
+    let task2 = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        Some(42),
+        r#"["Quality Gate"]"#,
+        Some("fp-abc"),
+        Some("base-sha-123"),
+    );
+    let directive1 = build_ci_blocking_directive(&task1).expect("directive1 should be Some");
+    let directive2 = build_ci_blocking_directive(&task2).expect("directive2 should be Some");
+
+    assert_eq!(
+        directive1, directive2,
+        "same failing baseline should produce identical directive text (deduplication)"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_uses_unknown_when_head_sha_missing() {
+    let task = make_task_with_ci(
+        "failing",
+        None, // no head SHA
+        Some(42),
+        r#"["Quality Gate"]"#,
+        Some("fp-abc"),
+        Some("base-sha-123"),
+    );
+    let directive = build_ci_blocking_directive(&task).expect("directive should be Some");
+
+    assert!(
+        directive.contains("**Failing head SHA:** `unknown`"),
+        "directive should use 'unknown' when head SHA is missing"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_uses_zero_when_pr_number_missing() {
+    let task = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        None, // no PR number
+        r#"["Quality Gate"]"#,
+        Some("fp-abc"),
+        Some("base-sha-123"),
+    );
+    let directive = build_ci_blocking_directive(&task).expect("directive should be Some");
+
+    assert!(
+        directive.contains("**PR:** #0"),
+        "directive should use #0 when PR number is missing"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_handles_empty_check_names() {
+    let task = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        Some(42),
+        "[]", // empty check names
+        Some("fp-abc"),
+        Some("base-sha-123"),
+    );
+    let directive = build_ci_blocking_directive(&task).expect("directive should be Some");
+
+    assert!(
+        directive.contains("**Blocking checks:** unknown"),
+        "directive should use 'unknown' when check names are empty"
+    );
+}
+
+#[test]
+fn build_ci_blocking_directive_omits_fingerprint_line_when_absent() {
+    let task = make_task_with_ci(
+        "failing",
+        Some("head-sha-456"),
+        Some(42),
+        r#"["Quality Gate"]"#,
+        None, // no fingerprint
+        Some("base-sha-123"),
+    );
+    let directive = build_ci_blocking_directive(&task).expect("directive should be Some");
+
+    assert!(
+        !directive.contains("Failure fingerprint"),
+        "directive should omit fingerprint line when fingerprint is None"
+    );
+}
