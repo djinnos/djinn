@@ -3514,4 +3514,205 @@ mod tests {
             edges
         );
     }
+
+    // ── Additional process_batch_edges characterization tests ──────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_with_unknown_proposal_target_endpoint_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+        let p2 = create_targeted_proposal(&db, &project.id, "Proposal B", "body")
+            .await;
+
+        let batch_ids = vec![n1.id.clone()];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+        // p2 is NOT in proposal_ids → target is unknown.
+
+        let llm_edges = vec![make_proposal_edge(
+            &p1.id,
+            &p2.id,
+            "proposal",
+            "proposal",
+            "builds_on",
+            Some("evidence"),
+        )];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "edge with unknown proposal target endpoint should be dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_edge_list_produces_empty_report_edges() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone()];
+        let llm_edges: Vec<LlmEdge> = Vec::new();
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(report.edges.is_empty(), "empty input should produce no edges");
+        assert_eq!(report.edges_dropped_wikilink_dup, 0, "no drops expected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn edge_dropped_for_unknown_target_type_does_not_count_toward_cap() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content A"),
+        )
+        .await;
+        let n2 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note B",
+            &make_note_content("Note B", "content B"),
+        )
+        .await;
+
+        let batch_ids = vec![n1.id.clone(), n2.id.clone()];
+
+        let mut llm_edges = Vec::new();
+
+        // 30 edges with unknown TARGET entity type — should be dropped
+        // without incrementing the counter.
+        for _ in 0..30 {
+            llm_edges.push(LlmEdge {
+                source_note_id: n1.id.clone(),
+                target_note_id: n2.id.clone(),
+                kind: "builds_on".to_string(),
+                confidence: 0.7,
+                source_entity_type: "note".to_string(),
+                target_entity_type: "unknown_type".to_string(),
+                evidence_quote: None,
+            });
+        }
+
+        // 50 valid edges — all should be accepted (exactly the cap).
+        for _ in 0..50 {
+            llm_edges.push(make_llm_edge(&n1.id, &n2.id, "builds_on", None));
+        }
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &HashSet::new(),
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.edges.len(),
+            MAX_EDGES_PER_BATCH,
+            "skipped edges (unknown target type) should not count toward cap; got {} accepted",
+            report.edges.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_to_proposal_edge_without_evidence_is_dropped() {
+        let db = create_test_db();
+        let project = make_test_project(&db).await;
+        let note_repo =
+            NoteRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+
+        let _n1 = create_source_note(
+            &note_repo,
+            &project.id,
+            "Note A",
+            &make_note_content("Note A", "content"),
+        )
+        .await;
+        let p1 = create_targeted_proposal(&db, &project.id, "Proposal A", "body")
+            .await;
+        let p2 = create_targeted_proposal(&db, &project.id, "Proposal B", "body")
+            .await;
+
+        let batch_ids = vec![];
+        let mut proposal_ids = HashSet::new();
+        proposal_ids.insert(p1.id.clone());
+        proposal_ids.insert(p2.id.clone());
+
+        // proposal→proposal edge WITHOUT evidence.
+        let llm_edges = vec![LlmEdge {
+            source_note_id: p1.id.clone(),
+            target_note_id: p2.id.clone(),
+            kind: "builds_on".to_string(),
+            confidence: 0.8,
+            source_entity_type: "proposal".to_string(),
+            target_entity_type: "proposal".to_string(),
+            evidence_quote: None, // missing!
+        }];
+
+        let mut report = EnrichmentReport::default();
+        process_batch_edges(
+            "proj",
+            &llm_edges,
+            &batch_ids,
+            &proposal_ids,
+            &note_repo,
+            &mut report,
+        )
+        .await;
+
+        assert!(
+            report.edges.is_empty(),
+            "proposal→proposal edge without evidence should be dropped"
+        );
+    }
 }
