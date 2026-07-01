@@ -227,6 +227,8 @@ pub(super) struct CoordinatorActor {
     /// hook in the terminal-close dispatch paths (sibling task hrv6).
     #[allow(dead_code)]
     pub(super) pr_cleanup_config: PrCleanupConfig,
+    /// Durable-progress / preservation-aware controlled-exit lifecycle config.
+    pub(super) worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig,
     /// Active refinement loops by proposal_id.  The coordinator is the
     /// authoritative source for duplicate-start rejection — a proposal that
     /// already has an entry here cannot be started again until the loop
@@ -377,6 +379,7 @@ impl CoordinatorActor {
             runtime_ops,
             rpc_registry,
             pr_cleanup_config,
+            worker_lifecycle_config,
         } = deps;
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
@@ -431,6 +434,7 @@ impl CoordinatorActor {
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
             pr_cleanup_config,
+            worker_lifecycle_config,
             active_refinements: HashMap::new(),
             refinement_sessions: HashMap::new(),
             dispatched: 0,

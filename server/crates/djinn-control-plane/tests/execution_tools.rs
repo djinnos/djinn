@@ -939,6 +939,7 @@ impl SlotPoolOps for RealSlotPoolBridge {
                     duration_seconds: task.duration_seconds,
                     idle_seconds: task.idle_seconds,
                     project_id: task.project_id,
+                    no_progress_streak: task.no_progress_streak,
                 })
                 .collect(),
         })
@@ -971,6 +972,7 @@ impl SlotPoolOps for RealSlotPoolBridge {
                     duration_seconds: task.duration_seconds,
                     idle_seconds: task.idle_seconds,
                     project_id: task.project_id,
+                    no_progress_streak: task.no_progress_streak,
                 })
             })
     }

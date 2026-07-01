@@ -138,6 +138,10 @@ pub struct CoordinatorDeps {
     pub rpc_registry: Option<Arc<ConnectionRegistry>>,
     /// Runtime configuration for the inline PR/branch cleanup hook.
     pub pr_cleanup_config: PrCleanupConfig,
+    /// Durable-progress / preservation-aware worker lifecycle rollout config.
+    /// Defaults are safe: no no-progress enforcement, no auto-submit, and no
+    /// checkpoint requirement unless explicitly enabled by production config.
+    pub worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig,
 }
 
 impl CoordinatorDeps {
@@ -169,6 +173,7 @@ impl CoordinatorDeps {
             runtime_ops: None,
             rpc_registry: None,
             pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: super::worker_lifecycle::WorkerLifecycleConfig::default(),
         }
     }
 
@@ -208,6 +213,15 @@ impl CoordinatorDeps {
     /// Override the default inline PR/branch cleanup configuration.
     pub fn with_pr_cleanup_config(mut self, config: PrCleanupConfig) -> Self {
         self.pr_cleanup_config = config;
+        self
+    }
+
+    /// Override durable-progress / controlled-exit lifecycle rollout config.
+    pub fn with_worker_lifecycle_config(
+        mut self,
+        config: super::worker_lifecycle::WorkerLifecycleConfig,
+    ) -> Self {
+        self.worker_lifecycle_config = config;
         self
     }
 }
