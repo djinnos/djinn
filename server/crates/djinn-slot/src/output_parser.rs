@@ -3,6 +3,25 @@
 //! Extracted from `djinn-agent::output_parser` so slot code can reference
 //! these types without depending on `djinn-agent`.
 
+use djinn_core::auto_submit_decision::{
+    AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
+};
+use djinn_core::models::VerifyRunRecord;
+
+/// Side-effect-free auto-submit settlement data prepared for lifecycle teardown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoSubmitSettlement {
+    pub task_run_id: String,
+    pub decision: AutoSubmitDecision,
+    pub freshness_event: VerifyFreshnessEvaluatedEvent,
+    pub review_event: ReviewAutoSubmitDecisionEvent,
+    pub verify_run: Option<VerifyRunRecord>,
+    pub commit_title: Option<String>,
+    pub summary: Option<String>,
+    pub files_changed: Vec<String>,
+    pub remaining_concerns: Vec<String>,
+}
+
 /// Parsed output from an agent session.
 ///
 /// After removing markers and nudging (see ADR-022 revision), this struct only
@@ -30,6 +49,9 @@ pub struct ParsedAgentOutput {
     /// `remaining_concerns: "budget-parked: <details>"` instead of a generic
     /// placeholder.
     pub budget_wind_down_details: Option<String>,
+    /// Auto-submit decision payload consumed by lifecycle teardown when the
+    /// model did not call the role's finalize tool.
+    pub auto_submit: Option<AutoSubmitSettlement>,
 }
 
 impl Default for ParsedAgentOutput {
@@ -48,6 +70,7 @@ impl ParsedAgentOutput {
             finalize_tool_name: None,
             budget_wind_down_summary: None,
             budget_wind_down_details: None,
+            auto_submit: None,
         }
     }
 
