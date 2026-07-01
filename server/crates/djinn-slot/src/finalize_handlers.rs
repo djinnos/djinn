@@ -1,6 +1,12 @@
-use crate::finalize_types::{AcVerdict, SubmitDecision, SubmitGrooming, SubmitReview, SubmitWork};
+use crate::finalize_types::{
+    AcVerdict, AutoSubmitReviewMetadataPayload, SubmitDecision, SubmitGrooming, SubmitReview,
+    SubmitWork,
+};
 use crate::host::SlotContext;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::verify_run::{
+    AutoSubmitReviewRepository, CreateAutoSubmitReviewParams,
+};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -19,20 +25,48 @@ pub async fn process_finalize_payload(
     task_id: &str,
     app_state: &SlotContext,
 ) {
-    let Some(payload) = payload else { return };
+    let _ = process_finalize_payload_with_outcome(payload, finalize_tool_name, task_id, app_state)
+        .await;
+}
+
+pub async fn process_finalize_payload_with_outcome(
+    payload: &Option<serde_json::Value>,
+    finalize_tool_name: &str,
+    task_id: &str,
+    app_state: &SlotContext,
+) -> bool {
+    let Some(payload) = payload else { return true };
 
     match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state).await,
-        "submit_review" => handle_submit_review(payload, task_id, app_state).await,
-        "submit_decision" => handle_submit_decision(payload, task_id, app_state).await,
-        "submit_grooming" => handle_submit_grooming(payload, app_state).await,
+        "submit_work" => handle_submit_work(payload, task_id, app_state, true).await,
+        "submit_review" => {
+            handle_submit_review(payload, task_id, app_state).await;
+            true
+        }
+        "submit_decision" => {
+            handle_submit_decision(payload, task_id, app_state).await;
+            true
+        }
+        "submit_grooming" => {
+            handle_submit_grooming(payload, app_state).await;
+            true
+        }
         other => {
             tracing::debug!(
                 finalize_tool = %other,
                 "finalize_handlers: unrecognized finalize tool; skipping"
             );
+            true
         }
     }
+}
+
+pub async fn process_auto_submit_payload(
+    payload: &serde_json::Value,
+    task_id: &str,
+    app_state: &SlotContext,
+) -> bool {
+    handle_submit_work(payload, task_id, app_state, false).await
 }
 
 /// Persist a budget-park handoff summary using the same payload shape as
@@ -74,7 +108,12 @@ pub async fn handle_budget_park(
 }
 
 /// Log structured work-submission activity for a worker session.
-async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_state: &SlotContext) {
+async fn handle_submit_work(
+    payload: &serde_json::Value,
+    task_id: &str,
+    app_state: &SlotContext,
+    model_called_submit_work: bool,
+) -> bool {
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
         Ok(w) => w,
         Err(e) => {
@@ -83,9 +122,10 @@ async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_stat
                 error = %e,
                 "finalize_handlers: malformed submit_work payload"
             );
-            return;
+            return false;
         }
     };
+    let metadata = work.auto_submit_review_metadata.clone();
 
     let activity_payload = serde_json::json!({
         "commit_title": work.commit_title,
@@ -111,7 +151,57 @@ async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_stat
             error = %e,
             "finalize_handlers: failed to log submit_work activity"
         );
+        return false;
     }
+
+    if let Some(metadata) = metadata {
+        return persist_auto_submit_review_metadata(
+            metadata,
+            app_state,
+            model_called_submit_work,
+            task_id,
+        )
+        .await;
+    }
+
+    true
+}
+
+async fn persist_auto_submit_review_metadata(
+    metadata: AutoSubmitReviewMetadataPayload,
+    app_state: &SlotContext,
+    model_called_submit_work: bool,
+    task_id: &str,
+) -> bool {
+    let repo = AutoSubmitReviewRepository::new(app_state.db.clone());
+    let id = uuid::Uuid::now_v7().to_string();
+    let result = repo
+        .create(CreateAutoSubmitReviewParams {
+            id: &id,
+            task_run_id: &metadata.task_run_id,
+            trigger_reason: &metadata.trigger_reason,
+            diff_fingerprint: &metadata.diff_fingerprint,
+            verify_source: metadata.verify_source.as_deref(),
+            verify_run_id: metadata.verify_run_id.as_deref(),
+            verify_timestamp: metadata.verify_timestamp.as_deref(),
+            session_id: metadata.session_id.as_deref(),
+            model_id: metadata.model_id.as_deref(),
+            no_progress_streak: metadata.no_progress_streak,
+            model_called_submit_work,
+        })
+        .await;
+
+    if let Err(e) = result {
+        tracing::warn!(
+            task_id = %task_id,
+            task_run_id = %metadata.task_run_id,
+            error = %e,
+            "finalize_handlers: failed to persist auto-submit review metadata"
+        );
+        return false;
+    }
+
+    true
 }
 
 /// Atomically set AC met/unmet on the task from the criteria array, then log the verdict.
@@ -732,5 +822,152 @@ mod tests {
         );
         let payload = Some(serde_json::json!({"anything": "here"}));
         process_finalize_payload(&payload, "submit_unknown", "any-task-id", &ctx).await;
+    }
+
+    // ── auto-submit review metadata persistence ────────────────────────────
+
+    #[tokio::test]
+    async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        // Create a task_run so the metadata can reference it.
+        let run_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+            .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task run");
+
+        let payload = Some(serde_json::json!({
+            "task_id": task.short_id,
+            "commit_title": "feat: model submitted",
+            "summary": "model called submit_work with review metadata",
+            "files_changed": ["src/main.rs"],
+            "remaining_concerns": [],
+            "auto_submit_review_metadata": {
+                "task_run_id": run_id,
+                "trigger_reason": "idle",
+                "diff_fingerprint": "abc123",
+                "verify_source": "ci",
+                "verify_run_id": "ci-42",
+                "verify_timestamp": "2026-07-01T10:00:00.000Z",
+                "session_id": "sess-1",
+                "model_id": "model-1",
+                "no_progress_streak": 2
+            }
+        }));
+
+        // Called via process_finalize_payload_with_outcome — this is the normal
+        // model-called submit_work path. The `model_called_submit_work` flag
+        // should be `true` in the persisted record.
+        let ok =
+            process_finalize_payload_with_outcome(&payload, "submit_work", &task.id, &ctx).await;
+        assert!(ok);
+
+        // work_submitted activity should be logged.
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = task_repo.list_activity(&task.id).await.unwrap();
+        assert!(entries.iter().any(|e| e.event_type == "work_submitted"));
+
+        // Auto-submit review record should be persisted with model_called=true.
+        let records = djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db)
+            .list_for_task_run(&run_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].model_called_submit_work);
+        assert_eq!(records[0].trigger_reason, "idle");
+        assert_eq!(records[0].diff_fingerprint, "abc123");
+        assert_eq!(records[0].verify_source.as_deref(), Some("ci"));
+        assert_eq!(records[0].verify_run_id.as_deref(), Some("ci-42"));
+        assert_eq!(
+            records[0].verify_timestamp.as_deref(),
+            Some("2026-07-01T10:00:00.000Z")
+        );
+        assert_eq!(records[0].session_id.as_deref(), Some("sess-1"));
+        assert_eq!(records[0].model_id.as_deref(), Some("model-1"));
+        assert_eq!(records[0].no_progress_streak, 2);
+    }
+
+    #[tokio::test]
+    async fn auto_submit_payload_records_model_called_false() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let epic = test_helpers::create_test_epic(&db, &project.id).await;
+        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let run_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::repositories::task_run::TaskRunRepository::new(db.clone())
+            .create(djinn_db::repositories::task_run::CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task run");
+
+        let payload = serde_json::json!({
+            "task_id": task.short_id,
+            "commit_title": "auto-submit verified worker diff",
+            "summary": "Auto-submitted eligible green exact diff.",
+            "files_changed": ["src/lib.rs"],
+            "remaining_concerns": [],
+            "auto_submit_review_metadata": {
+                "task_run_id": run_id,
+                "trigger_reason": "controlled_termination",
+                "diff_fingerprint": "diff-789",
+                "verify_source": "worker",
+                "verify_run_id": "worker-run-5",
+                "verify_timestamp": "2026-07-02T08:00:00.000Z",
+                "session_id": "sess-5",
+                "model_id": "model-5",
+                "no_progress_streak": 4
+            }
+        });
+
+        // Called via process_auto_submit_payload — this is the auto-submit
+        // path. The `model_called_submit_work` flag should be `false`.
+        let ok = process_auto_submit_payload(&payload, &task.id, &ctx).await;
+        assert!(ok);
+
+        let records = djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db)
+            .list_for_task_run(&run_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].model_called_submit_work);
+        assert_eq!(records[0].trigger_reason, "controlled_termination");
+        assert_eq!(records[0].diff_fingerprint, "diff-789");
+        assert_eq!(records[0].verify_source.as_deref(), Some("worker"));
+        assert_eq!(records[0].verify_run_id.as_deref(), Some("worker-run-5"));
+        assert_eq!(
+            records[0].verify_timestamp.as_deref(),
+            Some("2026-07-02T08:00:00.000Z")
+        );
+        assert_eq!(records[0].session_id.as_deref(), Some("sess-5"));
+        assert_eq!(records[0].model_id.as_deref(), Some("model-5"));
+        assert_eq!(records[0].no_progress_streak, 4);
     }
 }
