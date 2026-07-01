@@ -13,6 +13,7 @@ use crate::repositories::note::{LexicalSearchBackend, sanitize_postgres_tsquery}
 use crate::{Error, Result};
 
 use djinn_memory::ProposalSearchResult;
+use sqlx::Row;
 
 // Global proposals layer (Phase 0). A `proposal` is project-independent; it
 // targets projects via `proposal_targets` (editable M:N) and carries unified
@@ -422,6 +423,20 @@ impl EvidenceLifecycleMetadata {
             }
         }
     }
+}
+
+/// The current structured `evidence_findings` debate entry for a linked
+/// needs-evidence spike, ready for lifecycle/coordinator callers to consume.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CurrentEvidenceFindings {
+    pub proposal_id: String,
+    pub spike_task_id: String,
+    pub round: i32,
+    pub against_revision_seq: i32,
+    pub debate_entry_id: String,
+    pub debate_entry_body: String,
+    pub findings_metadata_json: String,
+    pub findings: EvidenceFindings,
 }
 
 /// Cap status for needs-evidence demands in the current refinement run.
@@ -2121,6 +2136,82 @@ impl ProposalRepository {
         )
         .fetch_optional(self.db.pool())
         .await?)
+    }
+
+    /// Return the current valid structured findings for a proposal's linked
+    /// evidence spike, if the proposal is still parked on that exact spike and
+    /// the newest matching `evidence_findings` row matches the stored claim's
+    /// round/revision.
+    ///
+    /// Invalid or stale states are not exceptional for lifecycle callers:
+    /// unlinked proposals, wrong spikes, malformed legacy claims, no matching
+    /// row, missing metadata, or malformed findings all return `Ok(None)`.
+    pub async fn current_evidence_findings_for_linked_spike(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) -> Result<Option<CurrentEvidenceFindings>> {
+        self.db.ensure_initialized().await?;
+
+        let Some(proposal) = self.get(proposal_id).await? else {
+            return Ok(None);
+        };
+        if proposal.linked_spike_task_id.as_deref() != Some(spike_task_id) {
+            return Ok(None);
+        }
+
+        let claim = match NeedsEvidenceClaim::parse_stored(proposal.needs_evidence_claim.as_deref())
+        {
+            Ok(Some(claim)) => claim,
+            Ok(None) | Err(_) => return Ok(None),
+        };
+
+        let row = sqlx::query(
+            r#"SELECT id, body, body_metadata::text AS body_metadata
+               FROM proposal_debate_trail
+               WHERE proposal_id = $1
+                 AND kind = 'evidence_findings'
+                 AND source_task_id = $2
+                 AND round = $3
+                 AND against_revision_seq = $4
+               ORDER BY created_at DESC, updated_at DESC, id DESC
+               LIMIT 1"#,
+        )
+        .bind(proposal_id)
+        .bind(spike_task_id)
+        .bind(claim.round)
+        .bind(claim.against_revision_seq)
+        .fetch_optional(self.db.pool())
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let debate_entry_id: String = row.try_get("id")?;
+        let debate_entry_body: String = row.try_get("body")?;
+        let Some(findings_metadata_json) = row.try_get::<Option<String>, _>("body_metadata")?
+        else {
+            return Ok(None);
+        };
+
+        let findings = match EvidenceFindings::parse_stored(Some(&findings_metadata_json)) {
+            Ok(Some(findings)) => findings,
+            Ok(None) | Err(_) => return Ok(None),
+        };
+        if findings.validate().is_err() {
+            return Ok(None);
+        }
+
+        Ok(Some(CurrentEvidenceFindings {
+            proposal_id: proposal_id.to_owned(),
+            spike_task_id: spike_task_id.to_owned(),
+            round: claim.round,
+            against_revision_seq: claim.against_revision_seq,
+            debate_entry_id,
+            debate_entry_body,
+            findings_metadata_json,
+            findings,
+        }))
     }
 
     /// Freeze or un-freeze a build. Frozen builds stay `building` but their
@@ -5714,6 +5805,364 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err}").contains("invalid debate trail kind"));
         assert!(format!("{err}").contains("observation"));
+    }
+
+    fn sample_evidence_findings(answer: &str) -> EvidenceFindings {
+        EvidenceFindings {
+            answer: answer.to_owned(),
+            evidence: vec!["verified by repository test fixture".to_owned()],
+            code_paths_inspected: vec![
+                "server/crates/djinn-db/src/repositories/proposal.rs".to_owned(),
+            ],
+            confidence: 0.9,
+            residual_risks: vec!["fixture only".to_owned()],
+            recommendation_for_advocate: "incorporate the finding".to_owned(),
+        }
+    }
+
+    fn sample_needs_evidence_claim(round: i32, against_revision_seq: i32) -> NeedsEvidenceClaim {
+        NeedsEvidenceClaim {
+            question: "Can the linked spike answer the claim?".to_owned(),
+            target_subsystem: "proposal repository".to_owned(),
+            spec_unknown_anchor: "evidence handoff".to_owned(),
+            insufficient_in_session_research: "requires spike completion".to_owned(),
+            expected_findings: "structured evidence_findings".to_owned(),
+            round,
+            against_revision_seq,
+            created_by_task_id: uuid::Uuid::now_v7().to_string(),
+        }
+    }
+
+    async fn insert_raw_evidence_findings_entry(
+        db: &Database,
+        proposal_id: &str,
+        spike_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        body_metadata: Option<&serde_json::Value>,
+    ) -> String {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO proposal_debate_trail
+                (id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                 author_user_id, author_model, source_task_id,
+                 against_revision_seq, round, body_metadata)
+             VALUES ($1, $2, 'evidence_findings', 'raw fixture', false, 'spike', 'agent',
+                     NULL, NULL, $3, $4, $5, $6)",
+        )
+        .bind(&id)
+        .bind(proposal_id)
+        .bind(spike_task_id)
+        .bind(against_revision_seq)
+        .bind(round)
+        .bind(body_metadata)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_valid_current_findings() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo.create(create_input("Lookup Valid")).await.unwrap();
+        let proj = insert_project(&db, "svc-lookup-valid").await;
+        let epic = insert_epic(&db, &proj, "lv01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "lv-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+
+        let findings = sample_evidence_findings("the current spike answer");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "current findings body",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task_id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+
+        let current = repo
+            .current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+            .await
+            .unwrap()
+            .expect("valid linked findings must be returned");
+        assert_eq!(current.proposal_id, p.id);
+        assert_eq!(current.spike_task_id, spike_task_id);
+        assert_eq!(current.round, claim.round);
+        assert_eq!(current.against_revision_seq, claim.against_revision_seq);
+        assert_eq!(current.debate_entry_id, entry.id);
+        assert_eq!(current.debate_entry_body, "current findings body");
+        assert_eq!(current.findings_metadata_json, entry.body_metadata.unwrap());
+        assert_eq!(current.findings, findings);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_when_missing() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo.create(create_input("Lookup Missing")).await.unwrap();
+        let proj = insert_project(&db, "svc-lookup-missing").await;
+        let epic = insert_epic(&db, &proj, "lm01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "lm-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_malformed_findings() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo.create(create_input("Lookup Malformed")).await.unwrap();
+        let proj = insert_project(&db, "svc-lookup-malformed").await;
+        let epic = insert_epic(&db, &proj, "mf01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "mf-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+        let malformed = serde_json::json!({
+            "answer": "",
+            "evidence": [],
+            "code_paths_inspected": [],
+            "confidence": 0.5,
+            "residual_risks": [],
+            "recommendation_for_advocate": "proceed"
+        });
+        insert_raw_evidence_findings_entry(
+            &db,
+            &p.id,
+            &spike_task_id,
+            claim.round,
+            claim.against_revision_seq,
+            Some(&malformed),
+        )
+        .await;
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_missing_metadata() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Lookup Missing Metadata"))
+            .await
+            .unwrap();
+        let proj = insert_project(&db, "svc-lookup-nometa").await;
+        let epic = insert_epic(&db, &proj, "nm01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "nm-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+        insert_raw_evidence_findings_entry(
+            &db,
+            &p.id,
+            &spike_task_id,
+            claim.round,
+            claim.against_revision_seq,
+            None,
+        )
+        .await;
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_wrong_spike() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Lookup Wrong Spike"))
+            .await
+            .unwrap();
+        let proj = insert_project(&db, "svc-lookup-wspike").await;
+        let epic = insert_epic(&db, &proj, "ws01").await;
+        let linked_spike_id = insert_task(&db, &proj, &epic, "ws-task").await;
+        let other_spike_id = uuid::Uuid::now_v7().to_string();
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
+            .await
+            .unwrap();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &other_spike_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_wrong_round() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Lookup Wrong Round"))
+            .await
+            .unwrap();
+        let proj = insert_project(&db, "svc-lookup-wround").await;
+        let epic = insert_epic(&db, &proj, "wr01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "wr-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+        let findings = sample_evidence_findings("wrong round");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "evidence_findings",
+            body: "wrong round",
+            blocking: false,
+            agent_role: "spike",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: Some(&spike_task_id),
+            against_revision_seq: claim.against_revision_seq,
+            round: claim.round + 1,
+            body_metadata: Some(&findings_value),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_wrong_revision() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Lookup Wrong Revision"))
+            .await
+            .unwrap();
+        let proj = insert_project(&db, "svc-lookup-wrev").await;
+        let epic = insert_epic(&db, &proj, "wv01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "wv-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+        let findings = sample_evidence_findings("wrong revision");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "evidence_findings",
+            body: "wrong revision",
+            blocking: false,
+            agent_role: "spike",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: Some(&spike_task_id),
+            against_revision_seq: claim.against_revision_seq + 1,
+            round: claim.round,
+            body_metadata: Some(&findings_value),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_unlinked_proposal() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Lookup Unlinked")).await.unwrap();
+        let spike_task_id = uuid::Uuid::now_v7().to_string();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &spike_task_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn current_evidence_findings_lookup_returns_none_for_wrongly_linked_proposal() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let p = repo
+            .create(create_input("Lookup Wrongly Linked"))
+            .await
+            .unwrap();
+        let proj = insert_project(&db, "svc-lookup-wlink").await;
+        let epic = insert_epic(&db, &proj, "wl01").await;
+        let linked_spike_id = insert_task(&db, &proj, &epic, "wl-task").await;
+        let requested_spike_id = uuid::Uuid::now_v7().to_string();
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
+            .await
+            .unwrap();
+        let findings = sample_evidence_findings("requested but not linked");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "evidence_findings",
+            body: "requested spike findings",
+            blocking: false,
+            agent_role: "spike",
+            author_kind: "agent",
+            author_model: None,
+            source_task_id: Some(&requested_spike_id),
+            against_revision_seq: claim.against_revision_seq,
+            round: claim.round,
+            body_metadata: Some(&findings_value),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            repo.current_evidence_findings_for_linked_spike(&p.id, &requested_spike_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── Evidence lifecycle metadata tests ─────────────────────────────────
