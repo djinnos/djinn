@@ -215,9 +215,169 @@ pub struct CheckpointLifecycleMetadata {
     /// Whether downstream safety scanning accepted the checkpoint.
     #[serde(default)]
     pub safety_scan: Option<CheckpointSafetyScanMetadata>,
+    /// Coordinator-side preservation gate outcome. Populated when the
+    /// coordinator requests preservation before a terminal failed/escalated/
+    /// reap-adjacent session termination. `None` means no preservation gate
+    /// was attempted (pre-contract behaviour or non-applicable path).
+    #[serde(default)]
+    pub preservation_outcome: Option<PreservationOutcome>,
     /// Free-form extension map for rollout-specific checkpoint details.
     #[serde(default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Coordinator-side classification of a checkpoint preservation attempt before
+/// a terminal failed/escalated/reap-adjacent session state transition.
+///
+/// Variants use stable `snake_case` serde names so downstream consumers
+/// (activity logs, metrics labels, lifecycle metadata JSON) share a single
+/// vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreservationOutcome {
+    /// Preservation request was sent to the worker/runtime and the worker
+    /// reported success. The coordinator did not verify the push/commit
+    /// itself — it trusts the worker's result.
+    Succeeded,
+    /// Preservation was requested but the worker reported a failure.
+    /// The configured failure-policy result was recorded; the terminal
+    /// transition proceeds without blocking on retry.
+    Failed,
+    /// No live worker connection was available to service the request.
+    /// The coordinator recorded an explicit "no worker" result rather than
+    /// silently discarding potentially dirty output.
+    UnavailableWorker,
+    /// No runtime/RPC infrastructure exists in this environment (e.g.
+    /// dev/test mode without Kubernetes or a live coordinator).
+    RuntimeUnavailable,
+    /// A clean/no-op skip: the coordinator determined that no preservation
+    /// attempt was necessary (e.g. the session had zero tokens or was
+    /// already finalized before the gate ran).
+    CleanSkip,
+}
+
+/// Structured result of a coordinator-side preservation gate attempt.
+///
+/// This is the return type of the internal `request_session_preservation`
+/// helper and is not persisted as a standalone row — it is logged as an
+/// activity entry and attached to [`CheckpointLifecycleMetadata`] via the
+/// `preservation_outcome` field.
+#[derive(Debug, Clone)]
+pub struct PreservationGateResult {
+    /// The classification of this preservation attempt.
+    pub outcome: PreservationOutcome,
+    /// Human-readable explanation for the outcome (e.g. "no live worker",
+    /// "worker reported success", "runtime_ops unavailable").
+    pub reason: String,
+    /// Checkpoint commit SHA if the worker reported one, or `None` if
+    /// preservation was skipped/failed.
+    pub commit_sha: Option<String>,
+    /// Checkpoint ref if the worker reported one, or `None`.
+    pub ref_name: Option<String>,
+    /// The task-run id that was the target of the preservation request, if
+    /// known. Helps downstream consumers correlate with Kubernetes jobs.
+    pub task_run_id: Option<String>,
+    /// The session id targeted by the preservation request.
+    pub session_id: String,
+    /// The task id owning this session.
+    pub task_id: String,
+    /// Why preservation was requested (stall, zombie, terminal fail, etc.)
+    pub trigger: &'static str,
+}
+
+impl PreservationGateResult {
+    /// Build a result for the "runtime unavailable" case (no runtime_ops).
+    pub fn runtime_unavailable(task_id: &str, session_id: &str, trigger: &'static str) -> Self {
+        Self {
+            outcome: PreservationOutcome::RuntimeUnavailable,
+            reason: "runtime_ops not configured".to_string(),
+            commit_sha: None,
+            ref_name: None,
+            task_run_id: None,
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            trigger,
+        }
+    }
+
+    /// Build a result for the "no live worker" case.
+    pub fn unavailable_worker(
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+        trigger: &'static str,
+    ) -> Self {
+        Self {
+            outcome: PreservationOutcome::UnavailableWorker,
+            reason: "no live worker connection".to_string(),
+            commit_sha: None,
+            ref_name: None,
+            task_run_id: task_run_id.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            trigger,
+        }
+    }
+
+    /// Build a result for the "clean skip" case (no dirty output to preserve).
+    pub fn clean_skip(
+        task_id: &str,
+        session_id: &str,
+        trigger: &'static str,
+        reason: &str,
+    ) -> Self {
+        Self {
+            outcome: PreservationOutcome::CleanSkip,
+            reason: reason.to_owned(),
+            commit_sha: None,
+            ref_name: None,
+            task_run_id: None,
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            trigger,
+        }
+    }
+
+    /// Build a result for the "worker reported success" case.
+    pub fn succeeded(
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+        trigger: &'static str,
+        commit_sha: Option<String>,
+        ref_name: Option<String>,
+    ) -> Self {
+        Self {
+            outcome: PreservationOutcome::Succeeded,
+            reason: "worker reported checkpoint success".to_string(),
+            commit_sha,
+            ref_name,
+            task_run_id: task_run_id.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            trigger,
+        }
+    }
+
+    /// Build a result for the "worker reported failure" case.
+    pub fn failed(
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+        trigger: &'static str,
+        reason: String,
+    ) -> Self {
+        Self {
+            outcome: PreservationOutcome::Failed,
+            reason,
+            commit_sha: None,
+            ref_name: None,
+            task_run_id: task_run_id.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            task_id: task_id.to_owned(),
+            trigger,
+        }
+    }
 }
 
 /// Passive checkpoint rollout config; defaults do not request checkpoint writes.
@@ -504,6 +664,7 @@ mod tests {
                     scanner: Some("safety-v1".to_string()),
                     findings: vec![],
                 }),
+                preservation_outcome: Some(PreservationOutcome::Succeeded),
                 extra: serde_json::Map::new(),
             }),
             auto_submit: Some(AutoSubmitLifecycleMetadata {
@@ -564,6 +725,7 @@ mod tests {
                         "scanner": "safety-v1",
                         "findings": []
                     },
+                    "preservation_outcome": "succeeded",
                     "extra": {}
                 },
                 "auto_submit": {
