@@ -401,6 +401,9 @@ async fn handle_rpc(
             let _ = (task_id, action, reason);
             ServiceRpcResponse::TransitionTask(Ok(()))
         }
+        ServiceRpcRequest::CheckLocalGatesForReview { .. } => {
+            ServiceRpcResponse::CheckLocalGatesForReview(Ok(()))
+        }
     }
 }
 

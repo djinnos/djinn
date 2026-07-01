@@ -797,6 +797,27 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn check_local_gates_for_review(
+        &self,
+        task_id: String,
+        workspace_path: String,
+        task_branch: String,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::CheckLocalGatesForReview {
+                task_id,
+                workspace_path,
+                task_branch,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::CheckLocalGatesForReview(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
