@@ -385,6 +385,16 @@ pub enum ServiceRpcRequest {
         cache_read: i64,
         cache_write: i64,
     },
+    /// [`crate::SupervisorServices::check_local_gates_for_review`].
+    /// Runs deterministic local gates before reviewer approval on the host.
+    /// Appended at the enum tail — the positional bincode codec encodes the
+    /// variant index, so inserting anywhere else would break mixed-version
+    /// host/worker frames mid-deploy.
+    CheckLocalGatesForReview {
+        task_id: String,
+        workspace_path: String,
+        task_branch: String,
+    },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -453,6 +463,11 @@ pub enum ServiceRpcResponse {
     /// pre-existing variant index stable for the positional bincode codec
     /// (see `ServiceRpcRequest::FlushSessionTokens`).
     FlushSessionTokens(Result<(), String>),
+    /// Local-gate pre-review check ack. `Ok(())` when all required gates
+    /// pass (or no gates apply); `Err(block_json)` when a required gate
+    /// fails or is unavailable. Appended after `FlushSessionTokens` to
+    /// keep every pre-existing variant index stable.
+    CheckLocalGatesForReview(Result<(), String>),
 }
 
 #[cfg(test)]
