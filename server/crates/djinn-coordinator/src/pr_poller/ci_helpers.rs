@@ -287,92 +287,87 @@ impl CoordinatorActor {
                 }
             }
 
-            if !any_fetch_succeeded {
-                // Every fetch errored (API down, timeout): fall back to the
-                // original generic escalation so the same-signature path is
-                // never silently skipped.
-                let reason = format!(
-                    "PR #{pull_number}: CI has failed with the identical fingerprint \
-                     {total_consecutive} consecutive times (checks: {check_names}). \
-                     The worker is not making progress on these specific failures. \
-                     Escalating for planner intervention.",
-                    check_names = blocking_names.join(", "),
-                );
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    fingerprint = %fingerprint,
-                    consecutive = total_consecutive,
-                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
-                    "PR poller: same CI failure signature — \
-                     all reproduction-context fetches failed; escalating generically"
-                );
-                let sections_text = ci_failure_sections.join("\n");
-                self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
-                    .await;
-            } else if reproducible_ctxs.is_empty() {
-                // Every bundle is unreproducible: route to human/lead
-                // intervention with the distinct unreproducible reason.
-                let mut reason = format!(
-                    "PR #{pull_number}: CI has failed with the identical fingerprint \
-                     {total_consecutive} consecutive times (checks: {check_names}). \
-                     No required check could be reproduced locally:",
-                    check_names = blocking_names.join(", "),
-                );
-                for ur in &unreproducible_reasons {
-                    reason.push_str(&format!("\n- {ur}"));
+            let repro_ctx = SameSignatureReproContext {
+                reproducible_ctxs,
+                unreproducible_reasons,
+                any_fetch_succeeded,
+            };
+
+            match classify_same_signature_escalation(&repro_ctx) {
+                SameSignatureEscalationRoute::GenericIntervention => {
+                    // Every fetch errored (API down, timeout): fall back to the
+                    // original generic escalation so the same-signature path is
+                    // never silently skipped.
+                    let reason = build_generic_same_signature_reason(
+                        pull_number,
+                        total_consecutive,
+                        &blocking_names,
+                    );
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        fingerprint = %fingerprint,
+                        consecutive = total_consecutive,
+                        threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                        "PR poller: same CI failure signature — \
+                         all reproduction-context fetches failed; escalating generically"
+                    );
+                    let sections_text = ci_failure_sections.join("\n");
+                    self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
+                        .await;
                 }
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    fingerprint = %fingerprint,
-                    consecutive = total_consecutive,
-                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
-                    unreproducible_count = unreproducible_reasons.len(),
-                    "PR poller: same CI failure signature — all bundles unreproducible; \
-                     routing to human intervention"
-                );
-                // Create a HumanReview remediation task with the
-                // unreproducible reason.  No Planner dispatch — a human
-                // must resolve it.
-                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                    .await;
-            } else {
-                // At least one reproducible bundle: build a focused
-                // reproduction plan for the remediation payload.
-                let plan_sections: Vec<String> = reproducible_ctxs
-                    .iter()
-                    .map(format_reproduction_plan)
-                    .collect();
-                let mut reason = format!(
-                    "PR #{pull_number}: CI has failed with the identical fingerprint \
-                     {total_consecutive} consecutive times (checks: {check_names}). \
-                     Focused remediation plan:\n\n{plan}",
-                    check_names = blocking_names.join(", "),
-                    plan = plan_sections.join("\n\n"),
-                );
-                if !unreproducible_reasons.is_empty() {
-                    reason.push_str("\n\n**Unreproducible checks:**\n");
-                    for ur in &unreproducible_reasons {
-                        reason.push_str(&format!("- {ur}\n"));
-                    }
+                SameSignatureEscalationRoute::UnreproducibleIntervention => {
+                    // Every bundle is unreproducible: route to human/lead
+                    // intervention with the distinct unreproducible reason.
+                    let reason = build_unreproducible_same_signature_reason(
+                        pull_number,
+                        total_consecutive,
+                        &blocking_names,
+                        &repro_ctx.unreproducible_reasons,
+                    );
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        fingerprint = %fingerprint,
+                        consecutive = total_consecutive,
+                        threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                        unreproducible_count = repro_ctx.unreproducible_reasons.len(),
+                        "PR poller: same CI failure signature — all bundles unreproducible; \
+                         routing to human intervention"
+                    );
+                    // Create a HumanReview remediation task with the
+                    // unreproducible reason.  No Planner dispatch — a human
+                    // must resolve it.
+                    self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+                        .await;
                 }
-                tracing::warn!(
-                    task_id = %task_short_id,
-                    pr = pull_number,
-                    fingerprint = %fingerprint,
-                    consecutive = total_consecutive,
-                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
-                    reproducible_count = reproducible_ctxs.len(),
-                    unreproducible_count = unreproducible_reasons.len(),
-                    "PR poller: same CI failure signature — emitting focused reproduction plan"
-                );
-                // Create a HumanReview remediation task with the reproduction
-                // plan as the reason.  This parks the source on the blocker
-                // without dispatching a Planner (no scope reshape for
-                // ordinary reproduced CI loops).
-                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
-                    .await;
+                SameSignatureEscalationRoute::ReproductionPlan => {
+                    // At least one reproducible bundle: build a focused
+                    // reproduction plan for the remediation payload.
+                    let reason = build_reproduction_plan_same_signature_reason(
+                        pull_number,
+                        total_consecutive,
+                        &blocking_names,
+                        &repro_ctx.reproducible_ctxs,
+                        &repro_ctx.unreproducible_reasons,
+                    );
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        pr = pull_number,
+                        fingerprint = %fingerprint,
+                        consecutive = total_consecutive,
+                        threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                        reproducible_count = repro_ctx.reproducible_ctxs.len(),
+                        unreproducible_count = repro_ctx.unreproducible_reasons.len(),
+                        "PR poller: same CI failure signature — emitting focused reproduction plan"
+                    );
+                    // Create a HumanReview remediation task with the reproduction
+                    // plan as the reason.  This parks the source on the blocker
+                    // without dispatching a Planner (no scope reshape for
+                    // ordinary reproduced CI loops).
+                    self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+                        .await;
+                }
             }
             return true;
         }
@@ -963,6 +958,121 @@ pub(crate) fn advisory_checks_section(advisory_failed: &[&CheckRun]) -> Option<S
 
 // CI failure fingerprinting and scope attribution live in `ci_failure_analysis`
 // to keep this poller helper below the changed-file size guard.
+
+// ── Same-signature reproduction-plan escalation reason builders ──────────────
+//
+// Pure functions that build the escalation reason text for the three branches
+// of the same-signature escalation path.  Extracted from the inline logic in
+// `handle_ci_failure` so regression tests can verify the full plan/reason
+// contract without a live DB or GitHub client.
+
+/// The outcome of collecting reproduction context for all blocking checks at
+/// same-signature escalation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SameSignatureReproContext {
+    /// Reproducible bundles collected from the provider.
+    pub reproducible_ctxs: Vec<djinn_provider::github_api::RequiredCheckReproductionContext>,
+    /// Formatted unreproducible reasons (one per unreproducible bundle).
+    pub unreproducible_reasons: Vec<String>,
+    /// True when at least one provider fetch succeeded (even if unreproducible).
+    pub any_fetch_succeeded: bool,
+}
+
+/// Classify the same-signature escalation into one of three routing strategies
+/// based on the collected reproduction context.  This mirrors the branching in
+/// `handle_ci_failure` and makes the decision testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SameSignatureEscalationRoute {
+    /// Every fetch errored/timed out — fall back to generic planner intervention.
+    GenericIntervention,
+    /// All fetched bundles are unreproducible — route to human intervention
+    /// with the concrete unreproducible reasons.
+    UnreproducibleIntervention,
+    /// At least one bundle is reproducible — emit a focused reproduction plan.
+    ReproductionPlan,
+}
+
+/// Determine which escalation route applies for the given collected context.
+pub(crate) fn classify_same_signature_escalation(
+    ctx: &SameSignatureReproContext,
+) -> SameSignatureEscalationRoute {
+    if !ctx.any_fetch_succeeded {
+        SameSignatureEscalationRoute::GenericIntervention
+    } else if ctx.reproducible_ctxs.is_empty() {
+        SameSignatureEscalationRoute::UnreproducibleIntervention
+    } else {
+        SameSignatureEscalationRoute::ReproductionPlan
+    }
+}
+
+/// Build the generic escalation reason when all reproduction-context fetches
+/// fail (API down, timeout).  This is the fallback that preserves the original
+/// same-signature behaviour so the path is never silently skipped.
+pub(crate) fn build_generic_same_signature_reason(
+    pull_number: u64,
+    total_consecutive: i64,
+    blocking_names: &[&str],
+) -> String {
+    format!(
+        "PR #{pull_number}: CI has failed with the identical fingerprint \
+         {total_consecutive} consecutive times (checks: {checks}). \
+         The worker is not making progress on these specific failures. \
+         Escalating for planner intervention.",
+        checks = blocking_names.join(", "),
+    )
+}
+
+/// Build the human-intervention reason when every fetched bundle is
+/// unreproducible.  The reason lists each distinct unreproducible reason so a
+/// human/lead knows exactly why the checks cannot be reproduced locally.
+pub(crate) fn build_unreproducible_same_signature_reason(
+    pull_number: u64,
+    total_consecutive: i64,
+    blocking_names: &[&str],
+    unreproducible_reasons: &[String],
+) -> String {
+    let mut reason = format!(
+        "PR #{pull_number}: CI has failed with the identical fingerprint \
+         {total_consecutive} consecutive times (checks: {checks}). \
+         No required check could be reproduced locally:",
+        checks = blocking_names.join(", "),
+    );
+    for ur in unreproducible_reasons {
+        reason.push_str(&format!("\n- {ur}"));
+    }
+    reason
+}
+
+/// Build the focused reproduction-plan reason when at least one blocking check
+/// is reproducible.  The plan includes the failing check, job/step, derived
+/// command/setup, CI log tail, observed head SHA, and reproduce → fix → verify
+/// → resubmit instructions.  Unreproducible checks (if any) are appended.
+pub(crate) fn build_reproduction_plan_same_signature_reason(
+    pull_number: u64,
+    total_consecutive: i64,
+    blocking_names: &[&str],
+    reproducible_ctxs: &[djinn_provider::github_api::RequiredCheckReproductionContext],
+    unreproducible_reasons: &[String],
+) -> String {
+    let plan_sections: Vec<String> = reproducible_ctxs
+        .iter()
+        .map(format_reproduction_plan)
+        .collect();
+    let mut reason = format!(
+        "PR #{pull_number}: CI has failed with the identical fingerprint \
+         {total_consecutive} consecutive times (checks: {checks}). \
+         Focused remediation plan:\n\n{plan}",
+        checks = blocking_names.join(", "),
+        plan = plan_sections.join("\n\n"),
+    );
+    if !unreproducible_reasons.is_empty() {
+        reason.push_str("\n\n**Unreproducible checks:**\n");
+        for ur in unreproducible_reasons {
+            reason.push_str(&format!("- {ur}\n"));
+        }
+    }
+    reason
+}
 
 // ── CI merge gate ────────────────────────────────────────────────────────────
 

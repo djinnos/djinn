@@ -120,6 +120,12 @@ use ci_failure_analysis::{
 use ci_helpers::is_advisory_check_name;
 use ci_helpers::{CiMergeGateVerdict, ci_merge_gate_verdict};
 #[cfg(test)]
+use ci_helpers::{
+    SameSignatureEscalationRoute, SameSignatureReproContext, build_generic_same_signature_reason,
+    build_reproduction_plan_same_signature_reason, build_unreproducible_same_signature_reason,
+    classify_same_signature_escalation,
+};
+#[cfg(test)]
 use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
 #[cfg(test)]
 use pr_review_handlers::{

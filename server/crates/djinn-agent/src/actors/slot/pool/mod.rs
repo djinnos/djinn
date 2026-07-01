@@ -1,5 +1,3 @@
-#[cfg(any(test, feature = "test-support"))]
-mod actor;
 mod handle;
 mod types;
 
@@ -8,6 +6,6 @@ pub use handle::SlotPoolHandle;
 pub use types::SlotFactory;
 pub use types::{ModelPoolStatus, PoolError, PoolMessage, PoolStatus, RunningTaskInfo};
 
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test: deadlined poll loops in integration tests
-mod tests;
+// Agent-side pool tests were compatibility coverage for the removed duplicate
+// actor. Canonical pool behavior is covered in `djinn-slot::pool::tests`; this
+// facade now contains only AgentContext→SlotContext construction glue.
