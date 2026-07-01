@@ -5865,9 +5865,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_valid_current_findings() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo.create(create_input("Lookup Valid")).await.unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-valid").await;
+        let epic = insert_epic(&db, &proj, "lv01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "lv-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -5909,9 +5912,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_none_when_missing() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo.create(create_input("Lookup Missing")).await.unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-missing").await;
+        let epic = insert_epic(&db, &proj, "lm01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "lm-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -5930,7 +5936,9 @@ mod tests {
         let db = test_db();
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo.create(create_input("Lookup Malformed")).await.unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-malformed").await;
+        let epic = insert_epic(&db, &proj, "mf01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "mf-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -5969,7 +5977,9 @@ mod tests {
             .create(create_input("Lookup Missing Metadata"))
             .await
             .unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-nometa").await;
+        let epic = insert_epic(&db, &proj, "nm01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "nm-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -5994,12 +6004,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_none_for_wrong_spike() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo
             .create(create_input("Lookup Wrong Spike"))
             .await
             .unwrap();
-        let linked_spike_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-wspike").await;
+        let epic = insert_epic(&db, &proj, "ws01").await;
+        let linked_spike_id = insert_task(&db, &proj, &epic, "ws-task").await;
         let other_spike_id = uuid::Uuid::now_v7().to_string();
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
@@ -6016,12 +6029,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_none_for_wrong_round() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo
             .create(create_input("Lookup Wrong Round"))
             .await
             .unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-wround").await;
+        let epic = insert_epic(&db, &proj, "wr01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "wr-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -6054,12 +6070,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_none_for_wrong_revision() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo
             .create(create_input("Lookup Wrong Revision"))
             .await
             .unwrap();
-        let spike_task_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-wrev").await;
+        let epic = insert_epic(&db, &proj, "wv01").await;
+        let spike_task_id = insert_task(&db, &proj, &epic, "wv-task").await;
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
             .await
@@ -6106,12 +6125,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn current_evidence_findings_lookup_returns_none_for_wrongly_linked_proposal() {
-        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
         let p = repo
             .create(create_input("Lookup Wrongly Linked"))
             .await
             .unwrap();
-        let linked_spike_id = uuid::Uuid::now_v7().to_string();
+        let proj = insert_project(&db, "svc-lookup-wlink").await;
+        let epic = insert_epic(&db, &proj, "wl01").await;
+        let linked_spike_id = insert_task(&db, &proj, &epic, "wl-task").await;
         let requested_spike_id = uuid::Uuid::now_v7().to_string();
         let claim = sample_needs_evidence_claim(2, 3);
         repo.set_structured_needs_evidence_spike(&p.id, &linked_spike_id, &claim)
