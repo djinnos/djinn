@@ -19,6 +19,9 @@ pub struct RunningTaskInfo {
     /// Project UUID the task belongs to, tracked by the slot pool so
     /// project-scoped status queries can filter pre-session lifecycles.
     pub project_id: Option<String>,
+    /// Live no-progress streak for this session, sourced from the worker's
+    /// durable-progress detector. Defaults to 0 when not yet reported.
+    pub no_progress_streak: u32,
 }
 
 #[derive(Debug, Clone)]
