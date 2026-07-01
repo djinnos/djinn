@@ -157,6 +157,156 @@ fn unchanged_head_rejection_includes_all_event_fields() {
     );
 }
 
+// ── Local gate block comment / detail formatting ─────────────────────────────
+
+use super::{
+    LOCAL_GATE_BLOCK_EVENT, format_local_gate_block_comment, gate_result_to_detail_json,
+    truncate_for_comment,
+};
+use crate::local_gates::{GateOutcome, GatePlanResult, GateResult};
+use std::time::Duration;
+
+fn make_blocking_gate_result(gate_id: &'static str, outcome: GateOutcome) -> GateResult {
+    let exit_code = match outcome {
+        GateOutcome::Failed => Some(1),
+        _ => None,
+    };
+    GateResult {
+        gate_id,
+        outcome,
+        blocking: true,
+        command: vec!["cargo".into(), "fmt".into(), "--check".into()],
+        cwd: "server".into(),
+        timeout: Duration::from_secs(120),
+        exit_code,
+        stdout_summary: String::new(),
+        stderr_summary: "error: some file is not formatted".into(),
+        duration: Some(Duration::from_millis(250)),
+        artifact: None,
+    }
+}
+
+#[test]
+fn gate_result_detail_json_includes_required_fields() {
+    let r = make_blocking_gate_result("rustfmt", GateOutcome::Failed);
+    let detail = gate_result_to_detail_json(&r);
+
+    assert_eq!(detail["gate_id"], "rustfmt");
+    assert_eq!(detail["outcome"], "failed");
+    assert_eq!(
+        detail["command"],
+        serde_json::json!(["cargo", "fmt", "--check"])
+    );
+    assert_eq!(detail["cwd"], "server");
+    assert_eq!(detail["timeout_secs"], 120);
+    assert_eq!(detail["exit_code"], 1);
+    assert_eq!(
+        detail["stderr_summary"],
+        "error: some file is not formatted"
+    );
+    assert_eq!(detail["duration_ms"], 250);
+    assert_eq!(
+        detail["blocking_reason"],
+        "required gate command exited non-zero"
+    );
+}
+
+#[test]
+fn gate_result_detail_json_unavailable_reason_is_distinct() {
+    let r = make_blocking_gate_result("clippy", GateOutcome::Unavailable);
+    let detail = gate_result_to_detail_json(&r);
+
+    assert_eq!(detail["gate_id"], "clippy");
+    assert_eq!(detail["outcome"], "unavailable");
+    assert_eq!(
+        detail["blocking_reason"],
+        "required command or working directory unavailable"
+    );
+    assert!(detail["exit_code"].is_null());
+}
+
+#[test]
+fn format_gate_block_comment_lists_all_blocking_gates() {
+    let result = GatePlanResult {
+        results: vec![
+            make_blocking_gate_result("rustfmt", GateOutcome::Failed),
+            make_blocking_gate_result("server-size-guard", GateOutcome::Unavailable),
+            GateResult {
+                gate_id: "advisory-lint",
+                outcome: GateOutcome::Skipped,
+                blocking: false,
+                command: vec!["echo".into()],
+                cwd: String::new(),
+                timeout: Duration::from_secs(10),
+                exit_code: None,
+                stdout_summary: String::new(),
+                stderr_summary: String::new(),
+                duration: None,
+                artifact: None,
+            },
+        ],
+    };
+
+    let comment =
+        format_local_gate_block_comment("abc123", &["rustfmt", "server-size-guard"], &result);
+
+    // Must mention the commit SHA.
+    assert!(
+        comment.contains("abc123"),
+        "comment must mention the commit SHA: {comment}"
+    );
+    // Must list blocking gates.
+    assert!(
+        comment.contains("rustfmt"),
+        "comment must mention rustfmt: {comment}"
+    );
+    assert!(
+        comment.contains("server-size-guard"),
+        "comment must mention server-size-guard: {comment}"
+    );
+    // Must NOT list advisory (non-blocking) gates.
+    assert!(
+        !comment.contains("advisory-lint"),
+        "comment must not mention advisory gates: {comment}"
+    );
+    // Must show the unavailable status distinctly.
+    assert!(
+        comment.contains("unavailable"),
+        "comment must mention 'unavailable' for unavailable gates: {comment}"
+    );
+    // Must include the blocked gate summary.
+    assert!(
+        comment.contains("Blocked gates:"),
+        "comment must have a 'Blocked gates:' summary line: {comment}"
+    );
+}
+
+#[test]
+fn truncate_for_comment_preserves_short_strings() {
+    assert_eq!(truncate_for_comment("hello world", 100), "hello world");
+}
+
+#[test]
+fn truncate_for_comment_truncates_long_strings() {
+    let long = "a".repeat(500);
+    let truncated = truncate_for_comment(&long, 100);
+    // max_len (100) + ellipsis char (3 UTF-8 bytes) = 103
+    assert!(
+        truncated.len() <= 103,
+        "must truncate to max_len + ellipsis, got len {}",
+        truncated.len()
+    );
+    assert!(truncated.ends_with('…'), "must end with ellipsis");
+    assert!(truncated.starts_with("aaa"), "must preserve head of string");
+}
+
+#[test]
+fn local_gate_block_event_type_is_stable() {
+    // Pin the event type string so it is never accidentally changed (would
+    // break activity-log dedup queries across deploys).
+    assert_eq!(LOCAL_GATE_BLOCK_EVENT, "local_gate_block");
+}
+
 /// AC1: The unchanged-head rejection preserves remediation state. When the
 /// submit is rejected, the task must remain in remediation — the predicate
 /// returns Some (indicating rejection) so the caller can keep the task parked.
