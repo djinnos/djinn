@@ -68,6 +68,7 @@ use std::sync::Arc;
 pub mod cargo_cache_policy;
 pub mod cargo_metrics;
 mod cargo_target_seed;
+mod checkpoint;
 mod checkpoint_safety;
 mod lifecycle;
 mod worker_services;
@@ -91,7 +92,7 @@ use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artif
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
 use djinn_supervisor::{RpcServices, SupervisorServices, TaskRunSupervisor};
-use djinn_workspace::{GitIdentity, MirrorManager, Workspace};
+use djinn_workspace::{MirrorManager, Workspace};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -1322,6 +1323,7 @@ async fn run_task_run(args: WorkerDefaultArgs) -> Result<()> {
         &spec.task_branch,
         &terminal_checkpoint_identity,
         &args.task_run_id,
+        checkpoint::CheckpointReason::Terminal,
     )
     .await;
 
@@ -1379,9 +1381,11 @@ struct CheckpointIdentity {
     email: String,
 }
 
-/// Best-effort "save work before we die" checkpoint: stage + commit any
-/// uncommitted changes on the LIVE ephemeral stage clone and push `task_branch`
-/// to the mirror, all bounded by [`CHECKPOINT_TIMEOUT`].
+/// Safety-scanned "save work before we die" checkpoint: scan the LIVE
+/// ephemeral stage clone via the shared [`checkpoint::preserve_checkpoint`]
+/// path, create a WIP commit with only safety-approved files, and push
+/// `task_branch` with lease-aware bounded retry. All bounded by
+/// [`CHECKPOINT_TIMEOUT`].
 ///
 /// The path is read lazily, at fire time, from the `captured_workspace_path`
 /// slot that [`WorkerSupervisorServices`] populates on its first
@@ -1391,22 +1395,24 @@ struct CheckpointIdentity {
 /// supervisor never writes to. If no stage has started yet the slot is `None`
 /// and there is no in-flight work to save, so the checkpoint is a clean no-op.
 ///
-/// Called from the SIGTERM handler and the soft-deadline timer. It races the
-/// supervisor's own (cancelled) shutdown, so it may arrive mid-git-operation —
-/// a locked index, a half-applied merge. Every failure is logged and
-/// swallowed; this function never panics and never blocks past its timeout,
-/// because it runs inside the kubelet's short `terminationGracePeriodSeconds`
-/// window and must leave room for the terminal RPC flush.
+/// Called from the SIGTERM handler, the soft-deadline timer, and the terminal
+/// checkpoint after the supervisor returns. All callers route through this
+/// single shared preservation path. It races the supervisor's own (cancelled)
+/// shutdown, so it may arrive mid-git-operation — a locked index, a
+/// half-applied merge. Every failure is logged and swallowed; this function
+/// never panics and never blocks past its timeout, because it runs inside the
+/// kubelet's short `terminationGracePeriodSeconds` window and must leave room
+/// for the terminal RPC flush.
 ///
-/// Idempotent against the supervisor's pushes: the commit is a no-op on a clean
-/// tree and the push refspec (`task_branch:task_branch`) is a no-op when the
-/// mirror is already current.
+/// Returns the structured [`checkpoint::CheckpointPreservationResult`] for
+/// callers that need to inspect the outcome (events, metrics, persistence).
 async fn checkpoint_workspace(
     captured_workspace_path: &std::sync::Mutex<Option<PathBuf>>,
     task_branch: &str,
     identity: &CheckpointIdentity,
     task_run_id: &str,
-) {
+    reason: checkpoint::CheckpointReason,
+) -> checkpoint::CheckpointPreservationResult {
     let workspace_path = {
         captured_workspace_path
             .lock()
@@ -1417,77 +1423,72 @@ async fn checkpoint_workspace(
         info!(
             task_run_id,
             branch = task_branch,
+            reason = %reason,
             "checkpoint: no stage has started (no captured workspace); nothing to save"
         );
-        return;
+        return checkpoint::CheckpointPreservationResult::default();
     };
 
-    let ws = match Workspace::attach_existing(&workspace_path, task_branch.to_string()) {
-        Ok(ws) => ws,
-        Err(e) => {
-            warn!(
-                task_run_id,
-                branch = task_branch,
-                path = %workspace_path.display(),
-                error = %e,
-                "checkpoint: failed to attach workspace; cannot save in-flight work"
-            );
-            return;
-        }
+    // The session ID is the task-run ID for this worker binary (each Pod
+    // runs exactly one task-run). The turn number is unknown at the worker
+    // level — the reply-loop turn counter lives in the coordinator/agent,
+    // not here. `turn_known: false` in the result distinguishes this.
+    let metadata = checkpoint::CheckpointMetadata {
+        session_id: task_run_id.to_string(),
+        task_run_id: task_run_id.to_string(),
+        turn: None,
+        reason,
+        author_name: identity.name.clone(),
+        author_email: identity.email.clone(),
+        task_branch: task_branch.to_string(),
     };
 
-    let git_identity = GitIdentity {
-        name: &identity.name,
-        email: &identity.email,
-    };
-    let message = format!("checkpoint: interrupted task-run {task_run_id}");
-
-    let result = tokio::time::timeout(CHECKPOINT_TIMEOUT, async {
-        // Commit is best-effort: a clean tree (worker already committed via
-        // shell) returns Ok(false) and we still push. A failure (locked index
-        // mid-merge) is logged but must not block the push of whatever IS
-        // already committed in the clone.
-        match ws.commit(&message, git_identity).await {
-            Ok(true) => info!(
-                task_run_id,
-                branch = task_branch,
-                "checkpoint: committed uncommitted changes"
-            ),
-            Ok(false) => info!(
-                task_run_id,
-                branch = task_branch,
-                "checkpoint: tree already clean; nothing to commit"
-            ),
-            Err(e) => warn!(
-                task_run_id,
-                branch = task_branch,
-                error = %e,
-                "checkpoint: commit failed (continuing to push already-committed work)"
-            ),
-        }
-        match ws.push_to_origin(task_branch).await {
-            Ok(()) => info!(
-                task_run_id,
-                branch = task_branch,
-                "checkpoint: pushed task_branch to mirror — in-flight work is durable"
-            ),
-            Err(e) => error!(
-                task_run_id,
-                branch = task_branch,
-                error = %e,
-                "checkpoint: push_to_origin failed — in-flight work may be LOST on Pod kill"
-            ),
-        }
-    })
+    let result = tokio::time::timeout(
+        CHECKPOINT_TIMEOUT,
+        checkpoint::preserve_checkpoint(&workspace_path, &metadata, None),
+    )
     .await;
 
-    if result.is_err() {
-        error!(
-            task_run_id,
-            branch = task_branch,
-            timeout_secs = CHECKPOINT_TIMEOUT.as_secs(),
-            "checkpoint: timed out (wedged git operation?); in-flight work may be LOST"
-        );
+    match result {
+        Ok(result) => {
+            info!(
+                task_run_id,
+                branch = task_branch,
+                reason = %reason,
+                outcome = %result.outcome,
+                commit_attempted = result.commit_attempted,
+                commit_succeeded = result.commit_succeeded,
+                commit_sha = ?result.commit_sha,
+                parent_sha = ?result.parent_sha,
+                local_sha = ?result.local_sha,
+                remote_sha = ?result.remote_sha,
+                target_ref = %result.target_ref,
+                push_attempts = result.push_attempts,
+                conflict_strategy = %result.conflict_strategy,
+                push_result = %result.push_result,
+                staged_count = result.staged_count,
+                excluded_count = result.excluded_count,
+                blocked_count = result.blocked_count,
+                had_changes = result.had_changes,
+                failure_reason = ?result.failure_reason,
+                "checkpoint preservation complete"
+            );
+            result
+        }
+        Err(_) => {
+            error!(
+                task_run_id,
+                branch = task_branch,
+                reason = %reason,
+                timeout_secs = CHECKPOINT_TIMEOUT.as_secs(),
+                "checkpoint: timed out (wedged git operation?); in-flight work may be LOST"
+            );
+            checkpoint::CheckpointPreservationResult {
+                outcome: checkpoint::PreservationOutcome::TimedOut,
+                failure_reason: Some("checkpoint timed out".to_string()),
+                ..checkpoint::CheckpointPreservationResult::default()
+            }
+        }
     }
 }
 
@@ -1551,6 +1552,7 @@ fn install_termination_handlers(
                     &task_branch,
                     &identity,
                     &task_run_id,
+                    checkpoint::CheckpointReason::Signal,
                 )
                 .await;
             }
@@ -1631,6 +1633,7 @@ fn install_soft_deadline(
                     &task_branch,
                     &identity,
                     &task_run_id,
+                    checkpoint::CheckpointReason::SoftDeadline,
                 )
                 .await;
             }
@@ -2538,7 +2541,14 @@ mod tests {
             email: "bot@djinn.local".into(),
         };
         let captured = std::sync::Mutex::new(Some(cp.to_path_buf()));
-        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
+        checkpoint_workspace(
+            &captured,
+            "task",
+            &identity,
+            "run-xyz",
+            checkpoint::CheckpointReason::Terminal,
+        )
+        .await;
 
         // The edit is committed locally...
         let status = git(cp, &["status", "--porcelain"]);
@@ -2583,7 +2593,14 @@ mod tests {
             email: "bot@djinn.local".into(),
         };
         let captured = std::sync::Mutex::new(Some(cp.to_path_buf()));
-        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
+        checkpoint_workspace(
+            &captured,
+            "task",
+            &identity,
+            "run-xyz",
+            checkpoint::CheckpointReason::Terminal,
+        )
+        .await;
 
         let remote = git(op, &["rev-parse", "task"]);
         assert_eq!(
@@ -2691,7 +2708,14 @@ mod tests {
         // Empty slot: execute_stage never ran, so nothing was captured.
         let captured: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
         // Must return cleanly without touching the filesystem or panicking.
-        checkpoint_workspace(&captured, "task", &identity, "run-xyz").await;
+        checkpoint_workspace(
+            &captured,
+            "task",
+            &identity,
+            "run-xyz",
+            checkpoint::CheckpointReason::Terminal,
+        )
+        .await;
         // The slot is unchanged — the no-op path doesn't mutate it.
         assert!(
             captured.lock().unwrap().is_none(),
