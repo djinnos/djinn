@@ -24,7 +24,6 @@
 //!
 //! This wave adds code only — no public external API. All helpers are
 //! `pub(crate)` or private.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -316,10 +315,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(600);
 pub(crate) fn builtin_registry() -> &'static [GateSpec] {
     &REGISTRY
 }
-
-/// The static registry. `&'static` references are safe because the slice and
-/// all `GateSpec` fields are `'static` constants.
-static REGISTRY_DOCS: () = ();
 
 const REGISTRY: [GateSpec; 4] = [
     // ── server-size-guard ──────────────────────────────────────────────────
@@ -649,11 +644,6 @@ fn summarize_output(output: &str) -> String {
         OUTPUT_SUMMARY_MAX_LINES,
     )
 }
-
-// ── Static anchor ────────────────────────────────────────────────────────────
-// Suppress the unused warning for `REGISTRY_DOCS` — it exists only to anchor
-// the `static REGISTRY` in a documentation grouping.
-const _: () = REGISTRY_DOCS;
 
 #[cfg(test)]
 mod tests;
