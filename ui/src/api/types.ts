@@ -11,12 +11,45 @@ export type AcceptanceCriterion = TaskListOutputSchema.AcceptanceCriterionStatus
 
 export type Project = import("./server").Project;
 
+/**
+ * CI status values exposed by the backend CiStatus enum.
+ * Wire values are lowercase snake-case strings.
+ */
+export type CiStatus = "passing" | "failing" | "pending" | "unknown";
+
+/**
+ * Structured CI gate snapshot from the backend.
+ * Rendered from the task's `ci` field when a PR snapshot exists.
+ */
+export interface CiGateSnapshot {
+  /** Current required-CI status for the PR head. */
+  status: CiStatus;
+  /** Git SHA of the PR head this snapshot describes. */
+  head_sha: string;
+  /** Names of required checks that are currently failing and blocking merge. */
+  blocking_required_check_names: string[];
+  /** Stable fingerprint of the current failure signature. */
+  failure_fingerprint?: string | null;
+  /** ISO-8601 timestamp when this snapshot was first observed. */
+  first_seen_at: string;
+  /** ISO-8601 timestamp when this snapshot was last observed/updated. */
+  last_seen_at: string;
+  /** How many consecutive observations carried the same failure fingerprint. */
+  same_signature_count: number;
+  /** Base SHA of the last remediation attempt. */
+  last_remediation_base_sha?: string | null;
+  /** GitHub PR number, when available. */
+  pr_number?: number | null;
+}
+
 export type Task = Omit<TaskShowOutputSchema.TaskShowOutput, "owner"> & {
   owner: string | null;
   // Stamped by the desktop app when fetching from a specific project
   project_id?: string | null;
   // URL of the associated pull request (populated when server supports it)
   pr_url?: string | null;
+  // CI gate snapshot for this task's PR, if any
+  ci?: CiGateSnapshot | null;
 };
 
 export type Epic = Omit<EpicListOutputSchema.EpicModel, "owner"> & {
