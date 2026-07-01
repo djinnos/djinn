@@ -24,7 +24,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use djinn_provider::github_api::{RequiredCheckReproduction, RequiredCheckReproductionContext};
+use djinn_provider::github_api::{
+    RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+};
 
 /// Default timeout for a single reproduction command invocation (5 minutes).
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
@@ -292,6 +294,97 @@ fn tail_bytes(s: &str, max_bytes: usize) -> String {
         return String::new();
     };
     s[start..].to_owned()
+}
+
+// ─── Reproduction-plan formatting ────────────────────────────────────────────
+
+/// Build a focused reproduction plan from a reproducible provider bundle.
+///
+/// The returned markdown contains every field the worker needs to locally
+/// reproduce the failure: failing check, Actions job/step, the exact shell
+/// command, setup steps, the CI log tail, the observed head SHA, and
+/// step-by-step reproduce → fix → verify → resubmit instructions.
+pub fn format_reproduction_plan(ctx: &RequiredCheckReproductionContext) -> String {
+    let mut plan = String::new();
+
+    plan.push_str(&format!(
+        "**Failing Required Check:** `{}`\n",
+        ctx.required_check_name
+    ));
+    plan.push_str(&format!(
+        "**Observed Head SHA:** `{}`\n",
+        ctx.observed_head_sha
+    ));
+
+    // ── Job / step details ─────────────────────────────────────────────
+    plan.push_str(&format!(
+        "**Failed Job:** `{}` (id: {}, [run]({}))\n",
+        ctx.job.name, ctx.job.id, ctx.job.html_url
+    ));
+    plan.push_str(&format!(
+        "**Failed Step:** {} (step {})\n",
+        ctx.failing_step.name, ctx.failing_step.number
+    ));
+    if let Some(ref wf) = ctx.workflow_name {
+        plan.push_str(&format!("**Workflow:** `{wf}`\n"));
+    }
+
+    // ── Command + setup steps ──────────────────────────────────────────
+    plan.push_str("\n**Reproduction Command:**\n```\n");
+    plan.push_str(&ctx.command);
+    plan.push_str("\n```\n");
+
+    if !ctx.setup_steps.is_empty() {
+        plan.push_str("\n**Setup Steps** (run before the failing command):\n");
+        for step in &ctx.setup_steps {
+            if step.command.trim().is_empty() {
+                plan.push_str(&format!(
+                    "{}. `{}` — _(empty, skipped)_\n",
+                    step.number, step.name
+                ));
+            } else {
+                plan.push_str(&format!(
+                    "{}. `{}`\n   ```\n   {}\n   ```\n",
+                    step.number, step.name, step.command
+                ));
+            }
+        }
+    }
+
+    // ── CI log tail ────────────────────────────────────────────────────
+    if !ctx.log_tail.is_empty() {
+        plan.push_str("\n**CI Log Tail:**\n```\n");
+        plan.push_str(&ctx.log_tail);
+        plan.push_str("\n```\n");
+    }
+
+    // ── Remediation instructions ───────────────────────────────────────
+    plan.push_str("\n**Remediation Steps:**\n");
+    plan.push_str("1. **Reproduce:** Run the reproduction command above in the project working directory (after running setup steps if any).\n");
+    plan.push_str("2. **Fix:** Address the failure revealed by the reproduction.\n");
+    plan.push_str(
+        "3. **Verify:** Re-run the same command locally and confirm it passes (exit code 0).\n",
+    );
+    plan.push_str("4. **Resubmit:** Push the fix and let CI re-run on the PR.\n");
+
+    plan
+}
+
+/// Build a distinct intervention reason for an unreproducible required check.
+///
+/// The returned text makes clear that the check could not be reproduced
+/// locally and routes to human/lead intervention.  It never marks the check
+/// as passing or produces a scope-reshape payload.
+pub fn format_unreproducible_intervention_reason(bundle: &RequiredCheckUnreproducible) -> String {
+    let mut reason = format!(
+        "Required check `{}` (observed SHA `{}`) could not be reproduced locally.",
+        bundle.required_check_name, bundle.observed_head_sha,
+    );
+    reason.push_str(&format!("\nUnreproducible reason: `{:?}`", bundle.reason));
+    if let Some(ref details) = bundle.details {
+        reason.push_str(&format!("\nDetails: {details}"));
+    }
+    reason
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -625,5 +718,125 @@ mod tests {
         let json = serde_json::to_string(&results[0]).expect("serialize");
         let deserialized: LocalGateResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(results[0], deserialized);
+    }
+
+    // ── format_reproduction_plan ──────────────────────────────────────
+
+    #[test]
+    fn reproduction_plan_contains_all_required_fields() {
+        let ctx = sample_context("cargo test --all");
+        let plan = format_reproduction_plan(&ctx);
+
+        assert!(plan.contains("ci/test"), "must include check name");
+        assert!(plan.contains("abc123"), "must include head SHA");
+        assert!(plan.contains("cargo test --all"), "must include command");
+        assert!(plan.contains("Run tests"), "must include failing step name");
+        assert!(
+            plan.contains("quality-gate.yml"),
+            "must include workflow name"
+        );
+        assert!(plan.contains("test"), "must include job name");
+        assert!(
+            plan.contains("original CI log tail"),
+            "must include log tail"
+        );
+        assert!(
+            plan.contains("**Reproduction Command:**"),
+            "must have reproduction command section"
+        );
+        assert!(
+            plan.contains("**Remediation Steps:**"),
+            "must have remediation instructions"
+        );
+        assert!(
+            plan.contains("**Reproduce:**"),
+            "must include reproduce step"
+        );
+        assert!(plan.contains("**Fix:**"), "must include fix step");
+        assert!(plan.contains("**Verify:**"), "must include verify step");
+        assert!(plan.contains("**Resubmit:**"), "must include resubmit step");
+    }
+
+    #[test]
+    fn reproduction_plan_includes_setup_steps() {
+        let ctx = sample_context_with_setup(
+            "cargo test",
+            vec![ReproductionSetupStep {
+                number: 1,
+                name: "Install deps".into(),
+                command: "cargo fetch".into(),
+            }],
+        );
+        let plan = format_reproduction_plan(&ctx);
+
+        assert!(
+            plan.contains("**Setup Steps**"),
+            "must include setup steps section"
+        );
+        assert!(
+            plan.contains("Install deps"),
+            "must include setup step name"
+        );
+        assert!(
+            plan.contains("cargo fetch"),
+            "must include setup step command"
+        );
+    }
+
+    #[test]
+    fn reproduction_plan_omits_empty_setup_steps_section() {
+        let ctx = sample_context("cargo test");
+        let plan = format_reproduction_plan(&ctx);
+
+        assert!(
+            !plan.contains("**Setup Steps**"),
+            "empty setup steps should be omitted"
+        );
+    }
+
+    // ── format_unreproducible_intervention_reason ──────────────────────
+
+    #[test]
+    fn unreproducible_reason_contains_all_fields() {
+        let bundle = RequiredCheckUnreproducible {
+            required_check_name: "ci/build".into(),
+            observed_head_sha: "deadbeef".into(),
+            reason: RequiredCheckUnreproducibleReason::WorkflowRunNotFound,
+            details: Some("no matching workflow run".into()),
+        };
+        let reason = format_unreproducible_intervention_reason(&bundle);
+
+        assert!(reason.contains("ci/build"), "must include check name");
+        assert!(reason.contains("deadbeef"), "must include head SHA");
+        assert!(
+            reason.contains("WorkflowRunNotFound"),
+            "must include typed reason"
+        );
+        assert!(
+            reason.contains("no matching workflow run"),
+            "must include details"
+        );
+        assert!(
+            reason.contains("could not be reproduced locally"),
+            "must state unreproducible"
+        );
+    }
+
+    #[test]
+    fn unreproducible_reason_without_details() {
+        let bundle = RequiredCheckUnreproducible {
+            required_check_name: "ci/lint".into(),
+            observed_head_sha: "cafe".into(),
+            reason: RequiredCheckUnreproducibleReason::CommandNotFound,
+            details: None,
+        };
+        let reason = format_unreproducible_intervention_reason(&bundle);
+
+        assert!(reason.contains("ci/lint"));
+        assert!(reason.contains("CommandNotFound"));
+        assert!(
+            !reason.contains("Details:"),
+            "no details line when details is None"
+        );
     }
 }
