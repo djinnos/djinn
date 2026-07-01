@@ -68,6 +68,7 @@ mod actor;
 mod consolidation;
 pub mod dispatch;
 mod evidence;
+mod evidence_lifecycle_state;
 pub mod handle;
 mod health;
 pub mod messages;
