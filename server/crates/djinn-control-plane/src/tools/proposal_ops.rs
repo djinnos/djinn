@@ -750,3 +750,43 @@ pub struct VerdictOverrideResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+// ── Needs-evidence demand responses ──────────────────────────────────────────
+
+/// Accepted demand result for `proposal_refinement_demand_evidence`.
+///
+/// Returned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand
+/// passes validation and is recorded. Spike creation is wired in a later
+/// task — until then `spike_task_id` is `None` and the proposal is parked.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct NeedsEvidenceDemandResult {
+    /// The recorded needs-evidence claim question.
+    pub claim: String,
+    /// The spike task id (UUID) once linked. `None` until spike creation is
+    /// wired in a subsequent task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spike_task_id: Option<String>,
+    /// The pre-refinement snapshot revision seq the demand targets.
+    pub against_revision_seq: i32,
+    /// The debate round when the demand was issued.
+    pub round: i32,
+}
+
+/// Response for `proposal_refinement_demand_evidence`.
+///
+/// Two flavours: accepted (claim recorded, proposal parked) or rejected
+/// (validation failed, `error` populated). Exactly one of `result` or
+/// `error` is present depending on `accepted`.
+#[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct NeedsEvidenceDemandResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// True when the demand was accepted and recorded.
+    pub accepted: bool,
+    /// Details for an accepted demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<NeedsEvidenceDemandResult>,
+    /// Error message for a rejected demand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}

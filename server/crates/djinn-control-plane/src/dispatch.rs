@@ -59,8 +59,9 @@ use crate::tools::provider_tools::{
     ProviderRemoveInput, ProviderValidateInput,
 };
 use crate::tools::refinement_tools::{
-    ProposalRefinementDemandRoundParams, ProposalRefinementResolveParams,
-    ProposalRefinementStartParams, ProposalRefinementStatusParams, ProposalVerdictOverrideParams,
+    ProposalRefinementDemandEvidenceParams, ProposalRefinementDemandRoundParams,
+    ProposalRefinementResolveParams, ProposalRefinementStartParams, ProposalRefinementStatusParams,
+    ProposalVerdictOverrideParams,
 };
 use crate::tools::service_tools::ServicePresetListParams;
 use crate::tools::session_tools::{
@@ -574,6 +575,13 @@ impl DjinnMcpServer {
                 name,
                 self.proposal_verdict_override(Parameters(decode_args::<
                     ProposalVerdictOverrideParams,
+                >(name, args)?))
+                    .await,
+            ),
+            "proposal_refinement_demand_evidence" => map_json(
+                name,
+                self.proposal_refinement_demand_evidence(Parameters(decode_args::<
+                    ProposalRefinementDemandEvidenceParams,
                 >(name, args)?))
                     .await,
             ),
