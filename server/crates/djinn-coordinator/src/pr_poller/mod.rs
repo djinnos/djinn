@@ -87,6 +87,10 @@ mod tests;
 #[cfg(test)]
 mod pr_cleanup_tests;
 
+use crate::ci_preflight_gate::{
+    CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,
+    run_ci_reproduction_preflight_gate,
+};
 use crate::github_error_render::render_github_write_error;
 use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
