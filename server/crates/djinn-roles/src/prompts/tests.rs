@@ -380,6 +380,158 @@ fn planner_prompt_prunes_unverifiable_acceptance_criteria() {
         );
 }
 
+// ── s3z7: verify-after-lands planner-policy cleanup ──────────────────────────
+//
+// AC1: decomposition prompt must tell planners not to create standalone
+// deterministic verify-after-lands worker tasks once required CI is the
+// coordinator gate.
+// AC2: guidance must preserve the existing rule that workers write code and
+// are not used merely to verify/close tasks/epics, while still allowing focused
+// tests during implementation work.
+// AC3: prompt regression tests must fail if guidance asks for CI-green as
+// planner-authored acceptance criteria or reintroduces verify-only terminal
+// worker slices.
+
+#[test]
+fn planner_decomposition_prohibits_verify_after_lands_worker_tasks() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    // AC1: The prompt must explicitly prohibit standalone verify-after-lands tasks.
+    assert!(
+        prompt.contains("verify-after-lands"),
+        "decomposition prompt must mention verify-after-lands tasks"
+    );
+    assert!(
+        prompt.contains("do NOT create standalone deterministic"),
+        "decomposition prompt must tell planners not to create standalone deterministic verify tasks"
+    );
+    assert!(
+        prompt.contains("required CI is the coordinator gate"),
+        "decomposition prompt must frame required CI as the coordinator gate"
+    );
+}
+
+#[test]
+fn planner_decomposition_preserves_workers_write_code_rule() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    // AC2: The existing rule that workers write code must be preserved.
+    assert!(
+        prompt.contains("workers write code"),
+        "decomposition prompt must preserve the rule that workers write code"
+    );
+    assert!(
+        prompt.contains("Never create a worker task merely to verify or close"),
+        "decomposition prompt must preserve the rule against verify/close-only worker tasks"
+    );
+
+    // AC2: Focused tests during implementation work must still be allowed.
+    assert!(
+        prompt.contains("Workers MAY run focused"),
+        "decomposition prompt must allow focused test runs during implementation"
+    );
+    assert!(
+        prompt.contains("implementation-local test commands"),
+        "decomposition prompt must distinguish implementation-local test commands"
+    );
+}
+
+#[test]
+fn planner_decomposition_distinguishes_local_tests_from_verify_only_slices() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    // The prompt must draw a clear line between running tests for code you
+    // wrote and a standalone verify-only terminal slice.
+    assert!(
+        prompt.contains("Allowed"),
+        "decomposition prompt must mark allowed test-running behavior"
+    );
+    assert!(
+        prompt.contains("Prohibited"),
+        "decomposition prompt must mark prohibited verify-only slice behavior"
+    );
+    assert!(
+        prompt.contains("wait for or re-run deterministic post-land CI"),
+        "decomposition prompt must describe the prohibited verify-only shape"
+    );
+}
+
+#[test]
+fn planner_decomposition_must_not_require_ci_green_as_acceptance_criteria() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    // AC3: The prompt must explicitly prohibit CI-green as task AC.
+    assert!(
+        prompt.contains("Do NOT put `CI must be green` in task acceptance criteria"),
+        "decomposition prompt must prohibit CI-green as task AC"
+    );
+    assert!(
+        prompt.contains("Required CI pass/fail is coordinator control flow"),
+        "decomposition prompt must frame required CI as coordinator control flow, not worker AC"
+    );
+}
+
+#[test]
+fn planner_decomposition_verify_after_lands_guidance_has_no_unresolved_placeholders() {
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let ctx = make_ctx();
+    let prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+
+    assert!(
+        !prompt.contains("{{"),
+        "decomposition prompt should have no unresolved placeholders"
+    );
+}
+
+#[test]
+fn planner_decomposition_verify_guidance_present_only_in_decomposition_mode() {
+    // The verify-after-lands guidance lives in decomposition.md and should
+    // appear for the planning (decomposition) mode. Other planner modes
+    // (intervention, proposal) should not duplicate it since they operate on
+    // existing tasks, not wave decomposition.
+    let ctx = make_ctx();
+
+    let mut decomposition_task = make_task();
+    decomposition_task.issue_type = "planning".into();
+    let decomposition_prompt = render_prompt(AgentType::Planner, &decomposition_task, &ctx);
+    assert!(
+        decomposition_prompt.contains("verify-after-lands"),
+        "decomposition mode must include verify-after-lands guidance"
+    );
+
+    // The general planner.md "workers write code" / decision rules apply to all
+    // modes, but the specific verify-after-lands decomposition guidance should
+    // not be duplicated in intervention/proposal modes.
+    let mut intervention_task = make_task();
+    intervention_task.issue_type = "review".into();
+    let intervention_prompt = render_prompt(AgentType::Planner, &intervention_task, &ctx);
+    assert!(
+        !intervention_prompt.contains("verify-after-lands"),
+        "intervention mode should not include verify-after-lands decomposition guidance"
+    );
+
+    let mut proposal_task = make_task();
+    proposal_task.issue_type = "epic_breakdown".into();
+    let proposal_prompt = render_prompt(AgentType::Planner, &proposal_task, &ctx);
+    assert!(
+        !proposal_prompt.contains("verify-after-lands"),
+        "proposal mode should not include verify-after-lands decomposition guidance"
+    );
+}
+
 #[test]
 fn externally_blocked_replay_prunes_and_closes_without_loop_outcomes() {
     let externally_blocked_criteria = [
@@ -762,5 +914,161 @@ fn ci_blocking_directive_does_not_appear_in_activity_section() {
     assert_eq!(
         blocking_count, 1,
         "BLOCKING directive should appear exactly once, got {blocking_count}"
+    );
+}
+
+// ── sa4x: Cross-role directive deduplication with concrete values ────────────
+//
+// AC3: These tests verify the promoted BLOCKING directive deduplication for
+// worker and reviewer dispatch contexts using the same concrete PR/head/check/
+// fingerprint values used across the guardrail test suite. The directive text
+// must be identical for both roles when the underlying CI gate snapshot is the
+// same.
+
+/// Concrete directive text matching the sa4x guardrail test values.
+/// Derived from: PR #42, head SHA abc123..., checks Quality Gate + Server Clippy,
+/// fingerprint fp-e2e-sa4x-regression, base SHA abc123...
+const SA4X_CONCRETE_DIRECTIVE: &str = "**PR:** #42\n\
+    **Failing head SHA:** `abc123def456789012345678901234567890abcd`\n\
+    **Blocking checks:** Quality Gate, Server Clippy\n\
+    **Failure fingerprint:** `fp-e2e-sa4x-regression`\n\
+    **Remediation baseline SHA:** `abc123def456789012345678901234567890abcd`\n\n\
+    > REQUIRED CI is failing on the current PR head. You MUST fix the \
+    failing required checks listed above before this task can proceed. \
+    The task will remain in remediation until all blocking checks pass \
+    on a new commit pushed to the PR branch.";
+
+/// AC3: Worker dispatch context renders the BLOCKING directive with all
+/// concrete values from the durable CI gate snapshot.
+#[test]
+fn sa4x_worker_prompt_renders_concrete_blocking_directive() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "worker prompt must contain the BLOCKING section heading"
+    );
+    assert!(
+        prompt.contains("**PR:** #42"),
+        "worker prompt must contain the concrete PR number"
+    );
+    assert!(
+        prompt.contains("`abc123def456789012345678901234567890abcd`"),
+        "worker prompt must contain the failing head SHA"
+    );
+    assert!(
+        prompt.contains("Quality Gate"),
+        "worker prompt must contain blocking check 'Quality Gate'"
+    );
+    assert!(
+        prompt.contains("Server Clippy"),
+        "worker prompt must contain blocking check 'Server Clippy'"
+    );
+    assert!(
+        prompt.contains("fp-e2e-sa4x-regression"),
+        "worker prompt must contain the failure fingerprint"
+    );
+    assert!(
+        prompt.contains("REQUIRED CI is failing"),
+        "worker prompt must contain the blocking instruction"
+    );
+    // Exactly one BLOCKING section — no duplication.
+    assert_eq!(
+        prompt
+            .matches("## ⛔ BLOCKING: Required CI Failing")
+            .count(),
+        1,
+        "BLOCKING directive must appear exactly once in worker prompt"
+    );
+}
+
+/// AC3: Reviewer dispatch context renders the identical BLOCKING directive
+/// with the same concrete values. The directive text is the same because
+/// it's derived from the durable snapshot, not from role-specific logic.
+#[test]
+fn sa4x_reviewer_prompt_renders_concrete_blocking_directive() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "reviewer prompt must contain the BLOCKING section heading"
+    );
+    assert!(
+        prompt.contains("**PR:** #42"),
+        "reviewer prompt must contain the concrete PR number"
+    );
+    assert!(
+        prompt.contains("`abc123def456789012345678901234567890abcd`"),
+        "reviewer prompt must contain the failing head SHA"
+    );
+    assert!(
+        prompt.contains("Quality Gate"),
+        "reviewer prompt must contain blocking check 'Quality Gate'"
+    );
+    assert!(
+        prompt.contains("Server Clippy"),
+        "reviewer prompt must contain blocking check 'Server Clippy'"
+    );
+    assert!(
+        prompt.contains("fp-e2e-sa4x-regression"),
+        "reviewer prompt must contain the failure fingerprint"
+    );
+    // Exactly one BLOCKING section — no duplication.
+    assert_eq!(
+        prompt
+            .matches("## ⛔ BLOCKING: Required CI Failing")
+            .count(),
+        1,
+        "BLOCKING directive must appear exactly once in reviewer prompt"
+    );
+}
+
+/// AC3: Deduplication verification — the same directive text rendered in
+/// both worker and reviewer prompts produces the same BLOCKING section.
+/// This is by construction (same input → same output) but we verify it
+/// explicitly to guard against role-specific injection bugs.
+#[test]
+fn sa4x_directive_text_identical_across_worker_and_reviewer() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let worker_prompt = render_prompt(AgentType::Worker, &task, &ctx);
+    let reviewer_prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    // Both prompts must contain the directive.
+    assert!(worker_prompt.contains("## ⛔ BLOCKING: Required CI Failing"));
+    assert!(reviewer_prompt.contains("## ⛔ BLOCKING: Required CI Failing"));
+
+    // Extract the directive body (up to the next ## heading or end of prompt).
+    fn extract_blocking_body(prompt: &str) -> String {
+        let start = prompt
+            .find("## ⛔ BLOCKING: Required CI Failing")
+            .expect("must have BLOCKING section");
+        let rest = &prompt[start..];
+        // Find the next section heading after BLOCKING.
+        match rest[3..].find("\n## ") {
+            Some(end) => rest[..3 + end].to_string(),
+            None => rest.to_string(),
+        }
+    }
+
+    let worker_body = extract_blocking_body(&worker_prompt);
+    let reviewer_body = extract_blocking_body(&reviewer_prompt);
+
+    assert_eq!(
+        worker_body, reviewer_body,
+        "BLOCKING directive body must be identical for worker and reviewer"
     );
 }
