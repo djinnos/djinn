@@ -14913,7 +14913,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "EvidenceLifecyclePhase": {
-          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "description": "Evidence lifecycle phase for a needs-evidence parking.\n\nThis is the inner phase within a `NeedsEvidenceStatus` and describes\nonly the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for\nthe top-level refinement status discriminator that includes Active,\nPausedOrFrozen, and Terminal.",
           "oneOf": [
             {
               "const": "awaiting_evidence",
@@ -14928,6 +14928,41 @@ expression: signatures
             {
               "const": "evidence_failed",
               "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
+        "EvidenceLifecycleState": {
+          "description": "Top-level evidence lifecycle state for the refinement status surface.\n\nDerived from durable proposal fields, debate-trail lifecycle events,\nlinked-spike task status, and admin freeze state — **not** from\nin-memory coordinator state. Downstream control-plane and UI consumers\nuse this discriminator to determine the refinement's effective state\nwithout needing to inspect individual `needs_evidence` sub-fields.\n\nPrecedence (highest → lowest):\n1. `Terminal` — proposal status is done/rejected/archived/superseded.\n2. `PausedOrFrozen` — admin freeze is active (`build_frozen = true`).\n   This takes precedence over active resume wording.\n3. `EvidenceFailed` — persisted failure lifecycle event exists.\n4. `EvidenceReceived` — persisted receipt lifecycle event exists.\n5. `AwaitingEvidence` — open linked evidence spike.\n6. `Active` — refinement is active, no evidence parking.",
+          "oneOf": [
+            {
+              "const": "active",
+              "description": "Refinement is active (advocate/adversary/judge loop running).",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_evidence",
+              "description": "Refinement is parked: an evidence spike is in flight and findings\nhave not yet arrived.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Evidence findings have been recorded; refinement may resume once\ndownstream processing completes.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Evidence spike failed or was force-closed; refinement is blocked\nuntil the failure is addressed.",
+              "type": "string"
+            },
+            {
+              "const": "paused_or_frozen",
+              "description": "The proposal is administratively paused or frozen. Takes precedence\nover all evidence sub-states and active resume wording.",
+              "type": "string"
+            },
+            {
+              "const": "terminal",
+              "description": "Refinement has reached a terminal outcome (proposal done/rejected/\narchived/superseded).",
               "type": "string"
             }
           ]
@@ -15047,6 +15082,10 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "evidence_lifecycle_state": {
+              "$ref": "#/$defs/EvidenceLifecycleState",
+              "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
               "type": [
@@ -15089,7 +15128,8 @@ expression: signatures
           "required": [
             "active",
             "dry_rounds",
-            "total_entries"
+            "total_entries",
+            "evidence_lifecycle_state"
           ],
           "type": "object"
         }
@@ -15220,7 +15260,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "EvidenceLifecyclePhase": {
-          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "description": "Evidence lifecycle phase for a needs-evidence parking.\n\nThis is the inner phase within a `NeedsEvidenceStatus` and describes\nonly the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for\nthe top-level refinement status discriminator that includes Active,\nPausedOrFrozen, and Terminal.",
           "oneOf": [
             {
               "const": "awaiting_evidence",
@@ -15235,6 +15275,41 @@ expression: signatures
             {
               "const": "evidence_failed",
               "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
+        "EvidenceLifecycleState": {
+          "description": "Top-level evidence lifecycle state for the refinement status surface.\n\nDerived from durable proposal fields, debate-trail lifecycle events,\nlinked-spike task status, and admin freeze state — **not** from\nin-memory coordinator state. Downstream control-plane and UI consumers\nuse this discriminator to determine the refinement's effective state\nwithout needing to inspect individual `needs_evidence` sub-fields.\n\nPrecedence (highest → lowest):\n1. `Terminal` — proposal status is done/rejected/archived/superseded.\n2. `PausedOrFrozen` — admin freeze is active (`build_frozen = true`).\n   This takes precedence over active resume wording.\n3. `EvidenceFailed` — persisted failure lifecycle event exists.\n4. `EvidenceReceived` — persisted receipt lifecycle event exists.\n5. `AwaitingEvidence` — open linked evidence spike.\n6. `Active` — refinement is active, no evidence parking.",
+          "oneOf": [
+            {
+              "const": "active",
+              "description": "Refinement is active (advocate/adversary/judge loop running).",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_evidence",
+              "description": "Refinement is parked: an evidence spike is in flight and findings\nhave not yet arrived.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Evidence findings have been recorded; refinement may resume once\ndownstream processing completes.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Evidence spike failed or was force-closed; refinement is blocked\nuntil the failure is addressed.",
+              "type": "string"
+            },
+            {
+              "const": "paused_or_frozen",
+              "description": "The proposal is administratively paused or frozen. Takes precedence\nover all evidence sub-states and active resume wording.",
+              "type": "string"
+            },
+            {
+              "const": "terminal",
+              "description": "Refinement has reached a terminal outcome (proposal done/rejected/\narchived/superseded).",
               "type": "string"
             }
           ]
@@ -15354,6 +15429,10 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "evidence_lifecycle_state": {
+              "$ref": "#/$defs/EvidenceLifecycleState",
+              "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
               "type": [
@@ -15396,7 +15475,8 @@ expression: signatures
           "required": [
             "active",
             "dry_rounds",
-            "total_entries"
+            "total_entries",
+            "evidence_lifecycle_state"
           ],
           "type": "object"
         }
@@ -15453,7 +15533,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "EvidenceLifecyclePhase": {
-          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "description": "Evidence lifecycle phase for a needs-evidence parking.\n\nThis is the inner phase within a `NeedsEvidenceStatus` and describes\nonly the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for\nthe top-level refinement status discriminator that includes Active,\nPausedOrFrozen, and Terminal.",
           "oneOf": [
             {
               "const": "awaiting_evidence",
@@ -15468,6 +15548,41 @@ expression: signatures
             {
               "const": "evidence_failed",
               "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
+        "EvidenceLifecycleState": {
+          "description": "Top-level evidence lifecycle state for the refinement status surface.\n\nDerived from durable proposal fields, debate-trail lifecycle events,\nlinked-spike task status, and admin freeze state — **not** from\nin-memory coordinator state. Downstream control-plane and UI consumers\nuse this discriminator to determine the refinement's effective state\nwithout needing to inspect individual `needs_evidence` sub-fields.\n\nPrecedence (highest → lowest):\n1. `Terminal` — proposal status is done/rejected/archived/superseded.\n2. `PausedOrFrozen` — admin freeze is active (`build_frozen = true`).\n   This takes precedence over active resume wording.\n3. `EvidenceFailed` — persisted failure lifecycle event exists.\n4. `EvidenceReceived` — persisted receipt lifecycle event exists.\n5. `AwaitingEvidence` — open linked evidence spike.\n6. `Active` — refinement is active, no evidence parking.",
+          "oneOf": [
+            {
+              "const": "active",
+              "description": "Refinement is active (advocate/adversary/judge loop running).",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_evidence",
+              "description": "Refinement is parked: an evidence spike is in flight and findings\nhave not yet arrived.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Evidence findings have been recorded; refinement may resume once\ndownstream processing completes.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Evidence spike failed or was force-closed; refinement is blocked\nuntil the failure is addressed.",
+              "type": "string"
+            },
+            {
+              "const": "paused_or_frozen",
+              "description": "The proposal is administratively paused or frozen. Takes precedence\nover all evidence sub-states and active resume wording.",
+              "type": "string"
+            },
+            {
+              "const": "terminal",
+              "description": "Refinement has reached a terminal outcome (proposal done/rejected/\narchived/superseded).",
               "type": "string"
             }
           ]
@@ -15587,6 +15702,10 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "evidence_lifecycle_state": {
+              "$ref": "#/$defs/EvidenceLifecycleState",
+              "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
               "type": [
@@ -15629,7 +15748,8 @@ expression: signatures
           "required": [
             "active",
             "dry_rounds",
-            "total_entries"
+            "total_entries",
+            "evidence_lifecycle_state"
           ],
           "type": "object"
         }
@@ -15800,7 +15920,7 @@ expression: signatures
           "type": "object"
         },
         "EvidenceLifecyclePhase": {
-          "description": "Evidence lifecycle phase for a needs-evidence parking.",
+          "description": "Evidence lifecycle phase for a needs-evidence parking.\n\nThis is the inner phase within a `NeedsEvidenceStatus` and describes\nonly the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for\nthe top-level refinement status discriminator that includes Active,\nPausedOrFrozen, and Terminal.",
           "oneOf": [
             {
               "const": "awaiting_evidence",
@@ -15815,6 +15935,41 @@ expression: signatures
             {
               "const": "evidence_failed",
               "description": "Spike failed (cancelled, errored, force-closed).",
+              "type": "string"
+            }
+          ]
+        },
+        "EvidenceLifecycleState": {
+          "description": "Top-level evidence lifecycle state for the refinement status surface.\n\nDerived from durable proposal fields, debate-trail lifecycle events,\nlinked-spike task status, and admin freeze state — **not** from\nin-memory coordinator state. Downstream control-plane and UI consumers\nuse this discriminator to determine the refinement's effective state\nwithout needing to inspect individual `needs_evidence` sub-fields.\n\nPrecedence (highest → lowest):\n1. `Terminal` — proposal status is done/rejected/archived/superseded.\n2. `PausedOrFrozen` — admin freeze is active (`build_frozen = true`).\n   This takes precedence over active resume wording.\n3. `EvidenceFailed` — persisted failure lifecycle event exists.\n4. `EvidenceReceived` — persisted receipt lifecycle event exists.\n5. `AwaitingEvidence` — open linked evidence spike.\n6. `Active` — refinement is active, no evidence parking.",
+          "oneOf": [
+            {
+              "const": "active",
+              "description": "Refinement is active (advocate/adversary/judge loop running).",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_evidence",
+              "description": "Refinement is parked: an evidence spike is in flight and findings\nhave not yet arrived.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_received",
+              "description": "Evidence findings have been recorded; refinement may resume once\ndownstream processing completes.",
+              "type": "string"
+            },
+            {
+              "const": "evidence_failed",
+              "description": "Evidence spike failed or was force-closed; refinement is blocked\nuntil the failure is addressed.",
+              "type": "string"
+            },
+            {
+              "const": "paused_or_frozen",
+              "description": "The proposal is administratively paused or frozen. Takes precedence\nover all evidence sub-states and active resume wording.",
+              "type": "string"
+            },
+            {
+              "const": "terminal",
+              "description": "Refinement has reached a terminal outcome (proposal done/rejected/\narchived/superseded).",
               "type": "string"
             }
           ]
@@ -16404,6 +16559,10 @@ expression: signatures
               "format": "int32",
               "type": "integer"
             },
+            "evidence_lifecycle_state": {
+              "$ref": "#/$defs/EvidenceLifecycleState",
+              "description": "Top-level evidence lifecycle state derived from durable proposal\nfields, lifecycle events, and linked-spike task status. Lets\ndownstream consumers distinguish Active, AwaitingEvidence,\nEvidenceFailed, PausedOrFrozen, and Terminal without inspecting\nindividual sub-fields."
+            },
             "judge_summary": {
               "description": "The judge's summary shown alongside the accept/reject review.\n`None` unless `awaiting_review` is true.",
               "type": [
@@ -16446,7 +16605,8 @@ expression: signatures
           "required": [
             "active",
             "dry_rounds",
-            "total_entries"
+            "total_entries",
+            "evidence_lifecycle_state"
           ],
           "type": "object"
         },
