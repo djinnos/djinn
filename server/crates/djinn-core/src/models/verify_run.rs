@@ -145,7 +145,7 @@ impl FromStr for AutoSubmitTriggerReason {
 /// Captures the identity, versioning, timing, result, diff fingerprint, and
 /// task-specific check coverage of the verification that produced the
 /// authoritative pass/fail signal used by auto-submit decisions.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
 pub struct VerifyRunRecord {
     pub id: String,
