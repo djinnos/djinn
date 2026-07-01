@@ -364,6 +364,7 @@ fn never_blocks_on_self() {
 fn check(name: &str) -> CheckRun {
     CheckRun {
         id: 1,
+        run_id: None,
         name: name.to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -896,6 +897,7 @@ fn rejects_non_github_url() {
 fn check_run(name: &str, run_id: u64) -> CheckRun {
     CheckRun {
         id: run_id * 100 + name.len() as u64,
+        run_id: Some(run_id),
         name: name.to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -1163,6 +1165,7 @@ fn compute_ci_failure_fingerprint_normalizes_casing_and_whitespace() {
     // Check names with different casing/whitespace normalize to the same fingerprint.
     let check_upper = CheckRun {
         id: 1,
+        run_id: None,
         name: "  CI / BUILD  ".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -1170,6 +1173,7 @@ fn compute_ci_failure_fingerprint_normalizes_casing_and_whitespace() {
     };
     let check_lower = CheckRun {
         id: 2,
+        run_id: None,
         name: "ci / build".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -1191,6 +1195,7 @@ fn compute_ci_failure_fingerprint_independent_of_order() {
     // Check names in different order → same fingerprint (sorted internally).
     let check_a = CheckRun {
         id: 1,
+        run_id: None,
         name: "CI / build".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -1198,6 +1203,7 @@ fn compute_ci_failure_fingerprint_independent_of_order() {
     };
     let check_b = CheckRun {
         id: 2,
+        run_id: None,
         name: "CI / test".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -1624,6 +1630,7 @@ fn build_failing_snapshot_input(
 fn make_check_run(name: &str, conclusion: &str) -> CheckRun {
     CheckRun {
         id: 1000,
+        run_id: None,
         name: name.to_string(),
         status: "completed".to_string(),
         conclusion: Some(conclusion.to_string()),
@@ -2032,6 +2039,7 @@ fn ci_status_classifies_incomplete_checks_as_pending() {
     // When not all checks are completed, the status should be Pending.
     let running_check = CheckRun {
         id: 300,
+        run_id: None,
         name: "CI / build".to_string(),
         status: "in_progress".to_string(),
         conclusion: None,
@@ -3387,6 +3395,7 @@ fn required_vs_advisory_failures_through_blocking_filter() {
     // co-blocking rule doesn't include the advisory check.
     let quality_gate = CheckRun {
         id: 100,
+        run_id: Some(10),
         name: "Quality Gate".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
@@ -3394,6 +3403,7 @@ fn required_vs_advisory_failures_through_blocking_filter() {
     };
     let vercel = CheckRun {
         id: 200,
+        run_id: Some(20),
         name: "Vercel – portal".to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),
