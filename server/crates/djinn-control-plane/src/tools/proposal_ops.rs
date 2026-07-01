@@ -756,14 +756,16 @@ pub struct VerdictOverrideResponse {
 /// Accepted demand result for `proposal_refinement_demand_evidence`.
 ///
 /// Returned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand
-/// passes validation and is recorded. Spike creation is wired in a later
-/// task — until then `spike_task_id` is `None` and the proposal is parked.
+/// passes validation. The accepted-demand mutation atomically creates the
+/// evidence spike task, links it to the proposal, writes a `needs_evidence`
+/// debate entry, and records a `refinement_awaiting_evidence_started`
+/// lifecycle event.
 #[derive(Serialize, Deserialize, Clone, schemars::JsonSchema)]
 pub struct NeedsEvidenceDemandResult {
     /// The recorded needs-evidence claim question.
     pub claim: String,
-    /// The spike task id (UUID) once linked. `None` until spike creation is
-    /// wired in a subsequent task.
+    /// The spike task id (UUID) created for this demand. Present when the
+    /// demand was accepted and the spike was successfully linked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spike_task_id: Option<String>,
     /// The pre-refinement snapshot revision seq the demand targets.

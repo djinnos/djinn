@@ -2040,6 +2040,52 @@ impl ProposalRepository {
             .await
     }
 
+    /// Try to atomically link a spike to the proposal only when no existing
+    /// spike is linked (`linked_spike_task_id IS NULL`).
+    ///
+    /// Returns `Some(proposal)` when the link succeeded, or `None` when
+    /// the proposal already has an existing linked spike (the row is
+    /// unchanged). This is the race-safe path for concurrent demand
+    /// attempts: at most one caller can win the IS NULL guard.
+    pub async fn try_set_structured_needs_evidence_spike(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        claim: &NeedsEvidenceClaim,
+    ) -> Result<Option<Proposal>> {
+        self.db.ensure_initialized().await?;
+        let json = serde_json::to_string(claim).map_err(|e| {
+            Error::InvalidData(format!("failed to serialize NeedsEvidenceClaim: {e}"))
+        })?;
+        let result = sqlx::query(
+            r#"UPDATE proposals SET
+                    status = 'draft',
+                    linked_spike_task_id = $1,
+                    needs_evidence_claim = $2,
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $3
+               AND linked_spike_task_id IS NULL"#,
+        )
+        .bind(spike_task_id)
+        .bind(&json)
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Either the proposal doesn't exist or it already has a linked
+            // spike. Read the proposal to distinguish and to return the
+            // current state.
+            let proposal = self.get(proposal_id).await?;
+            return Ok(proposal); // Some with existing spike, or None if deleted
+        }
+
+        let proposal = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&proposal));
+        Ok(Some(proposal))
+    }
+
     /// Clear the needs-evidence spike linkage after the spike closes and
     /// refinement resumes. Emits a `proposal_updated` event.
     pub async fn clear_needs_evidence_spike(&self, proposal_id: &str) -> Result<Proposal> {

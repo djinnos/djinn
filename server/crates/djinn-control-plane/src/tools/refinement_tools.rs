@@ -22,8 +22,10 @@ use crate::tools::proposal_ops::{
     ProposalRefinementStatusModel, ProposalRefinementStatusResponse, VerdictOverrideResponse,
 };
 use djinn_core::models::NeedsEvidenceClaim;
-use djinn_db::ProposalRepository;
-use djinn_db::TaskRepository;
+use djinn_core::models::{TaskStatus, TransitionAction};
+use djinn_db::{
+    NeedsEvidenceClaimLink, ProposalDebateTrailCreateInput, ProposalRepository, TaskRepository,
+};
 
 fn err_refinement_start(error: impl Into<String>) -> ProposalRefinementStartResponse {
     ProposalRefinementStartResponse {
@@ -256,12 +258,13 @@ async fn validate_demand_evidence(
     proposal: &djinn_core::models::Proposal,
     refinement: &ProposalRefinementStatusModel,
     params: &ProposalRefinementDemandEvidenceParams,
-) -> Result<(), String> {
+) -> Result<String, String> {
     // 0. Caller must be the active Judge for this proposal's refinement run.
     //    This check runs before any state inspection so that non-Judge
     //    callers receive a typed authorization rejection before any
     //    proposal/task/debate/lifecycle mutation.
-    verify_active_judge_authorization(task_repo, &proposal.id).await?;
+    //    Returns the Judge task id on success.
+    let judge_task_id = verify_active_judge_authorization(task_repo, &proposal.id).await?;
 
     // 1. Terminal proposals cannot accept demands.
     if TERMINAL_PROPOSAL_STATUSES.contains(&proposal.status.as_str()) {
@@ -396,7 +399,7 @@ async fn validate_demand_evidence(
         ));
     }
 
-    Ok(())
+    Ok(judge_task_id)
 }
 
 // ── Tool router ──────────────────────────────────────────────────────────────
@@ -855,14 +858,21 @@ impl DjinnMcpServer {
     /// feasibility claim. The Judge calls this when in-session research is
     /// not enough to resolve a load-bearing claim in the spec.
     ///
-    /// Validates the proposal exists and is in refinement, checks the
-    /// per-run needs-evidence cap (Phase 1: max 2), records the structured
-    /// claim, and parks refinement until the spike findings arrive.
+    /// Validates the caller is the active Judge, the proposal is not terminal,
+    /// the refinement round/revision match, the question is falsifiable, the
+    /// spec anchor exists, and the per-run needs-evidence cap is not exhausted.
+    /// On acceptance: creates a single read-only evidence spike task (Architect
+    /// routing), writes a `needs_evidence` debate-trail entry with structured
+    /// `NeedsEvidenceClaimLink` metadata, links the spike to the proposal via
+    /// `set_structured_needs_evidence_spike`, parks the proposal, and writes a
+    /// `refinement_awaiting_evidence_started` lifecycle event.
     ///
-    /// Spike creation and linking are deferred to a subsequent task — this
-    /// tool records the demand and parks the proposal.
+    /// Race protection: concurrent valid demands cannot produce two open
+    /// spikes because `set_structured_needs_evidence_spike` atomically sets
+    /// `linked_spike_task_id` only when the column is NULL. The loser's
+    /// spike task is closed, and a conflict response is returned.
     #[tool(
-        description = "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Validates the proposal and refinement state, checks the per-run needs-evidence cap, records the structured claim, and parks refinement until spike findings arrive. Spike creation is wired in a subsequent task."
+        description = "Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim. Validates the proposal and refinement state, checks the per-run needs-evidence cap, records the structured claim, creates a linked read-only spike task for the Architect, writes a needs_evidence debate entry, and parks refinement until spike findings arrive."
     )]
     pub async fn proposal_refinement_demand_evidence(
         &self,
@@ -894,20 +904,23 @@ impl DjinnMcpServer {
         // Run the full validation gate before any mutation. This ensures
         // no-mutation-on-reject: no lifecycle events, no debate entries, no
         // proposal fields are touched when the demand is invalid.
-        if let Err(e) =
-            validate_demand_evidence(&repo, &task_repo, &proposal, &refinement, &p).await
-        {
-            return Json(NeedsEvidenceDemandResponse {
-                proposal_id: Some(proposal.id),
-                accepted: false,
-                result: None,
-                error: Some(e),
-            });
-        }
+        // Returns the Judge task id on success.
+        let judge_task_id =
+            match validate_demand_evidence(&repo, &task_repo, &proposal, &refinement, &p).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return Json(NeedsEvidenceDemandResponse {
+                        proposal_id: Some(proposal.id),
+                        accepted: false,
+                        result: None,
+                        error: Some(e),
+                    });
+                }
+            };
 
         // Build the structured claim for persistence. The claim JSON is stored
-        // on the proposal alongside the spike task id (wired in a later task).
-        let claim = djinn_core::models::NeedsEvidenceClaim {
+        // on the proposal alongside the spike task id.
+        let claim = NeedsEvidenceClaim {
             question: p.question.clone(),
             target_subsystem: p.target_subsystem.clone(),
             spec_unknown_anchor: p.spec_unknown_anchor.clone(),
@@ -915,35 +928,217 @@ impl DjinnMcpServer {
             expected_findings: p.expected_findings.clone(),
             round: p.round,
             against_revision_seq: p.against_revision_seq,
-            created_by_task_id: djinn_core::auth_context::current_user_id().unwrap_or_default(),
+            created_by_task_id: judge_task_id.clone(),
         };
 
-        // Record the demand as a lifecycle event.
-        let demand_metadata = serde_json::json!({
-            "source": "judge_demand_evidence",
-            "round": p.round,
-            "against_revision_seq": p.against_revision_seq,
-            "question": p.question,
-            "target_subsystem": p.target_subsystem,
-            "spec_unknown_anchor": p.spec_unknown_anchor,
-            "insufficient_in_session_research": p.insufficient_in_session_research,
-            "expected_findings": p.expected_findings,
-        });
+        // ── Step 1: Resolve project_id for the spike task ────────────────
+        let project_id = match repo.targets(&proposal.id).await {
+            Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
+            _ => {
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(
+                        "proposal has no target project; cannot create evidence spike task"
+                            .to_string(),
+                    ),
+                });
+            }
+        };
 
-        if let Err(e) = repo
-            .record_refinement_lifecycle(
-                &proposal.id,
-                "refinement_demand_evidence",
-                Some(&demand_metadata),
+        // ── Step 2: Create the evidence spike task ───────────────────────
+        let spike_title = format!("Evidence spike: {}", p.question.trim());
+        let spike_description = format!(
+            "## Evidence Spike\n\n\
+             **Proposal:** {proposal_id} (short_id: {short_id})\n\
+             **Question:** {question}\n\
+             **Target subsystem:** {target_subsystem}\n\
+             **Spec unknown anchor:** {spec_unknown_anchor}\n\
+             **Insufficiency rationale:** {insufficiency}\n\
+             **Expected findings:** {expected_findings}\n\n\
+             ### Read-Only Constraints\n\n\
+             This is a **read-only** evidence investigation. The spike must:\n\
+             - Only read and analyze existing code, docs, and specs.\n\
+             - NOT modify, create, or delete any production files.\n\
+             - Produce structured findings as evidence for the Judge.\n\
+             - Return findings via the evidence_findings debate-trail entry.",
+            proposal_id = proposal.id,
+            short_id = proposal.short_id,
+            question = p.question.trim(),
+            target_subsystem = p.target_subsystem.trim(),
+            spec_unknown_anchor = p.spec_unknown_anchor.trim(),
+            insufficiency = p.insufficient_in_session_research.trim(),
+            expected_findings = p.expected_findings.trim(),
+        );
+
+        let labels = vec![
+            "refinement-evidence".to_string(),
+            "read-only".to_string(),
+            format!("proposal:{}", proposal.short_id),
+        ];
+
+        let spike_task = match task_repo
+            .create_in_project(
+                &project_id,
+                None, // no epic parent
+                &spike_title,
+                &spike_description,
+                "", // no design field
+                "spike",
+                0,  // default priority
+                "", // no owner
+                Some("open"),
+                None, // no acceptance criteria
             )
             .await
         {
+            Ok(task) => task,
+            Err(e) => {
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(format!("failed to create evidence spike task: {e}")),
+                });
+            }
+        };
+
+        // Set labels on the spike task.
+        if let Err(e) = task_repo
+            .update_labels(
+                &spike_task.id,
+                &serde_json::to_string(&labels).unwrap_or_else(|_| "[]".into()),
+            )
+            .await
+        {
+            // Best-effort: log but don't fail the entire demand.
+            tracing::warn!(
+                spike_task_id = %spike_task.id,
+                error = %e,
+                "failed to set labels on evidence spike task"
+            );
+        }
+
+        // Set agent_type = "architect" for Architect routing.
+        if let Err(e) = task_repo
+            .update_agent_type(&spike_task.id, Some("architect"))
+            .await
+        {
+            tracing::warn!(
+                spike_task_id = %spike_task.id,
+                error = %e,
+                "failed to set agent_type on evidence spike task"
+            );
+        }
+
+        // ── Step 3: Write needs_evidence debate-trail entry ──────────────
+        let claim_link = NeedsEvidenceClaimLink::from_claim(&proposal.id, &spike_task.id, &claim);
+        let claim_link_value = claim_link.to_value();
+
+        if let Err(e) = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "needs_evidence",
+                body: &p.question,
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&judge_task_id),
+                against_revision_seq: p.against_revision_seq,
+                round: p.round,
+                body_metadata: Some(&claim_link_value),
+            })
+            .await
+        {
+            // Clean up the spike task on failure.
+            let _ = task_repo.delete(&spike_task.id).await;
             return Json(NeedsEvidenceDemandResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
                 result: None,
-                error: Some(format!("failed to record demand-evidence event: {e}")),
+                error: Some(format!("failed to record needs_evidence debate entry: {e}")),
             });
+        }
+
+        // ── Step 4: Link spike to proposal (race-safe atomic) ─────────
+        //
+        // `try_set_structured_needs_evidence_spike` atomically sets
+        // `linked_spike_task_id` and `needs_evidence_claim` only when
+        // `linked_spike_task_id IS NULL`. Returns `None` when a
+        // concurrent demand already won the race.
+        let link_result = repo
+            .try_set_structured_needs_evidence_spike(&proposal.id, &spike_task.id, &claim)
+            .await;
+
+        match link_result {
+            Ok(Some(_updated_proposal)) => {
+                // We won the race — the spike is linked to the proposal.
+            }
+            Ok(None) => {
+                // A concurrent demand already linked a spike (or the
+                // proposal was deleted). Clean up our spike and report
+                // the conflict.
+                let _ = task_repo
+                    .transition(
+                        &spike_task.id,
+                        TransitionAction::ForceClose,
+                        "system",
+                        "system",
+                        Some("duplicate demand; superseded"),
+                        Some(TaskStatus::Closed),
+                    )
+                    .await;
+                // Re-read to get the winner's spike id for the error.
+                let winner_id = repo
+                    .get(&proposal.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.linked_spike_task_id.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(format!(
+                        "proposal already has an open linked evidence spike ({}); \
+                         concurrent demand was rejected",
+                        winner_id
+                    )),
+                });
+            }
+            Err(e) => {
+                // The atomic UPDATE failed — likely a DB error. Clean up.
+                let _ = task_repo.delete(&spike_task.id).await;
+                return Json(NeedsEvidenceDemandResponse {
+                    proposal_id: Some(proposal.id),
+                    accepted: false,
+                    result: None,
+                    error: Some(format!("failed to link evidence spike to proposal: {e}")),
+                });
+            }
+        }
+
+        // ── Step 5: Record refinement_awaiting_evidence_started lifecycle ─
+        if let Err(e) = repo
+            .record_awaiting_evidence_started(
+                &proposal.id,
+                &spike_task.id,
+                &judge_task_id,
+                p.round,
+                p.against_revision_seq,
+            )
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal.id,
+                spike_task_id = %spike_task.id,
+                error = %e,
+                "failed to record refinement_awaiting_evidence_started lifecycle event; \
+                 spike is linked but lifecycle event is missing"
+            );
         }
 
         Json(NeedsEvidenceDemandResponse {
@@ -951,7 +1146,7 @@ impl DjinnMcpServer {
             accepted: true,
             result: Some(NeedsEvidenceDemandResult {
                 claim: claim.question.clone(),
-                spike_task_id: None, // Wired in a subsequent task.
+                spike_task_id: Some(spike_task.id.clone()),
                 against_revision_seq: p.against_revision_seq,
                 round: p.round,
             }),
