@@ -19,28 +19,15 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
 
-/// PR E2 feature flag: comma-separated list of role names (matching
-/// `RoleConfig::name`) that opt-in to auto-injected `code_graph context`
-/// summaries. Empty / unset → no roles get auto-injection.
-///
-/// Retained here for agent-side tests that toggle this env var; the canonical
-/// implementation (and its own copy of this constant) lives in `djinn-slot`.
-///
-/// Example: `DJINN_AUTO_CODE_CONTEXT_ROLES=worker,reviewer`.
-#[cfg(test)]
-pub(crate) const AUTO_CODE_CONTEXT_ROLES_ENV: &str = "DJINN_AUTO_CODE_CONTEXT_ROLES";
-
 mod code_context;
 mod feedback;
 pub mod provider_resolution;
 mod reviewer_diff;
 
-// Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose: the lock
-// serializes env-var mutation (set/remove) for the duration of each async test
-// so concurrent tests cannot race the shared process env. Deliberate test-only
-// guard, not a production async-lock concern.
+// b7pe: code-context and reviewer-diff tests now live canonically in
+// `djinn-slot/src/helpers/tests.rs`.  This module is retained for future
+// host-only adapter tests.
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
 mod tests;
 
 #[allow(unused_imports)]
