@@ -253,12 +253,42 @@ fn reviewer_stage_outcome(
     };
     match finalize_name {
         "submit_review" => {
+            // Did the reviewer mark EVERY acceptance criterion met? `None` when
+            // the payload carried no criteria array (can't assert either way).
+            // submit_review sets AC met/unmet state atomically, so this array is
+            // the reviewer's own structured verdict on the objective
+            // definition-of-done — not feedback prose.
+            let all_criteria_met = finalize_payload
+                .and_then(|p| p.get("acceptance_criteria"))
+                .and_then(|v| v.as_array())
+                .filter(|arr| !arr.is_empty())
+                .map(|arr| {
+                    arr.iter()
+                        .all(|c| c.get("met").and_then(|m| m.as_bool()).unwrap_or(false))
+                });
             // Accept both present-tense ("approve"/"reject") and past-tense
             // ("approved"/"rejected") forms — gpt-5.x consistently emits
             // past-tense in the submit_review payload, which previously fell
             // through to the "Failed" arm and broke open_pr for every review.
             match payload_str("verdict").unwrap_or("") {
                 "approve" | "approved" => StageOutcome::ReviewerApproved,
+                // Self-contradictory verdict: `rejected` while EVERY acceptance
+                // criterion is marked met. The objective definition-of-done is
+                // satisfied, yet a reject bounces the task to `open` (+reopen),
+                // cycling it into planner escalation (observed 2026-07-01: task
+                // 55i8 — reviewer wrote "acceptable ... does not block the P0
+                // epic" but emitted `rejected`, looping the task). Resolve in
+                // favor of the AC contract and approve. A genuine blocker must be
+                // expressed by marking at least one criterion unmet (which keeps
+                // the reject). Keys on the structured AC-met array, not prose.
+                "reject" | "rejected" if all_criteria_met == Some(true) => {
+                    tracing::warn!(
+                        feedback = payload_str("feedback").unwrap_or(""),
+                        "reviewer submitted `rejected` with all acceptance criteria marked met; \
+                         treating as approved (a reject must mark at least one criterion unmet)"
+                    );
+                    StageOutcome::ReviewerApproved
+                }
                 "reject" | "rejected" => StageOutcome::ReviewerRejected {
                     feedback: payload_str("feedback").unwrap_or("").to_string(),
                 },
@@ -1357,6 +1387,51 @@ mod tests {
                 StageOutcome::ReviewerRejected { feedback } if feedback == "regression"
             ),
             "past-tense 'rejected' must also map to ReviewerRejected",
+        );
+    }
+
+    #[test]
+    fn reviewer_reject_with_all_criteria_met_is_coerced_to_approve() {
+        // Regression (2026-07-01, task 55i8): a reviewer that marks every
+        // acceptance criterion met but emits `rejected` is self-contradictory —
+        // it bounced the task to `open` (+reopen) and cycled it into planner
+        // escalation. Such a verdict must be treated as an approval, keyed on the
+        // structured AC-met array (not feedback prose).
+        let contradictory = serde_json::json!({
+            "verdict": "rejected",
+            "feedback": "this submission is acceptable as it stands and does not block the P0 epic",
+            "acceptance_criteria": [
+                {"criterion": "a", "met": true},
+                {"criterion": "b", "met": true},
+            ],
+        });
+        assert!(
+            matches!(
+                reviewer_stage_outcome("submit_review", Some(&contradictory)),
+                StageOutcome::ReviewerApproved
+            ),
+            "a `rejected` verdict with all criteria met must be coerced to approve, not reopen the task",
+        );
+    }
+
+    #[test]
+    fn reviewer_reject_with_an_unmet_criterion_still_rejects() {
+        // A genuine blocker is expressed by marking at least one criterion unmet;
+        // that must keep the reject (and its feedback) intact.
+        let genuine = serde_json::json!({
+            "verdict": "rejected",
+            "feedback": "criterion b not covered",
+            "acceptance_criteria": [
+                {"criterion": "a", "met": true},
+                {"criterion": "b", "met": false},
+            ],
+        });
+        assert!(
+            matches!(
+                reviewer_stage_outcome("submit_review", Some(&genuine)),
+                StageOutcome::ReviewerRejected { feedback } if feedback == "criterion b not covered"
+            ),
+            "a reject with an unmet criterion must still reject",
         );
     }
 
