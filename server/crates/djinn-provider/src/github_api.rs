@@ -49,9 +49,10 @@ pub use refresh::{DbBackedRefresher, NoRefresh, UserTokenRefresh};
 pub use transport::UserTokenExpired;
 pub use types::{
     ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
-    CreatePrParams, DequeueEvent, GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState,
-    PrFile, PrMergeQueueState, PrRef, PrReview, PrReviewFeedback, PrState, PullRequest,
-    ReproductionJob, ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
+    CiFailureContextBundle, CiFailureContextRequest, CiSetupStep, CreatePrParams, DequeueEvent,
+    GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrFile, PrMergeQueueState,
+    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReproductionJob,
+    ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
     RequiredCheckReproductionContext, RequiredCheckUnreproducible,
     RequiredCheckUnreproducibleReason, ReviewComment,
 };
