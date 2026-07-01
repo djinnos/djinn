@@ -1244,16 +1244,6 @@ async fn dispatch(
             let result = services.transition_task(task_id, action, reason).await;
             ServiceRpcResponse::TransitionTask(result)
         }
-        ServiceRpcRequest::CheckLocalGatesForReview {
-            task_id,
-            workspace_path,
-            task_branch,
-        } => {
-            let result = services
-                .check_local_gates_for_review(task_id, workspace_path, task_branch)
-                .await;
-            ServiceRpcResponse::CheckLocalGatesForReview(result)
-        }
     }
 }
 

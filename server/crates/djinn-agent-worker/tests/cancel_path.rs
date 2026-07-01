@@ -327,9 +327,6 @@ async fn start_fake_server(
                         ServiceRpcRequest::TransitionTask { .. } => {
                             ServiceRpcResponse::TransitionTask(Ok(()))
                         }
-                        ServiceRpcRequest::CheckLocalGatesForReview { .. } => {
-                            ServiceRpcResponse::CheckLocalGatesForReview(Ok(()))
-                        }
                     };
                     let reply = Frame {
                         correlation_id,
