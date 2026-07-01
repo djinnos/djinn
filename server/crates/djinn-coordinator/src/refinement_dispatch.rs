@@ -24,6 +24,7 @@
 
 use std::time::{Duration, Instant as StdInstant};
 
+use super::evidence_lifecycle_state::EvidenceLifecycleState;
 use super::refinement::{RefinementPhase, StopReason};
 
 use super::actor::CoordinatorActor;
@@ -242,6 +243,73 @@ impl CoordinatorActor {
                 proposal_id = %proposal_id,
                 phase = ?phase,
                 "Refinement dispatch deferred by administrative dispatch pause"
+            );
+            return;
+        }
+
+        // ── Evidence lifecycle state gate ──────────────────────────────────
+        //
+        // Consult the derived evidence lifecycle state from persisted data
+        // (proposal fields, lifecycle events, spike task status) before
+        // creating any Adversary, Advocate, or Judge tasks.  This is the
+        // authoritative check that catches EvidenceFailed, Terminal, and
+        // build_frozen states which the in-memory phase checks above cannot
+        // detect — particularly after a coordinator restart where in-memory
+        // state is lost.
+        //
+        // The in-memory `AwaitingEvidence` and admin-dispause checks above
+        // serve as fast-path early returns that avoid DB reads when the
+        // in-memory state is already parked.
+        let lifecycle_proposal = self.load_proposal_for_lifecycle(proposal_id).await;
+        if let Some(ref proposal) = lifecycle_proposal {
+            let lifecycle_state = self.derive_proposal_evidence_lifecycle(proposal).await;
+            match lifecycle_state {
+                EvidenceLifecycleState::Active | EvidenceLifecycleState::EvidenceReady => {
+                    // Proceed to dispatch — either normal refinement or
+                    // evidence findings are available and dispatch is not
+                    // paused/frozen.
+                }
+                EvidenceLifecycleState::AwaitingEvidence => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        lifecycle_state = "awaiting_evidence",
+                        "Refinement dispatch skipped: evidence spike still running (persisted state gate)"
+                    );
+                    return;
+                }
+                EvidenceLifecycleState::EvidenceFailed => {
+                    tracing::warn!(
+                        proposal_id = %proposal_id,
+                        lifecycle_state = "evidence_failed",
+                        "Refinement dispatch skipped: evidence demand failed; refinement is blocked (persisted state gate)"
+                    );
+                    return;
+                }
+                EvidenceLifecycleState::PausedOrFrozen => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        lifecycle_state = "paused_or_frozen",
+                        build_frozen = proposal.build_frozen,
+                        "Refinement dispatch skipped: proposal is paused or build-frozen (persisted state gate)"
+                    );
+                    return;
+                }
+                EvidenceLifecycleState::Terminal => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        lifecycle_state = "terminal",
+                        proposal_status = %proposal.status,
+                        "Refinement dispatch skipped: proposal in terminal status (persisted state gate)"
+                    );
+                    return;
+                }
+            }
+        } else {
+            // Failed to load the proposal — fail closed: do not dispatch
+            // without the lifecycle check.
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                "Refinement dispatch skipped: could not load proposal for evidence lifecycle check (fail-closed)"
             );
             return;
         }
