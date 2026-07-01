@@ -37,6 +37,10 @@ use crate::local_gates::{
 use crate::task_merge::build_app_push_url;
 
 use super::disposition::{LiveMoverEvidence, NudgeHintEvidence, resolve_corrective_nudge_hint};
+use crate::ci_preflight_gate::{
+    CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,
+    run_ci_reproduction_preflight_gate,
+};
 
 /// Open (or adopt) a GitHub PR for the completed task-run.
 ///
@@ -271,6 +275,39 @@ pub async fn supervisor_pr_open(
         return outcome;
     }
 
+    let github_client = GitHubApiClient::for_installation(installation_id);
+
+    // ── Repo-derived required-CI reproduction preflight ─────────────────────
+    // Before letting a worker submit/open (or update) a PR for a task that is
+    // remediating currently/previously failing required checks, run the
+    // repo-derived failing Actions command locally. A reproduced failure blocks
+    // this submit attempt and records structured activity. Passing locally only
+    // allows the existing PR flow to continue; it does not declare GitHub CI
+    // green.
+    if let Some(workdir) = latest_task_workdir(&task.id, app_state.db.clone()).await {
+        match run_ci_reproduction_preflight_gate(
+            task,
+            &task_repo,
+            &github_client,
+            &owner,
+            &repo_name,
+            &workdir,
+            CiPreflightGateKind::WorkerSubmit,
+        )
+        .await
+        {
+            CiPreflightGateVerdict::Block { reason } => {
+                return TaskRunOutcome::Escalated { reason };
+            }
+            CiPreflightGateVerdict::Allow | CiPreflightGateVerdict::NotApplicable => {}
+        }
+    } else {
+        tracing::debug!(
+            task_id = %task.short_id,
+            "supervisor PR-open: no latest workspace path available; skipping CI reproduction preflight"
+        );
+    }
+
     let merge_result_commit_sha = head_sha;
 
     let pr_title = format!("{}({}): {}", commit_type, task.short_id, task.title);
@@ -280,7 +317,6 @@ pub async fn supervisor_pr_open(
         short_id = task.short_id,
     );
 
-    let github_client = GitHubApiClient::for_installation(installation_id);
     let head_ref = format!("{owner}:{}", spec.task_branch);
 
     let existing_pr = match github_client
