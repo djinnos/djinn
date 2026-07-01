@@ -12,6 +12,7 @@ use crate::context::CoordinatorContext;
 use djinn_provider::provider::LlmProvider;
 
 pub mod disposition;
+pub(crate) mod local_ci_gate;
 pub(crate) mod pr;
 
 pub use disposition::{

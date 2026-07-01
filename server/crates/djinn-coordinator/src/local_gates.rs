@@ -27,6 +27,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use djinn_provider::github_api::{
+    RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+};
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::truncate::{smart_truncate, smart_truncate_lines};
@@ -36,6 +40,201 @@ const OUTPUT_SUMMARY_MAX_BYTES: usize = 4_096;
 
 /// Maximum line count for a single stdout/stderr summary in a gate result.
 const OUTPUT_SUMMARY_MAX_LINES: usize = 50;
+
+/// Repo-derived required-check reproduction result persisted as task activity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum LocalGateResult {
+    ReproducedPass(LocalGateOutcome),
+    ReproducedFailure(LocalGateOutcome),
+    Unreproducible(LocalGateUnreproducible),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LocalGateOutcome {
+    pub required_check_name: String,
+    pub command: String,
+    pub exit_code: i32,
+    pub log_tail: String,
+    pub observed_head_sha: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LocalGateUnreproducible {
+    pub required_check_name: String,
+    pub observed_head_sha: String,
+    pub reason: LocalGateUnreproducibleReason,
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalGateUnreproducibleReason {
+    ProviderUnreproducible,
+    EmptyCommand,
+    SetupStepFailed,
+    CommandSpawnFailed,
+}
+
+pub(crate) fn unreproducible_results_for_checks(
+    check_names: &[String],
+    observed_head_sha: &str,
+    reason: LocalGateUnreproducibleReason,
+    details: Option<String>,
+) -> Vec<LocalGateResult> {
+    check_names
+        .iter()
+        .map(|check_name| {
+            LocalGateResult::Unreproducible(LocalGateUnreproducible {
+                required_check_name: check_name.clone(),
+                observed_head_sha: observed_head_sha.to_owned(),
+                reason: reason.clone(),
+                details: details.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Run repo-derived reproduction commands for required CI checks.
+pub(crate) async fn reproduce_ci_checks(
+    bundles: &[RequiredCheckReproduction],
+    repo_root: &Path,
+) -> Vec<LocalGateResult> {
+    let mut results = Vec::with_capacity(bundles.len());
+    for bundle in bundles {
+        results.push(match bundle {
+            RequiredCheckReproduction::Reproducible(context) => {
+                reproduce_one_ci_check(context, repo_root).await
+            }
+            RequiredCheckReproduction::Unreproducible(unreproducible) => {
+                provider_unreproducible_result(unreproducible)
+            }
+        });
+    }
+    results
+}
+
+async fn reproduce_one_ci_check(
+    context: &RequiredCheckReproductionContext,
+    repo_root: &Path,
+) -> LocalGateResult {
+    if context.command.trim().is_empty() {
+        return LocalGateResult::Unreproducible(LocalGateUnreproducible {
+            required_check_name: context.required_check_name.clone(),
+            observed_head_sha: context.observed_head_sha.clone(),
+            reason: LocalGateUnreproducibleReason::EmptyCommand,
+            details: Some("provider reproduction bundle had an empty command".to_owned()),
+        });
+    }
+
+    for setup in &context.setup_steps {
+        if setup.command.trim().is_empty() {
+            continue;
+        }
+        match run_repo_shell_command(repo_root, &setup.command).await {
+            Ok((0, _, _)) => {}
+            Ok((exit_code, stdout, stderr)) => {
+                return LocalGateResult::Unreproducible(LocalGateUnreproducible {
+                    required_check_name: context.required_check_name.clone(),
+                    observed_head_sha: context.observed_head_sha.clone(),
+                    reason: LocalGateUnreproducibleReason::SetupStepFailed,
+                    details: Some(format!(
+                        "setup step '{}' exited {}\n{}",
+                        setup.name,
+                        exit_code,
+                        summarize_reproduction_output(&stdout, &stderr, &context.log_tail)
+                    )),
+                });
+            }
+            Err(e) => {
+                return LocalGateResult::Unreproducible(LocalGateUnreproducible {
+                    required_check_name: context.required_check_name.clone(),
+                    observed_head_sha: context.observed_head_sha.clone(),
+                    reason: LocalGateUnreproducibleReason::CommandSpawnFailed,
+                    details: Some(format!("setup step '{}' could not run: {e}", setup.name)),
+                });
+            }
+        }
+    }
+
+    match run_repo_shell_command(repo_root, &context.command).await {
+        Ok((exit_code, stdout, stderr)) => {
+            let outcome = LocalGateOutcome {
+                required_check_name: context.required_check_name.clone(),
+                command: context.command.clone(),
+                exit_code,
+                log_tail: summarize_reproduction_output(&stdout, &stderr, &context.log_tail),
+                observed_head_sha: context.observed_head_sha.clone(),
+            };
+            if exit_code == 0 {
+                LocalGateResult::ReproducedPass(outcome)
+            } else {
+                LocalGateResult::ReproducedFailure(outcome)
+            }
+        }
+        Err(e) => LocalGateResult::Unreproducible(LocalGateUnreproducible {
+            required_check_name: context.required_check_name.clone(),
+            observed_head_sha: context.observed_head_sha.clone(),
+            reason: LocalGateUnreproducibleReason::CommandSpawnFailed,
+            details: Some(format!("reproduction command could not run: {e}")),
+        }),
+    }
+}
+
+async fn run_repo_shell_command(
+    repo_root: &Path,
+    command: &str,
+) -> std::io::Result<(i32, String, String)> {
+    let output = Command::new("bash")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(repo_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await?;
+    Ok((
+        output.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+fn provider_unreproducible_result(unreproducible: &RequiredCheckUnreproducible) -> LocalGateResult {
+    LocalGateResult::Unreproducible(LocalGateUnreproducible {
+        required_check_name: unreproducible.required_check_name.clone(),
+        observed_head_sha: unreproducible.observed_head_sha.clone(),
+        reason: LocalGateUnreproducibleReason::ProviderUnreproducible,
+        details: Some(format!(
+            "{:?}{}",
+            unreproducible.reason,
+            unreproducible
+                .details
+                .as_ref()
+                .map(|details| format!(" — {details}"))
+                .unwrap_or_default()
+        )),
+    })
+}
+
+fn summarize_reproduction_output(stdout: &str, stderr: &str, provider_log_tail: &str) -> String {
+    let mut combined = String::new();
+    if !stderr.trim().is_empty() {
+        combined.push_str(stderr.trim());
+    }
+    if !stdout.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(stdout.trim());
+    }
+    if combined.is_empty() {
+        combined.push_str(provider_log_tail.trim());
+    }
+    summarize_output(&combined)
+}
 
 // ── Applicability / severity ──────────────────────────────────────────────────
 

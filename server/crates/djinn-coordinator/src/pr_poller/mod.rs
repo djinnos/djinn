@@ -74,6 +74,7 @@ const REVIEW_STUCK_WINDOW_MINUTES: i64 = 10;
 mod ci_helpers;
 mod conversation_resolution;
 mod installation;
+mod local_ci_gate;
 pub(crate) mod pr_cleanup;
 mod pr_commands;
 mod pr_review_handlers;
