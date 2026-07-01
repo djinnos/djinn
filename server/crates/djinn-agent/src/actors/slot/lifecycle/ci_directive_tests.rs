@@ -213,11 +213,14 @@ async fn task_with_structured_red_ci_and_audit_activity(
 
     // Ordinary CI audit prose intentionally contains distinct fake values. The
     // promoted directive must not scrape these comments to find job/reason/head.
+    // Using actor_role="verification" so these entries are included in
+    // recent_feedback and appear in activity_text (the "system" role is filtered
+    // out by the high-signal comment filter).
     task_repo
         .log_activity(
             Some(&task.id),
-            "system",
-            "system",
+            "verification",
+            "verification",
             "comment",
             r#"{"body":"CI audit: required check failed. job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used"}"#,
         )
@@ -226,8 +229,8 @@ async fn task_with_structured_red_ci_and_audit_activity(
     task_repo
         .log_activity(
             Some(&task.id),
-            "system",
-            "system",
+            "verification",
+            "verification",
             "comment",
             r#"{"body":"CI audit repeat: job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used"}"#,
         )
