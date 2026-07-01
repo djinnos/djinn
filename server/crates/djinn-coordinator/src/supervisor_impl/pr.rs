@@ -213,24 +213,6 @@ pub async fn supervisor_pr_open(
     };
     let message = format!("{}({}): {}", commit_type, task.short_id, task.title);
 
-    // ── Local gate pre-flight ────────────────────────────────────────────────
-    // Run required deterministic local gates (size-guard, rustfmt, clippy,
-    // tests) from the task branch workspace before pushing to GitHub.  A
-    // failing required gate blocks the PR-open path, keeps the task in
-    // remediation, and records structured activity — so GitHub never sees a
-    // commit that would fail a deterministic required check.
-    //
-    // The check is SHA-aware: if a `local_gate_block` activity was already
-    // recorded for the same commit SHA, the gates are skipped (the block is
-    // durable until a new commit changes the code).  This prevents the
-    // approved→open→approved→… re-dispatch loop from re-running gates on
-    // every tick.
-    if let Some(outcome) =
-        check_local_gates_before_pr(task, mirror.as_ref(), &task_repo, &spec.task_branch).await
-    {
-        return outcome;
-    }
-
     // Push the worker's task_branch from the mirror to the GitHub remote
     // so the PR's head ref exists. We deliberately do NOT call
     // squash_merge_via_mirror here — it pushes the squashed commit directly
@@ -989,20 +971,6 @@ pub(super) async fn close_noop(
         reason: reason.to_string(),
     }
 }
-
-// ── Local gate pre-flight ────────────────────────────────────────────────────
-// Extracted into `pr_local_gates` to stay under the server-size-guard limit.
-
-#[path = "pr_local_gates.rs"]
-mod pr_local_gates;
-
-use pr_local_gates::check_local_gates_before_pr;
-
-#[cfg(test)]
-use pr_local_gates::{
-    LOCAL_GATE_BLOCK_EVENT, format_local_gate_block_comment, gate_result_to_detail_json,
-    truncate_for_comment,
-};
 
 /// Event type emitted when a submit/PR-open attempt is rejected because the
 /// post-session PR head SHA is unchanged from the durable red-CI remediation
