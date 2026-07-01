@@ -5,10 +5,7 @@ use djinn_orchestration_types::slot::{MERGE_CONFLICT_PREFIX, MergeConflictMetada
 /// Return the most recent N high-signal comments (lead, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
 /// Each entry is formatted as "**Label:** body".
-pub(crate) fn recent_feedback(
-    activity: &[djinn_core::models::ActivityEntry],
-    max: usize,
-) -> Vec<String> {
+pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usize) -> Vec<String> {
     let high_signal: Vec<&djinn_core::models::ActivityEntry> = activity
         .iter()
         .rev()
@@ -52,7 +49,7 @@ pub(crate) fn recent_feedback(
 /// reviewer sees why the worker made certain changes.
 ///
 /// Returns `(worker_summary, worker_concerns)`.
-pub(crate) fn extract_worker_context(
+pub fn extract_worker_context(
     activity: &Option<Vec<djinn_core::models::ActivityEntry>>,
 ) -> (Option<String>, Option<String>) {
     let Some(entries) = activity else {
@@ -104,10 +101,7 @@ pub(crate) fn extract_worker_context(
 /// what to fix.
 ///
 /// Returns `None` when no PR review feedback exists for the task.
-pub(crate) async fn pr_review_feedback_context(
-    task_id: &str,
-    app_state: &SlotContext,
-) -> Option<String> {
+pub async fn pr_review_feedback_context(task_id: &str, app_state: &SlotContext) -> Option<String> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let entries = repo
         .query_activity(ActivityQuery {
@@ -222,9 +216,7 @@ pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
 }
 
 /// Format command specs as `- **name**: \`command\`` for display in prompts.
-pub(crate) fn format_command_details(
-    specs: &[djinn_core::commands::CommandSpec],
-) -> Option<String> {
+pub fn format_command_details(specs: &[djinn_core::commands::CommandSpec]) -> Option<String> {
     if specs.is_empty() {
         return None;
     }
@@ -237,7 +229,7 @@ pub(crate) fn format_command_details(
     )
 }
 
-pub(crate) fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
+pub fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
     let project = Path::new(project_path);
     let worktree_git = worktree_path.join(".git");
     format!(
@@ -251,7 +243,7 @@ pub(crate) fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -
     )
 }
 
-pub(crate) fn runtime_env_diagnostics(
+pub fn runtime_env_diagnostics(
     session_id: &str,
     project_path: &str,
     worktree_path: &Path,
@@ -286,7 +278,7 @@ pub(crate) fn runtime_env_diagnostics(
 
 // ─── Task / project helpers ───────────────────────────────────────────────────
 
-pub(crate) async fn load_task(task_id: &str, app_state: &SlotContext) -> anyhow::Result<Task> {
+pub async fn load_task(task_id: &str, app_state: &SlotContext) -> anyhow::Result<Task> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = repo
         .get(task_id)
@@ -295,7 +287,7 @@ pub(crate) async fn load_task(task_id: &str, app_state: &SlotContext) -> anyhow:
     task.ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))
 }
 
-pub(crate) async fn default_target_branch(project_id: &str, app_state: &SlotContext) -> String {
+pub async fn default_target_branch(project_id: &str, app_state: &SlotContext) -> String {
     let repo = ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Ok(Some(config)) = repo.get_config(project_id).await {
         return config.target_branch;
@@ -332,7 +324,7 @@ async fn last_review_rejection_reason(task_id: &str, app_state: &SlotContext) ->
     )
 }
 
-pub(crate) async fn conflict_context_for_dispatch(
+pub async fn conflict_context_for_dispatch(
     task_id: &str,
     app_state: &SlotContext,
 ) -> Option<MergeConflictMetadata> {
@@ -359,7 +351,7 @@ pub(crate) async fn conflict_context_for_dispatch(
         .and_then(|e| serde_json::from_str(&e.payload).ok())
 }
 
-pub(crate) fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
+pub fn parse_conflict_metadata(reason: &str) -> Option<MergeConflictMetadata> {
     let raw = reason.strip_prefix(MERGE_CONFLICT_PREFIX)?;
     serde_json::from_str(raw).ok()
 }
@@ -371,13 +363,13 @@ const MAX_COMBINED_SECTION_CHARS: usize = 3000;
 /// Total char budget shared by the two sections (reviewer feedback + CI
 /// feedback) of the COMBINED rework brief. Sized so a worker turn carries
 /// actionable detail from both sources without an unbounded payload.
-pub(crate) const COMBINED_BRIEF_TOTAL_CHARS: usize = 14_000;
+pub const COMBINED_BRIEF_TOTAL_CHARS: usize = 14_000;
 
 /// Guaranteed floor each section keeps when BOTH are present in the combined
 /// brief, so a huge blob in one source can never fully starve the other. The
 /// budget above the two floors is shared; whatever a small section doesn't use
 /// is lent to the large one (up to the full total).
-pub(crate) const COMBINED_BRIEF_SECTION_FLOOR_CHARS: usize = 3000;
+pub const COMBINED_BRIEF_SECTION_FLOOR_CHARS: usize = 3000;
 
 /// Fairly split `COMBINED_BRIEF_TOTAL_CHARS` between the reviewer section and
 /// the CI section, then `smart_truncate` each to its allotment.
@@ -392,7 +384,7 @@ pub(crate) const COMBINED_BRIEF_SECTION_FLOOR_CHARS: usize = 3000;
 ///
 /// Returns `(reviewer_out, ci_out)`, each already truncated with a clear
 /// `[truncated …]` marker (via `smart_truncate`) when it exceeded its budget.
-pub(crate) fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
+pub fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
     let total = COMBINED_BRIEF_TOTAL_CHARS;
     let floor = COMBINED_BRIEF_SECTION_FLOOR_CHARS.min(total / 2);
 
@@ -442,7 +434,7 @@ pub(crate) fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, Str
 ///
 /// Returns the comment body, or `None` when there's no in-cycle CI/verification
 /// comment.
-pub(crate) fn raw_ci_feedback_in_cycle(
+pub fn raw_ci_feedback_in_cycle(
     activity: &[djinn_core::models::ActivityEntry],
     not_before: Option<&str>,
 ) -> Option<String> {
@@ -475,10 +467,7 @@ pub(crate) fn raw_ci_feedback_in_cycle(
 /// changes AND required checks are red), both are combined into a single
 /// "address all of the following in one pass" directive so the worker fixes
 /// everything at once instead of one source per rework cycle.
-pub(crate) async fn initial_user_message_for_task(
-    task_id: &str,
-    app_state: &SlotContext,
-) -> String {
+pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContext) -> String {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
 
