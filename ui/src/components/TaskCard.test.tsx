@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { TaskCard } from "./TaskCard";
 import { render, screen } from "@/test/test-utils";
-import { mockTaskA, mockCiPassing, mockCiPending, mockCiFailing, mockCiUnknown } from "@/test/fixtures";
+import { mockTaskA, mockCiPassing, mockCiPending, mockCiFailing, mockCiUnknown, mockCiAdvisoryFailure } from "@/test/fixtures";
 
 describe("TaskCard", () => {
   it("renders title, short_id, status badge, priority, labels, and AC count", () => {
@@ -72,6 +72,21 @@ describe("TaskCard", () => {
     expect(badge).toHaveTextContent("CI: pending");
   });
 
+  it("renders derived awaiting_ci gate state from structured API fields", () => {
+    render(
+      <TaskCard
+        task={{
+          ...mockTaskA,
+          id: "task-ci-awaiting",
+          short_id: "caw",
+          ci: { ...mockCiPending, gate_state: "awaiting_ci" },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("taskcard-ci-badge")).toHaveTextContent("CI: awaiting_ci");
+  });
+
   it("renders CI: failing badge with blocking check names from structured fields", () => {
     const task = {
       ...mockTaskA,
@@ -84,10 +99,26 @@ describe("TaskCard", () => {
 
     const badge = screen.getByTestId("taskcard-ci-badge");
     expect(badge).toHaveTextContent("CI: failing");
-    expect(badge).toHaveTextContent("lint");
+    expect(badge).toHaveTextContent("Quality Gate");
     expect(badge).toHaveTextContent("+1");
     // title attribute shows blocking details
-    expect(badge).toHaveAttribute("title", expect.stringContaining("lint"));
+    expect(badge).toHaveAttribute("title", expect.stringContaining("Blocked by failing required check: Quality Gate"));
+  });
+
+  it("renders closed tasks with required red CI as still blocked by the structured CI reason", () => {
+    render(<TaskCard task={{ ...mockTaskA, id: "task-closed-red-ci", status: "closed", ci: mockCiFailing }} />);
+
+    const badge = screen.getByTestId("taskcard-ci-badge");
+    expect(badge).toHaveTextContent("CI: failing");
+    expect(badge).toHaveAttribute("title", expect.stringContaining("Quality Gate"));
+  });
+
+  it("renders advisory/non-required failures as non-blocking when required CI is passing", () => {
+    render(<TaskCard task={{ ...mockTaskA, id: "task-advisory-ci", ci: mockCiAdvisoryFailure }} />);
+
+    const badge = screen.getByTestId("taskcard-ci-badge");
+    expect(badge).toHaveTextContent("CI: passing");
+    expect(badge).not.toHaveAttribute("title");
   });
 
   it("renders CI: unknown badge when ci status is unknown", () => {
