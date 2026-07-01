@@ -530,6 +530,44 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // ── Repo-derived required-CI reproduction pre-approval gate ─────
+            // Before auto-approving, and before acting on an existing human
+            // approval by moving toward merge, re-run the repo-derived failing
+            // required-check command for any currently/previously failing
+            // durable CI snapshot. A reproduced local failure blocks this tick;
+            // a local pass merely allows the existing review/merge flow to
+            // continue and does not override GitHub CI lifecycle gates.
+            if let Some(workdir) = latest_task_workdir(&task.id, self.db.clone()).await {
+                match run_ci_reproduction_preflight_gate(
+                    &task,
+                    &self.task_repo(),
+                    gh_client,
+                    &owner,
+                    &repo,
+                    &workdir,
+                    CiPreflightGateKind::ReviewerApprove,
+                )
+                .await
+                {
+                    CiPreflightGateVerdict::Block { reason } => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            reason = %reason,
+                            "PR poller: reviewer approval blocked by reproduced required-CI failure"
+                        );
+                        continue;
+                    }
+                    CiPreflightGateVerdict::Allow | CiPreflightGateVerdict::NotApplicable => {}
+                }
+            } else {
+                tracing::debug!(
+                    task_id = %task.short_id,
+                    pr = pull_number,
+                    "PR poller: no latest workspace path available; skipping reviewer CI reproduction preflight"
+                );
+            }
+
             // ── Auto-approve (per-user opt-in, with fallback approver) ────────
             // When some user has `auto_approve_prs=true` and we have their
             // live GitHub session token, POST an APPROVE review using their
