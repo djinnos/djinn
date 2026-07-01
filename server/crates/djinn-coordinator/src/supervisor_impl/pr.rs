@@ -1110,12 +1110,12 @@ pub(crate) async fn check_unchanged_remediation_head(
 pub(crate) const LOCAL_CI_GATE_EVENT: &str = "local_ci_gate_result";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LocalGateBlockKind {
+pub(crate) enum LocalGateBlockKind {
     ReproducedFailure,
     Unreproducible,
 }
 
-pub(super) fn local_gate_block_kind(results: &[LocalGateResult]) -> Option<LocalGateBlockKind> {
+pub(crate) fn local_gate_block_kind(results: &[LocalGateResult]) -> Option<LocalGateBlockKind> {
     if results
         .iter()
         .any(|result| matches!(result, LocalGateResult::Unreproducible(_)))
@@ -1200,7 +1200,7 @@ async fn run_required_ci_local_gate_before_pr_open(
     }
 }
 
-fn implicated_required_check_names(task: &djinn_core::models::Task) -> Vec<String> {
+pub(crate) fn implicated_required_check_names(task: &djinn_core::models::Task) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(&task.ci_blocking_required_check_names)
         .unwrap_or_default()
         .into_iter()
@@ -1208,7 +1208,7 @@ fn implicated_required_check_names(task: &djinn_core::models::Task) -> Vec<Strin
         .collect()
 }
 
-async fn persist_local_gate_results(
+pub(crate) async fn persist_local_gate_results(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
     results: &[LocalGateResult],
@@ -1239,7 +1239,7 @@ async fn persist_local_gate_results(
     }
 }
 
-async fn route_local_gate_block(
+pub(crate) async fn route_local_gate_block(
     task: &djinn_core::models::Task,
     task_repo: &TaskRepository,
     results: &[LocalGateResult],
@@ -1303,7 +1303,7 @@ async fn route_local_gate_block(
     TaskRunOutcome::Escalated { reason }
 }
 
-pub(super) fn local_gate_block_reason(
+pub(crate) fn local_gate_block_reason(
     kind: LocalGateBlockKind,
     results: &[LocalGateResult],
 ) -> String {

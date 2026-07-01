@@ -530,6 +530,31 @@ impl CoordinatorActor {
                 continue;
             }
 
+            // ── Repo-derived local CI gate (pre-approve) ───────────────────
+            // Before auto-approving or merging, reproduce implicated required
+            // CI checks locally using the repo-derived command from the
+            // provider bundle. A reproduced failure blocks approval; an
+            // unreproducible check routes to lead/human intervention and is
+            // never treated as passing.
+            if let Some(()) = self
+                .run_local_gate_before_reviewer_approval(
+                    &task,
+                    gh_client,
+                    &owner,
+                    &repo,
+                    &current_sha,
+                )
+                .await
+            {
+                // Local gate blocked — skip auto-approve and merge.
+                self.pr_status_cache.remove(&task.id);
+                self.review_stuck_sha_first_seen.remove(&task.id);
+                self.merge_fail_count.remove(&task.id);
+                self.delegated_to_github.remove(&task.id);
+                self.conversations_resolved.remove(&task.id);
+                continue;
+            }
+
             // ── Auto-approve (per-user opt-in, with fallback approver) ────────
             // When some user has `auto_approve_prs=true` and we have their
             // live GitHub session token, POST an APPROVE review using their
@@ -952,6 +977,117 @@ impl CoordinatorActor {
                     }
                 }
             }
+        }
+    }
+
+    /// Run the repo-derived local CI gate before reviewer approval can advance.
+    ///
+    /// Fetches reproduction bundles for each implicated required check from
+    /// the provider, runs the repo-derived command in an ephemeral worktree,
+    /// and persists each result as task activity. Returns `Some(())` when the
+    /// gate blocks (reproduced failure or unreproducible), `None` when the
+    /// gate passes or no implicated checks exist.
+    async fn run_local_gate_before_reviewer_approval(
+        &self,
+        task: &Task,
+        gh_client: &GitHubApiClient,
+        owner: &str,
+        repo_name: &str,
+        current_sha: &str,
+    ) -> Option<()> {
+        use crate::local_gates::reproduce_ci_checks;
+        use crate::supervisor_impl::pr::{
+            implicated_required_check_names, local_gate_block_kind, persist_local_gate_results,
+            route_local_gate_block,
+        };
+        use djinn_provider::github_api::{
+            RequiredCheckReproduction, RequiredCheckUnreproducible,
+            RequiredCheckUnreproducibleReason,
+        };
+
+        let required_check_names = implicated_required_check_names(task);
+        if required_check_names.is_empty() {
+            return None;
+        }
+
+        // Fetch reproduction bundles from the provider.
+        let mut bundles = Vec::with_capacity(required_check_names.len());
+        for check_name in &required_check_names {
+            match gh_client
+                .required_check_reproduction_context(owner, repo_name, current_sha, check_name)
+                .await
+            {
+                Ok(bundle) => bundles.push(bundle),
+                Err(e) => bundles.push(RequiredCheckReproduction::Unreproducible(
+                    RequiredCheckUnreproducible {
+                        required_check_name: check_name.clone(),
+                        observed_head_sha: current_sha.to_owned(),
+                        reason: RequiredCheckUnreproducibleReason::WorkflowRunNotFound,
+                        details: Some(format!(
+                            "provider error while fetching reproduction bundle: {e}"
+                        )),
+                    },
+                )),
+            }
+        }
+
+        // Clone an ephemeral worktree to run the reproduction commands.
+        let task_branch = format!("task/{}", task.short_id);
+        let mirror = match self.mirror.as_ref() {
+            Some(m) => m,
+            None => {
+                // No mirror manager — treat all checks as unreproducible.
+                let results: Vec<crate::local_gates::LocalGateResult> = required_check_names
+                    .iter()
+                    .map(|check_name| {
+                        crate::local_gates::LocalGateResult::Unreproducible(
+                            crate::local_gates::LocalGateUnreproducible {
+                                required_check_name: check_name.clone(),
+                                observed_head_sha: current_sha.to_owned(),
+                                reason: crate::local_gates::LocalGateUnreproducibleReason::CommandSpawnFailed,
+                                details: Some("coordinator has no mirror manager".to_owned()),
+                            },
+                        )
+                    })
+                    .collect();
+                persist_local_gate_results(task, &self.task_repo(), &results).await;
+                let _ = route_local_gate_block(task, &self.task_repo(), &results).await;
+                return Some(());
+            }
+        };
+
+        let workspace = match mirror.clone_ephemeral(&task.project_id, &task_branch).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                let results: Vec<crate::local_gates::LocalGateResult> = required_check_names
+                    .iter()
+                    .map(|check_name| {
+                        crate::local_gates::LocalGateResult::Unreproducible(
+                            crate::local_gates::LocalGateUnreproducible {
+                                required_check_name: check_name.clone(),
+                                observed_head_sha: current_sha.to_owned(),
+                                reason: crate::local_gates::LocalGateUnreproducibleReason::CommandSpawnFailed,
+                                details: Some(format!(
+                                    "could not materialize task worktree: {e}"
+                                )),
+                            },
+                        )
+                    })
+                    .collect();
+                persist_local_gate_results(task, &self.task_repo(), &results).await;
+                let _ = route_local_gate_block(task, &self.task_repo(), &results).await;
+                return Some(());
+            }
+        };
+
+        let results = reproduce_ci_checks(&bundles, &workspace.path_buf()).await;
+        persist_local_gate_results(task, &self.task_repo(), &results).await;
+
+        if local_gate_block_kind(&results).is_some() {
+            let _ = route_local_gate_block(task, &self.task_repo(), &results).await;
+            Some(())
+        } else {
+            None
         }
     }
 }
