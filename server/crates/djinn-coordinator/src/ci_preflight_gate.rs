@@ -253,7 +253,22 @@ async fn log_preflight_result(
     job_name: &str,
     step_name: &str,
 ) {
-    let payload = match &result.outcome {
+    let payload = preflight_result_activity_payload(kind, result, job_name, step_name);
+    log_preflight_activity(task_repo, task_id, payload).await;
+}
+
+/// Build the durable activity payload for a required-check reproduction result.
+///
+/// Kept as a small pure helper so regression tests can prove the persisted
+/// shape contains the repo-derived command, exit code, and failure/error
+/// context without needing a live database.
+fn preflight_result_activity_payload(
+    kind: CiPreflightGateKind,
+    result: &CiPreflightResult,
+    job_name: &str,
+    step_name: &str,
+) -> serde_json::Value {
+    match &result.outcome {
         CiPreflightOutcome::Passed => serde_json::json!({
             "gate": kind.as_str(),
             "check_name": result.check_name,
@@ -287,8 +302,7 @@ async fn log_preflight_result(
             "unreproducible_reason": reason,
             "details": details,
         }),
-    };
-    log_preflight_activity(task_repo, task_id, payload).await;
+    }
 }
 
 async fn log_preflight_activity(
@@ -421,6 +435,44 @@ mod tests {
     }
 
     #[test]
+    fn reproduced_failure_activity_payload_persists_command_exit_and_log_context_for_both_gates() {
+        for (kind, expected_gate) in [
+            (CiPreflightGateKind::WorkerSubmit, "worker_submit"),
+            (CiPreflightGateKind::ReviewerApprove, "reviewer_approve"),
+        ] {
+            let result = CiPreflightResult {
+                check_name: "Quality Gate".to_string(),
+                observed_head_sha: "abc123".to_string(),
+                outcome: CiPreflightOutcome::ReproducedFailure {
+                    command: "./repo-defined-check --strict".to_string(),
+                    exit_code: 7,
+                    output: "first relevant failure line\nsecond line".to_string(),
+                },
+            };
+
+            let payload = preflight_result_activity_payload(
+                kind,
+                &result,
+                "Repository Defined Check",
+                "Run repo-defined check",
+            );
+
+            assert_eq!(payload["gate"], expected_gate);
+            assert_eq!(payload["outcome"], "reproduced_failure");
+            assert_eq!(payload["check_name"], "Quality Gate");
+            assert_eq!(payload["job"], "Repository Defined Check");
+            assert_eq!(payload["step"], "Run repo-defined check");
+            assert_eq!(payload["command"], "./repo-defined-check --strict");
+            assert_eq!(payload["exit_code"], 7);
+            assert_eq!(
+                payload["first_relevant_failure_output"],
+                "first relevant failure line\nsecond line"
+            );
+            assert_eq!(payload["observed_head_sha"], "abc123");
+        }
+    }
+
+    #[test]
     fn passing_preflight_does_not_block_existing_flow() {
         let result = CiPreflightResult {
             check_name: "CI".to_string(),
@@ -473,6 +525,53 @@ mod tests {
                 assert!(reason.contains("MarketplaceActionInSetup"));
             }
             other => panic!("expected RouteToLeadIntervention, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unreproducible_activity_payload_persists_typed_reason_and_is_not_passing_for_both_gates() {
+        use crate::ci_reproduction::CiPreflightUnreproducibleReason;
+
+        for (kind, expected_gate) in [
+            (CiPreflightGateKind::WorkerSubmit, "worker_submit"),
+            (CiPreflightGateKind::ReviewerApprove, "reviewer_approve"),
+        ] {
+            let result = CiPreflightResult {
+                check_name: "Quality Gate".to_string(),
+                observed_head_sha: "abc123".to_string(),
+                outcome: CiPreflightOutcome::Unreproducible {
+                    reason: CiPreflightUnreproducibleReason::MarketplaceActionInSetup,
+                    details: Some(
+                        "setup step 'Checkout' uses marketplace action 'actions/checkout@v4'"
+                            .to_string(),
+                    ),
+                },
+            };
+
+            let payload = preflight_result_activity_payload(
+                kind,
+                &result,
+                "Repository Defined Check",
+                "Run repo-defined check",
+            );
+
+            assert_eq!(payload["gate"], expected_gate);
+            assert_eq!(payload["outcome"], "unreproducible");
+            assert_ne!(payload["outcome"], "passed");
+            assert_eq!(payload["check_name"], "Quality Gate");
+            assert_eq!(payload["job"], "Repository Defined Check");
+            assert_eq!(payload["step"], "Run repo-defined check");
+            assert_eq!(payload["observed_head_sha"], "abc123");
+            assert_eq!(
+                payload["unreproducible_reason"],
+                "marketplace_action_in_setup"
+            );
+            assert!(
+                payload["details"]
+                    .as_str()
+                    .expect("details string")
+                    .contains("actions/checkout")
+            );
         }
     }
 
