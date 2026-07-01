@@ -51,7 +51,10 @@ pub use types::{
     ActionsJob, ActionsJobStep, AutoMergeRequest, CheckAnnotation, CheckRun, CheckRunsResponse,
     CiFailureContextBundle, CiFailureContextRequest, CiSetupStep, CreatePrParams, DequeueEvent,
     GitHubUser, MergeMethod, MergeQueueEntry, MergeQueueEntryState, PrFile, PrMergeQueueState,
-    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReviewComment,
+    PrRef, PrReview, PrReviewFeedback, PrState, PullRequest, ReproductionJob,
+    ReproductionSetupStep, ReproductionStep, RequiredCheckReproduction,
+    RequiredCheckReproductionContext, RequiredCheckUnreproducible,
+    RequiredCheckUnreproducibleReason, ReviewComment,
 };
 pub use write_errors::{
     GitHubWriteErrorEnvelope, GitHubWriteErrorInput, github_write_error_envelope,

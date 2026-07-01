@@ -75,6 +75,74 @@ pub struct ActionsJobStep {
     pub number: u64,
 }
 
+/// Provider-side result for required-check reproduction introspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RequiredCheckReproduction {
+    Reproducible(RequiredCheckReproductionContext),
+    Unreproducible(RequiredCheckUnreproducible),
+}
+
+/// Structured context needed to reproduce a failing GitHub Actions check.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequiredCheckReproductionContext {
+    pub required_check_name: String,
+    pub observed_head_sha: String,
+    pub check_run_id: u64,
+    pub workflow_run_id: u64,
+    #[serde(default)]
+    pub workflow_name: Option<String>,
+    pub job: ReproductionJob,
+    pub failing_step: ReproductionStep,
+    pub command: String,
+    pub setup_steps: Vec<ReproductionSetupStep>,
+    pub log_tail: String,
+}
+
+/// The failing Actions job selected for reproduction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReproductionJob {
+    pub id: u64,
+    pub name: String,
+    pub html_url: String,
+}
+
+/// The failing Actions step selected for reproduction.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReproductionStep {
+    pub number: u64,
+    pub name: String,
+}
+
+/// A preceding shell command that the same workflow executed before the failing command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReproductionSetupStep {
+    pub number: u64,
+    pub name: String,
+    pub command: String,
+}
+
+/// Typed reason why a required check could not be mapped to a local command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequiredCheckUnreproducible {
+    pub required_check_name: String,
+    pub observed_head_sha: String,
+    pub reason: RequiredCheckUnreproducibleReason,
+    #[serde(default)]
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredCheckUnreproducibleReason {
+    CheckRunNotFound,
+    CheckRunNotFailed,
+    WorkflowRunNotFound,
+    JobNotFound,
+    FailingStepNotFound,
+    CommandNotFound,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ActionsJobsResponse {
     pub(super) jobs: Vec<ActionsJob>,
