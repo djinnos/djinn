@@ -178,7 +178,8 @@
         let lifecycle_count = revisions
             .iter()
             .filter(|r| {
-                r.event_kind == "refinement_demand_evidence"
+                r.event_kind == "refinement_awaiting_evidence_started"
+                    || r.event_kind == "refinement_demand_evidence"
                     || r.event_kind == "refinement_stop"
             })
             .count();
@@ -821,11 +822,18 @@
 
     /// Sanity check: a valid demand with all fields correct and
     /// the body containing the anchor text should be accepted.
+    /// Verifies the full accepted-demand mutation path:
+    /// - Spike task created with `issue_type = "spike"` and correct labels
+    /// - `needs_evidence` debate entry written
+    /// - `linked_spike_task_id` set on the proposal
+    /// - `refinement_awaiting_evidence_started` lifecycle event recorded
+    /// - `spike_task_id` returned in the response
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn valid_demand_accepted() {
         let (server, db, p, user_id, _judge_task_id) =
             setup_demand_test().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), EventBus::noop());
 
         let resp = djinn_core::auth_context::SESSION_USER_ID
             .scope(Some(user_id), async {
@@ -849,11 +857,125 @@
             "valid demand should be accepted"
         );
 
-        // Verify a lifecycle event was recorded.
+        // Verify spike_task_id is returned (not None).
+        let spike_id = resp
+            .get("result")
+            .and_then(|r| r.get("spike_task_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        assert!(spike_id.is_some(), "spike_task_id must be Some in accepted response");
+
+        // Verify the spike task was created with correct issue_type and labels.
+        let spike_id = spike_id.unwrap();
+        let spike = task_repo.get(&spike_id).await.unwrap().expect("spike task must exist");
+        assert_eq!(spike.issue_type, "spike", "spike task must have issue_type = 'spike'");
+        let labels: Vec<String> = serde_json::from_str(&spike.labels).unwrap_or_default();
+        assert!(labels.contains(&"refinement-evidence".to_string()), "must have refinement-evidence label");
+        assert!(labels.contains(&"read-only".to_string()), "must have read-only label");
+        assert!(
+            labels.iter().any(|l| l.starts_with("proposal:")),
+            "must have proposal:<short_id> label"
+        );
+        assert_eq!(spike.agent_type.as_deref(), Some("architect"), "spike agent_type must be architect");
+
+        // Verify the proposal has linked_spike_task_id set.
+        let updated_proposal = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated_proposal.linked_spike_task_id.as_deref(),
+            Some(spike_id.as_str()),
+            "proposal linked_spike_task_id must point to the spike task"
+        );
+        assert!(
+            updated_proposal.needs_evidence_claim.is_some(),
+            "proposal must have needs_evidence_claim set"
+        );
+
+        // Verify a needs_evidence debate entry was written.
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        let ne_entries: Vec<_> = trail.iter().filter(|e| e.kind == "needs_evidence").collect();
+        assert_eq!(ne_entries.len(), 1, "should record exactly one needs_evidence debate entry");
+        assert!(ne_entries[0].blocking, "needs_evidence entry must be blocking");
+        assert_eq!(ne_entries[0].agent_role, "judge", "needs_evidence entry must be from judge");
+
+        // Verify the refinement_awaiting_evidence_started lifecycle event.
         let revisions = repo.revisions(&p.id).await.unwrap();
-        let demand_events = revisions
+        let awaiting_events = revisions
             .iter()
-            .filter(|r| r.event_kind == "refinement_demand_evidence")
+            .filter(|r| r.event_kind == "refinement_awaiting_evidence_started")
             .count();
-        assert_eq!(demand_events, 1, "should record exactly one demand lifecycle event");
+        assert_eq!(awaiting_events, 1, "should record exactly one refinement_awaiting_evidence_started lifecycle event");
+    }
+
+    // ── AC: Duplicate demand cannot create two open spikes ───────────
+
+    /// Verify that a second valid demand after an accepted first demand
+    /// is rejected because the proposal already has an open linked spike.
+    /// This is the sequential duplicate scenario; concurrent races are
+    /// protected at the DB level by the atomic set_structured_needs_evidence_spike.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_demand_after_accepted_rejected() {
+        let (server, db, p, user_id, _judge_task_id) =
+            setup_demand_test().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        // First demand — should succeed and create a spike.
+        let resp1 = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id.clone()), async {
+                server
+                    .dispatch_tool(
+                        "proposal_refinement_demand_evidence",
+                        valid_demand_params(&p.id),
+                    )
+                    .await
+            })
+            .await
+            .expect("tool should be registered");
+
+        assert!(
+            resp1.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false),
+            "first demand should be accepted: {:?}",
+            resp1.get("error"),
+        );
+        let first_spike = resp1
+            .get("result")
+            .and_then(|r| r.get("spike_task_id"))
+            .and_then(|v| v.as_str())
+            .expect("first demand should have spike_task_id")
+            .to_string();
+
+        // Second demand — should be rejected by validation gate (step 11).
+        let resp2 = djinn_core::auth_context::SESSION_USER_ID
+            .scope(Some(user_id), async {
+                server
+                    .dispatch_tool(
+                        "proposal_refinement_demand_evidence",
+                        valid_demand_params(&p.id),
+                    )
+                    .await
+            })
+            .await
+            .expect("tool should be registered");
+
+        assert!(
+            !resp2.get("accepted").and_then(|v| v.as_bool()).unwrap_or(true),
+            "second demand should be rejected"
+        );
+        let error = resp2.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            error.contains("already has an open linked evidence spike"),
+            "should mention existing spike: {error}"
+        );
+
+        // Verify exactly one spike is linked to the proposal.
+        let updated = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.linked_spike_task_id.as_deref(),
+            Some(first_spike.as_str()),
+            "proposal should still be linked to the first spike only"
+        );
+
+        // Verify exactly one needs_evidence debate entry exists.
+        let trail = repo.debate_trail(&p.id).await.unwrap();
+        let ne_count = trail.iter().filter(|e| e.kind == "needs_evidence").count();
+        assert_eq!(ne_count, 1, "should have exactly one needs_evidence debate entry");
     }

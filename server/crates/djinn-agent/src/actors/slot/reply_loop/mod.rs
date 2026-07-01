@@ -1,35 +1,243 @@
-//! Djinn-native reply loop.
+//! Compatibility facade for the canonical `djinn-slot` reply loop.
 //!
-//! The reply loop drives an `LlmProvider` stream, dispatches tool calls via the
-//! extension layer, and continues until the assistant produces a text-only
-//! response or a termination condition is reached.
-//!
-//! The original `slot/reply_loop.rs` (2,064 lines) has been decomposed into
-//! focused submodules.  The previously-partial split already extracted
-//! `error_handling`, `streaming`, and `tool_dispatch`; this final layout adds
-//! `turn` (the main `run_reply_loop` orchestrator and its helpers), `persistence`
-//! (the session-message persistence + serialization helpers), and `tests` (the
-//! integration test suite).  The public surface (`ReplyLoopContext` and
-//! `run_reply_loop`) is re-exported here so the external path
-//! `crate::actors::slot::reply_loop::{ReplyLoopContext, run_reply_loop}` keeps
-//! resolving identically.
+//! The duplicated agent reply-loop implementation has been removed from the
+//! compiled module graph. This module preserves the historical
+//! `crate::actors::slot::reply_loop::*` API by adapting agent host services into
+//! `djinn-slot`'s `SlotContext` and `SlotToolDispatcher` seams.
 
-pub(crate) mod budget;
-pub(crate) mod durable_progress;
-pub(crate) mod error_handling;
-pub(crate) mod loop_guard;
-mod persistence;
-mod streaming;
-mod tool_dispatch;
-mod turn;
+use std::sync::{Arc, Mutex};
 
-pub(crate) use turn::{ReplyLoopContext, run_reply_loop};
+use djinn_provider::message::Conversation;
 
-// Soft-budget tests hold `SESSION_BUDGET_ENV_LOCK` across `.await` on
-// purpose: the lock serializes env-var mutation (set/remove) for the
-// duration of each async test so concurrent tests cannot race the shared
-// process env. Mirrors the `AUTO_CODE_CONTEXT_ENV_LOCK` pattern in
-// `helpers/tests.rs`.
-#[cfg(test)]
-#[allow(clippy::await_holding_lock)]
-mod tests;
+use crate::context::AgentContext;
+use crate::output_parser::ParsedAgentOutput;
+use crate::output_stash::{OutputStash, handle_stash_tool, is_stash_tool, render_tool_result};
+
+pub(crate) mod error_handling {
+    pub(crate) use djinn_slot::reply_loop::error_handling::*;
+}
+
+pub(crate) mod loop_guard {
+    pub(crate) use djinn_slot::reply_loop::loop_guard::*;
+}
+
+pub(crate) struct ReplyLoopContext<'a> {
+    pub provider: &'a dyn djinn_provider::provider::LlmProvider,
+    pub tools: &'a [serde_json::Value],
+    pub task_id: &'a str,
+    pub task_short_id: &'a str,
+    pub session_id: &'a str,
+    pub project_path: &'a str,
+    pub worktree_path: &'a std::path::Path,
+    pub role_name: &'a str,
+    pub finalize_tool_names: &'a [&'a str],
+    pub context_window: i64,
+    pub model_id: &'a str,
+    pub cancel: &'a tokio_util::sync::CancellationToken,
+    pub global_cancel: &'a tokio_util::sync::CancellationToken,
+    pub app_state: &'a AgentContext,
+    pub services: &'a dyn djinn_supervisor::SupervisorServices,
+    pub mcp_registry: Option<&'a crate::mcp_client::McpToolRegistry>,
+    pub active_skill_names: &'a [String],
+    pub active_mcp_server_names: &'a [String],
+    pub max_turns_override: Option<u32>,
+}
+
+struct AgentToolDispatcher {
+    app_state: AgentContext,
+    services: &'static dyn djinn_supervisor::SupervisorServices,
+    mcp_registry: Option<&'static crate::mcp_client::McpToolRegistry>,
+    output_stash: Mutex<OutputStash>,
+}
+
+impl AgentToolDispatcher {
+    fn new(
+        app_state: &AgentContext,
+        services: &dyn djinn_supervisor::SupervisorServices,
+        mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
+    ) -> Self {
+        // SAFETY: the dispatcher is created immediately before calling the
+        // canonical reply loop and dropped when that call returns. The canonical
+        // loop awaits every tool-dispatch future before returning, so these
+        // erased references cannot outlive their source borrows.
+        let services_static = unsafe {
+            std::mem::transmute::<
+                &dyn djinn_supervisor::SupervisorServices,
+                &'static dyn djinn_supervisor::SupervisorServices,
+            >(services)
+        };
+        let registry_static = mcp_registry.map(|registry| unsafe {
+            std::mem::transmute::<
+                &crate::mcp_client::McpToolRegistry,
+                &'static crate::mcp_client::McpToolRegistry,
+            >(registry)
+        });
+        Self {
+            app_state: app_state.clone(),
+            services: services_static,
+            mcp_registry: registry_static,
+            output_stash: Mutex::new(OutputStash::new()),
+        }
+    }
+}
+
+impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
+    fn is_stash_tool(&self, tool_name: &str) -> bool {
+        is_stash_tool(tool_name)
+    }
+
+    fn handle_stash_call(
+        &self,
+        tool_name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<String, String> {
+        handle_stash_tool(&self.output_stash, tool_name, arguments)
+    }
+
+    fn render_result(
+        &self,
+        tool_use_id: &str,
+        tool_name: &str,
+        value: &serde_json::Value,
+    ) -> String {
+        render_tool_result(&self.output_stash, tool_use_id, tool_name, value)
+    }
+
+    fn dispatch_extension_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+        worktree_path: &'a std::path::Path,
+        task_id: &'a str,
+        role_name: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    > {
+        Box::pin(crate::extension::call_tool(
+            &self.app_state,
+            self.services,
+            tool_name,
+            arguments,
+            worktree_path,
+            Some(task_id),
+            Some(role_name),
+            self.mcp_registry,
+        ))
+    }
+
+    fn is_mcp_tool(&self, tool_name: &str) -> bool {
+        self.mcp_registry
+            .map(|registry| registry.has_tool(tool_name))
+            .unwrap_or(false)
+    }
+
+    fn dispatch_mcp_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    > {
+        match self.mcp_registry {
+            Some(registry) => Box::pin(registry.call_tool(tool_name, arguments)),
+            None => Box::pin(async move { Err(format!("MCP tool `{tool_name}` not found")) }),
+        }
+    }
+
+    fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
+        self.mcp_registry
+            .and_then(|registry| registry.server_for_tool(tool_name))
+            .map(str::to_owned)
+    }
+
+    fn clear_stash(&self) {
+        self.output_stash
+            .lock()
+            .expect("output stash mutex")
+            .clear();
+    }
+}
+
+pub(crate) async fn run_reply_loop(
+    ctx: ReplyLoopContext<'_>,
+    conversation: &mut Conversation,
+    is_resumed_session: bool,
+) -> (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64) {
+    let ReplyLoopContext {
+        provider,
+        tools,
+        task_id,
+        task_short_id,
+        session_id,
+        project_path,
+        worktree_path,
+        role_name,
+        finalize_tool_names,
+        context_window,
+        model_id,
+        cancel,
+        global_cancel,
+        app_state,
+        services,
+        mcp_registry,
+        active_skill_names,
+        active_mcp_server_names,
+        max_turns_override,
+    } = ctx;
+
+    let mut slot_ctx = super::host_callbacks::agent_to_dispatch_slot_context(app_state);
+    slot_ctx.tool_dispatcher = Some(Arc::new(AgentToolDispatcher::new(
+        app_state,
+        services,
+        mcp_registry,
+    )));
+
+    let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
+        djinn_slot::reply_loop::run_reply_loop(
+            djinn_slot::reply_loop::ReplyLoopContext {
+                provider,
+                tools,
+                task_id,
+                task_short_id,
+                session_id,
+                project_path,
+                worktree_path,
+                role_name,
+                finalize_tool_names,
+                context_window,
+                model_id,
+                cancel,
+                global_cancel,
+                ctx: &slot_ctx,
+                active_skill_names,
+                active_mcp_server_names,
+                max_turns_override,
+            },
+            conversation,
+            is_resumed_session,
+        )
+        .await;
+
+    let mut agent_output = ParsedAgentOutput::new(false);
+    agent_output.runtime_error = output.runtime_error;
+    agent_output.reviewer_feedback = output.reviewer_feedback;
+    agent_output.finalize_payload = output.finalize_payload;
+    agent_output.finalize_tool_name = output.finalize_tool_name;
+    agent_output.budget_wind_down_summary = output.budget_wind_down_summary;
+    agent_output.budget_wind_down_details = output.budget_wind_down_details;
+
+    (
+        result,
+        agent_output,
+        tokens_in,
+        tokens_out,
+        cache_read,
+        cache_write,
+    )
+}
+
+// Agent-side reply-loop tests duplicated canonical behavior and are intentionally
+// retired with this facade cut-over. Canonical coverage lives in
+// `server/crates/djinn-slot/src/reply_loop/tests.rs` and
+// `server/crates/djinn-slot/src/reply_loop_tests.rs`; compatibility is compile-
+// checked through this adapter and `supervisor_impl::stage`.

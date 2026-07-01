@@ -14814,7 +14814,7 @@ expression: signatures
     "output_schema": {
       "$defs": {
         "NeedsEvidenceDemandResult": {
-          "description": "Accepted demand result for `proposal_refinement_demand_evidence`.\n\nReturned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand\npasses validation and is recorded. Spike creation is wired in a later\ntask — until then `spike_task_id` is `None` and the proposal is parked.",
+          "description": "Accepted demand result for `proposal_refinement_demand_evidence`.\n\nReturned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand\npasses validation. The accepted-demand mutation atomically creates the\nevidence spike task, links it to the proposal, writes a `needs_evidence`\ndebate entry, and records a `refinement_awaiting_evidence_started`\nlifecycle event.",
           "properties": {
             "against_revision_seq": {
               "description": "The pre-refinement snapshot revision seq the demand targets.",
@@ -14831,7 +14831,7 @@ expression: signatures
               "type": "integer"
             },
             "spike_task_id": {
-              "description": "The spike task id (UUID) once linked. `None` until spike creation is\nwired in a subsequent task.",
+              "description": "The spike task id (UUID) created for this demand. Present when the\ndemand was accepted and the spike was successfully linked.",
               "type": [
                 "string",
                 "null"

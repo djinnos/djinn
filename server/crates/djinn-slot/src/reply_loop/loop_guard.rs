@@ -17,23 +17,23 @@ use sha2::{Digest, Sha256};
 
 /// Default number of identical failing `(tool_name, normalized_args)` attempts
 /// before the general repeated-tool-failure guard trips.
-pub(crate) const DEFAULT_IDENTICAL_TOOL_FAILURE_THRESHOLD: u32 = 3;
+pub const DEFAULT_IDENTICAL_TOOL_FAILURE_THRESHOLD: u32 = 3;
 
 /// Default number of identical permission/security denials before the stricter
 /// denial guard trips.
-pub(crate) const DEFAULT_PERMISSION_DENIAL_THRESHOLD: u32 = 2;
+pub const DEFAULT_PERMISSION_DENIAL_THRESHOLD: u32 = 2;
 
 /// Default number of identical assistant output signatures before the assistant
 /// output repeat guard trips.
-pub(crate) const DEFAULT_ASSISTANT_OUTPUT_REPEAT_THRESHOLD: u32 = 4;
+pub const DEFAULT_ASSISTANT_OUTPUT_REPEAT_THRESHOLD: u32 = 4;
 
 /// Default number of consecutive tool failures, across signatures, before the
 /// consecutive-failure guard trips.
-pub(crate) const DEFAULT_CONSECUTIVE_TOOL_FAILURE_THRESHOLD: u32 = 6;
+pub const DEFAULT_CONSECUTIVE_TOOL_FAILURE_THRESHOLD: u32 = 6;
 
 /// Configurable guard thresholds. Defaults are the epic-wide values above.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LoopGuardConfig {
+pub struct LoopGuardConfig {
     pub identical_tool_failure_threshold: u32,
     pub permission_denial_threshold: u32,
     pub assistant_output_repeat_threshold: u32,
@@ -54,14 +54,14 @@ impl Default for LoopGuardConfig {
 /// Deterministic signature for one tool invocation, excluding provider-assigned
 /// tool-call IDs and other runtime-random data.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub(crate) struct ToolCallSignature {
+pub struct ToolCallSignature {
     pub tool_name: String,
     pub normalized_args: String,
     pub digest: String,
 }
 
 impl ToolCallSignature {
-    pub(crate) fn new(tool_name: impl Into<String>, args: &Value) -> Self {
+    pub fn new(tool_name: impl Into<String>, args: &Value) -> Self {
         let tool_name = tool_name.into();
         let normalized_args = normalize_json(args);
         let digest = stable_digest(&["tool", &tool_name, &normalized_args]);
@@ -72,7 +72,7 @@ impl ToolCallSignature {
         }
     }
 
-    pub(crate) fn display_label(&self) -> String {
+    pub fn display_label(&self) -> String {
         format!(
             "{}({}) [digest={}]",
             self.tool_name, self.normalized_args, self.digest
@@ -83,14 +83,14 @@ impl ToolCallSignature {
 /// Deterministic signature for one assistant turn: narrative text plus the
 /// ordered tool-call signatures observed in that turn.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-pub(crate) struct AssistantOutputSignature {
+pub struct AssistantOutputSignature {
     pub narrative_text: String,
     pub tool_calls: Vec<ToolCallSignature>,
     pub digest: String,
 }
 
 impl AssistantOutputSignature {
-    pub(crate) fn new(
+    pub fn new(
         narrative_text: impl Into<String>,
         tool_calls: impl IntoIterator<Item = ToolCallSignature>,
     ) -> Self {
@@ -113,10 +113,7 @@ impl AssistantOutputSignature {
         }
     }
 
-    pub(crate) fn from_content_blocks(
-        narrative_text: impl Into<String>,
-        blocks: &[ContentBlock],
-    ) -> Self {
+    pub fn from_content_blocks(narrative_text: impl Into<String>, blocks: &[ContentBlock]) -> Self {
         let tool_calls = blocks.iter().filter_map(|block| match block {
             ContentBlock::ToolUse { name, input, .. } => Some(ToolCallSignature::new(name, input)),
             _ => None,
@@ -127,7 +124,7 @@ impl AssistantOutputSignature {
 
 /// Tool-failure class supplied by the future integration layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ToolFailureClass {
+pub enum ToolFailureClass {
     General,
     PermissionOrSecurityDenial,
 }
@@ -135,7 +132,7 @@ pub(crate) enum ToolFailureClass {
 /// Coarse guard discriminator for downstream typed handling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LoopGuardKind {
+pub enum LoopGuardKind {
     RepeatedToolFailure,
     RepeatedPermissionOrSecurityDenial,
     RepeatedAssistantOutput,
@@ -144,7 +141,7 @@ pub(crate) enum LoopGuardKind {
 
 /// Typed reason payload that preserves the offending deterministic signature.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum LoopGuardReason {
+pub enum LoopGuardReason {
     RepeatedToolFailure { signature: ToolCallSignature },
     RepeatedPermissionOrSecurityDenial { signature: ToolCallSignature },
     RepeatedAssistantOutput { signature: AssistantOutputSignature },
@@ -152,7 +149,7 @@ pub(crate) enum LoopGuardReason {
 }
 
 impl LoopGuardReason {
-    pub(crate) fn kind(&self) -> LoopGuardKind {
+    pub fn kind(&self) -> LoopGuardKind {
         match self {
             Self::RepeatedToolFailure { .. } => LoopGuardKind::RepeatedToolFailure,
             Self::RepeatedPermissionOrSecurityDenial { .. } => {
@@ -166,18 +163,18 @@ impl LoopGuardReason {
 
 /// A tripped guard condition with observed counter state and threshold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LoopGuardCondition {
+pub struct LoopGuardCondition {
     pub reason: LoopGuardReason,
     pub observed: u32,
     pub threshold: u32,
 }
 
 impl LoopGuardCondition {
-    pub(crate) fn kind(&self) -> LoopGuardKind {
+    pub fn kind(&self) -> LoopGuardKind {
         self.reason.kind()
     }
 
-    pub(crate) fn offending_signature_label(&self) -> String {
+    pub fn offending_signature_label(&self) -> String {
         match &self.reason {
             LoopGuardReason::RepeatedToolFailure { signature }
             | LoopGuardReason::RepeatedPermissionOrSecurityDenial { signature } => {
@@ -196,7 +193,7 @@ impl LoopGuardCondition {
 /// Typed reply-loop error used when a deterministic loop guard terminates the
 /// session.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LoopGuardError {
+pub struct LoopGuardError {
     pub condition: LoopGuardCondition,
     pub turn_span: (u32, u32),
     pub session_id: String,
@@ -221,7 +218,7 @@ impl std::error::Error for LoopGuardError {}
 
 /// Pure in-memory guard state for one reply loop.
 #[derive(Clone, Debug)]
-pub(crate) struct LoopGuardState {
+pub struct LoopGuardState {
     config: LoopGuardConfig,
     tool_failure_counts: HashMap<ToolCallSignature, u32>,
     permission_denial_counts: HashMap<ToolCallSignature, u32>,
@@ -236,7 +233,7 @@ impl Default for LoopGuardState {
 }
 
 impl LoopGuardState {
-    pub(crate) fn new(config: LoopGuardConfig) -> Self {
+    pub fn new(config: LoopGuardConfig) -> Self {
         Self {
             config,
             tool_failure_counts: HashMap::new(),
@@ -246,7 +243,7 @@ impl LoopGuardState {
         }
     }
 
-    pub(crate) fn record_assistant_output(
+    pub fn record_assistant_output(
         &mut self,
         signature: AssistantOutputSignature,
     ) -> Option<LoopGuardCondition> {
@@ -258,7 +255,7 @@ impl LoopGuardState {
         })
     }
 
-    pub(crate) fn record_tool_failure(
+    pub fn record_tool_failure(
         &mut self,
         signature: ToolCallSignature,
         class: ToolFailureClass,
@@ -281,7 +278,7 @@ impl LoopGuardState {
         })
     }
 
-    pub(crate) fn record_tool_failure_after_progress(
+    pub fn record_tool_failure_after_progress(
         &mut self,
         signature: ToolCallSignature,
         class: ToolFailureClass,
@@ -321,14 +318,14 @@ impl LoopGuardState {
         }
     }
 
-    pub(crate) fn record_tool_success(&mut self) {
+    pub fn record_tool_success(&mut self) {
         self.tool_failure_counts.clear();
         self.permission_denial_counts.clear();
         self.assistant_output_counts.clear();
         self.consecutive_tool_failures = 0;
     }
 
-    pub(crate) fn consecutive_tool_failures(&self) -> u32 {
+    pub fn consecutive_tool_failures(&self) -> u32 {
         self.consecutive_tool_failures
     }
 }
@@ -343,7 +340,7 @@ where
 }
 
 /// Render JSON deterministically for signature inputs.
-pub(crate) fn normalize_json(value: &Value) -> String {
+pub fn normalize_json(value: &Value) -> String {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => value.to_string(),
         Value::Array(values) => {

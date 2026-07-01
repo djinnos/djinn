@@ -23,6 +23,7 @@ pub mod proposal_ops;
 pub mod proposal_readiness;
 pub mod proposal_tools;
 pub mod provider_tools;
+pub mod refinement_helpers;
 pub mod refinement_tools;
 pub mod service_tools;
 pub mod session_tools;

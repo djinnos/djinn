@@ -45,6 +45,11 @@ pub(crate) enum CiPreflightGateVerdict {
     Allow,
     /// A required check reproduced a local failure and the caller must block.
     Block { reason: String },
+    /// A required check is unreproducible locally — submit/approval must block
+    /// and the caller must route to lead/human intervention. This is distinct
+    /// from [`Block`] because the caller must escalate rather than simply
+    /// deferring the tick.
+    RouteToLeadIntervention { reason: String },
 }
 
 /// Select implicated required checks from durable current/prior CI state.
@@ -186,31 +191,57 @@ pub(crate) async fn run_ci_reproduction_preflight_gate_with_runner(
         )
         .await;
 
-        if let Some(reason) = blocking_reason(kind, &result) {
-            return CiPreflightGateVerdict::Block { reason };
+        if let Some(verdict) = classify_preflight_verdict(kind, &result) {
+            return verdict;
         }
     }
 
     CiPreflightGateVerdict::Allow
 }
 
-fn blocking_reason(kind: CiPreflightGateKind, result: &CiPreflightResult) -> Option<String> {
+/// Classify a preflight result into the appropriate gate verdict.
+///
+/// - `ReproducedFailure` → [`CiPreflightGateVerdict::Block`]: the caller must
+///   block submit/approval.
+/// - `Unreproducible` → [`CiPreflightGateVerdict::RouteToLeadIntervention`]:
+///   the caller must block AND route to lead/human intervention.
+/// - `Passed` → `None`: the check is not blocking.
+fn classify_preflight_verdict(
+    kind: CiPreflightGateKind,
+    result: &CiPreflightResult,
+) -> Option<CiPreflightGateVerdict> {
     match &result.outcome {
         CiPreflightOutcome::ReproducedFailure {
             command,
             exit_code,
             output,
-        } => Some(format!(
-            "CI reproduction preflight blocked {}: required check '{}' reproduced locally \
-             at head {} with command `{}` exiting {}. First relevant failure output: {}",
-            kind.as_str(),
-            result.check_name,
-            result.observed_head_sha,
-            command,
-            exit_code,
-            first_line_or_empty(output),
-        )),
-        CiPreflightOutcome::Passed | CiPreflightOutcome::Unreproducible { .. } => None,
+        } => Some(CiPreflightGateVerdict::Block {
+            reason: format!(
+                "CI reproduction preflight blocked {}: required check '{}' reproduced locally \
+                 at head {} with command `{}` exiting {}. First relevant failure output: {}",
+                kind.as_str(),
+                result.check_name,
+                result.observed_head_sha,
+                command,
+                exit_code,
+                first_line_or_empty(output),
+            ),
+        }),
+        CiPreflightOutcome::Unreproducible { reason, details } => {
+            let detail_text = details.as_deref().unwrap_or("no additional detail");
+            Some(CiPreflightGateVerdict::RouteToLeadIntervention {
+                reason: format!(
+                    "CI preflight unreproducible {}: required check '{}' at head {} cannot be \
+                     locally reproduced. Reason: {:?}. Detail: {}.",
+                    kind.as_str(),
+                    result.check_name,
+                    result.observed_head_sha,
+                    reason,
+                    detail_text,
+                ),
+            })
+        }
+        CiPreflightOutcome::Passed => None,
     }
 }
 
@@ -354,12 +385,17 @@ mod tests {
                 output: "assertion failed\nstack".to_string(),
             },
         };
-        let reason = blocking_reason(CiPreflightGateKind::WorkerSubmit, &result).unwrap();
-        assert!(reason.contains("worker_submit"));
-        assert!(reason.contains("Quality Gate"));
-        assert!(reason.contains("cargo test -p crate"));
-        assert!(reason.contains("101"));
-        assert!(reason.contains("assertion failed"));
+        let verdict = classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &result);
+        match verdict {
+            Some(CiPreflightGateVerdict::Block { reason }) => {
+                assert!(reason.contains("worker_submit"));
+                assert!(reason.contains("Quality Gate"));
+                assert!(reason.contains("cargo test -p crate"));
+                assert!(reason.contains("101"));
+                assert!(reason.contains("assertion failed"));
+            }
+            other => panic!("expected Block, got {:?}", other),
+        }
     }
 
     #[test]
@@ -373,10 +409,15 @@ mod tests {
                 output: "test failed".to_string(),
             },
         };
-        let reason = blocking_reason(CiPreflightGateKind::ReviewerApprove, &result).unwrap();
-        assert!(reason.contains("reviewer_approve"));
-        assert!(reason.contains("CI"));
-        assert!(reason.contains("pnpm test"));
+        let verdict = classify_preflight_verdict(CiPreflightGateKind::ReviewerApprove, &result);
+        match verdict {
+            Some(CiPreflightGateVerdict::Block { reason }) => {
+                assert!(reason.contains("reviewer_approve"));
+                assert!(reason.contains("CI"));
+                assert!(reason.contains("pnpm test"));
+            }
+            other => panic!("expected Block, got {:?}", other),
+        }
     }
 
     #[test]
@@ -386,6 +427,93 @@ mod tests {
             observed_head_sha: "def456".to_string(),
             outcome: CiPreflightOutcome::Passed,
         };
-        assert!(blocking_reason(CiPreflightGateKind::WorkerSubmit, &result).is_none());
+        assert!(classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &result).is_none());
+    }
+
+    #[test]
+    fn unreproducible_required_check_routes_to_lead_intervention() {
+        use crate::ci_reproduction::CiPreflightUnreproducibleReason;
+        let result = CiPreflightResult {
+            check_name: "Quality Gate".to_string(),
+            observed_head_sha: "abc123".to_string(),
+            outcome: CiPreflightOutcome::Unreproducible {
+                reason: CiPreflightUnreproducibleReason::EmptyCommand,
+                details: Some("step script is empty".to_string()),
+            },
+        };
+        let verdict = classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &result);
+        match verdict {
+            Some(CiPreflightGateVerdict::RouteToLeadIntervention { reason }) => {
+                assert!(reason.contains("worker_submit"));
+                assert!(reason.contains("Quality Gate"));
+                assert!(reason.contains("abc123"));
+                assert!(reason.contains("EmptyCommand"));
+                assert!(reason.contains("step script is empty"));
+            }
+            other => panic!("expected RouteToLeadIntervention, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unreproducible_reviewer_gate_also_routes_to_intervention() {
+        use crate::ci_reproduction::CiPreflightUnreproducibleReason;
+        let result = CiPreflightResult {
+            check_name: "CI".to_string(),
+            observed_head_sha: "def456".to_string(),
+            outcome: CiPreflightOutcome::Unreproducible {
+                reason: CiPreflightUnreproducibleReason::MarketplaceActionInSetup,
+                details: Some("uses: actions/checkout@v4".to_string()),
+            },
+        };
+        let verdict = classify_preflight_verdict(CiPreflightGateKind::ReviewerApprove, &result);
+        match verdict {
+            Some(CiPreflightGateVerdict::RouteToLeadIntervention { reason }) => {
+                assert!(reason.contains("reviewer_approve"));
+                assert!(reason.contains("CI"));
+                assert!(reason.contains("MarketplaceActionInSetup"));
+            }
+            other => panic!("expected RouteToLeadIntervention, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unreproducible_verdict_is_not_conflated_with_passing_or_reproduced_failure() {
+        use crate::ci_reproduction::CiPreflightUnreproducibleReason;
+        // Passing → no verdict
+        let passing = CiPreflightResult {
+            check_name: "CI".to_string(),
+            observed_head_sha: "sha1".to_string(),
+            outcome: CiPreflightOutcome::Passed,
+        };
+        assert!(classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &passing).is_none());
+
+        // ReproducedFailure → Block (not RouteToLeadIntervention)
+        let reproduced = CiPreflightResult {
+            check_name: "CI".to_string(),
+            observed_head_sha: "sha1".to_string(),
+            outcome: CiPreflightOutcome::ReproducedFailure {
+                command: "cargo test".to_string(),
+                exit_code: 1,
+                output: "fail".to_string(),
+            },
+        };
+        assert!(matches!(
+            classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &reproduced),
+            Some(CiPreflightGateVerdict::Block { .. })
+        ));
+
+        // Unreproducible → RouteToLeadIntervention (not Block, not None)
+        let unreproducible = CiPreflightResult {
+            check_name: "CI".to_string(),
+            observed_head_sha: "sha1".to_string(),
+            outcome: CiPreflightOutcome::Unreproducible {
+                reason: CiPreflightUnreproducibleReason::EmptyCommand,
+                details: None,
+            },
+        };
+        assert!(matches!(
+            classify_preflight_verdict(CiPreflightGateKind::WorkerSubmit, &unreproducible),
+            Some(CiPreflightGateVerdict::RouteToLeadIntervention { .. })
+        ));
     }
 }
