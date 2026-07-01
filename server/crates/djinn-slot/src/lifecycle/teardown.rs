@@ -332,4 +332,162 @@ mod tests {
                 .any(|event| event.action == "auto_submit_fallback_checkpoint_requested")
         );
     }
+
+    #[tokio::test]
+    async fn no_auto_submit_decision_emits_no_decision_fallback() {
+        let (db, ctx, task, _task_run_id, events) = fixture().await;
+        let output = ParsedAgentOutput::empty();
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
+
+        // No work_submitted activity should be logged.
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let activity = task_repo.list_activity(&task.id).await.unwrap();
+        assert!(
+            activity
+                .iter()
+                .all(|entry| entry.event_type != "work_submitted")
+        );
+
+        // The fallback hook should fire with "no_decision" reason.
+        let events = events.lock().expect("events mutex");
+        let fallback = events
+            .iter()
+            .find(|event| event.action == "auto_submit_fallback_checkpoint_requested");
+        assert!(fallback.is_some(), "expected no_decision fallback event");
+        let payload: serde_json::Value =
+            serde_json::from_str(&fallback.unwrap().payload).unwrap_or_default();
+        assert_eq!(payload["reason"], "no_decision");
+
+        // No auto_submit_decision event because there was no settlement.
+        assert!(
+            events
+                .iter()
+                .all(|event| event.action != "auto_submit_decision")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_called_submit_work_with_metadata_persists_model_called_true() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+
+        // Simulate the model calling submit_work with auto_submit_review_metadata.
+        let metadata = serde_json::json!({
+            "task_run_id": task_run_id,
+            "trigger_reason": "idle",
+            "diff_fingerprint": "diff-456",
+            "verify_source": "local",
+            "verify_run_id": "local-run-99",
+            "verify_timestamp": "2026-07-01T12:00:00.000Z",
+            "session_id": "session-42",
+            "model_id": "model-42",
+            "no_progress_streak": 0
+        });
+        let payload = serde_json::json!({
+            "task_id": task.short_id,
+            "commit_title": "feat: worker implemented the feature",
+            "summary": "implemented feature X",
+            "files_changed": ["src/main.rs"],
+            "remaining_concerns": [],
+            "auto_submit_review_metadata": metadata
+        });
+
+        // Call through process_finalize_payload_with_outcome (normal model path).
+        let ok = crate::finalize_handlers::process_finalize_payload_with_outcome(
+            &Some(payload),
+            "submit_work",
+            &task.id,
+            &ctx,
+        )
+        .await;
+        assert!(ok);
+
+        // work_submitted activity should exist.
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let activity = task_repo.list_activity(&task.id).await.unwrap();
+        assert!(
+            activity
+                .iter()
+                .any(|entry| entry.event_type == "work_submitted")
+        );
+
+        // The review record should have model_called_submit_work=true.
+        let records = AutoSubmitReviewRepository::new(db)
+            .list_for_task_run(&task_run_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].model_called_submit_work);
+        assert_eq!(records[0].trigger_reason, "idle");
+        assert_eq!(records[0].diff_fingerprint, "diff-456");
+        assert_eq!(records[0].verify_source.as_deref(), Some("local"));
+        assert_eq!(records[0].verify_run_id.as_deref(), Some("local-run-99"));
+        assert_eq!(
+            records[0].verify_timestamp.as_deref(),
+            Some("2026-07-01T12:00:00.000Z")
+        );
+        assert_eq!(records[0].session_id.as_deref(), Some("session-42"));
+        assert_eq!(records[0].model_id.as_deref(), Some("model-42"));
+        assert_eq!(records[0].no_progress_streak, 0);
+    }
+
+    #[tokio::test]
+    async fn normal_submit_work_without_metadata_still_works_and_no_review_record() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+
+        // Normal model submit_work without auto_submit_review_metadata.
+        let payload = serde_json::json!({
+            "task_id": task.short_id,
+            "commit_title": "feat: normal submit",
+            "summary": "did the work",
+            "files_changed": ["src/lib.rs"],
+            "remaining_concerns": []
+        });
+
+        let ok = crate::finalize_handlers::process_finalize_payload_with_outcome(
+            &Some(payload),
+            "submit_work",
+            &task.id,
+            &ctx,
+        )
+        .await;
+        assert!(ok);
+
+        // work_submitted activity should exist.
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let activity = task_repo.list_activity(&task.id).await.unwrap();
+        assert!(
+            activity
+                .iter()
+                .any(|entry| entry.event_type == "work_submitted")
+        );
+
+        // No review metadata record since the model didn't include metadata.
+        let records = AutoSubmitReviewRepository::new(db)
+            .list_for_task_run(&task_run_id)
+            .await
+            .unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eligible_auto_submit_records_verify_timestamp_in_metadata() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+        let mut output = ParsedAgentOutput::empty();
+        output.auto_submit = Some(settlement(&task_run_id, true));
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Submitted);
+
+        let records = AutoSubmitReviewRepository::new(db)
+            .list_for_task_run(&task_run_id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].verify_timestamp.as_deref(),
+            Some("2026-07-01T00:00:00.000Z")
+        );
+    }
 }
