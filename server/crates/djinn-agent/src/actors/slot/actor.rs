@@ -13,7 +13,8 @@ use super::SlotEvent;
 /// `djinn_slot::SlotHandle`; this type is adapted into the canonical runner in
 /// [`SlotHandle::spawn_with_test_runner`].
 #[cfg(any(test, feature = "test-support"))]
-type LifecycleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'static>>;
+type LifecycleFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'static>>;
 #[cfg(any(test, feature = "test-support"))]
 pub type TestLifecycleRunner = Arc<
     dyn Fn(
