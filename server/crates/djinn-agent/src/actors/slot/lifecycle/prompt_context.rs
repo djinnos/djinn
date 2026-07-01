@@ -790,3 +790,7 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
 #[cfg(test)]
 #[path = "prompt_context_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ci_directive_tests.rs"]
+mod ci_directive_tests;

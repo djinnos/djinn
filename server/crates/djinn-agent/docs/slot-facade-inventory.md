@@ -2,7 +2,8 @@
 
 > **Task:** hw3r — Inventory and document djinn-agent slot facade compatibility exports
 > **Epic:** p6i4 — Slot cut-over host facade: remove djinn-agent duplicate behavior while preserving callers
-> **Generated:** 2026-07-01
+> **Generated:** 2026-07-01  
+> **Updated:** 2026-07-01 — p6i4 slice `019f1ad9-e93b-7f01-9494-f7a497982162`
 
 ## Overview
 
@@ -45,8 +46,8 @@ djinn-agent/src/actors/slot/
 │   ├── setup.rs
 │   ├── task_classifier.rs
 │   └── teardown.rs
-├── llm_extraction.rs         ← THIN SHIM: re-exports run_llm_extraction from djinn-slot,
-│                                 agent-side test helpers retained
+├── llm_extraction.rs         ← THIN SHIM: AgentContext→SlotContext test adapters;
+│                                 production behavior removed in favor of djinn-slot
 ├── memory_enrichment.rs      ← EMPTY SHIM: mod file exists; types/re-exports are in mod.rs
 ├── pool/                     ← HOST-ONLY: SlotPoolHandle, SlotFactory, PoolStatus, etc.
 ├── reply_loop/               ← HOST-ONLY: AgentContext-based reply loop wiring
@@ -79,7 +80,7 @@ These symbols are re-exported in `mod.rs` so that existing
 | `EnrichmentReport` | `djinn_slot::EnrichmentReport` | Yes (mcp_bridge) |
 | `run_memory_enrichment` | `djinn_slot::run_memory_enrichment` | No (facade only) |
 | `run_memory_enrichment_with_db` | `djinn_slot::run_memory_enrichment_with_db` | Yes (mcp_bridge) |
-| `run_llm_extraction` | `djinn_slot::run_llm_extraction` | No (facade only) |
+| `run_llm_extraction` | `djinn_slot::run_llm_extraction` | No (facade only; module-level agent adapter kept for tests) |
 | `SlotCommand` | `djinn_slot::SlotCommand` | Yes (control-plane) |
 | `SlotError` | `djinn_slot::SlotError` | Yes (control-plane) |
 | `apply_ac_verdicts` | `djinn_slot::finalize_handlers` | No (pub(crate)) |
@@ -146,7 +147,7 @@ Re-exported via `pub use helpers::*`:
 | `server/src/server/chat/prompt/system_message.rs` | `djinn_agent::actors::slot` | `format_family_for_provider`, `parse_model_id` | **Preserved facade** (host-only helpers) |
 | `server/src/server/tests/debug.rs` | `djinn_agent::actors::slot` | `SlotPoolConfig`, `SlotPoolHandle` | **Preserved facade** |
 | `server/src/mcp_bridge/bridges.rs` | `djinn_agent::actors::slot` | `SlotPoolHandle` | **Preserved facade** |
-| `server/src/mcp_bridge/memory_enrichment.rs` | `djinn_agent::actors::slot` | `run_memory_enrichment_with_db`, `EnrichmentReport`, `EnrichmentEntity`, `EnrichmentClaim`, `EnrichmentEdge` | **Migration candidate** → `djinn_slot::*` |
+| `server/src/mcp_bridge/memory_enrichment.rs` | `djinn_slot` | `run_memory_enrichment_with_db`, `EnrichmentReport`, `EnrichmentEntity`, `EnrichmentClaim`, `EnrichmentEdge` | **Migrated by p6i4 slice `019f1ad9`** |
 | `server/crates/djinn-control-plane/tests/execution_tools.rs` | `djinn_agent::actors::slot` | `ModelSlotConfig`, `SlotFactory`, `SlotHandle`, `SlotPoolConfig`, `SlotPoolHandle` | **Preserved facade** |
 | `server/crates/djinn-agent-worker/src/worker_services.rs` | `djinn_agent::actors::slot::helpers` | `OAuthConfigWire`, `auth_method_for_provider`, `capabilities_for_provider`, `default_base_url`, `format_family_for_provider`, `parse_model_id` | **Migration candidate** → `djinn_agent::actors::slot::helpers` or `djinn_slot::helpers` |
 
@@ -195,21 +196,24 @@ to `djinn-slot`:
 These external callers should eventually migrate to direct `djinn_slot::*`
 imports. The facade preserves them until migration tasks run:
 
-1. **`server/src/mcp_bridge/memory_enrichment.rs`** — All enrichment types and
-   `run_memory_enrichment_with_db` are canonical `djinn_slot` exports.
-   Migrate to `djinn_slot::{EnrichmentReport, ...}` when the dependency
-   graph allows it.
-
-2. **`server/crates/djinn-agent-worker/src/worker_services.rs`** — Helper
+1. **`server/crates/djinn-agent-worker/src/worker_services.rs`** — Helper
    functions (`parse_model_id`, `default_base_url`, etc.) are host-only
    but could use `djinn_slot::helpers::*` directly if the agent-worker
    adds a `djinn-slot` dependency.
+
+### Caller migrations completed by p6i4 slice `019f1ad9`
+
+- **`server/src/mcp_bridge/memory_enrichment.rs`** now imports and converts
+  canonical `djinn_slot::{EnrichmentReport, EnrichmentEntity,
+  EnrichmentClaim, EnrichmentEdge}` values and calls
+  `djinn_slot::run_memory_enrichment_with_db` directly. The root
+  `djinn-server` crate therefore has an explicit `djinn-slot` dependency.
 
 ---
 
 ## Build Verification
 
-After facade inventory changes, the following must compile:
+After facade inventory/cut-over changes, the following must compile:
 
 ```bash
 cd server/
@@ -230,3 +234,20 @@ they must:
    any callers introduced since this inventory was generated.
 3. **Update this document** to reflect the new module state after each
    deletion wave.
+
+---
+
+## p6i4 slice `019f1ad9` shim inventory update
+
+This slice thinned the extraction/enrichment-facing agent modules as follows:
+
+| Agent file | Current status | Canonical owner |
+|------------|----------------|-----------------|
+| `commands.rs` | Thin compatibility wrapper: re-exports `SlotCommand`/`SlotError`; adapts `AgentContext` for `log_commands_run_event`. | `djinn_slot::commands` |
+| `finalize_handlers.rs` | Thin compatibility wrapper: adapts `AgentContext` for `process_finalize_payload`/`handle_budget_park`; re-exports canonical test helper/types. | `djinn_slot::finalize_handlers` / `djinn_slot::finalize_types` |
+| `session_extraction.rs` | Thin compatibility wrapper: owns only `AgentContext`→`SlotContext` conversion/no-op callback glue plus adapters for backfill/post-session extraction and test structural extraction. | `djinn_slot::session_extraction` |
+| `llm_extraction.rs` | Thin compatibility wrapper: the former 2k+ line duplicate implementation was removed; remaining code is test-only `AgentContext`→`SlotContext` adapters around `djinn_slot::llm_extraction` entry points. | `djinn_slot::llm_extraction` |
+| `memory_enrichment.rs` | Empty compatibility module retained only so `mod memory_enrichment;` resolves; public surface is re-exported from `djinn_slot` in `mod.rs`. | `djinn_slot::memory_enrichment` |
+
+No independent extraction, enrichment, prompt, deduplication, admission-gate,
+finalization, or command-activity behavior remains in these agent files.

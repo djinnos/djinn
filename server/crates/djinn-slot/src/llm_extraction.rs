@@ -1578,7 +1578,7 @@ async fn lookup_candidates(
     note_type: &str,
     candidate_abstract: &str,
 ) -> djinn_db::Result<Vec<djinn_db::NoteDedupCandidate>> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(lookup) = extraction_context.candidate_lookup.override_lookup {
         return Ok(lookup(
             extraction_context.project_id,
