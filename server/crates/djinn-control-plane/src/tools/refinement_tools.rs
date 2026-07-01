@@ -144,11 +144,93 @@ const GENERIC_QUESTION_PATTERNS: &[&str] = &[
     "study more",
 ];
 
+/// Find the active Judge task for a proposal's refinement run.
+///
+/// Queries the DB for an open or in-progress refinement task whose
+/// `agent_type` is `"judge"` and whose title contains the proposal id.
+/// Returns the task if found, or `None` when no Judge task is in flight
+/// for this proposal.
+async fn find_active_judge_task(
+    task_repo: &TaskRepository,
+    proposal_id: &str,
+) -> Result<Option<djinn_core::models::Task>, String> {
+    let open_tasks = task_repo
+        .list_by_status("open")
+        .await
+        .map_err(|e| format!("failed to query open tasks: {e}"))?;
+    let in_progress_tasks = task_repo
+        .list_by_status("in_progress")
+        .await
+        .map_err(|e| format!("failed to query in_progress tasks: {e}"))?;
+
+    let candidate = open_tasks.into_iter().chain(in_progress_tasks).find(|t| {
+        t.issue_type == "refinement"
+            && t.agent_type.as_deref() == Some("judge")
+            && t.title.contains(proposal_id)
+    });
+
+    Ok(candidate)
+}
+
+/// Verify the caller is the active Judge for this proposal's refinement run.
+///
+/// Checks:
+/// - A session user identity exists (`auth_context::current_user_id()`).
+/// - An active Judge task is in flight for this proposal.
+/// - The caller's user id matches the Judge task's `created_by_user_id`.
+///
+/// Returns `Ok(judge_task_id)` when authorized, or `Err(rejection_reason)`
+/// when the caller is not the active Judge.
+async fn verify_active_judge_authorization(
+    task_repo: &TaskRepository,
+    proposal_id: &str,
+) -> Result<String, String> {
+    // The caller must have a session identity.
+    let caller_user_id = djinn_core::auth_context::current_user_id();
+    let Some(caller_id) = caller_user_id else {
+        return Err("caller is not authenticated: no session user identity; \
+             only the active Judge may demand evidence"
+            .to_string());
+    };
+
+    // Find the active Judge task for this proposal's refinement run.
+    let judge_task = find_active_judge_task(task_repo, proposal_id).await?;
+
+    let Some(task) = judge_task else {
+        return Err(
+            "no active Judge task in flight for this proposal's refinement; \
+             the caller cannot be verified as the active Judge"
+                .to_string(),
+        );
+    };
+
+    // The caller must match the Judge task's attributed user.
+    let task_owner = task.created_by_user_id.as_deref().unwrap_or("");
+    if task_owner.is_empty() || task_owner != caller_id {
+        return Err(format!(
+            "caller '{}' is not the active Judge for this proposal \
+             (Judge task {} attributed to '{}')",
+            caller_id,
+            task.id,
+            if task_owner.is_empty() {
+                "nobody"
+            } else {
+                task_owner
+            },
+        ));
+    }
+
+    Ok(task.id)
+}
+
 /// Validate demand-evidence parameters and proposal/refinement state before
 /// any mutation occurs. Returns `Ok(())` when the demand is valid, or
 /// `Err(rejection_reason)` when it should be rejected without side effects.
 ///
 /// Checks (in order):
+/// 0. **Caller is the active Judge** — verifies caller identity via
+///    `auth_context::current_user_id()` matches the active Judge task's
+///    `created_by_user_id` for this proposal's refinement run.
 /// 1. **Proposal not terminal** — terminal proposals cannot accept demands.
 /// 2. **Refinement active** — must be in an active refinement run.
 /// 3. **Refinement not awaiting review** — the Judge must still be
@@ -170,10 +252,17 @@ const GENERIC_QUESTION_PATTERNS: &[&str] = &[
 ///     most one open spike at a time.
 async fn validate_demand_evidence(
     repo: &ProposalRepository,
+    task_repo: &TaskRepository,
     proposal: &djinn_core::models::Proposal,
     refinement: &ProposalRefinementStatusModel,
     params: &ProposalRefinementDemandEvidenceParams,
 ) -> Result<(), String> {
+    // 0. Caller must be the active Judge for this proposal's refinement run.
+    //    This check runs before any state inspection so that non-Judge
+    //    callers receive a typed authorization rejection before any
+    //    proposal/task/debate/lifecycle mutation.
+    verify_active_judge_authorization(task_repo, &proposal.id).await?;
+
     // 1. Terminal proposals cannot accept demands.
     if TERMINAL_PROPOSAL_STATUSES.contains(&proposal.status.as_str()) {
         return Err(format!(
@@ -780,6 +869,7 @@ impl DjinnMcpServer {
         Parameters(p): Parameters<ProposalRefinementDemandEvidenceParams>,
     ) -> Json<NeedsEvidenceDemandResponse> {
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
 
         let Some(proposal) = repo.resolve(&p.proposal_id).await.ok().flatten() else {
             return Json(err_demand_evidence(format!(
@@ -804,7 +894,9 @@ impl DjinnMcpServer {
         // Run the full validation gate before any mutation. This ensures
         // no-mutation-on-reject: no lifecycle events, no debate entries, no
         // proposal fields are touched when the demand is invalid.
-        if let Err(e) = validate_demand_evidence(&repo, &proposal, &refinement, &p).await {
+        if let Err(e) =
+            validate_demand_evidence(&repo, &task_repo, &proposal, &refinement, &p).await
+        {
             return Json(NeedsEvidenceDemandResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
