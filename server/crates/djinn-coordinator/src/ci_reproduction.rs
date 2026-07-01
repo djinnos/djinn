@@ -302,6 +302,96 @@ async fn preflight_reproduce_with_timeout(
     }
 }
 
+// ─── Reproduction-plan formatting ────────────────────────────────────────────
+
+/// Build a focused reproduction plan from a reproducible provider bundle.
+///
+/// The returned markdown contains the failing check/job, exact shell command,
+/// setup steps when available, CI log tail, observed head SHA, and
+/// reproduce → fix → verify → resubmit instructions for a focused remediation
+/// session.
+pub fn format_reproduction_plan(
+    ctx: &djinn_provider::github_api::RequiredCheckReproductionContext,
+) -> String {
+    let mut plan = String::new();
+
+    plan.push_str(&format!(
+        "**Failing Required Check:** `{}`\n",
+        ctx.required_check_name
+    ));
+    plan.push_str(&format!(
+        "**Observed Head SHA:** `{}`\n",
+        ctx.observed_head_sha
+    ));
+    plan.push_str(&format!(
+        "**Failed Job:** `{}` (id: {}, [run]({}))\n",
+        ctx.job.name, ctx.job.id, ctx.job.html_url
+    ));
+    plan.push_str(&format!(
+        "**Failed Step:** {} (step {})\n",
+        ctx.failing_step.name, ctx.failing_step.number
+    ));
+    if let Some(workflow) = &ctx.workflow_name {
+        plan.push_str(&format!("**Workflow:** `{workflow}`\n"));
+    }
+
+    plan.push_str("\n**Reproduction Command:**\n```\n");
+    plan.push_str(&ctx.command);
+    plan.push_str("\n```\n");
+
+    if !ctx.setup_steps.is_empty() {
+        plan.push_str("\n**Setup Steps** (run before the failing command):\n");
+        for step in &ctx.setup_steps {
+            if step.command.trim().is_empty() {
+                plan.push_str(&format!(
+                    "{}. `{}` — _(empty, skipped)_\n",
+                    step.number, step.name
+                ));
+            } else {
+                plan.push_str(&format!(
+                    "{}. `{}`\n   ```\n   {}\n   ```\n",
+                    step.number, step.name, step.command
+                ));
+            }
+        }
+    }
+
+    if !ctx.log_tail.is_empty() {
+        plan.push_str("\n**CI Log Tail:**\n```\n");
+        plan.push_str(&ctx.log_tail);
+        plan.push_str("\n```\n");
+    }
+
+    plan.push_str("\n**Remediation Steps:**\n");
+    plan.push_str("1. **Reproduce:** Run the reproduction command above in the project working directory (after running setup steps if any).\n");
+    plan.push_str("2. **Fix:** Address the failure revealed by the reproduction.\n");
+    plan.push_str(
+        "3. **Verify:** Re-run the same command locally and confirm it passes (exit code 0).\n",
+    );
+    plan.push_str("4. **Resubmit:** Push the fix and let CI re-run on the PR.\n");
+
+    plan
+}
+
+/// Build a distinct intervention reason for an unreproducible required check.
+///
+/// The returned text makes clear that the check could not be reproduced locally
+/// and must be handled as an unreproducible required-check boundary, not as a
+/// passing check and not as generic planner scope reshaping.
+pub fn format_unreproducible_intervention_reason(
+    bundle: &djinn_provider::github_api::RequiredCheckUnreproducible,
+) -> String {
+    let mut reason = format!(
+        "Required check `{}` (observed SHA `{}`) could not be reproduced locally.",
+        bundle.required_check_name, bundle.observed_head_sha,
+    );
+    reason.push_str(&format!("\nUnreproducible reason: `{:?}`", bundle.reason));
+    if let Some(details) = &bundle.details {
+        reason.push_str(&format!("\nDetails: {details}"));
+    }
+    reason
+}
+
 // ─── Utility ────────────────────────────────────────────────────────────────
 
 /// Take the last `max_bytes` of a string, aligned to UTF-8 char boundaries.
@@ -986,5 +1076,75 @@ mod tests {
                 term,
             );
         }
+    }
+    // ── Same-signature remediation payload formatting ───────────────────
+
+    fn sample_required_check_context()
+    -> djinn_provider::github_api::RequiredCheckReproductionContext {
+        djinn_provider::github_api::RequiredCheckReproductionContext {
+            required_check_name: "Quality Gate".into(),
+            observed_head_sha: "abc123".into(),
+            check_run_id: 10,
+            workflow_run_id: 42,
+            workflow_name: Some("CI".into()),
+            job: djinn_provider::github_api::ReproductionJob {
+                id: 200,
+                name: "Server Test".into(),
+                html_url: "https://example.test/job/200".into(),
+            },
+            failing_step: djinn_provider::github_api::ReproductionStep {
+                number: 3,
+                name: "Run cargo test".into(),
+            },
+            command: "cargo test -p djinn-coordinator pr_poller::tests".into(),
+            setup_steps: vec![djinn_provider::github_api::ReproductionSetupStep {
+                number: 2,
+                name: "Install Rust".into(),
+                command: "rustup show".into(),
+            }],
+            log_tail: "assertion failed: expected green CI".into(),
+        }
+    }
+
+    #[test]
+    fn reproduction_plan_contains_required_remediation_fields() {
+        let plan = format_reproduction_plan(&sample_required_check_context());
+
+        for expected in [
+            "Quality Gate",
+            "abc123",
+            "Server Test",
+            "Run cargo test",
+            "cargo test -p djinn-coordinator pr_poller::tests",
+            "Install Rust",
+            "rustup show",
+            "assertion failed: expected green CI",
+            "**Reproduce:**",
+            "**Fix:**",
+            "**Verify:**",
+            "**Resubmit:**",
+        ] {
+            assert!(plan.contains(expected), "plan missing {expected:?}: {plan}");
+        }
+    }
+
+    #[test]
+    fn unreproducible_reason_is_distinct_required_check_boundary() {
+        let reason = format_unreproducible_intervention_reason(
+            &djinn_provider::github_api::RequiredCheckUnreproducible {
+                required_check_name: "Quality Gate".into(),
+                observed_head_sha: "def456".into(),
+                reason:
+                    djinn_provider::github_api::RequiredCheckUnreproducibleReason::CommandNotFound,
+                details: Some("no shell command in failed Actions step".into()),
+            },
+        );
+
+        assert!(reason.contains("Quality Gate"));
+        assert!(reason.contains("def456"));
+        assert!(reason.contains("CommandNotFound"));
+        assert!(reason.contains("no shell command in failed Actions step"));
+        assert!(reason.contains("could not be reproduced locally"));
+        assert!(!reason.to_lowercase().contains("scope reshape"));
     }
 }

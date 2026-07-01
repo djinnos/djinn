@@ -1,5 +1,16 @@
 use super::*;
 use djinn_core::models::CiStatus;
+use djinn_provider::github_api::RequiredCheckReproduction;
+
+use super::ci_failure_analysis::{
+    compute_ci_failure_fingerprint, detect_scope_inversion, extract_crate_names,
+    extract_crate_names_from_sections,
+};
+use crate::ci_reproduction::{format_reproduction_plan, format_unreproducible_intervention_reason};
+
+/// Timeout for fetching reproduction context from the GitHub API when building
+/// a focused reproduction plan for same-signature escalation.
+const REPRODUCTION_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 impl CoordinatorActor {
     pub(crate) async fn resolve_required_contexts(
@@ -226,28 +237,143 @@ impl CoordinatorActor {
 
         if total_consecutive >= SAME_CI_SIGNATURE_THRESHOLD as i64 {
             let blocking_names: Vec<&str> = blocking.iter().map(|cr| cr.name.as_str()).collect();
-            let reason = format!(
-                "PR #{pull_number}: CI has failed with the identical fingerprint {total_consecutive} \
-                 consecutive times (checks: {check_names}). The worker is not making progress on \
-                 these specific failures. Escalating for planner intervention.",
-                check_names = blocking_names.join(", "),
-            );
-            tracing::warn!(
-                task_id = %task_short_id,
-                pr = pull_number,
-                fingerprint = %fingerprint,
-                consecutive = total_consecutive,
-                threshold = SAME_CI_SIGNATURE_THRESHOLD,
-                "PR poller: same CI failure signature detected — escalating for planner intervention"
-            );
-            let sections_text = ci_failure_sections.join("\n");
-            self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
+
+            // ── Build a focused reproduction plan from the provider bundle ──
+            // Fetch the CI-introspection bundle for each blocking check.
+            // Reproducible bundles yield a reproduction plan; unreproducible
+            // bundles yield a typed intervention reason.  If every fetch errors
+            // (API down, timeout), fall back to the original generic reason.
+            let mut reproducible_ctxs: Vec<
+                djinn_provider::github_api::RequiredCheckReproductionContext,
+            > = Vec::new();
+            let mut unreproducible_reasons: Vec<String> = Vec::new();
+            let mut any_fetch_succeeded = false;
+
+            for check in &blocking {
+                let fetch = tokio::time::timeout(
+                    REPRODUCTION_FETCH_TIMEOUT,
+                    gh_client.required_check_reproduction_context(
+                        owner,
+                        repo,
+                        current_sha,
+                        &check.name,
+                    ),
+                )
                 .await;
-            // The intervention escalated + blocked the source; park it to `open`
-            // so it is genuinely HELD (not left in pr_draft/pr_review where the
-            // poller keeps re-polling the red PR) and revivable when the
-            // remediation closes.
-            self.park_source_open(task_id, &reason).await;
+                match fetch {
+                    Ok(Ok(RequiredCheckReproduction::Reproducible(ctx))) => {
+                        any_fetch_succeeded = true;
+                        reproducible_ctxs.push(ctx);
+                    }
+                    Ok(Ok(RequiredCheckReproduction::Unreproducible(u))) => {
+                        any_fetch_succeeded = true;
+                        unreproducible_reasons.push(format_unreproducible_intervention_reason(&u));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::info!(
+                            task_id = %task_short_id,
+                            check = %check.name,
+                            error = %e,
+                            "PR poller: failed to fetch reproduction context for same-signature check"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::info!(
+                            task_id = %task_short_id,
+                            check = %check.name,
+                            "PR poller: timeout fetching reproduction context for same-signature check"
+                        );
+                    }
+                }
+            }
+
+            if !any_fetch_succeeded {
+                // Every fetch errored (API down, timeout): fall back to the
+                // original generic escalation so the same-signature path is
+                // never silently skipped.
+                let reason = format!(
+                    "PR #{pull_number}: CI has failed with the identical fingerprint \
+                     {total_consecutive} consecutive times (checks: {check_names}). \
+                     The worker is not making progress on these specific failures. \
+                     Escalating for planner intervention.",
+                    check_names = blocking_names.join(", "),
+                );
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    fingerprint = %fingerprint,
+                    consecutive = total_consecutive,
+                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                    "PR poller: same CI failure signature — \
+                     all reproduction-context fetches failed; escalating generically"
+                );
+                let sections_text = ci_failure_sections.join("\n");
+                self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
+                    .await;
+            } else if reproducible_ctxs.is_empty() {
+                // Every bundle is unreproducible: route to human/lead
+                // intervention with the distinct unreproducible reason.
+                let mut reason = format!(
+                    "PR #{pull_number}: CI has failed with the identical fingerprint \
+                     {total_consecutive} consecutive times (checks: {check_names}). \
+                     No required check could be reproduced locally:",
+                    check_names = blocking_names.join(", "),
+                );
+                for ur in &unreproducible_reasons {
+                    reason.push_str(&format!("\n- {ur}"));
+                }
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    fingerprint = %fingerprint,
+                    consecutive = total_consecutive,
+                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                    unreproducible_count = unreproducible_reasons.len(),
+                    "PR poller: same CI failure signature — all bundles unreproducible; \
+                     routing to human intervention"
+                );
+                // Create a HumanReview remediation task with the
+                // unreproducible reason.  No Planner dispatch — a human
+                // must resolve it.
+                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+                    .await;
+            } else {
+                // At least one reproducible bundle: build a focused
+                // reproduction plan for the remediation payload.
+                let plan_sections: Vec<String> = reproducible_ctxs
+                    .iter()
+                    .map(format_reproduction_plan)
+                    .collect();
+                let mut reason = format!(
+                    "PR #{pull_number}: CI has failed with the identical fingerprint \
+                     {total_consecutive} consecutive times (checks: {check_names}). \
+                     Focused remediation plan:\n\n{plan}",
+                    check_names = blocking_names.join(", "),
+                    plan = plan_sections.join("\n\n"),
+                );
+                if !unreproducible_reasons.is_empty() {
+                    reason.push_str("\n\n**Unreproducible checks:**\n");
+                    for ur in &unreproducible_reasons {
+                        reason.push_str(&format!("- {ur}\n"));
+                    }
+                }
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    pr = pull_number,
+                    fingerprint = %fingerprint,
+                    consecutive = total_consecutive,
+                    threshold = SAME_CI_SIGNATURE_THRESHOLD,
+                    reproducible_count = reproducible_ctxs.len(),
+                    unreproducible_count = unreproducible_reasons.len(),
+                    "PR poller: same CI failure signature — emitting focused reproduction plan"
+                );
+                // Create a HumanReview remediation task with the reproduction
+                // plan as the reason.  This parks the source on the blocker
+                // without dispatching a Planner (no scope reshape for
+                // ordinary reproduced CI loops).
+                self.escalate_ci_failure_and_park(task, pr_url, &reason, &ci_failure_sections)
+                    .await;
+            }
             return true;
         }
 
@@ -835,200 +961,8 @@ pub(crate) fn advisory_checks_section(advisory_failed: &[&CheckRun]) -> Option<S
     ))
 }
 
-/// Compute a stable fingerprint from normalized failing-check names and CI
-/// failure sections. The fingerprint is a hash of:
-/// 1. Sorted, deduplicated failing check-run names (normalized: lowercase, trimmed)
-/// 2. The workflow names + failed job names + failed step names from the CI
-///    failure sections (the structured content, not the full text)
-///
-/// Returns a hex string. Two CI failures with the same fingerprint indicate
-/// the worker is hitting the exact same checks/errors across pushes.
-pub(crate) fn compute_ci_failure_fingerprint(
-    failed_checks: &[&CheckRun],
-    ci_failure_sections: &[String],
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    // 1. Normalize check names
-    let mut check_names: Vec<String> = failed_checks
-        .iter()
-        .map(|cr| cr.name.to_lowercase().trim().to_string())
-        .collect();
-    check_names.sort();
-    check_names.dedup();
-
-    // 2. Extract structured failure markers from sections
-    //    Parse lines starting with "**Failed job:**" or "**Failed step:**"
-    let mut failure_markers: Vec<String> = ci_failure_sections
-        .iter()
-        .filter_map(|s| {
-            if s.starts_with("**Failed job:**") || s.starts_with("**Failed step:**") {
-                Some(s.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    failure_markers.sort();
-    failure_markers.dedup();
-
-    // 3. Hash combined content
-    let combined = format!(
-        "checks:{}|failures:{}",
-        check_names.join(","),
-        failure_markers.join(",")
-    );
-    let mut hasher = DefaultHasher::new();
-    combined.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
-/// Walk activity entries in reverse chronological order and count how many
-/// consecutive entries have a fingerprint matching `current_fp`.
-/// Stops at the first different fingerprint.
-#[cfg(test)]
-pub(crate) fn count_consecutive_identical(
-    entries: &[djinn_core::models::ActivityEntry],
-    current_fp: &str,
-) -> u32 {
-    let mut count = 0u32;
-    for entry in entries.iter().rev() {
-        let parsed: serde_json::Value = match serde_json::from_str(&entry.payload) {
-            Ok(v) => v,
-            Err(_) => break,
-        };
-        let fp = match parsed.get("fingerprint").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => break,
-        };
-        if fp == current_fp {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count
-}
-
-/// Determine whether a CI failure is a scope-inversion: the failing crates/files
-/// are OUTSIDE the PR's own git diff.
-///
-/// Returns:
-/// - `Some(true)` — scope inversion detected (CI fails on crates outside the PR diff)
-/// - `Some(false)` — CI fails on crates WITHIN the PR diff (normal worker bug)
-/// - `None` — inconclusive (can't attribute failures to specific files/crates,
-///   e.g. workspace-wide errors, no file path in failure sections)
-pub(crate) fn detect_scope_inversion(
-    ci_failure_sections: &[String],
-    pr_files: &[String], // file paths from the PR diff
-) -> Option<bool> {
-    if pr_files.is_empty() {
-        return None;
-    }
-
-    // 1. Extract failing crate names from CI failure sections.
-    let failing_crates = extract_crate_names_from_sections(ci_failure_sections);
-    if failing_crates.is_empty() {
-        return None;
-    }
-
-    // 2. Extract crate names from PR diff files.
-    let pr_crates = extract_crate_names(pr_files);
-    if pr_crates.is_empty() {
-        return None;
-    }
-
-    // 3. Compare the sets:
-    //    - If ANY failing crate is NOT in the PR's crate set → Some(true)
-    //    - If ALL failing crates ARE in the PR's crate set → Some(false)
-    let pr_crate_set: std::collections::HashSet<&str> =
-        pr_crates.iter().map(|s| s.as_str()).collect();
-    let any_outside = failing_crates
-        .iter()
-        .any(|c| !pr_crate_set.contains(c.as_str()));
-
-    if any_outside { Some(true) } else { Some(false) }
-}
-
-/// Extract crate names from a list of file paths using a simple heuristic:
-/// - `server/crates/<crate-name>/src/...` → `<crate-name>`
-/// - `crates/<crate-name>/src/...` → `<crate-name>`
-/// - Paths without `crates/` return `None`.
-pub(crate) fn extract_crate_name(path: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split('/').collect();
-    for i in 0..parts.len().saturating_sub(1) {
-        if parts[i] == "crates" {
-            return parts.get(i + 1).map(|s| s.to_string());
-        }
-    }
-    None
-}
-
-/// Extract crate names from a list of file paths, deduplicated and sorted.
-pub(crate) fn extract_crate_names(paths: &[String]) -> Vec<String> {
-    let mut crates: Vec<String> = paths.iter().filter_map(|p| extract_crate_name(p)).collect();
-    crates.sort();
-    crates.dedup();
-    crates
-}
-
-/// Extract crate names from CI failure sections by looking for file paths
-/// embedded in the failure text. We look for:
-/// - Rust compiler error locations: `--> path/to/file.rs:line:col`
-/// - File paths in "Failed step:" or "Failed job:" names that contain crate paths
-/// - Any path segment containing `crates/`
-pub(crate) fn extract_crate_names_from_sections(sections: &[String]) -> Vec<String> {
-    let mut crates = std::collections::HashSet::new();
-    for section in sections {
-        // Look for `--> path/to/file.rs:line:col` pattern (Rust compiler errors)
-        for line in section.lines() {
-            if let Some(arrow_idx) = line.find("-->") {
-                let after_arrow = &line[arrow_idx + 3..];
-                let trimmed = after_arrow.trim();
-                // Strip trailing `:line:col` if present
-                let path_part = if let Some(colon_idx) = trimmed.rfind(':') {
-                    let before_last_colon = &trimmed[..colon_idx];
-                    if before_last_colon.rfind(':').is_some() {
-                        // Likely `path:line:col` — extract the path part
-                        if let Some(prev_colon) = before_last_colon.rfind(':') {
-                            let candidate = &trimmed[..prev_colon];
-                            // Verify candidate looks like a path (contains '/')
-                            if candidate.contains('/') {
-                                candidate
-                            } else {
-                                trimmed
-                            }
-                        } else {
-                            trimmed
-                        }
-                    } else {
-                        trimmed
-                    }
-                } else {
-                    trimmed
-                };
-                if let Some(crate_name) = extract_crate_name(path_part) {
-                    crates.insert(crate_name);
-                }
-            }
-        }
-
-        // Also look for any `crates/<name>/` pattern in the text
-        if let Some(start) = section.find("crates/") {
-            let after = &section[start + 7..];
-            if let Some(end) = after.find('/') {
-                let crate_name = &after[..end];
-                if !crate_name.is_empty() {
-                    crates.insert(crate_name.to_string());
-                }
-            }
-        }
-    }
-    let mut result: Vec<String> = crates.into_iter().collect();
-    result.sort();
-    result
-}
+// CI failure fingerprinting and scope attribution live in `ci_failure_analysis`
+// to keep this poller helper below the changed-file size guard.
 
 // ── CI merge gate ────────────────────────────────────────────────────────────
 
