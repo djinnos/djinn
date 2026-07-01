@@ -1,23 +1,7 @@
-use std::path::{Path, PathBuf};
-
 use crate::context::AgentContext;
 use djinn_core::models::Task;
-use djinn_db::ActivityQuery;
-use djinn_db::ProjectRepository;
-use djinn_db::TaskRepository;
-use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
+use djinn_orchestration_types::slot::MergeConflictMetadata;
 use djinn_provider::repos::CredentialRepository;
-
-use super::*;
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-/// Max characters for verification output included in user messages.
-/// Keeps the user-message payload reasonable (clippy stderr can be huge).
-const MAX_VERIFICATION_CHARS: usize = 3000;
-
-/// Max characters for a single inline PR review comment included in the prompt.
-const MAX_PR_COMMENT_CHARS: usize = 500;
 
 mod feedback;
 pub mod provider_resolution;
@@ -35,11 +19,9 @@ mod tests;
 pub(crate) use djinn_slot::helpers::{
     derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
 };
-#[cfg(test)]
 #[allow(unused_imports)]
-// retained for agent facade compatibility tests; canonical home is djinn-slot
-pub(crate) use feedback::log_snippet;
-#[allow(unused_imports)]
+// Thin adapter layer: context-free functions re-exported from djinn_slot,
+// context-dependent async functions wrapped with AgentContext → SlotContext.
 pub(crate) use feedback::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
     conflict_context_for_dispatch, default_target_branch, extract_worker_context,

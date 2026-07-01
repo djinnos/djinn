@@ -65,7 +65,7 @@ pub use code_context::{
 #[cfg(test)]
 pub(crate) use feedback::log_snippet;
 #[allow(unused_imports)]
-pub(crate) use feedback::{
+pub use feedback::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
     conflict_context_for_dispatch, default_target_branch, extract_worker_context,
     format_command_details, initial_user_message_for_task, load_task, parse_conflict_metadata,
