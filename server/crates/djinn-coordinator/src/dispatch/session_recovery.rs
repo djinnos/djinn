@@ -1,3 +1,4 @@
+// djinn:allow-oversize — session recovery + preservation gate for reap/stall/escalated termination
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
