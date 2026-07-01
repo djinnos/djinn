@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { render, screen } from "@/test/test-utils";
-import { mockEpicA, mockTaskA } from "@/test/fixtures";
+import { mockEpicA, mockTaskA, mockCiPassing, mockCiPending, mockCiFailing, mockCiUnknown } from "@/test/fixtures";
 
 vi.mock("@/hooks/useTaskActions", () => ({
   useTaskActions: () => ({ busy: false, transition: vi.fn() }),
@@ -71,5 +71,86 @@ describe("TaskDetailPanel", () => {
     expect(checkboxes).toHaveLength(2);
     expect(checkboxes[0]).toBeChecked();
     expect(checkboxes[1]).not.toBeChecked();
+  });
+
+  it("renders CI: passing status section when ci snapshot is passing", () => {
+    const task = {
+      ...mockTaskA,
+      short_id: "ci-pass",
+      title: "CI passing task",
+      status: "in_progress",
+      ci: mockCiPassing,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.getByText(/CI Status/i)).toBeInTheDocument();
+    expect(screen.getByText("Passing")).toBeInTheDocument();
+    expect(screen.getByText("abc12345")).toBeInTheDocument();
+    expect(screen.getByText(/#42/)).toBeInTheDocument();
+  });
+
+  it("renders CI: pending status as visible non-terminal state", () => {
+    const task = {
+      ...mockTaskA,
+      short_id: "ci-pend",
+      title: "CI pending task",
+      status: "in_progress",
+      ci: mockCiPending,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.getByText(/CI Status/i)).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+  });
+
+  it("renders CI: failing status with blocking checks from structured fields", () => {
+    const task = {
+      ...mockTaskA,
+      short_id: "ci-fail",
+      title: "CI failing task",
+      status: "in_progress",
+      ci: mockCiFailing,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.getByText(/CI Status/i)).toBeInTheDocument();
+    expect(screen.getByText("Failing")).toBeInTheDocument();
+    expect(screen.getByText("lint")).toBeInTheDocument();
+    expect(screen.getByText("tests")).toBeInTheDocument();
+    expect(screen.getByText("Blocking checks:")).toBeInTheDocument();
+    expect(screen.getByText("Repeat count:")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("renders CI: unknown status as visible non-terminal state", () => {
+    const task = {
+      ...mockTaskA,
+      short_id: "ci-unk",
+      title: "CI unknown task",
+      status: "open",
+      ci: mockCiUnknown,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.getByText(/CI Status/i)).toBeInTheDocument();
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+  });
+
+  it("does not render CI section when ci field is absent", () => {
+    const task = {
+      ...mockTaskA,
+      short_id: "no-ci",
+      title: "No CI task",
+      status: "open",
+      ci: undefined,
+    };
+
+    render(<TaskDetailPanel task={task} epic={mockEpicA} open onClose={() => {}} />);
+
+    expect(screen.queryByText(/CI Status/i)).not.toBeInTheDocument();
   });
 });
