@@ -8,7 +8,7 @@ use djinn_db::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::roles::LeadRole;
+use crate::roles::{LeadRole, ReviewerRole, WorkerRole};
 use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
 
 async fn create_epic(
@@ -96,6 +96,90 @@ async fn full_prompt_context(
         read_sources,
     })
     .await
+}
+
+async fn full_prompt_context_for_role(
+    db: Database,
+    task: &djinn_core::models::Task,
+    role: &dyn AgentRole,
+) -> PromptContext {
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    assemble_prompt_context(PromptContextInputs {
+        task,
+        runtime_role: role,
+        role_for_epic_check: role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+    })
+    .await
+}
+
+fn ci_directive_section(prompt: &str) -> &str {
+    let start = prompt
+        .find("## ⛔ BLOCKING: Required CI Failing")
+        .expect("prompt must contain promoted CI BLOCKING section");
+    let rest = &prompt[start..];
+    match rest[3..].find("\n## ") {
+        Some(end) => &rest[..3 + end],
+        None => rest,
+    }
+}
+
+fn assert_single_structured_ci_directive(prompt: &str) {
+    assert_eq!(
+        prompt
+            .matches("## ⛔ BLOCKING: Required CI Failing")
+            .count(),
+        1,
+        "prompt must contain exactly one promoted CI BLOCKING directive"
+    );
+
+    let directive = ci_directive_section(prompt);
+    assert!(
+        directive.contains("**PR:** #314"),
+        "directive must use structured PR number from task CI snapshot: {directive}"
+    );
+    assert!(
+        directive.contains("**Failing head SHA:** `structured-head-sha-314159`"),
+        "directive must use structured head SHA from task CI snapshot: {directive}"
+    );
+    assert!(
+        directive.contains("Structured Quality Gate"),
+        "directive must use structured primary blocking check from task CI snapshot: {directive}"
+    );
+    assert!(
+        directive.contains("Structured Server Tests"),
+        "directive must include structured blocking check values from task CI snapshot: {directive}"
+    );
+    assert!(
+        directive.contains("`structured-fingerprint-314`"),
+        "directive must include structured failure fingerprint: {directive}"
+    );
+    assert!(
+        directive.contains("**Remediation baseline SHA:** `structured-base-sha-271828`"),
+        "directive must include structured remediation baseline SHA: {directive}"
+    );
+    assert!(
+        !directive.contains("audit-log-head-sha-should-not-be-used"),
+        "promoted directive must not be assembled from activity-log prose: {directive}"
+    );
+    assert!(
+        !directive.contains("Audit Log CI Job Should Not Be Promoted"),
+        "promoted directive must not scrape activity-log check names: {directive}"
+    );
+    assert!(
+        !directive.contains("audit-log-reason-should-not-be-used"),
+        "promoted directive must not scrape activity-log failure reasons: {directive}"
+    );
 }
 
 #[tokio::test]
@@ -1116,6 +1200,107 @@ fn make_task_with_ci(
         ci_last_remediation_base_sha: ci_last_remediation_base_sha.map(Into::into),
         unresolved_blocker_count: 0,
     }
+}
+
+async fn task_with_structured_red_ci_and_audit_activity(
+    db: &Database,
+    events: &EventBus,
+) -> djinn_core::models::Task {
+    let project = create_test_project(db).await;
+    let epic = create_epic(
+        db,
+        events,
+        &project.id,
+        "Structured CI directive epic",
+        "Exercises red-CI prompt context assembly.",
+        None,
+    )
+    .await;
+    let task_repo = TaskRepository::new(db.clone(), events.clone());
+    let task = task_repo
+        .create(
+            &epic.id,
+            "Fix structured CI failure",
+            "The task has red required CI.",
+            "Use the durable CI snapshot, not activity prose.",
+            "task",
+            1,
+            "test-owner",
+            None,
+        )
+        .await
+        .expect("create CI prompt task");
+
+    // Ordinary CI audit prose intentionally contains distinct fake values. The
+    // promoted directive must not scrape these comments to find job/reason/head.
+    task_repo
+        .log_activity(
+            Some(&task.id),
+            "system",
+            "system",
+            "comment",
+            r#"{"body":"CI audit: required check failed. job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used"}"#,
+        )
+        .await
+        .expect("log first CI audit activity");
+    task_repo
+        .log_activity(
+            Some(&task.id),
+            "system",
+            "system",
+            "comment",
+            r#"{"body":"CI audit repeat: job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used"}"#,
+        )
+        .await
+        .expect("log second CI audit activity");
+
+    let mut task = task;
+    task.ci_status = "failing".into();
+    task.ci_head_sha = Some("structured-head-sha-314159".into());
+    task.ci_pr_number = Some(314);
+    task.ci_blocking_required_check_names =
+        r#"["Structured Quality Gate", "Structured Server Tests"]"#.into();
+    task.ci_failure_fingerprint = Some("structured-fingerprint-314".into());
+    task.ci_last_remediation_base_sha = Some("structured-base-sha-271828".into());
+    task
+}
+
+#[tokio::test]
+async fn worker_prompt_context_has_one_promoted_structured_ci_directive() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = task_with_structured_red_ci_and_audit_activity(&db, &events).await;
+    let role = WorkerRole;
+
+    let ctx = full_prompt_context_for_role(db, &task, &role).await;
+
+    assert_single_structured_ci_directive(&ctx.system_prompt);
+    assert!(
+        ctx.activity_text
+            .as_deref()
+            .expect("activity audit text should be present")
+            .contains("audit-log-head-sha-should-not-be-used"),
+        "fixture must include audit-only CI prose so the test distinguishes structured rendering"
+    );
+}
+
+#[tokio::test]
+async fn reviewer_prompt_context_does_not_duplicate_directive_from_ci_audit_activity() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = task_with_structured_red_ci_and_audit_activity(&db, &events).await;
+    let role = ReviewerRole;
+
+    let ctx = full_prompt_context_for_role(db, &task, &role).await;
+
+    assert_single_structured_ci_directive(&ctx.system_prompt);
+    assert!(
+        ctx.activity_text
+            .as_deref()
+            .expect("activity audit text should be present")
+            .contains("Audit Log CI Job Should Not Be Promoted"),
+        "fixture must keep CI audit activity visible as ordinary activity"
+    );
 }
 
 #[test]
