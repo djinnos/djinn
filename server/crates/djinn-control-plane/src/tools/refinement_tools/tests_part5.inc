@@ -48,9 +48,9 @@
              VALUES ($1, $2, $3, $4)",
         )
         .bind(&project_id)
-        .bind("test-project")
+        .bind(format!("test-project-{project_id}"))
         .bind("test-owner")
-        .bind(format!("test-repo-{}", &project_id[..8]))
+        .bind(format!("test-repo-{project_id}"))
         .execute(db.pool())
         .await
         .unwrap();
