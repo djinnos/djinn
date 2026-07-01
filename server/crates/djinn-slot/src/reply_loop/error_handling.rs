@@ -10,23 +10,21 @@ use std::fmt;
 
 // Re-export provider-layer classifiers so callers in the reply loop can import
 // them from this module as before.
-pub(crate) use djinn_provider::error_classify::{
-    is_context_length_error, is_orphaned_tool_call_error,
-};
+pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_tool_call_error};
 
 /// Maximum retries for empty assistant turns before treating as a hard failure.
-pub(crate) const MAX_EMPTY_TURN_RETRIES: u32 = 2;
+pub const MAX_EMPTY_TURN_RETRIES: u32 = 2;
 /// Maximum consecutive text-only turns before treating as a session failure.
 /// Each text-only turn without a finalize tool call triggers a nudge message.
-pub(crate) const MAX_NUDGE_ATTEMPTS: u32 = 3;
+pub const MAX_NUDGE_ATTEMPTS: u32 = 3;
 /// Maximum reactive compaction attempts before giving up.
-pub(crate) const MAX_COMPACTION_RETRIES: u32 = 2;
+pub const MAX_COMPACTION_RETRIES: u32 = 2;
 
 /// Typed reply-loop outcome for a budget-triggered wind-down whose one granted
 /// final turn produced no hand-off text.
 #[derive(Debug, Clone)]
-pub(crate) struct BudgetWindDownIgnored {
-    pub(crate) details: String,
+pub struct BudgetWindDownIgnored {
+    pub details: String,
 }
 
 impl fmt::Display for BudgetWindDownIgnored {
@@ -39,7 +37,7 @@ impl std::error::Error for BudgetWindDownIgnored {}
 
 /// Build the wind-down directive injected on the final permitted turn when the
 /// reply loop is about to hit the step cap (`MAX_TURNS`).
-pub(crate) fn wind_down_message() -> Message {
+pub fn wind_down_message() -> Message {
     Message::user(
         "You are out of steps for this session. Do NOT start any new work, do NOT \
          call any tools. Reply with a concise hand-off summary covering exactly: \
@@ -50,7 +48,7 @@ pub(crate) fn wind_down_message() -> Message {
 
 /// Build the soft-budget converge directive injected exactly once when the
 /// reply loop's in-memory usage accumulator crosses the resolved soft threshold.
-pub(crate) fn soft_budget_converge_message() -> Message {
+pub fn soft_budget_converge_message() -> Message {
     Message::user(
         "<system-reminder>\n\
          Budget for this session is mostly consumed. You should now CONVERGE on the \
@@ -65,7 +63,7 @@ pub(crate) fn soft_budget_converge_message() -> Message {
 
 /// Providers confirmed to handle `tool_choice: "required"` correctly,
 /// even with reasoning/thinking enabled.
-pub(crate) fn supports_tool_choice_required(model_id: &str) -> bool {
+pub fn supports_tool_choice_required(model_id: &str) -> bool {
     let provider = model_id.split('/').next().unwrap_or("").to_lowercase();
     matches!(
         provider.as_str(),
@@ -73,10 +71,7 @@ pub(crate) fn supports_tool_choice_required(model_id: &str) -> bool {
     )
 }
 
-pub(crate) fn should_retry_empty_stream(
-    saw_round_event: bool,
-    empty_turn_retries: u32,
-) -> Option<u32> {
+pub fn should_retry_empty_stream(saw_round_event: bool, empty_turn_retries: u32) -> Option<u32> {
     if !saw_round_event && empty_turn_retries < MAX_EMPTY_TURN_RETRIES {
         Some(empty_turn_retries + 1)
     } else {
@@ -84,7 +79,7 @@ pub(crate) fn should_retry_empty_stream(
     }
 }
 
-pub(crate) fn should_retry_empty_assistant_turn(
+pub fn should_retry_empty_assistant_turn(
     assistant_content_is_empty: bool,
     empty_turn_retries: u32,
 ) -> Option<u32> {
@@ -97,12 +92,12 @@ pub(crate) fn should_retry_empty_assistant_turn(
 
 /// Discriminate a **reasoning-only** turn from a quota **empty-200** when the
 /// assembled assistant content is empty.
-pub(crate) fn empty_turn_is_reasoning_only(reasoning_tokens_out: u32) -> bool {
+pub fn empty_turn_is_reasoning_only(reasoning_tokens_out: u32) -> bool {
     reasoning_tokens_out > 0
 }
 
 /// Build the nudge injected after a reasoning-only empty turn.
-pub(crate) fn reasoning_only_nudge_message() -> Message {
+pub fn reasoning_only_nudge_message() -> Message {
     Message::user(
         "<system-reminder>\n\
          Your previous turn produced reasoning but NO visible output and NO tool \
@@ -114,19 +109,16 @@ pub(crate) fn reasoning_only_nudge_message() -> Message {
 }
 
 /// Backoff before retrying an empty / no-event provider turn.
-pub(crate) fn empty_turn_backoff(retry: u32) -> std::time::Duration {
+pub fn empty_turn_backoff(retry: u32) -> std::time::Duration {
     let secs = 3u64.saturating_pow(retry.clamp(1, 3)).min(30);
     std::time::Duration::from_secs(secs)
 }
 
-pub(crate) fn should_retry_after_tool_call_compaction(
-    compacted: bool,
-    turn_has_tool_calls: bool,
-) -> bool {
+pub fn should_retry_after_tool_call_compaction(compacted: bool, turn_has_tool_calls: bool) -> bool {
     compacted && turn_has_tool_calls
 }
 
-pub(crate) fn next_nudge_message(
+pub fn next_nudge_message(
     turn_has_tool_calls: bool,
     tools_are_available: bool,
     consecutive_nudge_count: u32,
@@ -156,10 +148,7 @@ pub(crate) fn next_nudge_message(
     )))
 }
 
-pub(crate) fn tool_choice_for_turn(
-    model_id: &str,
-    tools: &[serde_json::Value],
-) -> Option<ToolChoice> {
+pub fn tool_choice_for_turn(model_id: &str, tools: &[serde_json::Value]) -> Option<ToolChoice> {
     if tools.is_empty() {
         None
     } else if supports_tool_choice_required(model_id) {

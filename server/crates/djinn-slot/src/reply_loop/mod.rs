@@ -10,8 +10,8 @@
 //! directly; and `djinn-agent` is never imported.
 
 pub(crate) mod budget;
-pub(crate) mod error_handling;
-pub(crate) mod loop_guard;
+pub mod error_handling;
+pub mod loop_guard;
 mod persistence;
 mod streaming;
 mod tool_dispatch;

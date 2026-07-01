@@ -235,6 +235,7 @@ pub(crate) fn format_command_details(
     )
 }
 
+#[allow(dead_code)] // retained for agent facade compatibility; canonical use moved to djinn-slot
 pub(crate) fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -> String {
     let project = Path::new(project_path);
     let worktree_git = worktree_path.join(".git");
@@ -249,6 +250,7 @@ pub(crate) fn runtime_fs_diagnostics(project_path: &str, worktree_path: &Path) -
     )
 }
 
+#[allow(dead_code)] // retained for agent facade compatibility; canonical use moved to djinn-slot
 pub(crate) fn runtime_env_diagnostics(
     session_id: &str,
     project_path: &str,
