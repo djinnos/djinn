@@ -1019,3 +1019,308 @@ async fn stale_revision_feedback_is_excluded_from_task_description() {
         task.description
     );
 }
+
+// ── Evidence lifecycle state gate tests ───────────────────────────────
+
+/// The evidence lifecycle state gate must NOT block dispatch when the
+/// proposal is in Active lifecycle state (no linked spike, no lifecycle
+/// events, non-terminal status, not frozen/paused). This is the positive
+/// case: normal refinement dispatch proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_lifecycle_active_allows_dispatch() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(fixture.user_id.clone()),
+    );
+
+    // The fixture proposal is "building" with no linked spike — Active.
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.refinement_sessions.contains_key(&fixture.proposal_id),
+        "Active lifecycle state must allow refinement dispatch"
+    );
+    let session = &actor.refinement_sessions[&fixture.proposal_id];
+    assert_eq!(
+        session.phase,
+        super::super::refinement::RefinementPhase::AdversaryAttack,
+        "first dispatched phase is AdversaryAttack"
+    );
+}
+
+/// When a linked evidence spike is open (task status != "closed"), the
+/// evidence lifecycle state is AwaitingEvidence and dispatch must be
+/// skipped. No refinement task is created and no pool dispatch occurs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_lifecycle_awaiting_evidence_skips_dispatch() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    // Create an open spike task in the DB.
+    let spike_task_id = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(fixture.user_id.clone()), async {
+            TaskRepository::new(db.clone(), EventBus::noop())
+                .create_in_project(
+                    &fixture.project_id,
+                    None,
+                    "Evidence spike",
+                    "Investigation for evidence demand",
+                    "",
+                    "spike",
+                    0,
+                    "worker",
+                    Some("open"),
+                    Some("[]"),
+                )
+                .await
+                .expect("create spike task")
+                .id
+        })
+        .await;
+
+    // Link the spike to the proposal (sets status to "draft").
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .set_needs_evidence_spike(
+            &fixture.proposal_id,
+            &spike_task_id,
+            r#"{"question":"Is X feasible?","target_subsystem":"core","spec_unknown_anchor":"unknown","insufficient_in_session_research":"too broad","expected_findings":"proof","round":1,"against_revision_seq":1,"created_by_task_id":"judge-task"}"#,
+        )
+        .await
+        .expect("set needs-evidence spike");
+
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(fixture.user_id.clone()),
+    );
+
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "AwaitingEvidence lifecycle state must skip dispatch — no session created"
+    );
+    // The refinement must remain active (not terminated) — it's parked.
+    assert!(
+        actor.active_refinements.contains_key(&fixture.proposal_id),
+        "refinement must remain active when parked for evidence"
+    );
+
+    // Verify no refinement task was created.
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks");
+    let refinement_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.issue_type == "refinement")
+        .collect();
+    assert!(
+        refinement_tasks.is_empty(),
+        "no refinement task should be created when AwaitingEvidence"
+    );
+}
+
+/// When an `refinement_evidence_failed` lifecycle event exists, the
+/// evidence lifecycle state is EvidenceFailed and dispatch must be
+/// skipped. This is distinguishable from Active and Terminal in the
+/// dispatch path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_lifecycle_evidence_failed_skips_dispatch() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    // Create a spike task that will be closed (failed).
+    let spike_task_id = djinn_core::auth_context::SESSION_USER_ID
+        .scope(Some(fixture.user_id.clone()), async {
+            TaskRepository::new(db.clone(), EventBus::noop())
+                .create_in_project(
+                    &fixture.project_id,
+                    None,
+                    "Evidence spike (failed)",
+                    "Investigation that failed",
+                    "",
+                    "spike",
+                    0,
+                    "worker",
+                    Some("open"),
+                    Some("[]"),
+                )
+                .await
+                .expect("create spike task")
+                .id
+        })
+        .await;
+
+    // Link the spike to the proposal.
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .set_needs_evidence_spike(
+            &fixture.proposal_id,
+            &spike_task_id,
+            r#"{"question":"Is Y feasible?","target_subsystem":"core","spec_unknown_anchor":"unknown","insufficient_in_session_research":"too broad","expected_findings":"proof","round":1,"against_revision_seq":1,"created_by_task_id":"judge-task"}"#,
+        )
+        .await
+        .expect("set needs-evidence spike");
+
+    // Close the spike task (simulate failure).
+    TaskRepository::new(db.clone(), EventBus::noop())
+        .set_status_with_reason(&spike_task_id, "closed", Some("force_closed"))
+        .await
+        .expect("close spike task");
+
+    // Record an evidence_failed lifecycle event.
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .record_evidence_failed(
+            &fixture.proposal_id,
+            &spike_task_id,
+            "judge-task-1",
+            1,
+            1,
+            "spike force-closed without findings",
+        )
+        .await
+        .expect("record evidence failed");
+
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(fixture.user_id.clone()),
+    );
+
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "EvidenceFailed lifecycle state must skip dispatch — no session created"
+    );
+    assert!(
+        actor.active_refinements.contains_key(&fixture.proposal_id),
+        "refinement must remain active (not terminated) when evidence failed"
+    );
+
+    // Verify no refinement task was created.
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks");
+    let refinement_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.issue_type == "refinement")
+        .collect();
+    assert!(
+        refinement_tasks.is_empty(),
+        "no refinement task should be created when EvidenceFailed"
+    );
+}
+
+/// When the proposal is build-frozen, the evidence lifecycle state is
+/// PausedOrFrozen and dispatch must be skipped even though no evidence
+/// demand is active. The `build_frozen` flag is not checked by the
+/// existing `refinement_dispatch_paused` fast-path, so this verifies
+/// the lifecycle gate catches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_lifecycle_paused_or_frozen_skips_dispatch() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    // Freeze the proposal build.
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .set_frozen(&fixture.proposal_id, true)
+        .await
+        .expect("freeze proposal");
+
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(fixture.user_id.clone()),
+    );
+
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "PausedOrFrozen lifecycle state must skip dispatch — no session created"
+    );
+    assert!(
+        actor.active_refinements.contains_key(&fixture.proposal_id),
+        "refinement must remain active when paused/frozen"
+    );
+
+    // Verify no refinement task was created.
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks");
+    let refinement_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.issue_type == "refinement")
+        .collect();
+    assert!(
+        refinement_tasks.is_empty(),
+        "no refinement task should be created when PausedOrFrozen"
+    );
+}
+
+/// When the proposal is in a terminal status ("done"), the evidence
+/// lifecycle state is Terminal and dispatch must be skipped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evidence_lifecycle_terminal_skips_dispatch() {
+    let db = crate::test_helpers::create_test_db();
+    let fixture = seed_refinement_fixture(&db).await;
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<DjinnEventEnvelope>(256);
+    let pool = spawn_test_pool(&db, 4);
+
+    // Move the proposal to terminal status.
+    ProposalRepository::new(db.clone(), EventBus::noop())
+        .set_status(&fixture.proposal_id, "done")
+        .await
+        .expect("set proposal status to done");
+
+    let mut actor = build_refinement_actor(&db, &events_tx, pool.clone());
+    seed_refinement_state(
+        &mut actor,
+        &fixture.proposal_id,
+        Some(fixture.user_id.clone()),
+    );
+
+    actor.drive_active_refinements().await;
+
+    assert!(
+        actor.refinement_sessions.is_empty(),
+        "Terminal lifecycle state must skip dispatch — no session created"
+    );
+    assert!(
+        actor.active_refinements.contains_key(&fixture.proposal_id),
+        "refinement must remain active in map (terminal skip does not terminate the loop)"
+    );
+
+    // Verify no refinement task was created.
+    let tasks = TaskRepository::new(db.clone(), EventBus::noop())
+        .list_by_project(&fixture.project_id)
+        .await
+        .expect("list tasks");
+    let refinement_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.issue_type == "refinement")
+        .collect();
+    assert!(
+        refinement_tasks.is_empty(),
+        "no refinement task should be created when Terminal"
+    );
+}

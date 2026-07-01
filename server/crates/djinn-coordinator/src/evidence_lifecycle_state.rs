@@ -165,13 +165,32 @@ pub(super) fn derive_evidence_lifecycle_state(
 // ── Coordinator integration ─────────────────────────────────────────────────
 
 impl CoordinatorActor {
+    /// Load a proposal by id for the evidence lifecycle state check.
+    ///
+    /// Returns `None` when the proposal does not exist or a DB error
+    /// occurs — callers should fail closed (skip dispatch) on `None`.
+    pub(super) async fn load_proposal_for_lifecycle(&self, proposal_id: &str) -> Option<Proposal> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+        match proposal_repo.get(proposal_id).await {
+            Ok(proposal) => proposal,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to load proposal for evidence lifecycle check"
+                );
+                None
+            }
+        }
+    }
+
     /// Build an [`EvidenceLifecycleSnapshot`] from persisted DB data for
     /// the given proposal and derive the [`EvidenceLifecycleState`].
     ///
     /// Reads the proposal, dispatch-pause state, and (when a spike is
     /// linked) the spike task status and evidence lifecycle events.
     /// Returns the derived state.
-    #[allow(dead_code)]
     pub(super) async fn derive_proposal_evidence_lifecycle(
         &self,
         proposal: &Proposal,
@@ -182,7 +201,6 @@ impl CoordinatorActor {
 
     /// Build the snapshot of persisted data needed for evidence lifecycle
     /// state derivation.
-    #[allow(dead_code)]
     pub(super) async fn build_evidence_lifecycle_snapshot(
         &self,
         proposal: &Proposal,
