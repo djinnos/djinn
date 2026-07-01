@@ -9,8 +9,6 @@
 //! structured [`DurableProgressObservation`]s that downstream wiring (task yttk)
 //! can emit as metrics without affecting worker control flow.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 
 use djinn_coordinator::{
@@ -207,6 +205,7 @@ pub struct DurableProgressDetector {
     /// Consecutive flaky command observations per command digest.
     flaky_streaks: HashMap<String, u32>,
     /// Flaky command grace turns threshold.
+    #[allow(dead_code)]
     flaky_grace_turns: u32,
     /// Long command suspension threshold in seconds.
     long_command_suspension_secs: u64,
@@ -247,6 +246,7 @@ impl DurableProgressDetector {
     }
 
     /// Number of turns evaluated so far.
+    #[allow(dead_code)]
     pub fn evaluated_turn_count(&self) -> u32 {
         self.evaluated_turn_count
     }
