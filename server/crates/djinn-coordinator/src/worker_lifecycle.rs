@@ -520,6 +520,100 @@ pub enum AutoSubmitSkipReason {
     MergeConflict,
 }
 
+/// Coordinator command-liveness view for no-progress enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoProgressCommandState {
+    /// The coordinator has positive evidence that no command is currently in flight.
+    Idle,
+    /// A command is in flight and has been running for the given number of seconds.
+    InFlight { running_secs: u64 },
+    /// Command state is unavailable; destructive no-progress exits must defer.
+    Unknown,
+}
+
+/// Pure policy decision for the no-durable-progress controlled-exit gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoProgressControlledExitDecision {
+    /// Rollout/threshold settings do not permit action.
+    Disabled,
+    /// Threshold met only in shadow mode; emit observation, do not exit.
+    ShadowWouldExit,
+    /// Threshold not yet met.
+    BelowThreshold,
+    /// Threshold met, but command liveness requires deferral.
+    DeferredForCommand,
+    /// Threshold met and no in-flight/unknown command blocks a controlled exit.
+    RequestExit,
+}
+
+/// Side-effect-free preservation branch used by controlled no-progress exits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlledExitPreservationAction {
+    /// A ymed auto-submit decision already accepted the output; checkpoint can be skipped.
+    UseAutoSubmit,
+    /// No auto-submit was accepted; request/await the 8yjx checkpoint preservation path.
+    RequestCheckpoint,
+    /// Preservation failed and the configured policy blocks the terminal transition.
+    BlockForPreservationFailure,
+    /// Preservation failed but the configured policy explicitly records/proceeds.
+    RecordFailureAndProceed,
+}
+
+/// Decide whether a controlled exit should consume auto-submit, checkpoint, or policy result.
+pub fn decide_controlled_exit_preservation_action(
+    auto_submit_accepted: bool,
+    checkpoint_outcome: Option<PreservationOutcome>,
+    failure_policy: PreservationFailurePolicy,
+) -> ControlledExitPreservationAction {
+    if auto_submit_accepted {
+        return ControlledExitPreservationAction::UseAutoSubmit;
+    }
+    let Some(outcome) = checkpoint_outcome else {
+        return ControlledExitPreservationAction::RequestCheckpoint;
+    };
+    if outcome.should_block_transition(failure_policy) {
+        ControlledExitPreservationAction::BlockForPreservationFailure
+    } else if matches!(
+        outcome,
+        PreservationOutcome::Succeeded | PreservationOutcome::CleanSkip
+    ) {
+        ControlledExitPreservationAction::RequestCheckpoint
+    } else {
+        ControlledExitPreservationAction::RecordFailureAndProceed
+    }
+}
+
+/// Evaluate the no-progress lifecycle gate without side effects.
+pub fn evaluate_no_progress_controlled_exit(
+    config: &WorkerLifecycleConfig,
+    no_progress_streak: u32,
+    command_state: NoProgressCommandState,
+) -> NoProgressControlledExitDecision {
+    let Some(threshold) = config.no_progress_thresholds.forced_exit_turns else {
+        return NoProgressControlledExitDecision::Disabled;
+    };
+    if config.rollout.no_progress_enforcement == NoProgressEnforcementMode::Disabled {
+        return NoProgressControlledExitDecision::Disabled;
+    }
+    if no_progress_streak < config.no_progress_thresholds.min_evaluated_turns
+        || no_progress_streak < threshold
+    {
+        return NoProgressControlledExitDecision::BelowThreshold;
+    }
+    if config.rollout.no_progress_enforcement == NoProgressEnforcementMode::Shadow {
+        return NoProgressControlledExitDecision::ShadowWouldExit;
+    }
+    match command_state {
+        NoProgressCommandState::Idle => NoProgressControlledExitDecision::RequestExit,
+        NoProgressCommandState::Unknown => NoProgressControlledExitDecision::DeferredForCommand,
+        NoProgressCommandState::InFlight { running_secs } => {
+            let _over_long_command_bound =
+                running_secs >= config.no_progress_thresholds.long_command_suspension_secs;
+            NoProgressControlledExitDecision::DeferredForCommand
+        }
+    }
+}
+
 /// Resume-via-git metadata placeholder populated by sibling epics.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResumeLifecycleMetadata {
@@ -672,6 +766,147 @@ mod tests {
         assert!(!config.auto_submit.enabled);
         assert!(!config.resume.enabled);
         assert!(!config.model_rotation.enabled);
+    }
+
+    fn enforcing_config() -> WorkerLifecycleConfig {
+        WorkerLifecycleConfig {
+            rollout: DurableProgressRolloutConfig {
+                detection_mode: DurableProgressDetectionMode::Enforce,
+                no_progress_enforcement: NoProgressEnforcementMode::Enforce,
+                checkpoint_before_no_progress_exit: true,
+                auto_submit_if_green: true,
+                resume_from_checkpoint: false,
+                rotate_model_on_no_progress: false,
+            },
+            no_progress_thresholds: NoProgressThresholdConfig {
+                min_evaluated_turns: 2,
+                warning_turns: 2,
+                model_rotation_turns: None,
+                forced_exit_turns: Some(4),
+                long_command_suspension_secs: 600,
+                flaky_command_grace_turns: 0,
+            },
+            checkpoint: CheckpointLifecycleConfig {
+                enabled: true,
+                require_before_no_progress_exit: true,
+                ref_namespace: None,
+                failure_policy: PreservationFailurePolicy::RecordAndProceed,
+            },
+            auto_submit: AutoSubmitLifecycleConfig {
+                enabled: true,
+                require_fresh_verification: true,
+                canonical_verification_gate: Some("default".to_string()),
+            },
+            resume: ResumeLifecycleConfig::default(),
+            model_rotation: ModelRotationLifecycleConfig::default(),
+        }
+    }
+
+    #[test]
+    fn no_progress_gate_default_off_disables_exit() {
+        assert_eq!(
+            evaluate_no_progress_controlled_exit(
+                &WorkerLifecycleConfig::default(),
+                99,
+                NoProgressCommandState::Idle
+            ),
+            NoProgressControlledExitDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn no_progress_gate_requests_exit_after_threshold_when_idle() {
+        assert_eq!(
+            evaluate_no_progress_controlled_exit(
+                &enforcing_config(),
+                4,
+                NoProgressCommandState::Idle
+            ),
+            NoProgressControlledExitDecision::RequestExit
+        );
+    }
+
+    #[test]
+    fn no_progress_gate_defers_long_or_unknown_command_state() {
+        assert_eq!(
+            evaluate_no_progress_controlled_exit(
+                &enforcing_config(),
+                4,
+                NoProgressCommandState::InFlight { running_secs: 1200 }
+            ),
+            NoProgressControlledExitDecision::DeferredForCommand
+        );
+        assert_eq!(
+            evaluate_no_progress_controlled_exit(
+                &enforcing_config(),
+                4,
+                NoProgressCommandState::Unknown
+            ),
+            NoProgressControlledExitDecision::DeferredForCommand
+        );
+    }
+
+    #[test]
+    fn no_progress_gate_shadow_observes_without_exit() {
+        let mut config = enforcing_config();
+        config.rollout.no_progress_enforcement = NoProgressEnforcementMode::Shadow;
+
+        assert_eq!(
+            evaluate_no_progress_controlled_exit(&config, 4, NoProgressCommandState::Idle),
+            NoProgressControlledExitDecision::ShadowWouldExit
+        );
+    }
+
+    #[test]
+    fn controlled_exit_preservation_prefers_auto_submit() {
+        assert_eq!(
+            decide_controlled_exit_preservation_action(
+                true,
+                Some(PreservationOutcome::RuntimeUnavailable),
+                PreservationFailurePolicy::Block
+            ),
+            ControlledExitPreservationAction::UseAutoSubmit
+        );
+    }
+
+    #[test]
+    fn controlled_exit_preservation_requests_checkpoint_fallback() {
+        assert_eq!(
+            decide_controlled_exit_preservation_action(
+                false,
+                None,
+                PreservationFailurePolicy::RecordAndProceed
+            ),
+            ControlledExitPreservationAction::RequestCheckpoint
+        );
+        assert_eq!(
+            decide_controlled_exit_preservation_action(
+                false,
+                Some(PreservationOutcome::Succeeded),
+                PreservationFailurePolicy::RecordAndProceed
+            ),
+            ControlledExitPreservationAction::RequestCheckpoint
+        );
+    }
+
+    #[test]
+    fn controlled_exit_preservation_applies_failure_policy() {
+        assert_eq!(
+            decide_controlled_exit_preservation_action(
+                false,
+                Some(PreservationOutcome::Failed),
+                PreservationFailurePolicy::RecordAndProceed
+            ),
+            ControlledExitPreservationAction::RecordFailureAndProceed
+        );
+        assert_eq!(
+            decide_controlled_exit_preservation_action(
+                false,
+                Some(PreservationOutcome::Failed),
+                PreservationFailurePolicy::Block
+            ),
+            ControlledExitPreservationAction::BlockForPreservationFailure
+        );
     }
 
     #[test]
