@@ -164,12 +164,6 @@ pub use commands::{SlotCommand, SlotError};
 pub use helpers::*;
 pub use pool::*;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Test modules
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[cfg(test)]
-mod helpers_tests;
-
-#[cfg(test)]
-mod llm_extraction_tests;
+// Slot behavior tests live canonically in `djinn-slot/src/`. Agent-local tests
+// remain in host-only modules (helpers/lifecycle/finalize/pool/actor) where they
+// exercise AgentContext facade wiring rather than duplicate slot behavior.
