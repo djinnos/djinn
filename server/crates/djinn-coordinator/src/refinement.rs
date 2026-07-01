@@ -102,6 +102,12 @@ pub enum RefinementPhase {
     AwaitingHumanReview,
     /// Refinement loop is complete.
     Complete,
+    /// The Judge demanded evidence for a load-bearing spec claim. The loop
+    /// is parked — no further tribunal phases are dispatched — until the
+    /// linked evidence spike produces findings (resumed by the sibling epic
+    /// oeqd). While parked, `drive_one_refinement` returns early without
+    /// dispatching any new Adversary, Advocate, or Judge session.
+    AwaitingEvidence,
 }
 
 /// An adversary objection as seen by the state machine. The coordinator
@@ -270,6 +276,13 @@ impl RefinementLoopState {
         self.phase == RefinementPhase::AwaitingHumanReview
     }
 
+    /// Whether the loop is parked waiting for an evidence spike to produce
+    /// findings. While true, the coordinator dispatches no further tribunal
+    /// phases.
+    pub fn is_awaiting_evidence(&self) -> bool {
+        self.phase == RefinementPhase::AwaitingEvidence
+    }
+
     /// Record that an agent session was spawned. Returns `Err` if the spawn
     /// cap would be exceeded.
     pub fn record_spawn(&mut self) -> Result<(), StopReason> {
@@ -349,6 +362,16 @@ impl RefinementLoopState {
         }
         self.current_round += 1;
         self.phase = RefinementPhase::AdversaryAttack;
+    }
+
+    /// Record that the Judge demanded evidence for a load-bearing claim.
+    /// Parks the loop in `AwaitingEvidence` — no further tribunal phases are
+    /// dispatched until the linked evidence spike produces findings. Does NOT
+    /// advance the round counter; the round stays at the value where the
+    /// demand was issued so the resumed Judge session can complete its
+    /// adjudication at that same round boundary.
+    pub fn record_needs_evidence(&mut self) {
+        self.phase = RefinementPhase::AwaitingEvidence;
     }
 
     /// Park the loop for human review (converged or escalated). Records the
@@ -970,6 +993,76 @@ mod tests {
         );
         assert_eq!(StopReason::HumanAccepted.tag(), "human_accepted");
         assert_eq!(StopReason::HumanRejected.tag(), "human_rejected");
+    }
+
+    // ── Needs-evidence (AwaitingEvidence) ───────────────────────────────
+
+    #[test]
+    fn needs_evidence_parks_loop_in_awaiting_evidence() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Advance to judge phase.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Feasibility of X is unclear")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        // Judge demands evidence instead of ruling.
+        state.record_needs_evidence();
+        assert_eq!(state.phase, RefinementPhase::AwaitingEvidence);
+        assert!(state.is_awaiting_evidence());
+        assert!(!state.is_complete());
+        assert!(!state.is_awaiting_human_review());
+        // Round counter does NOT advance — the Judge will resume at the same
+        // round after the evidence spike produces findings.
+        assert_eq!(state.current_round, 1);
+        // No stop_reason set — the loop is parked, not terminated.
+        assert!(state.stop_reason.is_none());
+    }
+
+    #[test]
+    fn needs_evidence_from_dry_round() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Adversary is dry → straight to judge.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![],
+            explicit_dry: true,
+        });
+        assert_eq!(state.phase, RefinementPhase::JudgeAdjudication);
+
+        state.record_needs_evidence();
+        assert!(state.is_awaiting_evidence());
+        assert_eq!(state.current_round, 1);
+    }
+
+    #[test]
+    fn needs_evidence_does_not_advance_round() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        // Cycle through a full round to round 2.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue A")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        state.record_judge_verdict(&JudgeVerdictResult {
+            body: "Needs work.".into(),
+            blocking: true,
+        });
+        assert_eq!(state.current_round, 2);
+
+        // Round 2: adversary → advocate → judge demands evidence.
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Issue B")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(2);
+        state.record_needs_evidence();
+        assert_eq!(
+            state.current_round, 2,
+            "round must not advance on needs-evidence"
+        );
+        assert!(state.is_awaiting_evidence());
     }
 
     // ── Revision event metadata builder ──────────────────────────────────
