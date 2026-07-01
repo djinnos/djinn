@@ -49,12 +49,27 @@ pub(crate) async fn run_structural_extraction(
     djinn_slot::run_structural_extraction(session_id, messages, slot_ctx).await
 }
 
-/// No-op host callbacks for the extraction-backfill adapter.
+/// Host callbacks for the extraction adapter.
 ///
-/// `run_extraction_backfill` only needs `db` and `event_bus` from the
-/// context.  The callbacks trait methods are never invoked during
-/// backfill, so a no-op implementation is safe.
-struct ExtractionCallbacks;
+/// Extraction uses the normal slot-side model-resolution path, which delegates
+/// credential loading through [`djinn_slot::host::SlotHostCallbacks`]. Keep the
+/// non-extraction callbacks as no-ops, but preserve the `AgentContext` required
+/// to reuse the dispatch-side credential loader (including OAuth refresh and
+/// credential-vault fallback behavior).
+struct ExtractionCallbacks(AgentContext);
+
+fn agent_credential_to_slot(
+    credential: crate::actors::slot::helpers::ProviderCredential,
+) -> djinn_slot::helpers::ProviderCredential {
+    match credential {
+        crate::actors::slot::helpers::ProviderCredential::ApiKey(key_name, api_key) => {
+            djinn_slot::helpers::ProviderCredential::ApiKey(key_name, api_key)
+        }
+        crate::actors::slot::helpers::ProviderCredential::OAuthConfig(config) => {
+            djinn_slot::helpers::ProviderCredential::OAuthConfig(config)
+        }
+    }
+}
 
 impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
     fn interrupt_paused_worker_session<'a>(
@@ -127,7 +142,7 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
 
     fn resolve_provider_credential<'a>(
         &'a self,
-        _provider_id: &'a str,
+        provider_id: &'a str,
         _ctx: &'a djinn_slot::host::SlotContext,
     ) -> std::pin::Pin<
         Box<
@@ -137,7 +152,16 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
                 + 'a,
         >,
     > {
-        Box::pin(async { Err("not available in extraction backfill".into()) })
+        Box::pin(async move {
+            crate::actors::slot::helpers::load_provider_credential(provider_id, &self.0)
+                .await
+                .map(agent_credential_to_slot)
+                .map_err(|e| {
+                    format!(
+                        "extraction credential resolution failed for provider {provider_id}: {e}"
+                    )
+                })
+        })
     }
 
     fn run_task_dispatch<'a>(
@@ -173,9 +197,9 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
 
 /// Convert `AgentContext` → `SlotContext` for extraction backfill.
 ///
-/// Maps the shared service-handle fields and provides a no-op
-/// `SlotHostCallbacks` implementation (extraction backfill never
-/// invokes host callbacks).
+/// Maps the shared service-handle fields and installs extraction host callbacks
+/// that keep non-extraction operations no-op while resolving provider
+/// credentials through the normal AgentContext-backed loader.
 pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
     djinn_slot::host::SlotContext {
         db: agent.db.clone(),
@@ -190,8 +214,70 @@ pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::S
         runtime_ops: agent.runtime_ops.clone(),
         repo_graph_ops: agent.repo_graph_ops.clone(),
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
-        callbacks: std::sync::Arc::new(ExtractionCallbacks),
+        callbacks: std::sync::Arc::new(ExtractionCallbacks(agent.clone())),
         tool_dispatcher: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use djinn_db::Database;
+    use djinn_provider::repos::CredentialRepository;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extraction_callbacks_resolve_credentials_through_agent_loader() {
+        let db = Database::open_in_memory().expect("db");
+        db.ensure_initialized().await.expect("init db");
+        let agent =
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        let credential_repo = CredentialRepository::new(db, agent.event_bus.clone());
+        credential_repo
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-extraction", None)
+            .await
+            .expect("store credential");
+
+        let slot_ctx = agent_to_slot_context(&agent);
+        let resolved = slot_ctx
+            .callbacks
+            .resolve_provider_credential("anthropic", &slot_ctx)
+            .await
+            .expect("resolve credential through extraction callback");
+
+        match resolved {
+            djinn_slot::helpers::ProviderCredential::ApiKey(key_name, api_key) => {
+                assert_eq!(key_name, "ANTHROPIC_API_KEY");
+                assert_eq!(api_key, "sk-test-extraction");
+            }
+            djinn_slot::helpers::ProviderCredential::OAuthConfig(_) => {
+                panic!("expected API-key credential for anthropic test provider")
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extraction_credential_errors_include_provider_context() {
+        let db = Database::open_in_memory().expect("db");
+        db.ensure_initialized().await.expect("init db");
+        let agent = crate::test_helpers::agent_context_from_db(db, CancellationToken::new());
+        let slot_ctx = agent_to_slot_context(&agent);
+
+        let err = match slot_ctx
+            .callbacks
+            .resolve_provider_credential("missing-provider", &slot_ctx)
+            .await
+        {
+            Ok(_) => panic!("missing credential should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("missing-provider"), "error was: {err}");
+        assert!(
+            !err.contains("not available in extraction backfill"),
+            "error was: {err}"
+        );
     }
 }
 
