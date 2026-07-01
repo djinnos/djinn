@@ -1,14 +1,12 @@
-//! Bridge impl that wires `MemoryEnrichmentOps` to the agent-side
-//! `djinn_agent::actors::slot::memory_enrichment` module.
+//! Bridge impl that wires `MemoryEnrichmentOps` to the canonical
+//! `djinn_slot::memory_enrichment` module.
 //!
 //! Why this lives in the server binary: the trait is defined in
 //! `djinn-control-plane` (the consumer) and the algorithm lives in
-//! `djinn-agent`. Both crates sit on the same level of the dependency
-//! graph (`djinn-agent` depends on `djinn-control-plane`, not the other
-//! way around), so neither can directly reference the other without a
-//! trait. The server crate depends on both and is the natural place to
-//! close the loop — see the parent `bridge/memory_enrichment_bridge.rs`
-//! docstring for the design rationale.
+//! `djinn-slot`. The server crate depends on both `djinn-control-plane`
+//! and `djinn-slot` and is the natural place to close the loop — see the
+//! parent `bridge/memory_enrichment_bridge.rs` docstring for the design
+//! rationale.
 
 use async_trait::async_trait;
 use djinn_control_plane::bridge::{
@@ -16,7 +14,7 @@ use djinn_control_plane::bridge::{
 };
 
 /// Adapter that delegates `MemoryEnrichmentOps::run_enrichment` to the
-/// agent-side `run_memory_enrichment_with_db` entry point.
+/// canonical `djinn_slot::run_memory_enrichment_with_db` entry point.
 ///
 /// The agent's `EnrichmentReport` and the bridge's mirror types are kept
 /// structurally identical on purpose so the conversion is a 1:1 field
@@ -35,21 +33,18 @@ impl MemoryEnrichmentBridge {
 #[async_trait]
 impl MemoryEnrichmentOps for MemoryEnrichmentBridge {
     async fn run_enrichment(&self, project_id: &str) -> Result<EnrichmentReport, String> {
-        let agent_report = djinn_agent::actors::slot::run_memory_enrichment_with_db(
-            project_id,
-            Some(self.db.clone()),
-        )
-        .await;
-        Ok(convert_report(agent_report))
+        let slot_report =
+            djinn_slot::run_memory_enrichment_with_db(project_id, Some(self.db.clone())).await;
+        Ok(convert_report(slot_report))
     }
 }
 
-/// Translate the agent's report type into the bridge's mirror type.
+/// Translate the canonical slot report type into the bridge's mirror type.
 ///
 /// Lives here (not in `djinn-control-plane`) so the wire type is the
 /// only surface the consumer needs to know about, and the agent's type
 /// can evolve independently.
-fn convert_report(input: djinn_agent::actors::slot::EnrichmentReport) -> EnrichmentReport {
+fn convert_report(input: djinn_slot::EnrichmentReport) -> EnrichmentReport {
     EnrichmentReport {
         project_id: input.project_id,
         entities: input.entities.into_iter().map(convert_entity).collect(),
@@ -63,14 +58,14 @@ fn convert_report(input: djinn_agent::actors::slot::EnrichmentReport) -> Enrichm
     }
 }
 
-fn convert_entity(e: djinn_agent::actors::slot::EnrichmentEntity) -> EnrichmentEntity {
+fn convert_entity(e: djinn_slot::EnrichmentEntity) -> EnrichmentEntity {
     EnrichmentEntity {
         canonical_name: e.canonical_name,
         aliases: e.aliases,
     }
 }
 
-fn convert_claim(c: djinn_agent::actors::slot::EnrichmentClaim) -> EnrichmentClaim {
+fn convert_claim(c: djinn_slot::EnrichmentClaim) -> EnrichmentClaim {
     EnrichmentClaim {
         statement: c.statement,
         source_note_id: c.source_note_id,
@@ -78,7 +73,7 @@ fn convert_claim(c: djinn_agent::actors::slot::EnrichmentClaim) -> EnrichmentCla
     }
 }
 
-fn convert_edge(e: djinn_agent::actors::slot::EnrichmentEdge) -> EnrichmentEdge {
+fn convert_edge(e: djinn_slot::EnrichmentEdge) -> EnrichmentEdge {
     EnrichmentEdge {
         source_note_id: e.source_note_id,
         target_note_id: e.target_note_id,
