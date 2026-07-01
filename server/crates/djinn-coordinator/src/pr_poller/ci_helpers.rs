@@ -6,7 +6,7 @@ use super::ci_failure_analysis::{
     compute_ci_failure_fingerprint, detect_scope_inversion, extract_crate_names,
     extract_crate_names_from_sections,
 };
-use crate::local_gates::{format_reproduction_plan, format_unreproducible_intervention_reason};
+use crate::ci_reproduction::{format_reproduction_plan, format_unreproducible_intervention_reason};
 
 /// Timeout for fetching reproduction context from the GitHub API when building
 /// a focused reproduction plan for same-signature escalation.

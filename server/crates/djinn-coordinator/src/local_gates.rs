@@ -1,842 +1,649 @@
-//! Coordinator-side local-gate primitives for repo-derived CI reproduction.
+//! Deterministic local CI gate registry and executor core.
 //!
-//! Each primitive consumes a [`RequiredCheckReproduction`] bundle produced by
-//! the provider crate (`djinn-provider::github_api`) and executes only the
-//! bundle's own command + setup steps in the project's working directory.
-//! The module has **no** registry of repo- or language-specific commands; it
-//! runs exactly the commands present in each bundle.
+//! This module owns the coordinator-side declarative mapping from GitHub
+//! required-CI contexts / failure fingerprints to exact local commands. It is
+//! the deterministic pre-flight layer that runs *cheap* checks before a worker
+//! submits or a reviewer approves a PR-backed task, reducing avoidable red
+//! required-CI before it reaches GitHub.
 //!
-//! ## Result classification
+//! # Design
 //!
-//! | Outcome | Meaning |
-//! |---------|---------|
-//! | [`LocalGateResult::ReproducedPass`] | Command exited 0 |
-//! | [`LocalGateResult::ReproducedFailure`] | Command exited non-zero |
-//! | [`LocalGateResult::Unreproducible`] | Bundle was empty, setup failed, spawn failed, timed out, or the provider bundle was itself unreproducible |
+//! - **Gate specs** are declarative: each maps a stable id + check/context
+//!   aliases + fingerprint/job predicates to a command, working directory,
+//!   timeout, and a [`GateApplicability`] (required / advisory / non-applicable).
+//! - **Gate plans** are constructed from *structured* task CI metadata
+//!   (`ci_blocking_required_check_names`, `ci_failure_fingerprint`,
+//!   remediation baseline fields) — never from activity-log prose or prompt
+//!   text. This makes selection deterministic and testable.
+//! - **Gate results** distinguish `passed`, `failed`, `unavailable`, and
+//!   `skipped`/non-applicable. An `unavailable` *required* command is a
+//!   blocking result (never a pass).
+//! - **Executor** runs a command bounded by a timeout with unavailable-tool
+//!   detection. If the command binary or the working directory does not exist,
+//!   the result is `unavailable`.
 //!
-//! A `ReproducedFailure` **blocks** submit/approval.
-//! An `Unreproducible` is routed to lead/human intervention and is never
-//! reported as passing.
-
+//! This wave adds code only — no public external API. All helpers are
+//! `pub(crate)` or private.
 use std::path::Path;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use djinn_provider::github_api::{
-    RequiredCheckReproduction, RequiredCheckReproductionContext, RequiredCheckUnreproducible,
-};
+use crate::truncate::{smart_truncate, smart_truncate_lines};
 
-/// Default timeout for a single reproduction command invocation (5 minutes).
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+/// Maximum byte budget for a single stdout/stderr summary in a gate result.
+const OUTPUT_SUMMARY_MAX_BYTES: usize = 4_096;
 
-/// Maximum log tail captured from reproduction output (8 KiB).
-const MAX_LOG_TAIL_BYTES: usize = 8 * 1024;
+/// Maximum line count for a single stdout/stderr summary in a gate result.
+const OUTPUT_SUMMARY_MAX_LINES: usize = 50;
 
-// ─── Public result types ────────────────────────────────────────────────────
+// ── Applicability / severity ──────────────────────────────────────────────────
 
-/// Structured result of attempting to locally reproduce a CI check from a
-/// provider bundle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "verdict", rename_all = "snake_case")]
-pub enum LocalGateResult {
-    /// The command exited successfully (exit code 0).
-    ReproducedPass(LocalGateOutcome),
-    /// The command exited with a non-zero exit code.
-    ReproducedFailure(LocalGateOutcome),
-    /// The check could not be reproduced locally.
-    Unreproducible(LocalGateUnreproducible),
+/// Whether a gate blocks a submit/approve transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GateApplicability {
+    /// A failed or unavailable result blocks the submit/approve path.
+    Required,
+    /// The gate runs for visibility but never blocks.
+    Advisory,
+    /// The gate's predicates never matched this task — it is excluded from the
+    /// plan entirely and produces a `skipped` result if explicitly evaluated.
+    NonApplicable,
 }
 
-/// Detail for a reproduced check (shared by pass and failure outcomes).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LocalGateOutcome {
-    /// The required check name from the provider bundle.
-    pub required_check_name: String,
-    /// The shell command that was executed.
-    pub command: String,
-    /// Process exit code (0 for pass, non-zero for failure).
-    pub exit_code: i32,
-    /// Relevant log tail — stdout for pass, combined stdout+stderr for failure.
-    pub log_tail: String,
-    /// The head SHA observed by the provider when building the bundle.
-    pub observed_head_sha: String,
-}
+// ── Gate spec ─────────────────────────────────────────────────────────────────
 
-/// A check that could not be reproduced locally, with a typed reason.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LocalGateUnreproducible {
-    pub required_check_name: String,
-    pub observed_head_sha: String,
-    pub reason: LocalGateUnreproducibleReason,
-    /// Human-readable detail about why reproduction was not possible.
-    #[serde(default)]
-    pub details: Option<String>,
-}
-
-/// Typed reasons for an unreproducible local-gate result.
+/// A declarative mapping from CI contexts/fingerprints/jobs to a local command.
 ///
-/// The first variant captures provider-side reasons (the bundle was itself
-/// unreproducible). The remaining variants cover coordinator-side failures
-/// encountered while executing the bundle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LocalGateUnreproducibleReason {
-    /// The provider bundle was itself an [`RequiredCheckReproduction::Unreproducible`].
-    ProviderUnreproducible,
-    /// The `command` field in the bundle was empty or whitespace-only.
-    EmptyCommand,
-    /// A setup step exited with a non-zero code before the main command ran.
-    SetupStepFailed,
-    /// The command (or a setup step) process could not be spawned — e.g. the
-    /// binary is not installed in the container image.
-    CommandSpawnFailed,
-    /// The command exceeded the configured timeout.
-    Timeout,
+/// Selection is purely structural: a spec matches when *any* of its check-name
+/// aliases, fingerprint substrings, or job-name predicates intersect the task's
+/// structured CI metadata. The spec then contributes a command to run and an
+/// applicability level.
+#[derive(Clone, Debug)]
+pub(crate) struct GateSpec {
+    /// Stable identifier (e.g. `"server-size-guard"`).
+    pub id: &'static str,
+    /// GitHub required-check context names that implicate this gate.
+    /// Matched case-insensitively against `ci_blocking_required_check_names`.
+    pub check_aliases: &'static [&'static str],
+    /// Substrings of `ci_failure_fingerprint` that implicate this gate.
+    /// A gate matches when the task fingerprint contains *any* of these.
+    pub fingerprint_substrings: &'static [&'static str],
+    /// Substrings of CI job/step names (from structured CI failure sections)
+    /// that implicate this gate. Matched case-insensitively.
+    pub job_name_substrings: &'static [&'static str],
+    /// Command argv to execute.
+    pub command: &'static [&'static str],
+    /// Working directory *relative to the repository root*.
+    pub cwd: &'static str,
+    /// Execution timeout.
+    pub timeout: Duration,
+    /// Whether a failure/unavailable blocks the transition.
+    pub applicability: GateApplicability,
 }
 
-// ─── Public API ─────────────────────────────────────────────────────────────
-
-/// Attempt to locally reproduce one or more CI checks from their provider
-/// bundles. Each bundle is executed independently in `workdir`.
-///
-/// For each bundle the function:
-/// 1. Maps provider-level `Unreproducible` bundles to
-///    [`LocalGateResult::Unreproducible`] without execution.
-/// 2. Rejects empty/whitespace-only commands as `Unreproducible(EmptyCommand)`.
-/// 3. Runs the bundle's `setup_steps` sequentially — stopping at the first
-///    non-zero exit — then runs the `command`.
-/// 4. Classifies the command exit code as pass (0) or failure (non-zero).
-///
-/// The primitive has **no** registry of repo- or language-specific commands;
-/// it executes exactly the commands present in each bundle.
-pub async fn reproduce_ci_checks(
-    bundles: &[RequiredCheckReproduction],
-    workdir: &Path,
-) -> Vec<LocalGateResult> {
-    let mut results = Vec::with_capacity(bundles.len());
-    for bundle in bundles {
-        results.push(reproduce_single(bundle, workdir).await);
-    }
-    results
-}
-
-/// Reproduce a single CI check from its provider bundle.
-pub async fn reproduce_single(
-    bundle: &RequiredCheckReproduction,
-    workdir: &Path,
-) -> LocalGateResult {
-    let ctx = match bundle {
-        RequiredCheckReproduction::Reproducible(ctx) => ctx,
-        RequiredCheckReproduction::Unreproducible(u) => {
-            return LocalGateResult::Unreproducible(LocalGateUnreproducible {
-                required_check_name: u.required_check_name.clone(),
-                observed_head_sha: u.observed_head_sha.clone(),
-                reason: LocalGateUnreproducibleReason::ProviderUnreproducible,
-                details: Some(format!("{:?}", u.reason)),
-            });
-        }
-    };
-    reproduce_from_context(ctx, workdir).await
-}
-
-// ─── Internal implementation ────────────────────────────────────────────────
-
-async fn reproduce_from_context(
-    ctx: &RequiredCheckReproductionContext,
-    workdir: &Path,
-) -> LocalGateResult {
-    let required_check_name = &ctx.required_check_name;
-    let observed_head_sha = &ctx.observed_head_sha;
-
-    // Reject empty commands.
-    if ctx.command.trim().is_empty() {
-        return LocalGateResult::Unreproducible(LocalGateUnreproducible {
-            required_check_name: required_check_name.clone(),
-            observed_head_sha: observed_head_sha.clone(),
-            reason: LocalGateUnreproducibleReason::EmptyCommand,
-            details: None,
-        });
-    }
-
-    // Run setup steps sequentially; stop at first failure.
-    for step in &ctx.setup_steps {
-        if step.command.trim().is_empty() {
-            continue;
-        }
-        match run_shell_command(&step.command, workdir, DEFAULT_COMMAND_TIMEOUT).await {
-            Ok(output) if output.exit_code == 0 => { /* continue to next step */ }
-            Ok(output) => {
-                let tail = tail_bytes(&output.stderr, MAX_LOG_TAIL_BYTES);
-                return LocalGateResult::Unreproducible(LocalGateUnreproducible {
-                    required_check_name: required_check_name.clone(),
-                    observed_head_sha: observed_head_sha.clone(),
-                    reason: LocalGateUnreproducibleReason::SetupStepFailed,
-                    details: Some(format!(
-                        "setup step '{}' (step {}) exited with code {}: {}",
-                        step.name, step.number, output.exit_code, tail,
-                    )),
-                });
-            }
-            Err(e) => {
-                return LocalGateResult::Unreproducible(LocalGateUnreproducible {
-                    required_check_name: required_check_name.clone(),
-                    observed_head_sha: observed_head_sha.clone(),
-                    reason: LocalGateUnreproducibleReason::CommandSpawnFailed,
-                    details: Some(format!(
-                        "setup step '{}' (step {}) could not be spawned: {}",
-                        step.name, step.number, e,
-                    )),
-                });
-            }
-        }
-    }
-
-    // Run the main failing command.
-    match run_shell_command(&ctx.command, workdir, DEFAULT_COMMAND_TIMEOUT).await {
-        Ok(output) if output.exit_code == 0 => {
-            let log_tail = tail_bytes(&output.stdout, MAX_LOG_TAIL_BYTES);
-            LocalGateResult::ReproducedPass(LocalGateOutcome {
-                required_check_name: required_check_name.clone(),
-                command: ctx.command.clone(),
-                exit_code: output.exit_code,
-                log_tail,
-                observed_head_sha: observed_head_sha.clone(),
-            })
-        }
-        Ok(output) => {
-            // Combine stdout and stderr for the failure log tail.
-            let mut combined = output.stdout;
-            if !output.stderr.is_empty() {
-                if !combined.is_empty() {
-                    combined.push_str("\n--- stderr ---\n");
+impl GateSpec {
+    /// Returns `true` when this spec is implicated by the given structured CI
+    /// metadata. Matching is against check names and fingerprint substrings
+    /// only — never activity-log prose.
+    ///
+    /// - `blocking_check_names`: the parsed entries from
+    ///   `task.ci_blocking_required_check_names` (a JSON array string).
+    /// - `failure_fingerprint`: `task.ci_failure_fingerprint` (optional).
+    /// - `implicated_job_names`: job/step names extracted from structured CI
+    ///   failure sections (optional).
+    fn matches(
+        &self,
+        blocking_check_names: &[String],
+        failure_fingerprint: Option<&str>,
+        implicated_job_names: &[String],
+    ) -> bool {
+        // Check-name alias match (case-insensitive substring on either side).
+        for alias in self.check_aliases {
+            let alias_l = alias.to_lowercase();
+            for cn in blocking_check_names {
+                if cn.to_lowercase().contains(&alias_l) || alias_l.contains(&cn.to_lowercase()) {
+                    return true;
                 }
-                combined.push_str(&output.stderr);
             }
-            let log_tail = tail_bytes(&combined, MAX_LOG_TAIL_BYTES);
-            LocalGateResult::ReproducedFailure(LocalGateOutcome {
-                required_check_name: required_check_name.clone(),
-                command: ctx.command.clone(),
-                exit_code: output.exit_code,
-                log_tail,
-                observed_head_sha: observed_head_sha.clone(),
-            })
+        }
+
+        // Fingerprint substring match.
+        if let Some(fp) = failure_fingerprint {
+            for sub in self.fingerprint_substrings {
+                if fp.contains(sub) {
+                    return true;
+                }
+            }
+        }
+
+        // Job-name substring match.
+        for job_sub in self.job_name_substrings {
+            let job_sub_l = job_sub.to_lowercase();
+            for jn in implicated_job_names {
+                if jn.to_lowercase().contains(&job_sub_l) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+// ── Structured CI input ───────────────────────────────────────────────────────
+
+/// Structured CI metadata used to select gates. Built by the caller from
+/// durable task fields — never from activity-log prose.
+///
+/// Fields mirror the task model's CI columns delivered by dependency epics
+/// (`iuic`, `zlys`, `sa4x`):
+/// - `ci_blocking_required_check_names` (JSON array string)
+/// - `ci_failure_fingerprint` (optional hex/hash string)
+/// - `ci_last_remediation_base_sha` (optional SHA)
+///
+/// `implicated_job_names` carries job/step names extracted from structured CI
+/// failure sections (the `**Failed job:**` / `**Failed step:**` markers built by
+/// `build_ci_failure_sections`). It is optional context — the registry matches
+/// on check names and fingerprints first.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CiGateInput {
+    /// Parsed `ci_blocking_required_check_names` entries.
+    pub blocking_check_names: Vec<String>,
+    /// `ci_failure_fingerprint`, when present.
+    pub failure_fingerprint: Option<String>,
+    /// `ci_last_remediation_base_sha`, when present.
+    pub last_remediation_base_sha: Option<String>,
+    /// Job/step names from structured CI failure sections, when available.
+    pub implicated_job_names: Vec<String>,
+}
+
+impl CiGateInput {
+    /// Parse a [`CiGateInput`] from raw task-model CI fields.
+    ///
+    /// `blocking_check_names_json` is the `ci_blocking_required_check_names`
+    /// column value (a JSON array string, possibly empty). The fingerprint and
+    /// remediation baseline are passed through as-is.
+    pub(crate) fn from_task_fields(
+        blocking_check_names_json: &str,
+        failure_fingerprint: Option<String>,
+        last_remediation_base_sha: Option<String>,
+        implicated_job_names: Vec<String>,
+    ) -> Self {
+        let blocking_check_names = parse_check_names_json(blocking_check_names_json);
+        Self {
+            blocking_check_names,
+            failure_fingerprint,
+            last_remediation_base_sha,
+            implicated_job_names,
+        }
+    }
+}
+
+/// Parse the `ci_blocking_required_check_names` JSON array string into a vec.
+/// Tolerates empty strings and malformed JSON (returns empty).
+fn parse_check_names_json(json: &str) -> Vec<String> {
+    if json.trim().is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(json).unwrap_or_default()
+}
+
+// ── Gate plan ─────────────────────────────────────────────────────────────────
+
+/// A selected gate ready for execution. Carries the spec (cloned — all inner
+/// fields are `&'static`, so cloning is cheap pointer copies).
+#[derive(Clone, Debug)]
+pub(crate) struct PlannedGate {
+    pub spec: GateSpec,
+}
+
+/// The set of gates selected for a given task's CI metadata.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GatePlan {
+    pub gates: Vec<PlannedGate>,
+}
+
+impl GatePlan {
+    /// Returns `true` when at least one *required* gate is in the plan.
+    pub(crate) fn has_required(&self) -> bool {
+        self.gates
+            .iter()
+            .any(|g| g.spec.applicability == GateApplicability::Required)
+    }
+
+    /// Returns the ids of all gates in the plan.
+    pub(crate) fn ids(&self) -> Vec<&'static str> {
+        self.gates.iter().map(|g| g.spec.id).collect()
+    }
+}
+
+// ── Gate result ───────────────────────────────────────────────────────────────
+
+/// Outcome category for a single gate evaluation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GateOutcome {
+    /// Command exited 0.
+    Passed,
+    /// Command exited non-zero.
+    Failed,
+    /// Command binary or working directory was unavailable.
+    Unavailable,
+    /// Gate was advisory or non-applicable and was not run as a blocker.
+    Skipped,
+}
+
+/// Result of evaluating one gate.
+#[derive(Clone, Debug)]
+pub(crate) struct GateResult {
+    pub gate_id: &'static str,
+    pub outcome: GateOutcome,
+    /// Whether this gate's failure would block the transition.
+    pub blocking: bool,
+    pub command: Vec<String>,
+    pub cwd: String,
+    pub timeout: Duration,
+    /// Exit code, when the command ran.
+    pub exit_code: Option<i32>,
+    /// Truncated stdout summary.
+    pub stdout_summary: String,
+    /// Truncated stderr summary.
+    pub stderr_summary: String,
+    /// Wall-clock duration of the command, when it ran.
+    pub duration: Option<Duration>,
+    /// Artifact path or identifier, when the command produced one.
+    pub artifact: Option<String>,
+}
+
+impl GateResult {
+    /// Returns `true` when this result blocks the submit/approve transition.
+    /// A blocking gate that failed or was unavailable blocks; passed/skipped
+    /// never block.
+    pub(crate) fn is_blocking_failure(&self) -> bool {
+        self.blocking && matches!(self.outcome, GateOutcome::Failed | GateOutcome::Unavailable)
+    }
+}
+
+/// Summary of a full gate plan execution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GatePlanResult {
+    pub results: Vec<GateResult>,
+}
+
+impl GatePlanResult {
+    /// Returns `true` when any gate result blocks the transition.
+    pub(crate) fn has_blocking_failure(&self) -> bool {
+        self.results.iter().any(|r| r.is_blocking_failure())
+    }
+
+    /// Returns the ids of all blocking failures.
+    pub(crate) fn blocking_gate_ids(&self) -> Vec<&'static str> {
+        self.results
+            .iter()
+            .filter(|r| r.is_blocking_failure())
+            .map(|r| r.gate_id)
+            .collect()
+    }
+
+    /// Returns `true` when every gate passed or was skipped (no failures of any
+    /// kind).
+    pub(crate) fn all_clean(&self) -> bool {
+        self.results
+            .iter()
+            .all(|r| matches!(r.outcome, GateOutcome::Passed | GateOutcome::Skipped))
+    }
+}
+
+// ── Registry ──────────────────────────────────────────────────────────────────
+
+/// Default timeout for the file-size guard — a pure-shell script, very fast.
+const SIZE_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default timeout for `cargo fmt --check`.
+const RUSTFMT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Default timeout for scoped clippy.
+const CLIPPY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Default timeout for scoped tests.
+const TEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The built-in registry of local gate specs.
+///
+/// Order matters only for determinism in plan construction (tests assert exact
+/// gate sets); it does not affect execution semantics.
+pub(crate) fn builtin_registry() -> &'static [GateSpec] {
+    &REGISTRY
+}
+
+const REGISTRY: [GateSpec; 4] = [
+    // ── server-size-guard ──────────────────────────────────────────────────
+    // CI check `server-size-guard` (job name "Server Size Guard") runs
+    // `scripts/check-file-size.sh`. The local mirror runs the same script from
+    // the repo root with a short timeout.
+    GateSpec {
+        id: "server-size-guard",
+        check_aliases: &["server-size-guard", "Server Size Guard"],
+        fingerprint_substrings: &["server-size-guard", "size-guard"],
+        job_name_substrings: &["Server Size Guard", "size-guard"],
+        command: &["./scripts/check-file-size.sh", "--all"],
+        cwd: "",
+        timeout: SIZE_GUARD_TIMEOUT,
+        applicability: GateApplicability::Required,
+    },
+    // ── rustfmt ────────────────────────────────────────────────────────────
+    // The CI `rustfmt` context (check name "rustfmt" / "Rust Format") is
+    // mirrored locally by `cargo fmt --all -- --check` from `server/`.
+    GateSpec {
+        id: "rustfmt",
+        check_aliases: &["rustfmt", "Rust Format", "rust-format", "fmt"],
+        fingerprint_substrings: &["rustfmt", "fmt"],
+        job_name_substrings: &["rustfmt", "Rust Format", "Format"],
+        command: &["cargo", "fmt", "--all", "--", "--check"],
+        cwd: "server",
+        timeout: RUSTFMT_TIMEOUT,
+        applicability: GateApplicability::Required,
+    },
+    // ── clippy (Rust lint) ─────────────────────────────────────────────────
+    // The CI `Server Clippy` job is mirrored by a scoped `cargo clippy`
+    // invocation. The applicability predicate is conservative: the gate is
+    // required when clippy is among the blocking checks/fingerprint, advisory
+    // otherwise.
+    GateSpec {
+        id: "clippy",
+        check_aliases: &["Server Clippy", "clippy"],
+        fingerprint_substrings: &["clippy"],
+        job_name_substrings: &["Clippy", "clippy"],
+        command: &[
+            "cargo",
+            "clippy",
+            "--all-targets",
+            "--features",
+            "qdrant",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        cwd: "server",
+        timeout: CLIPPY_TIMEOUT,
+        applicability: GateApplicability::Required,
+    },
+    // ── Rust tests ─────────────────────────────────────────────────────────
+    // The CI `Server Test` job is mirrored by a scoped `cargo test`. This gate
+    // is required when test failures are among the blocking checks/fingerprint.
+    GateSpec {
+        id: "rust-tests",
+        check_aliases: &["Server Test", "test"],
+        fingerprint_substrings: &["test"],
+        job_name_substrings: &["Test", "test"],
+        command: &["cargo", "test", "--no-fail-fast"],
+        cwd: "server",
+        timeout: TEST_TIMEOUT,
+        applicability: GateApplicability::Required,
+    },
+];
+
+// ── Plan construction ─────────────────────────────────────────────────────────
+
+/// Build a [`GatePlan`] from structured CI metadata.
+///
+/// A spec is included when it `matches` the input's check names, fingerprint,
+/// or implicated job names. Specs that do not match are excluded (they would
+/// produce `NonApplicable` results).
+///
+/// Selection uses *only* structured fields — never activity-log prose or
+/// prompt text.
+pub(crate) fn build_plan(input: &CiGateInput) -> GatePlan {
+    let mut gates: Vec<PlannedGate> = Vec::new();
+    for spec in builtin_registry() {
+        if spec.matches(
+            &input.blocking_check_names,
+            input.failure_fingerprint.as_deref(),
+            &input.implicated_job_names,
+        ) {
+            gates.push(PlannedGate { spec: spec.clone() });
+        }
+    }
+    GatePlan { gates }
+}
+
+// ── Executor ──────────────────────────────────────────────────────────────────
+
+/// Trait abstracting command execution so the gate executor can be unit-tested
+/// without spawning real processes.
+pub(crate) trait CommandRunner: Send + Sync {
+    /// Run `command` in `cwd` (relative to `repo_root`) with the given timeout.
+    /// Returns the exit code, stdout, and stderr. Returns `None` for the exit
+    /// code when the command binary or working directory was unavailable, or
+    /// the command timed out.
+    fn run(
+        &self,
+        repo_root: &Path,
+        command: &[&str],
+        cwd: &str,
+        timeout: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ExecOutput> + Send>>;
+}
+
+/// Raw output from a command execution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExecOutput {
+    /// Exit code when the command ran to completion. `None` when the binary or
+    /// cwd was unavailable, or the command timed out.
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    /// Wall-clock duration.
+    pub duration: Duration,
+    /// `true` when the command binary or cwd was unavailable (not found).
+    pub unavailable: bool,
+}
+
+/// Production command runner using `tokio::process::Command`.
+pub(crate) struct ProcessRunner;
+
+impl CommandRunner for ProcessRunner {
+    fn run(
+        &self,
+        repo_root: &Path,
+        command: &[&str],
+        cwd: &str,
+        timeout: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ExecOutput> + Send>> {
+        let repo_root = repo_root.to_path_buf();
+        let cwd = cwd.to_string();
+        let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+        Box::pin(async move { run_process(&repo_root, &command, &cwd, timeout).await })
+    }
+}
+
+/// Execute a command with unavailable-tool detection and timeout.
+///
+/// - If the working directory does not exist → `unavailable`.
+/// - If the command binary cannot be spawned (NotFound) → `unavailable`.
+/// - If the command times out → treated as `unavailable` (we cannot trust a
+///   partial result; a required timeout is blocking).
+/// - Otherwise → exit code + stdout + stderr.
+async fn run_process(
+    repo_root: &Path,
+    command: &[String],
+    cwd: &str,
+    timeout: Duration,
+) -> ExecOutput {
+    use tokio::time::Instant;
+    let start = Instant::now();
+
+    // Resolve the working directory.
+    let work_dir = if cwd.is_empty() {
+        repo_root.to_path_buf()
+    } else {
+        repo_root.join(cwd)
+    };
+    if !work_dir.is_dir() {
+        return ExecOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("working directory does not exist: {}", work_dir.display()),
+            duration: start.elapsed(),
+            unavailable: true,
+        };
+    }
+
+    if command.is_empty() {
+        return ExecOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: "empty command".to_string(),
+            duration: start.elapsed(),
+            unavailable: true,
+        };
+    }
+
+    let mut cmd = Command::new(&command[0]);
+    cmd.args(&command[1..]);
+    cmd.current_dir(&work_dir);
+    // Capture stdout/stderr; do not inherit stdin.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return ExecOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("command not found: {}: {e}", command[0]),
+                duration: start.elapsed(),
+                unavailable: true,
+            };
         }
         Err(e) => {
-            if e.kind() == std::io::ErrorKind::TimedOut {
-                LocalGateResult::Unreproducible(LocalGateUnreproducible {
-                    required_check_name: required_check_name.clone(),
-                    observed_head_sha: observed_head_sha.clone(),
-                    reason: LocalGateUnreproducibleReason::Timeout,
-                    details: Some(format!("command '{}' timed out: {}", ctx.command, e)),
-                })
-            } else {
-                LocalGateResult::Unreproducible(LocalGateUnreproducible {
-                    required_check_name: required_check_name.clone(),
-                    observed_head_sha: observed_head_sha.clone(),
-                    reason: LocalGateUnreproducibleReason::CommandSpawnFailed,
-                    details: Some(format!("command could not be spawned: {}", e)),
-                })
-            }
+            return ExecOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("failed to spawn command: {e}"),
+                duration: start.elapsed(),
+                unavailable: true,
+            };
         }
-    }
-}
-
-// ─── Shell execution helper ─────────────────────────────────────────────────
-
-/// Minimal output from a shell invocation.
-struct ShellOutput {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-/// Run a shell command in `workdir` with a timeout. Uses `sh -c` so that
-/// pipelines, redirections, and compound commands from the CI bundle work
-/// without modification.
-async fn run_shell_command(
-    command: &str,
-    workdir: &Path,
-    timeout: Duration,
-) -> Result<ShellOutput, std::io::Error> {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(workdir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "command timed out"))??;
-
-    Ok(ShellOutput {
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-/// Take the last `max_bytes` of a string, aligned to UTF-8 char boundaries.
-fn tail_bytes(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_owned();
-    }
-    let start = s.len() - max_bytes;
-    // Walk forward to the next valid UTF-8 char boundary.
-    let start = if let Some((i, _)) = s[start..].char_indices().next() {
-        start + i
-    } else {
-        // `start` is past the end — defensive; return empty.
-        return String::new();
     };
-    s[start..].to_owned()
-}
 
-// ─── Reproduction-plan formatting ────────────────────────────────────────────
-
-/// Build a focused reproduction plan from a reproducible provider bundle.
-///
-/// The returned markdown contains every field the worker needs to locally
-/// reproduce the failure: failing check, Actions job/step, the exact shell
-/// command, setup steps, the CI log tail, the observed head SHA, and
-/// step-by-step reproduce → fix → verify → resubmit instructions.
-pub fn format_reproduction_plan(ctx: &RequiredCheckReproductionContext) -> String {
-    let mut plan = String::new();
-
-    plan.push_str(&format!(
-        "**Failing Required Check:** `{}`\n",
-        ctx.required_check_name
-    ));
-    plan.push_str(&format!(
-        "**Observed Head SHA:** `{}`\n",
-        ctx.observed_head_sha
-    ));
-
-    // ── Job / step details ─────────────────────────────────────────────
-    plan.push_str(&format!(
-        "**Failed Job:** `{}` (id: {}, [run]({}))\n",
-        ctx.job.name, ctx.job.id, ctx.job.html_url
-    ));
-    plan.push_str(&format!(
-        "**Failed Step:** {} (step {})\n",
-        ctx.failing_step.name, ctx.failing_step.number
-    ));
-    if let Some(ref wf) = ctx.workflow_name {
-        plan.push_str(&format!("**Workflow:** `{wf}`\n"));
-    }
-
-    // ── Command + setup steps ──────────────────────────────────────────
-    plan.push_str("\n**Reproduction Command:**\n```\n");
-    plan.push_str(&ctx.command);
-    plan.push_str("\n```\n");
-
-    if !ctx.setup_steps.is_empty() {
-        plan.push_str("\n**Setup Steps** (run before the failing command):\n");
-        for step in &ctx.setup_steps {
-            if step.command.trim().is_empty() {
-                plan.push_str(&format!(
-                    "{}. `{}` — _(empty, skipped)_\n",
-                    step.number, step.name
-                ));
-            } else {
-                plan.push_str(&format!(
-                    "{}. `{}`\n   ```\n   {}\n   ```\n",
-                    step.number, step.name, step.command
-                ));
+    // Wait with timeout.
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            ExecOutput {
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                duration: start.elapsed(),
+                unavailable: false,
             }
         }
+        Ok(Err(e)) => ExecOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("command wait failed: {e}"),
+            duration: start.elapsed(),
+            unavailable: true,
+        },
+        Err(_elapsed) => ExecOutput {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("command timed out after {timeout:?}"),
+            duration: timeout,
+            unavailable: true,
+        },
     }
-
-    // ── CI log tail ────────────────────────────────────────────────────
-    if !ctx.log_tail.is_empty() {
-        plan.push_str("\n**CI Log Tail:**\n```\n");
-        plan.push_str(&ctx.log_tail);
-        plan.push_str("\n```\n");
-    }
-
-    // ── Remediation instructions ───────────────────────────────────────
-    plan.push_str("\n**Remediation Steps:**\n");
-    plan.push_str("1. **Reproduce:** Run the reproduction command above in the project working directory (after running setup steps if any).\n");
-    plan.push_str("2. **Fix:** Address the failure revealed by the reproduction.\n");
-    plan.push_str(
-        "3. **Verify:** Re-run the same command locally and confirm it passes (exit code 0).\n",
-    );
-    plan.push_str("4. **Resubmit:** Push the fix and let CI re-run on the PR.\n");
-
-    plan
 }
 
-/// Build a distinct intervention reason for an unreproducible required check.
+// ── Execution orchestration ───────────────────────────────────────────────────
+
+/// Execute a [`GatePlan`], producing a [`GatePlanResult`].
 ///
-/// The returned text makes clear that the check could not be reproduced
-/// locally and routes to human/lead intervention.  It never marks the check
-/// as passing or produces a scope-reshape payload.
-pub fn format_unreproducible_intervention_reason(bundle: &RequiredCheckUnreproducible) -> String {
-    let mut reason = format!(
-        "Required check `{}` (observed SHA `{}`) could not be reproduced locally.",
-        bundle.required_check_name, bundle.observed_head_sha,
-    );
-    reason.push_str(&format!("\nUnreproducible reason: `{:?}`", bundle.reason));
-    if let Some(ref details) = bundle.details {
-        reason.push_str(&format!("\nDetails: {details}"));
+/// Each gate is run via `runner`. Advisory and non-applicable gates produce
+/// `Skipped` results (they are not run as blockers). Required gates are run;
+/// unavailable commands produce `Unavailable` outcomes that are blocking.
+pub(crate) async fn execute_plan(
+    plan: &GatePlan,
+    repo_root: &Path,
+    runner: &dyn CommandRunner,
+) -> GatePlanResult {
+    let mut results = Vec::with_capacity(plan.gates.len());
+    for gate in &plan.gates {
+        let result = execute_gate(gate, repo_root, runner).await;
+        results.push(result);
     }
-    reason
+    GatePlanResult { results }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
+/// Execute a single planned gate.
+async fn execute_gate(
+    gate: &PlannedGate,
+    repo_root: &Path,
+    runner: &dyn CommandRunner,
+) -> GateResult {
+    let spec = &gate.spec;
+    let command_strings: Vec<String> = spec.command.iter().map(|s| s.to_string()).collect();
+
+    // Advisory and non-applicable gates are never run as blockers.
+    if spec.applicability != GateApplicability::Required {
+        return GateResult {
+            gate_id: spec.id,
+            outcome: GateOutcome::Skipped,
+            blocking: false,
+            command: command_strings,
+            cwd: spec.cwd.to_string(),
+            timeout: spec.timeout,
+            exit_code: None,
+            stdout_summary: String::new(),
+            stderr_summary: String::new(),
+            duration: None,
+            artifact: None,
+        };
+    }
+
+    let output = runner
+        .run(repo_root, spec.command, spec.cwd, spec.timeout)
+        .await;
+
+    let outcome = if output.unavailable {
+        GateOutcome::Unavailable
+    } else if output.exit_code == Some(0) {
+        GateOutcome::Passed
+    } else {
+        GateOutcome::Failed
+    };
+
+    GateResult {
+        gate_id: spec.id,
+        outcome,
+        blocking: spec.applicability == GateApplicability::Required,
+        command: command_strings,
+        cwd: spec.cwd.to_string(),
+        timeout: spec.timeout,
+        exit_code: output.exit_code,
+        stdout_summary: summarize_output(&output.stdout),
+        stderr_summary: summarize_output(&output.stderr),
+        duration: Some(output.duration),
+        artifact: None,
+    }
+}
+
+/// Truncate output to the summary budget using the crate's smart truncation
+/// utilities (preserves head + tail).
+fn summarize_output(output: &str) -> String {
+    if output.is_empty() {
+        return String::new();
+    }
+    smart_truncate_lines(
+        &smart_truncate(output, OUTPUT_SUMMARY_MAX_BYTES),
+        OUTPUT_SUMMARY_MAX_BYTES,
+        OUTPUT_SUMMARY_MAX_LINES,
+    )
+}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use djinn_provider::github_api::{
-        ReproductionJob, ReproductionSetupStep, ReproductionStep, RequiredCheckReproductionContext,
-        RequiredCheckUnreproducible, RequiredCheckUnreproducibleReason,
-    };
-
-    fn test_workdir() -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix("local_gates_test_")
-            .tempdir()
-            .expect("test tempdir")
-    }
-
-    fn sample_context(command: &str) -> RequiredCheckReproductionContext {
-        RequiredCheckReproductionContext {
-            required_check_name: "ci/test".into(),
-            observed_head_sha: "abc123".into(),
-            check_run_id: 1,
-            workflow_run_id: 42,
-            workflow_name: Some("quality-gate.yml".into()),
-            job: ReproductionJob {
-                id: 100,
-                name: "test".into(),
-                html_url: "https://example.com/run/42/job/100".into(),
-            },
-            failing_step: ReproductionStep {
-                number: 3,
-                name: "Run tests".into(),
-            },
-            command: command.into(),
-            setup_steps: vec![],
-            log_tail: "original CI log tail".into(),
-        }
-    }
-
-    fn sample_context_with_setup(
-        command: &str,
-        setup_steps: Vec<ReproductionSetupStep>,
-    ) -> RequiredCheckReproductionContext {
-        let mut ctx = sample_context(command);
-        ctx.setup_steps = setup_steps;
-        ctx
-    }
-
-    // ── Reproduced pass ─────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn reproduced_pass_exiting_zero() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context("true"));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-        assert_eq!(results.len(), 1);
-
-        match &results[0] {
-            LocalGateResult::ReproducedPass(outcome) => {
-                assert_eq!(outcome.required_check_name, "ci/test");
-                assert_eq!(outcome.command, "true");
-                assert_eq!(outcome.exit_code, 0);
-                assert_eq!(outcome.observed_head_sha, "abc123");
-            }
-            other => panic!("expected ReproducedPass, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn reproduced_pass_echo_command() {
-        let dir = test_workdir();
-        let bundle =
-            RequiredCheckReproduction::Reproducible(sample_context("echo 'all checks passed'"));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::ReproducedPass(outcome) => {
-                assert!(outcome.log_tail.contains("all checks passed"));
-                assert_eq!(outcome.exit_code, 0);
-            }
-            other => panic!("expected ReproducedPass, got {:?}", other),
-        }
-    }
-
-    // ── Reproduced failure ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn reproduced_failure_exiting_nonzero() {
-        let dir = test_workdir();
-        let bundle =
-            RequiredCheckReproduction::Reproducible(sample_context("echo 'FAIL' >&2; exit 1"));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-        assert_eq!(results.len(), 1);
-
-        match &results[0] {
-            LocalGateResult::ReproducedFailure(outcome) => {
-                assert_eq!(outcome.required_check_name, "ci/test");
-                assert_eq!(outcome.exit_code, 1);
-                assert!(outcome.log_tail.contains("FAIL"));
-                assert_eq!(outcome.observed_head_sha, "abc123");
-            }
-            other => panic!("expected ReproducedFailure, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn reproduced_failure_captures_stdout_and_stderr() {
-        let dir = test_workdir();
-        // Command writes to both stdout and stderr, then exits non-zero.
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context(
-            "echo 'line1'; echo 'errline' >&2; exit 42",
-        ));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::ReproducedFailure(outcome) => {
-                assert_eq!(outcome.exit_code, 42);
-                assert!(outcome.log_tail.contains("line1"));
-                assert!(outcome.log_tail.contains("errline"));
-                assert!(outcome.log_tail.contains("--- stderr ---"));
-            }
-            other => panic!("expected ReproducedFailure, got {:?}", other),
-        }
-    }
-
-    // ── Unreproducible: provider-side ───────────────────────────────────
-
-    #[tokio::test]
-    async fn unreproducible_provider_bundle() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Unreproducible(RequiredCheckUnreproducible {
-            required_check_name: "ci/missing".into(),
-            observed_head_sha: "def456".into(),
-            reason: RequiredCheckUnreproducibleReason::WorkflowRunNotFound,
-            details: None,
-        });
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::Unreproducible(u) => {
-                assert_eq!(u.required_check_name, "ci/missing");
-                assert_eq!(u.observed_head_sha, "def456");
-                assert_eq!(
-                    u.reason,
-                    LocalGateUnreproducibleReason::ProviderUnreproducible
-                );
-                assert!(u.details.is_some());
-            }
-            other => panic!("expected Unreproducible, got {:?}", other),
-        }
-    }
-
-    // ── Unreproducible: empty command ───────────────────────────────────
-
-    #[tokio::test]
-    async fn unreproducible_empty_command() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context(""));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::Unreproducible(u) => {
-                assert_eq!(u.reason, LocalGateUnreproducibleReason::EmptyCommand);
-            }
-            other => panic!("expected Unreproducible(EmptyCommand), got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn unreproducible_whitespace_only_command() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context("   "));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::Unreproducible(u) => {
-                assert_eq!(u.reason, LocalGateUnreproducibleReason::EmptyCommand);
-            }
-            other => panic!("expected Unreproducible(EmptyCommand), got {:?}", other),
-        }
-    }
-
-    // ── Unreproducible: setup step failure ──────────────────────────────
-
-    #[tokio::test]
-    async fn unreproducible_setup_step_fails() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context_with_setup(
-            "echo 'would run'",
-            vec![ReproductionSetupStep {
-                number: 1,
-                name: "Install deps".into(),
-                command: "echo 'install failed' >&2; exit 1".into(),
-            }],
-        ));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::Unreproducible(u) => {
-                assert_eq!(u.reason, LocalGateUnreproducibleReason::SetupStepFailed);
-                let d = u.details.as_ref().expect("details should be present");
-                assert!(d.contains("Install deps"));
-                assert!(d.contains("exited with code 1"));
-            }
-            other => panic!("expected Unreproducible(SetupStepFailed), got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_setup_steps_are_skipped() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context_with_setup(
-            "true",
-            vec![
-                ReproductionSetupStep {
-                    number: 1,
-                    name: "noop".into(),
-                    command: "".into(), // empty — should be skipped
-                },
-                ReproductionSetupStep {
-                    number: 2,
-                    name: "real setup".into(),
-                    command: "echo ok".into(),
-                },
-            ],
-        ));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::ReproducedPass(outcome) => {
-                assert_eq!(outcome.exit_code, 0);
-            }
-            other => panic!("expected ReproducedPass, got {:?}", other),
-        }
-    }
-
-    // ── Missing binary produces reproduced failure, not unreproducible ─
-
-    #[tokio::test]
-    async fn missing_binary_is_reproduced_failure_127() {
-        let dir = test_workdir();
-        // A command that references a non-existent binary: `sh -c` spawns
-        // successfully, the inner command gets exit code 127 from the shell.
-        // This is a reproduced failure, NOT an unreproducible result — the
-        // command was executable, it just failed.
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context(
-            "nonexistent_binary_xyz_12345 --version",
-        ));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::ReproducedFailure(outcome) => {
-                assert_eq!(outcome.exit_code, 127);
-                assert!(outcome.log_tail.contains("not found"));
-            }
-            other => panic!("expected ReproducedFailure(127), got {:?}", other),
-        }
-    }
-
-    // ── Multi-bundle execution ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn multiple_bundles_classified_independently() {
-        let dir = test_workdir();
-        let bundles = vec![
-            RequiredCheckReproduction::Reproducible(sample_context("true")),
-            RequiredCheckReproduction::Reproducible(sample_context("exit 1")),
-            RequiredCheckReproduction::Unreproducible(RequiredCheckUnreproducible {
-                required_check_name: "ci/other".into(),
-                observed_head_sha: "abc123".into(),
-                reason: RequiredCheckUnreproducibleReason::CommandNotFound,
-                details: Some("no command extracted".into()),
-            }),
-        ];
-        let results = reproduce_ci_checks(&bundles, dir.path()).await;
-        assert_eq!(results.len(), 3);
-
-        assert!(
-            matches!(results[0], LocalGateResult::ReproducedPass(_)),
-            "first bundle should pass"
-        );
-        assert!(
-            matches!(results[1], LocalGateResult::ReproducedFailure(_)),
-            "second bundle should fail"
-        );
-        assert!(
-            matches!(results[2], LocalGateResult::Unreproducible(ref u) if u.reason == LocalGateUnreproducibleReason::ProviderUnreproducible),
-            "third bundle should be unreproducible"
-        );
-    }
-
-    // ── Setup steps run before the main command ─────────────────────────
-
-    #[tokio::test]
-    async fn setup_steps_run_before_main_command() {
-        let dir = test_workdir();
-        // Create a file in a setup step, verify it exists in the main command.
-        let file_path = dir.path().join("marker.txt");
-        let setup_cmd = format!("touch {}", file_path.display());
-        let verify_cmd = format!("test -f {}", file_path.display());
-
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context_with_setup(
-            &verify_cmd,
-            vec![ReproductionSetupStep {
-                number: 1,
-                name: "create marker".into(),
-                command: setup_cmd,
-            }],
-        ));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        match &results[0] {
-            LocalGateResult::ReproducedPass(outcome) => {
-                assert_eq!(outcome.exit_code, 0);
-            }
-            other => panic!("expected ReproducedPass, got {:?}", other),
-        }
-    }
-
-    // ── Serialization round-trip ────────────────────────────────────────
-
-    #[tokio::test]
-    async fn result_serialization_round_trip() {
-        let dir = test_workdir();
-        let bundle = RequiredCheckReproduction::Reproducible(sample_context("exit 7"));
-        let results = reproduce_ci_checks(&[bundle], dir.path()).await;
-
-        let json = serde_json::to_string(&results[0]).expect("serialize");
-        let deserialized: LocalGateResult = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(results[0], deserialized);
-    }
-
-    // ── format_reproduction_plan ──────────────────────────────────────
-
-    #[test]
-    fn reproduction_plan_contains_all_required_fields() {
-        let ctx = sample_context("cargo test --all");
-        let plan = format_reproduction_plan(&ctx);
-
-        assert!(plan.contains("ci/test"), "must include check name");
-        assert!(plan.contains("abc123"), "must include head SHA");
-        assert!(plan.contains("cargo test --all"), "must include command");
-        assert!(plan.contains("Run tests"), "must include failing step name");
-        assert!(
-            plan.contains("quality-gate.yml"),
-            "must include workflow name"
-        );
-        assert!(plan.contains("test"), "must include job name");
-        assert!(
-            plan.contains("original CI log tail"),
-            "must include log tail"
-        );
-        assert!(
-            plan.contains("**Reproduction Command:**"),
-            "must have reproduction command section"
-        );
-        assert!(
-            plan.contains("**Remediation Steps:**"),
-            "must have remediation instructions"
-        );
-        assert!(
-            plan.contains("**Reproduce:**"),
-            "must include reproduce step"
-        );
-        assert!(plan.contains("**Fix:**"), "must include fix step");
-        assert!(plan.contains("**Verify:**"), "must include verify step");
-        assert!(plan.contains("**Resubmit:**"), "must include resubmit step");
-    }
-
-    #[test]
-    fn reproduction_plan_includes_setup_steps() {
-        let ctx = sample_context_with_setup(
-            "cargo test",
-            vec![ReproductionSetupStep {
-                number: 1,
-                name: "Install deps".into(),
-                command: "cargo fetch".into(),
-            }],
-        );
-        let plan = format_reproduction_plan(&ctx);
-
-        assert!(
-            plan.contains("**Setup Steps**"),
-            "must include setup steps section"
-        );
-        assert!(
-            plan.contains("Install deps"),
-            "must include setup step name"
-        );
-        assert!(
-            plan.contains("cargo fetch"),
-            "must include setup step command"
-        );
-    }
-
-    #[test]
-    fn reproduction_plan_omits_empty_setup_steps_section() {
-        let ctx = sample_context("cargo test");
-        let plan = format_reproduction_plan(&ctx);
-
-        assert!(
-            !plan.contains("**Setup Steps**"),
-            "empty setup steps should be omitted"
-        );
-    }
-
-    // ── format_unreproducible_intervention_reason ──────────────────────
-
-    #[test]
-    fn unreproducible_reason_contains_all_fields() {
-        let bundle = RequiredCheckUnreproducible {
-            required_check_name: "ci/build".into(),
-            observed_head_sha: "deadbeef".into(),
-            reason: RequiredCheckUnreproducibleReason::WorkflowRunNotFound,
-            details: Some("no matching workflow run".into()),
-        };
-        let reason = format_unreproducible_intervention_reason(&bundle);
-
-        assert!(reason.contains("ci/build"), "must include check name");
-        assert!(reason.contains("deadbeef"), "must include head SHA");
-        assert!(
-            reason.contains("WorkflowRunNotFound"),
-            "must include typed reason"
-        );
-        assert!(
-            reason.contains("no matching workflow run"),
-            "must include details"
-        );
-        assert!(
-            reason.contains("could not be reproduced locally"),
-            "must state unreproducible"
-        );
-    }
-
-    #[test]
-    fn unreproducible_reason_without_details() {
-        let bundle = RequiredCheckUnreproducible {
-            required_check_name: "ci/lint".into(),
-            observed_head_sha: "cafe".into(),
-            reason: RequiredCheckUnreproducibleReason::CommandNotFound,
-            details: None,
-        };
-        let reason = format_unreproducible_intervention_reason(&bundle);
-
-        assert!(reason.contains("ci/lint"));
-        assert!(reason.contains("CommandNotFound"));
-        assert!(
-            !reason.contains("Details:"),
-            "no details line when details is None"
-        );
-    }
-}
+mod tests;
