@@ -19,62 +19,21 @@ const MAX_VERIFICATION_CHARS: usize = 3000;
 /// Max characters for a single inline PR review comment included in the prompt.
 const MAX_PR_COMMENT_CHARS: usize = 500;
 
-/// PR E2 feature flag: comma-separated list of role names (matching
-/// `RoleConfig::name`) that opt-in to auto-injected `code_graph context`
-/// summaries. Empty / unset → no roles get auto-injection.
-///
-/// Example: `DJINN_AUTO_CODE_CONTEXT_ROLES=worker,reviewer`.
-const AUTO_CODE_CONTEXT_ROLES_ENV: &str = "DJINN_AUTO_CODE_CONTEXT_ROLES";
-
-/// Char budget for the auto-injected `code_graph context` block. Mirrors
-/// the existing 2000-char knowledge-context cap and is enforced via
-/// `truncate::smart_truncate` so we keep both head + tail of the block.
-const AUTO_CODE_CONTEXT_BUDGET_CHARS: usize = 2000;
-
-/// Cap on the number of high-PageRank symbols we pull from `ranked` before
-/// filtering by scope-path overlap. Bounds the worst-case `context()`
-/// fan-out per dispatch.
-const AUTO_CODE_CONTEXT_RANKED_POOL: usize = 60;
-
-/// Per-file cap on auto-included symbols. The plan calls for "top 3 by
-/// PageRank in F".
-const AUTO_CODE_CONTEXT_PER_FILE: usize = 3;
-
-/// Outer cap on emitted bullets — prevents runaway expansion when many
-/// scope-path files match. Soft cap; the char budget is the hard cap.
-const AUTO_CODE_CONTEXT_MAX_BULLETS: usize = 9;
-
-/// PR E3: char budget for the auto-injected `code_graph detect_changes`
-/// reviewer block. Mirrors the E2 cap so the two slots never collectively
-/// blow past 4k chars in a reviewer prompt.
-const REVIEWER_DIFF_CONTEXT_BUDGET_CHARS: usize = 2000;
-
-/// PR E3: outer cap on emitted touched-symbol bullets in the reviewer
-/// diff context. Soft cap; the char budget is the hard cap.
-const REVIEWER_DIFF_CONTEXT_MAX_BULLETS: usize = 30;
-
-/// PR E3: BFS depth for the per-symbol `impact` lookup that drives risk
-/// classification. Matches the `code_graph impact` default
-/// (`graph_tools.rs:1346`).
-const REVIEWER_DIFF_IMPACT_DEPTH: usize = 3;
-
-mod code_context;
 mod feedback;
 pub mod provider_resolution;
-mod reviewer_diff;
 
-// Tests hold `AUTO_CODE_CONTEXT_ENV_LOCK` across `.await` on purpose: the lock
-// serializes env-var mutation (set/remove) for the duration of each async test
-// so concurrent tests cannot race the shared process env. Deliberate test-only
-// guard, not a production async-lock concern.
+// b7pe: code-context and reviewer-diff tests now live canonically in
+// `djinn-slot/src/helpers/tests.rs`.  This module is retained for future
+// host-only adapter tests.
 #[cfg(test)]
-#[allow(clippy::await_holding_lock)]
 mod tests;
 
+// Re-export context-free code-context helpers directly from the canonical
+// djinn-slot implementation. The graph-dependent helpers below keep the
+// agent-facing `AgentContext` signature and only adapt to `SlotContext`.
 #[allow(unused_imports)]
-pub(crate) use code_context::{
-    build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
-    is_role_auto_code_context_enabled,
+pub(crate) use djinn_slot::helpers::{
+    derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
 };
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -99,5 +58,43 @@ pub(crate) use provider_resolution::{
     build_provider_from_resolved, build_telemetry_meta, build_telemetry_meta_with_attribution,
     resolved_needs_base_url,
 };
-#[allow(unused_imports)]
-pub(crate) use reviewer_diff::build_reviewer_diff_context;
+
+/// Agent-compatible wrapper around the canonical djinn-slot code graph context helper.
+pub(crate) async fn build_role_code_graph_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    task_paths: &[String],
+) -> Option<String> {
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::helpers::build_role_code_graph_context(
+        role_name,
+        task,
+        &slot_ctx,
+        project_path,
+        task_paths,
+    )
+    .await
+}
+
+/// Agent-compatible wrapper around the canonical djinn-slot reviewer diff helper.
+pub(crate) async fn build_reviewer_diff_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    from_sha: Option<&str>,
+    to_sha: Option<&str>,
+) -> Option<String> {
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::helpers::build_reviewer_diff_context(
+        role_name,
+        task,
+        &slot_ctx,
+        project_path,
+        from_sha,
+        to_sha,
+    )
+    .await
+}

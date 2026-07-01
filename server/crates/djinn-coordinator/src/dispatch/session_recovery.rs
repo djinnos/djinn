@@ -111,7 +111,7 @@ impl CoordinatorActor {
             // Query the activity tracker for idle time.  If the task has no
             // activity entry (e.g. session predates this feature, or reply loop
             // never started) fall back to wall-clock elapsed from started_at.
-            let (idle, activity_tracked, token_count, turn_count) = match self
+            let (idle, activity_tracked, token_count, turn_count, no_progress_streak) = match self
                 .pool
                 .session_for_task(task_id)
                 .await
@@ -121,6 +121,7 @@ impl CoordinatorActor {
                     info.activity_tracked,
                     info.token_count,
                     info.turn_count,
+                    info.no_progress_streak,
                 ),
                 _ => {
                     // Fallback: parse ISO-8601 started_at from the DB and compute
@@ -135,7 +136,7 @@ impl CoordinatorActor {
                         continue;
                     };
                     // No host activity entry → still on the first LLM call.
-                    (elapsed, false, 0, 0)
+                    (elapsed, false, 0, 0, 0)
                 }
             };
 
@@ -237,7 +238,7 @@ impl CoordinatorActor {
                 // re-killed; the next tick will re-evaluate.
                 if preservation_result
                     .outcome
-                    .should_block_transition(PreservationFailurePolicy::default())
+                    .should_block_transition(self.worker_lifecycle_config.checkpoint.failure_policy)
                 {
                     tracing::warn!(
                         task_id = %task_id,
@@ -288,6 +289,123 @@ impl CoordinatorActor {
                     "CoordinatorActor: killed ceiling-tripped session"
                 );
                 continue;
+            }
+
+            let no_progress_command_state = if !activity_tracked {
+                NoProgressCommandState::Unknown
+            } else if idle
+                >= self
+                    .worker_lifecycle_config
+                    .no_progress_thresholds
+                    .long_command_suspension_secs
+            {
+                NoProgressCommandState::InFlight { running_secs: idle }
+            } else {
+                NoProgressCommandState::Idle
+            };
+            let no_progress_decision = evaluate_no_progress_controlled_exit(
+                &self.worker_lifecycle_config,
+                no_progress_streak,
+                no_progress_command_state,
+            );
+            let no_progress_threshold = self
+                .worker_lifecycle_config
+                .no_progress_thresholds
+                .forced_exit_turns;
+            match no_progress_decision {
+                NoProgressControlledExitDecision::Disabled
+                | NoProgressControlledExitDecision::BelowThreshold => {}
+                NoProgressControlledExitDecision::ShadowWouldExit => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        threshold = ?no_progress_threshold,
+                        streak = no_progress_streak,
+                        termination_reason = "no_progress",
+                        rollout = "shadow",
+                        "djinn.controlled_exit.requested"
+                    );
+                }
+                NoProgressControlledExitDecision::DeferredForCommand => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        threshold = ?no_progress_threshold,
+                        streak = no_progress_streak,
+                        termination_reason = "no_progress",
+                        command_state = ?no_progress_command_state,
+                        "djinn.controlled_exit.deferred"
+                    );
+                    continue;
+                }
+                NoProgressControlledExitDecision::RequestExit => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        threshold = ?no_progress_threshold,
+                        streak = no_progress_streak,
+                        termination_reason = "no_progress",
+                        "djinn.controlled_exit.requested"
+                    );
+                    let auto_submit_accepted = self
+                        .try_accept_existing_auto_submit(
+                            task_id,
+                            &session.id,
+                            session.task_run_id.as_deref(),
+                            no_progress_streak,
+                            "no_progress",
+                        )
+                        .await;
+                    let preservation_result = if auto_submit_accepted {
+                        PreservationGateResult::clean_skip(
+                            task_id,
+                            &session.id,
+                            djinn_telemetry::preservation::TRIGGER_STALL,
+                            "auto-submit accepted before no-progress exit",
+                        )
+                    } else {
+                        self.request_session_preservation(
+                            task_id,
+                            &session.id,
+                            session.task_run_id.as_deref(),
+                            djinn_telemetry::preservation::TRIGGER_STALL,
+                        )
+                        .await
+                    };
+                    let preservation_blocks = preservation_result.outcome.should_block_transition(
+                        self.worker_lifecycle_config.checkpoint.failure_policy,
+                    );
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        threshold = ?no_progress_threshold,
+                        streak = no_progress_streak,
+                        termination_reason = "no_progress",
+                        auto_submit_result = if auto_submit_accepted { "accepted" } else { "not_accepted" },
+                        checkpoint_result = ?preservation_result.outcome,
+                        failure_policy = ?self.worker_lifecycle_config.checkpoint.failure_policy,
+                        failure_policy_outcome = if preservation_blocks { "blocked" } else { "proceeded" },
+                        "djinn.preservation.decision"
+                    );
+                    if preservation_blocks {
+                        tracing::warn!(task_id = %task_id, session_id = %session.id, "djinn.controlled_exit.deferred");
+                        continue;
+                    }
+                    if let Err(e) = self.pool.kill_session(task_id).await {
+                        tracing::warn!(task_id = %task_id, session_id = %session.id, error = %e, "CoordinatorActor: failed to kill no-progress session");
+                        continue;
+                    }
+                    self.stall_killed.insert(session.id.clone());
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        threshold = ?no_progress_threshold,
+                        streak = no_progress_streak,
+                        termination_reason = "no_progress",
+                        "djinn.controlled_exit.completed"
+                    );
+                    continue;
+                }
             }
 
             if idle <= applied_threshold {
@@ -349,7 +467,7 @@ impl CoordinatorActor {
             // not be re-killed; the next tick will re-evaluate.
             if preservation_result
                 .outcome
-                .should_block_transition(PreservationFailurePolicy::default())
+                .should_block_transition(self.worker_lifecycle_config.checkpoint.failure_policy)
             {
                 tracing::warn!(
                     task_id = %task_id,
@@ -608,7 +726,7 @@ impl CoordinatorActor {
             // this tick. The next tick will re-evaluate.
             if preservation_result
                 .outcome
-                .should_block_transition(PreservationFailurePolicy::default())
+                .should_block_transition(self.worker_lifecycle_config.checkpoint.failure_policy)
             {
                 tracing::warn!(
                     task_id = %task_id,
@@ -1028,6 +1146,80 @@ impl CoordinatorActor {
         }
     }
 
+    async fn try_accept_existing_auto_submit(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+        no_progress_streak: u32,
+        termination_reason: &'static str,
+    ) -> bool {
+        let Some(task_run_id) = task_run_id else {
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %session_id,
+                termination_reason,
+                no_progress_streak,
+                auto_submit_result = "skipped",
+                block_reason = "missing_task_run_id",
+                "djinn.auto_submit.decision"
+            );
+            return false;
+        };
+        let enabled = self.worker_lifecycle_config.rollout.auto_submit_if_green
+            && self.worker_lifecycle_config.auto_submit.enabled;
+        if !enabled {
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %session_id,
+                task_run_id = %task_run_id,
+                termination_reason,
+                no_progress_streak,
+                auto_submit_result = "skipped",
+                block_reason = "not_enabled",
+                "djinn.auto_submit.decision"
+            );
+            return false;
+        }
+        let repo =
+            djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(self.db.clone());
+        match repo.list_for_task_run(task_run_id).await {
+            Ok(reviews) => {
+                let accepted = reviews.iter().any(|review| {
+                    review.trigger_reason
+                        == djinn_core::models::AutoSubmitTriggerReason::NoProgress.as_str()
+                        && review.session_id.as_deref() == Some(session_id)
+                        && review.model_called_submit_work
+                });
+                tracing::info!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    task_run_id = %task_run_id,
+                    termination_reason,
+                    no_progress_streak,
+                    auto_submit_result = if accepted { "accepted" } else { "blocked" },
+                    block_reason = if accepted { "none" } else { "no_eligible_no_progress_review" },
+                    "djinn.auto_submit.decision"
+                );
+                accepted
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    task_run_id = %task_run_id,
+                    termination_reason,
+                    no_progress_streak,
+                    auto_submit_result = "blocked",
+                    block_reason = "repository_error",
+                    error = %e,
+                    "djinn.auto_submit.decision"
+                );
+                false
+            }
+        }
+    }
+
     /// Fail a task terminally (`ForceClose`) with an actionable reason. Used
     /// when a task is structurally undispatchable (its owner has no model with a
     /// connected provider) or has failed too many consecutive times. Looping
@@ -1089,10 +1281,9 @@ impl CoordinatorActor {
                     // Gate: inspect the preservation outcome. If the outcome
                     // would block the transition under the configured policy,
                     // flag the block and skip session interruption for this tick.
-                    if preservation_result
-                        .outcome
-                        .should_block_transition(PreservationFailurePolicy::default())
-                    {
+                    if preservation_result.outcome.should_block_transition(
+                        self.worker_lifecycle_config.checkpoint.failure_policy,
+                    ) {
                         tracing::warn!(
                             task_id = %task.short_id,
                             session_id = %session.id,
