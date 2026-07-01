@@ -1,4 +1,5 @@
 pub mod auth_context;
+pub mod canonical_verify;
 pub mod cargo_target_runs;
 pub mod clock;
 pub mod commands;
