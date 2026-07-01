@@ -123,6 +123,193 @@ fn err_demand_evidence(error: impl Into<String>) -> NeedsEvidenceDemandResponse 
     }
 }
 
+// ── Demand-evidence validation helpers ───────────────────────────────────────
+
+/// Terminal proposal statuses that cannot accept needs-evidence demands.
+const TERMINAL_PROPOSAL_STATUSES: &[&str] = &["done", "rejected", "archived", "superseded"];
+
+/// Generic, non-falsifiable question patterns that the Judge must not use.
+/// A valid question must be specific enough to be proven or disproven by
+/// concrete evidence; vague "investigate/improve" requests are rejected.
+const GENERIC_QUESTION_PATTERNS: &[&str] = &[
+    "investigate further",
+    "improve",
+    "design more",
+    "research further",
+    "look into",
+    "explore more",
+    "consider alternatives",
+    "review more",
+    "think about",
+    "study more",
+];
+
+/// Validate demand-evidence parameters and proposal/refinement state before
+/// any mutation occurs. Returns `Ok(())` when the demand is valid, or
+/// `Err(rejection_reason)` when it should be rejected without side effects.
+///
+/// Checks (in order):
+/// 1. **Proposal not terminal** — terminal proposals cannot accept demands.
+/// 2. **Refinement active** — must be in an active refinement run.
+/// 3. **Refinement not awaiting review** — the Judge must still be
+///    adjudicating (not converged/parked for human accept/reject).
+/// 4. **Round matches** — demand round must equal the current refinement
+///    round (prevents stale or ahead-of-time demands).
+/// 5. **`against_revision_seq` valid** — must be `<=` the proposal's
+///    `latest_revision_seq` (cannot target a future revision).
+/// 6. **Question specific & falsifiable** — non-empty, has a question mark,
+///    and does not match any generic pattern.
+/// 7. **`target_subsystem` non-empty** — must identify a concrete subsystem.
+/// 8. **`spec_unknown_anchor` present in reviewed body** — the anchor text
+///    must appear in the proposal revision being reviewed.
+/// 9. **`insufficient_in_session_research` non-empty** — must state what
+///    normal Judge research could not answer.
+/// 10. **Needs-evidence cap not exhausted** — uses persisted substrate
+///     helpers (no in-memory counters).
+/// 11. **No existing open linked evidence spike** — a proposal can have at
+///     most one open spike at a time.
+async fn validate_demand_evidence(
+    repo: &ProposalRepository,
+    proposal: &djinn_core::models::Proposal,
+    refinement: &ProposalRefinementStatusModel,
+    params: &ProposalRefinementDemandEvidenceParams,
+) -> Result<(), String> {
+    // 1. Terminal proposals cannot accept demands.
+    if TERMINAL_PROPOSAL_STATUSES.contains(&proposal.status.as_str()) {
+        return Err(format!(
+            "proposal status '{}' is terminal; needs-evidence demands are not accepted",
+            proposal.status
+        ));
+    }
+
+    // 2. Refinement must be active.
+    if !refinement.active {
+        return Err(
+            "refinement is not active for this proposal; start refinement before demanding evidence"
+                .to_string(),
+        );
+    }
+
+    // 3. Refinement must not have converged (awaiting human review).
+    if refinement.awaiting_review {
+        return Err(
+            "refinement has converged and is awaiting human review; demands are not accepted"
+                .to_string(),
+        );
+    }
+
+    // 4. Round must match the current refinement round.
+    let current_round = refinement.current_round.unwrap_or(1);
+    if params.round != current_round {
+        return Err(format!(
+            "demand round {} does not match the current refinement round {}",
+            params.round, current_round,
+        ));
+    }
+
+    // 5. `against_revision_seq` must be valid (not beyond latest).
+    if params.against_revision_seq > proposal.latest_revision_seq {
+        return Err(format!(
+            "against_revision_seq {} exceeds the proposal's latest revision seq {}",
+            params.against_revision_seq, proposal.latest_revision_seq,
+        ));
+    }
+
+    // 6. Question must be specific and falsifiable.
+    let question_trimmed = params.question.trim();
+    if question_trimmed.is_empty() {
+        return Err("question must not be empty".to_string());
+    }
+    if !question_trimmed.contains('?') {
+        return Err(
+            "question must be falsifiable: include a '?' to indicate a concrete question to answer"
+                .to_string(),
+        );
+    }
+    let question_lower = question_trimmed.to_lowercase();
+    for pattern in GENERIC_QUESTION_PATTERNS {
+        if question_lower.contains(pattern) {
+            return Err(format!(
+                "question is too generic ('{pattern}' detected); specify a concrete, falsifiable claim"
+            ));
+        }
+    }
+
+    // 7. `target_subsystem` must be non-empty.
+    if params.target_subsystem.trim().is_empty() {
+        return Err("target_subsystem must not be empty".to_string());
+    }
+
+    // 8. `spec_unknown_anchor` must be present in the reviewed proposal body.
+    let anchor = params.spec_unknown_anchor.trim();
+    if anchor.is_empty() {
+        return Err("spec_unknown_anchor must not be empty".to_string());
+    }
+    // Look up the body of the reviewed revision. If the against_revision_seq
+    // matches the current head, use the live proposal body; otherwise read
+    // from proposal_revisions.
+    let revision_body = if params.against_revision_seq >= proposal.latest_revision_seq {
+        proposal.body.clone()
+    } else {
+        let revisions = repo
+            .revisions(&proposal.id)
+            .await
+            .map_err(|e| format!("failed to read revisions: {e}"))?;
+        revisions
+            .iter()
+            .rev()
+            .find(|r| r.seq == params.against_revision_seq && r.event_kind == "spec_revision")
+            .map(|r| r.body.clone())
+            .unwrap_or_default()
+    };
+    if !revision_body.contains(anchor) {
+        return Err(format!(
+            "spec_unknown_anchor '{}' not found in the reviewed proposal revision (seq {})",
+            anchor, params.against_revision_seq,
+        ));
+    }
+
+    // 9. `insufficient_in_session_research` must be non-empty.
+    if params.insufficient_in_session_research.trim().is_empty() {
+        return Err(
+            "insufficient_in_session_research must state what normal Judge research could not answer"
+                .to_string(),
+        );
+    }
+
+    // 10. Cap must not be exhausted.
+    match check_needs_evidence_cap(repo, &proposal.id).await {
+        Ok(cap_status) => {
+            if cap_status.no_refinement_run {
+                return Err(
+                    "no active refinement run for this proposal; cap accounting unavailable"
+                        .to_string(),
+                );
+            }
+            if cap_status.cap_exceeded {
+                return Err(format!(
+                    "needs-evidence cap reached ({}/{}); no more demands allowed this run",
+                    cap_status.count, cap_status.cap,
+                ));
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    // 11. No existing open linked evidence spike.
+    if proposal.linked_spike_task_id.is_some() {
+        return Err(format!(
+            "proposal already has an open linked evidence spike ({}); resolve it before demanding new evidence",
+            proposal
+                .linked_spike_task_id
+                .as_deref()
+                .unwrap_or("unknown"),
+        ));
+    }
+
+    Ok(())
+}
+
 // ── Tool router ──────────────────────────────────────────────────────────────
 
 #[tool_router(router = refinement_tool_router, vis = "pub")]
@@ -601,7 +788,7 @@ impl DjinnMcpServer {
             )));
         };
 
-        // Verify refinement is active.
+        // Build refinement status for validation.
         let refinement = match build_refinement_status(&repo, &proposal.id).await {
             Ok(status) => status,
             Err(e) => {
@@ -614,52 +801,16 @@ impl DjinnMcpServer {
             }
         };
 
-        if !refinement.active {
+        // Run the full validation gate before any mutation. This ensures
+        // no-mutation-on-reject: no lifecycle events, no debate entries, no
+        // proposal fields are touched when the demand is invalid.
+        if let Err(e) = validate_demand_evidence(&repo, &proposal, &refinement, &p).await {
             return Json(NeedsEvidenceDemandResponse {
                 proposal_id: Some(proposal.id),
                 accepted: false,
                 result: None,
-                error: Some(
-                    "refinement is not active for this proposal; start refinement before demanding evidence"
-                        .to_string(),
-                ),
+                error: Some(e),
             });
-        }
-
-        // Check the per-run needs-evidence cap.
-        match check_needs_evidence_cap(&repo, &proposal.id).await {
-            Ok(cap_status) => {
-                if cap_status.cap_exceeded {
-                    return Json(NeedsEvidenceDemandResponse {
-                        proposal_id: Some(proposal.id),
-                        accepted: false,
-                        result: None,
-                        error: Some(format!(
-                            "needs-evidence cap reached ({}/{}); no more demands allowed this run",
-                            cap_status.count, cap_status.cap,
-                        )),
-                    });
-                }
-                if cap_status.no_refinement_run {
-                    return Json(NeedsEvidenceDemandResponse {
-                        proposal_id: Some(proposal.id),
-                        accepted: false,
-                        result: None,
-                        error: Some(
-                            "no active refinement run for this proposal; cap accounting unavailable"
-                                .to_string(),
-                        ),
-                    });
-                }
-            }
-            Err(e) => {
-                return Json(NeedsEvidenceDemandResponse {
-                    proposal_id: Some(proposal.id),
-                    accepted: false,
-                    result: None,
-                    error: Some(e),
-                });
-            }
         }
 
         // Build the structured claim for persistence. The claim JSON is stored
