@@ -7,6 +7,8 @@ expression: ok
     "{\"description\":\"default test criterion\",\"met\":false}"
   ],
   "active_session": null,
+  "ci_gate_state": "unknown",
+  "ci_status": "unknown",
   "close_reason": null,
   "closed_at": null,
   "continuation_count": 0,

@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use crate::server::DjinnMcpServer;
 use crate::tools::task_tools::types::{
     ActivityEntryResponse, ErrorOr, ErrorResponse, TaskResponse, task_ci_gate_snapshot,
+    task_ci_gate_state, task_ci_status,
 };
 use djinn_core::models::{ActivityEntry, Task, TaskStatus, TransitionAction};
 use djinn_db::{EpicRepository, TaskRepository};
@@ -43,6 +44,7 @@ const DESTRUCTIVE_TASK_KEYWORDS: [&str; 8] = [
 ];
 
 pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
+    let ci = task_ci_gate_snapshot(task);
     TaskResponse {
         id: task.id.clone(),
         short_id: task.short_id.clone(),
@@ -83,7 +85,12 @@ pub(crate) fn task_to_response(task: &Task) -> TaskResponse {
             .map(crate::tools::AnyJson),
         pr_url: task.pr_url.clone(),
         warning: None,
-        ci: task_ci_gate_snapshot(task),
+        ci_status: task_ci_status(task),
+        ci_gate_state: task_ci_gate_state(task),
+        ci_primary_blocking_check: ci.as_ref().and_then(|ci| ci.primary_blocking_check.clone()),
+        ci_summary_reason: ci.as_ref().map(|ci| ci.summary_reason.clone()),
+        ci_merge_blocked_reason: ci.as_ref().and_then(|ci| ci.merge_blocked_reason.clone()),
+        ci,
     }
 }
 
