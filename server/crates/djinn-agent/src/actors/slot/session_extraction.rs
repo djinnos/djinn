@@ -25,16 +25,21 @@ use crate::context::AgentContext;
 // paths resolving for agent-internal callers.
 
 #[cfg(test)]
+#[allow(unused_imports)]
+// retained for agent facade compatibility tests; canonical home is djinn-slot
 pub use djinn_slot::{ExtractionQuality, SessionTaxonomy};
 // Only needed by llm_extraction_tests; suppressed in non-test builds to avoid
 // unused-import warnings from clippy -D warnings.
 #[cfg(test)]
+#[allow(unused_imports)]
+// retained for agent facade compatibility tests; canonical home is djinn-slot
 pub use djinn_slot::extract_session_signals;
 
 // `run_structural_extraction` is re-exported from djinn-slot but takes
 // `SlotContext`.  We provide a thin adapter that accepts `AgentContext`
 // for tests that still construct the agent-side context.
 #[cfg(test)]
+#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) async fn run_structural_extraction(
     session_id: String,
     messages: Vec<djinn_core::message::Message>,

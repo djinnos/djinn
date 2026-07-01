@@ -18,6 +18,7 @@ use crate::context::AgentContext;
 /// Converts `AgentContext` → `SlotContext` and delegates to the canonical
 /// djinn-slot implementation.
 #[cfg(test)]
+#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) async fn run_llm_extraction(
     session_id: String,
     taxonomy: super::session_extraction::SessionTaxonomy,
@@ -30,6 +31,7 @@ pub(crate) async fn run_llm_extraction(
 /// Test-support adapter for injecting a fake provider while exercising the
 /// canonical djinn-slot LLM extraction implementation.
 #[cfg(test)]
+#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) async fn run_llm_extraction_with_provider(
     session_id: String,
     taxonomy: super::session_extraction::SessionTaxonomy,
@@ -46,6 +48,7 @@ pub(crate) async fn run_llm_extraction_with_provider(
 /// Test-support adapter for injecting both a fake provider and deterministic
 /// novelty candidates while exercising the canonical djinn-slot implementation.
 #[cfg(test)]
+#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) async fn run_llm_extraction_with_provider_and_candidate_lookup(
     session_id: String,
     taxonomy: super::session_extraction::SessionTaxonomy,

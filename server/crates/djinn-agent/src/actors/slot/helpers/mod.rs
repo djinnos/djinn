@@ -77,6 +77,8 @@ pub(crate) use code_context::{
     is_role_auto_code_context_enabled,
 };
 #[cfg(test)]
+#[allow(unused_imports)]
+// retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) use feedback::log_snippet;
 #[allow(unused_imports)]
 pub(crate) use feedback::{
