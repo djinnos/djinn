@@ -13,3 +13,4 @@ include!("tests_part2.inc");
 include!("tests_part3.inc");
 include!("tests_part4.inc");
 include!("tests_part5.inc");
+include!("tests_part6.inc");
