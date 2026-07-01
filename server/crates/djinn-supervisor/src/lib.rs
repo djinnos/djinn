@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger};
+use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger, TaskStatus};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
     MirrorManager,
@@ -952,8 +952,50 @@ impl TaskRunSupervisor {
                         role = %role_kind.as_str(),
                         action = %action,
                         error = %e,
-                        "supervisor: pre-stage status transition skipped (likely already in target state)"
+                        "supervisor: pre-stage status transition failed (may be idempotent, or the task became unclaimable)"
                     );
+                    // A failed `start` is normally benign — a re-dispatched run is
+                    // often already `in_progress` (idempotent second call). But if
+                    // the claim failed because a blocker landed AFTER this run was
+                    // dispatched (a remediation/hold review task now blocks the
+                    // source, so `validate_start_guard` rejects open→in_progress),
+                    // falling through to `execute_stage` would run the worker
+                    // UNCAPTURED and concurrently with the planner now remediating
+                    // the same task (observed 2026-07-01: task 55i8 ran `open`
+                    // alongside remediation `s9zp`). Positively re-assert the claim
+                    // rather than trusting the error shape: reload the task and, for
+                    // a `start` claim, require it actually reached `in_progress`. If
+                    // it did not, we never owned it — abort this run as Interrupted
+                    // (the task stays blocked and resurfaces via
+                    // `emit_unblocked_tasks` when the hold closes). On a reload error
+                    // we preserve the prior fall-through so a transient RPC blip
+                    // cannot start spuriously aborting healthy runs.
+                    if action == "start" {
+                        match self.services.load_task(spec.task_id.clone()).await {
+                            Ok(t) if t.status != TaskStatus::InProgress.as_str() => {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    role = %role_kind.as_str(),
+                                    status = %t.status,
+                                    "supervisor: aborting run — task not claimable after failed start \
+                                     (blocked or no longer open); refusing to execute stage uncaptured"
+                                );
+                                result = Some(TaskRunOutcome::Interrupted);
+                                break;
+                            }
+                            Ok(_) => {}
+                            Err(le) => {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %le,
+                                    "supervisor: could not reload task to verify claim after failed start; \
+                                     proceeding (prior behavior) to avoid regressing on a transient reload error"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 let stage_outcome = match self
@@ -2062,6 +2104,12 @@ mod tests {
         task: Task,
         outcome: StageOutcome,
         updated_statuses: std::sync::Arc<std::sync::Mutex<Vec<TaskRunStatus>>>,
+        /// When true, `transition_task` fails the `start` action to simulate a
+        /// blocker that landed after dispatch (a `validate_start_guard` rejection).
+        fail_start_transition: bool,
+        /// Counts `execute_stage` invocations so a test can assert the stage was
+        /// (or was not) run.
+        execute_stage_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait]
@@ -2083,6 +2131,8 @@ mod tests {
             _task_run_id: &str,
             _spec: &TaskRunSpec,
         ) -> Result<StageOutcome, StageError> {
+            self.execute_stage_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(role_kind, RoleKind::Worker);
             Ok(self.outcome.clone())
         }
@@ -2211,11 +2261,146 @@ mod tests {
         async fn transition_task(
             &self,
             _task_id: String,
-            _action: String,
+            action: String,
             _reason: Option<String>,
         ) -> Result<(), String> {
+            if self.fail_start_transition && action == "start" {
+                return Err("task has unresolved blockers".into());
+            }
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn worker_run_aborts_when_task_becomes_unclaimable_after_dispatch() {
+        // Regression (2026-07-01, task 55i8 / remediation s9zp): a remediation or
+        // human-review-hold blocker can land AFTER a worker run is already
+        // dispatched. The in-pod pre-stage `start` claim (open→in_progress) is then
+        // rejected by validate_start_guard ("task has unresolved blockers"). The
+        // supervisor must NOT log-and-fall-through into execute_stage — that ran the
+        // worker UNCAPTURED and concurrently with the planner remediating the same
+        // task (55i8 sat `open` with a running worker). It must abort the run as
+        // Interrupted and never execute the stage.
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-claim-guard";
+        let task_id = "task-claim-guard";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        // The failed `start` never claimed it, so a fresh reload still shows `open`.
+        let task = fixture_task(task_id, project_id);
+        assert_eq!(task.status, "open");
+        let updated_statuses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let execute_stage_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task,
+            outcome: StageOutcome::Failed {
+                reason: "must never run".into(),
+                provider_failure: None,
+            },
+            updated_statuses: updated_statuses.clone(),
+            fail_start_transition: true,
+            execute_stage_calls: execute_stage_calls.clone(),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-claim-guard".into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/claim-guard".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Interrupted),
+            "blocked-after-dispatch run must abort as Interrupted, got {:?}",
+            report.outcome
+        );
+        assert_eq!(
+            execute_stage_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "execute_stage must NOT run when the task could not be claimed (blocked)"
+        );
+        assert!(
+            report.stages_completed.is_empty(),
+            "no stage should complete when the claim failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_run_proceeds_when_start_fails_but_task_already_in_progress() {
+        // The benign idempotent case must still run: a `start` that fails only
+        // because the task is ALREADY `in_progress` (a re-dispatched run over a
+        // prior row) means we legitimately own it — the stage must proceed, not
+        // abort. This guards against the claim-assertion over-firing.
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-claim-idem";
+        let task_id = "task-claim-idem";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let mut task = fixture_task(task_id, project_id);
+        task.status = "in_progress".into(); // already claimed → benign `start` failure
+        let updated_statuses = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let execute_stage_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let services: Arc<dyn SupervisorServices> = Arc::new(ScriptedLoopGuardServices {
+            cancel: CancellationToken::new(),
+            task,
+            outcome: StageOutcome::Failed {
+                reason: "terminal so the run settles after the worker stage".into(),
+                provider_failure: None,
+            },
+            updated_statuses: updated_statuses.clone(),
+            fail_start_transition: true,
+            execute_stage_calls: execute_stage_calls.clone(),
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-claim-idem".into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: "djinn/claim-idem".into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+        };
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+        assert_eq!(
+            execute_stage_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "stage must run when `start` fails only because the task is already in_progress"
+        );
     }
 
     #[test]
@@ -2348,6 +2533,8 @@ mod tests {
             task: fixture_task(task_id, project_id),
             outcome: stage_outcome,
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -2419,6 +2606,8 @@ mod tests {
                 provider_failure: Some(djinn_runtime::ProviderFailureClass::Failure),
             },
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let provider_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), provider_services);
         let provider_spec = TaskRunSpec {
@@ -2516,6 +2705,8 @@ mod tests {
                 tokens_out: 45,
             },
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
         let spec = TaskRunSpec {
@@ -2578,6 +2769,8 @@ mod tests {
                 tokens_out: 33,
             },
             updated_statuses: std::sync::Arc::clone(&updated_statuses),
+            fail_start_transition: false,
+            execute_stage_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         let summary_supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), summary_services);
         let summary_spec = TaskRunSpec {
