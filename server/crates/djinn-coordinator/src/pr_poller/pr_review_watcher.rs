@@ -152,17 +152,9 @@ impl CoordinatorActor {
                 }
             };
 
-            // Collapse the full review history into the EFFECTIVE gating
-            // decision (latest standing review per reviewer), mirroring
-            // GitHub's own `reviewDecision`. GitHub keeps every review ever
-            // submitted in this list and never flips a `CHANGES_REQUESTED`
-            // review's `state` when later commits or approvals land — so a
-            // stale CHANGES_REQUESTED that the same reviewer subsequently
-            // dismissed or turned into APPROVED would otherwise match forever
-            // and bounce the task back to the worker every cycle (task 2sq6:
-            // PR approved + mergeable on GitHub, yet looped for hours). We
-            // compute `has_approved` here too so both signals come from the
-            // same deduped view.
+            // Effective gating decision: latest standing review per reviewer,
+            // deduping stale CHANGES_REQUESTED that a reviewer later dismissed
+            // or turned into APPROVED (task 2sq6 fix).
             let (changes_requested, has_approved) = effective_review_decision(&reviews);
 
             if changes_requested {
@@ -197,17 +189,10 @@ impl CoordinatorActor {
                 self.attach_pr_review_feedback(&task.id, &task.short_id, feedback)
                     .await;
 
-                // Evaluate CI in the SAME tick so a PR that has BOTH reviewer
-                // "changes requested" AND failing required checks surfaces both
-                // problems to the worker in one rework cycle (instead of
-                // reviewer-this-tick / CI-next-tick, which trickled the two
-                // signals across many dispatches). We log the CI-failure comment
-                // here too, but deliberately do NOT emit a second reopen — the
-                // single `PrChangesRequested` transition below carries both
-                // feedback artifacts. We use `log_ci_failure_comment` directly
-                // (not `handle_ci_failure`) to avoid double-transitioning and to
-                // skip the CI-specific cycle-cap/diff-empty escalation: the
-                // reviewer's request is the primary driver of this reopen.
+                // Evaluate CI in the same tick so changes-requested AND
+                // failing required checks surface together. Use
+                // `log_ci_failure_comment` directly (not `handle_ci_failure`)
+                // to avoid double-transitioning.
                 let blocking_failed: Vec<&CheckRun> = checks
                     .check_runs
                     .iter()
