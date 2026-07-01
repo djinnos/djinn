@@ -98,8 +98,9 @@ pub use worker_lifecycle::{
     CheckpointSafetyScanMetadata, DurableProgressDetectionMode, DurableProgressNoResetReason,
     DurableProgressResetReason, DurableProgressRolloutConfig, ModelRotationLifecycleConfig,
     ModelRotationLifecycleMetadata, ModelRotationReason, NoProgressEnforcementMode,
-    NoProgressThresholdConfig, PreservationGateResult, PreservationOutcome, ResumeLifecycleConfig,
-    ResumeLifecycleMetadata, ResumeSelectionReason, WorkerLifecycleConfig, WorkerLifecycleMetadata,
+    NoProgressThresholdConfig, PreservationFailurePolicy, PreservationGateResult,
+    PreservationOutcome, ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason,
+    WorkerLifecycleConfig, WorkerLifecycleMetadata,
 };
 
 // Re-export orchestration-types debug DTOs so djinn-agent can re-export from here.

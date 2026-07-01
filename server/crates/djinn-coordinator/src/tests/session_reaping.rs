@@ -1879,3 +1879,198 @@ fn preservation_outcome_serializes_to_stable_snake_case() {
         );
     }
 }
+
+// ── Preservation gate transition-blocking tests ────────────────────────
+
+/// `Succeeded` and `CleanSkip` never block, regardless of policy.
+#[test]
+fn succeeded_and_clean_skip_never_block_transition() {
+    for outcome in [
+        PreservationOutcome::Succeeded,
+        PreservationOutcome::CleanSkip,
+    ] {
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+            "{:?} should not block with RecordAndProceed",
+            outcome,
+        );
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::Block),
+            "{:?} should not block with Block",
+            outcome,
+        );
+    }
+}
+
+/// `Failed`, `UnavailableWorker`, and `RuntimeUnavailable` block only
+/// when the policy is `Block`.
+#[test]
+fn failure_outcomes_respect_policy() {
+    let blocking_outcomes = [
+        PreservationOutcome::Failed,
+        PreservationOutcome::UnavailableWorker,
+        PreservationOutcome::RuntimeUnavailable,
+    ];
+
+    for outcome in &blocking_outcomes {
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+            "{:?} should NOT block with RecordAndProceed",
+            outcome,
+        );
+        assert!(
+            outcome.should_block_transition(PreservationFailurePolicy::Block),
+            "{:?} SHOULD block with Block",
+            outcome,
+        );
+    }
+}
+
+/// `PreservationFailurePolicy` serializes to stable `snake_case` strings
+/// and round-trips through JSON.
+#[test]
+fn preservation_failure_policy_serializes_to_stable_snake_case() {
+    let cases = [
+        (
+            PreservationFailurePolicy::RecordAndProceed,
+            "record_and_proceed",
+        ),
+        (PreservationFailurePolicy::Block, "block"),
+    ];
+
+    for (policy, expected) in &cases {
+        let json = serde_json::to_value(policy).unwrap();
+        assert_eq!(
+            json.as_str().unwrap(),
+            *expected,
+            "PreservationFailurePolicy::{:?} should serialize to {:?}",
+            policy,
+            expected
+        );
+
+        let deserialized: PreservationFailurePolicy = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            deserialized, *policy,
+            "PreservationFailurePolicy::{:?} should round-trip through JSON",
+            policy
+        );
+    }
+}
+
+/// `PreservationFailurePolicy` defaults to `RecordAndProceed`.
+#[test]
+fn preservation_failure_policy_defaults_to_record_and_proceed() {
+    let policy = PreservationFailurePolicy::default();
+    assert_eq!(policy, PreservationFailurePolicy::RecordAndProceed);
+}
+
+/// `CheckpointLifecycleConfig` round-trips through JSON with the new
+/// `failure_policy` field, and the field defaults to `RecordAndProceed`.
+#[test]
+fn checkpoint_lifecycle_config_failure_policy_round_trips() {
+    // Default config — failure_policy should default to RecordAndProceed.
+    let config = CheckpointLifecycleConfig::default();
+    assert_eq!(
+        config.failure_policy,
+        PreservationFailurePolicy::RecordAndProceed
+    );
+
+    // Explicit Block policy.
+    let config = CheckpointLifecycleConfig {
+        failure_policy: PreservationFailurePolicy::Block,
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json["failure_policy"], "block");
+
+    let deserialized: CheckpointLifecycleConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        deserialized.failure_policy,
+        PreservationFailurePolicy::Block
+    );
+
+    // Missing field in JSON should default to RecordAndProceed.
+    let json_without_policy = serde_json::json!({
+        "enabled": true,
+        "require_before_no_progress_exit": false,
+    });
+    let deserialized: CheckpointLifecycleConfig =
+        serde_json::from_value(json_without_policy).unwrap();
+    assert_eq!(
+        deserialized.failure_policy,
+        PreservationFailurePolicy::RecordAndProceed
+    );
+}
+
+/// When the preservation gate returns `RuntimeUnavailable` (test actor has
+/// no runtime_ops), the default `RecordAndProceed` policy allows the
+/// zombie reap to proceed — the existing `preservation_gate_called_during_zombie_reap`
+/// test validates this path. This focused test verifies the outcome
+/// classification directly.
+#[test]
+fn runtime_unavailable_does_not_block_with_record_and_proceed() {
+    let result =
+        PreservationGateResult::runtime_unavailable("task-gate-1", "session-gate-1", "zombie");
+    assert_eq!(result.outcome, PreservationOutcome::RuntimeUnavailable);
+    assert!(
+        !result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+        "RuntimeUnavailable should not block with RecordAndProceed policy"
+    );
+}
+
+/// When the preservation gate returns `RuntimeUnavailable` and the policy
+/// is `Block`, the transition IS blocked.
+#[test]
+fn runtime_unavailable_blocks_with_block_policy() {
+    let result =
+        PreservationGateResult::runtime_unavailable("task-gate-2", "session-gate-2", "stall");
+    assert_eq!(result.outcome, PreservationOutcome::RuntimeUnavailable);
+    assert!(
+        result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::Block),
+        "RuntimeUnavailable should block with Block policy"
+    );
+}
+
+/// When the worker reports `Failed` and the policy is `RecordAndProceed`,
+/// the transition proceeds (the failure is recorded as a policy result).
+#[test]
+fn failed_outcome_record_and_proceed_does_not_block() {
+    let result = PreservationGateResult::failed(
+        "task-gate-3",
+        "session-gate-3",
+        Some("run-gate-3"),
+        "ceiling",
+        "worker push rejected".to_string(),
+    );
+    assert_eq!(result.outcome, PreservationOutcome::Failed);
+    assert!(
+        !result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+        "Failed should not block with RecordAndProceed policy"
+    );
+}
+
+/// When the worker reports `Failed` and the policy is `Block`,
+/// the transition is blocked.
+#[test]
+fn failed_outcome_blocks_with_block_policy() {
+    let result = PreservationGateResult::failed(
+        "task-gate-4",
+        "session-gate-4",
+        Some("run-gate-4"),
+        "stall",
+        "worker checkpoint failed".to_string(),
+    );
+    assert_eq!(result.outcome, PreservationOutcome::Failed);
+    assert!(
+        result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::Block),
+        "Failed should block with Block policy"
+    );
+}

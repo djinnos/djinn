@@ -256,6 +256,50 @@ pub enum PreservationOutcome {
     CleanSkip,
 }
 
+impl PreservationOutcome {
+    /// Returns whether this outcome should block the terminal transition
+    /// given the configured failure policy.
+    ///
+    /// - `Succeeded` and `CleanSkip` never block — preservation succeeded
+    ///   or was unnecessary.
+    /// - `Failed`, `UnavailableWorker`, and `RuntimeUnavailable` block only
+    ///   when the policy is [`PreservationFailurePolicy::Block`].
+    ///   With the default [`PreservationFailurePolicy::RecordAndProceed`]
+    ///   policy the failure is recorded as an explicit policy result and
+    ///   the transition proceeds.
+    pub fn should_block_transition(&self, policy: PreservationFailurePolicy) -> bool {
+        match self {
+            PreservationOutcome::Succeeded | PreservationOutcome::CleanSkip => false,
+            PreservationOutcome::Failed
+            | PreservationOutcome::UnavailableWorker
+            | PreservationOutcome::RuntimeUnavailable => {
+                matches!(policy, PreservationFailurePolicy::Block)
+            }
+        }
+    }
+}
+
+/// Policy for handling preservation failures before terminal transitions.
+///
+/// When a preservation attempt does not succeed (outcome is `Failed`,
+/// `UnavailableWorker`, or `RuntimeUnavailable`), this policy determines
+/// whether the terminal transition proceeds or is blocked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreservationFailurePolicy {
+    /// Record the failure as an explicit failure-policy result and proceed
+    /// with the terminal transition. This is the default — the preservation
+    /// gate recorded the outcome (for observability and future enforcement),
+    /// but does not block the transition.
+    #[default]
+    RecordAndProceed,
+    /// Block the terminal transition when preservation fails. The transition
+    /// will be retried on the next coordinator tick, giving the worker
+    /// another chance to preserve output. Used by y8pv enforcement once
+    /// the worker-side RPC is fully wired.
+    Block,
+}
+
 /// Structured result of a coordinator-side preservation gate attempt.
 ///
 /// This is the return type of the internal `request_session_preservation`
@@ -392,6 +436,13 @@ pub struct CheckpointLifecycleConfig {
     /// Optional branch/ref namespace for future checkpoint commits.
     #[serde(default)]
     pub ref_namespace: Option<String>,
+    /// Policy for handling preservation failures before terminal transitions.
+    /// Defaults to [`PreservationFailurePolicy::RecordAndProceed`] so the
+    /// gate records the outcome without blocking. Set to
+    /// [`PreservationFailurePolicy::Block`] once the worker-side RPC is
+    /// fully wired and y8pv enforcement is ready.
+    #[serde(default)]
+    pub failure_policy: PreservationFailurePolicy,
 }
 
 /// Lifecycle reason for requesting a preservation checkpoint.
