@@ -874,18 +874,12 @@ mod tests {
         // Called via process_finalize_payload_with_outcome — this is the normal
         // model-called submit_work path. The `model_called_submit_work` flag
         // should be `true` in the persisted record.
-        let ok = process_finalize_payload_with_outcome(
-            &payload,
-            "submit_work",
-            &task.id,
-            &ctx,
-        )
-        .await;
+        let ok =
+            process_finalize_payload_with_outcome(&payload, "submit_work", &task.id, &ctx).await;
         assert!(ok);
 
         // work_submitted activity should be logged.
-        let task_repo =
-            djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = task_repo.list_activity(&task.id).await.unwrap();
         assert!(entries.iter().any(|e| e.event_type == "work_submitted"));
 

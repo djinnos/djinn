@@ -35,10 +35,10 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         } = params;
 
-        if final_result_ok {
-            let model_called_submit_work =
-                final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
-            if model_called_submit_work {
+        let model_called_submit_work =
+            final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
+        if model_called_submit_work {
+            if final_result_ok {
                 let _ = process_finalize_payload_with_outcome(
                     &final_output.finalize_payload,
                     final_output.finalize_tool_name.as_deref().unwrap_or(""),
@@ -46,9 +46,9 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                     &ctx,
                 )
                 .await;
-            } else {
-                let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
             }
+        } else {
+            let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
         }
 
         apply_transition_and_dispatch(
@@ -127,6 +127,15 @@ fn emit_auto_submit_decision_events(
     settlement: &AutoSubmitSettlement,
 ) {
     ctx.event_bus.send(DjinnEventEnvelope {
+        entity_type: "verify",
+        action: "freshness_evaluated",
+        payload: serde_json::to_value(&settlement.freshness_event).unwrap_or_default(),
+        id: Some(task_id.to_string()),
+        project_id: None,
+        from_sync: false,
+    });
+
+    ctx.event_bus.send(DjinnEventEnvelope {
         entity_type: "review",
         action: "auto_submit_decision",
         payload: serde_json::to_value(&settlement.review_event).unwrap_or_default(),
@@ -168,7 +177,9 @@ pub(crate) async fn apply_transition_and_dispatch(
 mod tests {
     use super::*;
     use crate::test_helpers;
-    use djinn_core::auto_submit_decision::{AutoSubmitDecision, ReviewAutoSubmitDecisionEvent};
+    use djinn_core::auto_submit_decision::{
+        AutoSubmitDecision, ReviewAutoSubmitDecisionEvent, VerifyFreshnessEvaluatedEvent,
+    };
     use djinn_core::canonical_verify::FreshnessVerdict;
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_core::models::{AutoSubmitTriggerReason, TaskRunTrigger, VerifyRunRecord};
@@ -243,6 +254,13 @@ mod tests {
         AutoSubmitSettlement {
             task_run_id: task_run_id.to_string(),
             decision,
+            freshness_event: VerifyFreshnessEvaluatedEvent {
+                diff_fingerprint: "diff-123".to_string(),
+                has_verify_run: true,
+                freshness_verdict: FreshnessVerdict::accept(),
+                trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
+                submit_id: None,
+            },
             review_event: ReviewAutoSubmitDecisionEvent {
                 eligible,
                 trigger_reason: AutoSubmitTriggerReason::ControlledTermination,
@@ -324,6 +342,9 @@ mod tests {
                 .iter()
                 .any(|event| event.action == "auto_submit_decision")
         );
+        assert!(events.iter().any(|event| {
+            event.entity_type == "verify" && event.action == "freshness_evaluated"
+        }));
         assert!(
             events
                 .iter()
