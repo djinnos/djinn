@@ -1,4 +1,5 @@
 pub mod auth_context;
+pub mod auto_submit_decision;
 pub mod canonical_verify;
 pub mod cargo_target_runs;
 pub mod clock;
