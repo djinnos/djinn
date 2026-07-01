@@ -764,3 +764,159 @@ fn ci_blocking_directive_does_not_appear_in_activity_section() {
         "BLOCKING directive should appear exactly once, got {blocking_count}"
     );
 }
+
+// ── sa4x: Cross-role directive deduplication with concrete values ────────────
+//
+// AC3: These tests verify the promoted BLOCKING directive deduplication for
+// worker and reviewer dispatch contexts using the same concrete PR/head/check/
+// fingerprint values used across the guardrail test suite. The directive text
+// must be identical for both roles when the underlying CI gate snapshot is the
+// same.
+
+/// Concrete directive text matching the sa4x guardrail test values.
+/// Derived from: PR #42, head SHA abc123..., checks Quality Gate + Server Clippy,
+/// fingerprint fp-e2e-sa4x-regression, base SHA abc123...
+const SA4X_CONCRETE_DIRECTIVE: &str = "**PR:** #42\n\
+    **Failing head SHA:** `abc123def456789012345678901234567890abcd`\n\
+    **Blocking checks:** Quality Gate, Server Clippy\n\
+    **Failure fingerprint:** `fp-e2e-sa4x-regression`\n\
+    **Remediation baseline SHA:** `abc123def456789012345678901234567890abcd`\n\n\
+    > REQUIRED CI is failing on the current PR head. You MUST fix the \
+    failing required checks listed above before this task can proceed. \
+    The task will remain in remediation until all blocking checks pass \
+    on a new commit pushed to the PR branch.";
+
+/// AC3: Worker dispatch context renders the BLOCKING directive with all
+/// concrete values from the durable CI gate snapshot.
+#[test]
+fn sa4x_worker_prompt_renders_concrete_blocking_directive() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "worker prompt must contain the BLOCKING section heading"
+    );
+    assert!(
+        prompt.contains("**PR:** #42"),
+        "worker prompt must contain the concrete PR number"
+    );
+    assert!(
+        prompt.contains("`abc123def456789012345678901234567890abcd`"),
+        "worker prompt must contain the failing head SHA"
+    );
+    assert!(
+        prompt.contains("Quality Gate"),
+        "worker prompt must contain blocking check 'Quality Gate'"
+    );
+    assert!(
+        prompt.contains("Server Clippy"),
+        "worker prompt must contain blocking check 'Server Clippy'"
+    );
+    assert!(
+        prompt.contains("fp-e2e-sa4x-regression"),
+        "worker prompt must contain the failure fingerprint"
+    );
+    assert!(
+        prompt.contains("REQUIRED CI is failing"),
+        "worker prompt must contain the blocking instruction"
+    );
+    // Exactly one BLOCKING section — no duplication.
+    assert_eq!(
+        prompt
+            .matches("## ⛔ BLOCKING: Required CI Failing")
+            .count(),
+        1,
+        "BLOCKING directive must appear exactly once in worker prompt"
+    );
+}
+
+/// AC3: Reviewer dispatch context renders the identical BLOCKING directive
+/// with the same concrete values. The directive text is the same because
+/// it's derived from the durable snapshot, not from role-specific logic.
+#[test]
+fn sa4x_reviewer_prompt_renders_concrete_blocking_directive() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    assert!(
+        prompt.contains("## ⛔ BLOCKING: Required CI Failing"),
+        "reviewer prompt must contain the BLOCKING section heading"
+    );
+    assert!(
+        prompt.contains("**PR:** #42"),
+        "reviewer prompt must contain the concrete PR number"
+    );
+    assert!(
+        prompt.contains("`abc123def456789012345678901234567890abcd`"),
+        "reviewer prompt must contain the failing head SHA"
+    );
+    assert!(
+        prompt.contains("Quality Gate"),
+        "reviewer prompt must contain blocking check 'Quality Gate'"
+    );
+    assert!(
+        prompt.contains("Server Clippy"),
+        "reviewer prompt must contain blocking check 'Server Clippy'"
+    );
+    assert!(
+        prompt.contains("fp-e2e-sa4x-regression"),
+        "reviewer prompt must contain the failure fingerprint"
+    );
+    // Exactly one BLOCKING section — no duplication.
+    assert_eq!(
+        prompt
+            .matches("## ⛔ BLOCKING: Required CI Failing")
+            .count(),
+        1,
+        "BLOCKING directive must appear exactly once in reviewer prompt"
+    );
+}
+
+/// AC3: Deduplication verification — the same directive text rendered in
+/// both worker and reviewer prompts produces the same BLOCKING section.
+/// This is by construction (same input → same output) but we verify it
+/// explicitly to guard against role-specific injection bugs.
+#[test]
+fn sa4x_directive_text_identical_across_worker_and_reviewer() {
+    let task = make_task();
+    let ctx = TaskContext {
+        ci_blocking_directive: Some(SA4X_CONCRETE_DIRECTIVE.into()),
+        ..make_ctx()
+    };
+    let worker_prompt = render_prompt(AgentType::Worker, &task, &ctx);
+    let reviewer_prompt = render_prompt(AgentType::Reviewer, &task, &ctx);
+
+    // Both prompts must contain the directive.
+    assert!(worker_prompt.contains("## ⛔ BLOCKING: Required CI Failing"));
+    assert!(reviewer_prompt.contains("## ⛔ BLOCKING: Required CI Failing"));
+
+    // Extract the directive body (up to the next ## heading or end of prompt).
+    fn extract_blocking_body(prompt: &str) -> String {
+        let start = prompt
+            .find("## ⛔ BLOCKING: Required CI Failing")
+            .expect("must have BLOCKING section");
+        let rest = &prompt[start..];
+        // Find the next section heading after BLOCKING.
+        match rest[3..].find("\n## ") {
+            Some(end) => rest[..3 + end].to_string(),
+            None => rest.to_string(),
+        }
+    }
+
+    let worker_body = extract_blocking_body(&worker_prompt);
+    let reviewer_body = extract_blocking_body(&reviewer_prompt);
+
+    assert_eq!(
+        worker_body, reviewer_body,
+        "BLOCKING directive body must be identical for worker and reviewer"
+    );
+}
