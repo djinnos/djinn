@@ -1,4 +1,4 @@
-import type { Epic, Task } from "@/api/types";
+import type { Epic, Task, CiGateSnapshot } from "@/api/types";
 import { getAgentAvatar } from "@/lib/agentIdentity";
 
 import { TaskIdLabel } from "@/components/TaskIdLabel";
@@ -112,6 +112,49 @@ function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSess
   return (
     <span className={cn("text-[10px] font-medium", badge.className)}>
       {badge.label}
+    </span>
+  );
+}
+
+// --- CI status badge ---
+
+const CI_STATUS_CONFIG: Record<string, { label: string; className: string }> = {
+  passing: { label: "CI: passing", className: "text-emerald-400" },
+  pending: { label: "CI: pending", className: "text-blue-400 animate-pulse" },
+  failing: { label: "CI: failing", className: "text-red-400" },
+  unknown: { label: "CI: unknown", className: "text-zinc-400" },
+  awaiting_ci: { label: "CI: awaiting_ci", className: "text-blue-400 animate-pulse" },
+};
+
+function formatCiFailingTitle(ci: CiGateSnapshot): string {
+  const checks = ci.blocking_required_check_names;
+  const reason = ci.merge_blocked_reason ?? ci.summary_reason;
+  if (checks.length === 0) return reason ? `CI: failing — ${reason}` : "CI: failing";
+  const primary = ci.primary_blocking_check ?? checks[0];
+  const remaining = checks.length > 1 ? ` (+${checks.length - 1} more)` : "";
+  return `CI: failing — ${reason ?? primary}${remaining}`;
+}
+
+export function CiBadge({ ci }: { ci?: CiGateSnapshot | null }) {
+  if (!ci) return null;
+
+  const displayState = ci.gate_state ?? ci.status;
+  const config = CI_STATUS_CONFIG[displayState] ?? CI_STATUS_CONFIG.unknown;
+  const title = ci.status === "failing" ? formatCiFailingTitle(ci) : undefined;
+
+  return (
+    <span
+      className={cn("text-[10px] font-medium", config.className)}
+      title={title}
+      data-testid="taskcard-ci-badge"
+    >
+      {config.label}
+      {ci.status === "failing" && ci.blocking_required_check_names.length > 0 && (
+        <span className="ml-0.5 opacity-70">
+          ({ci.blocking_required_check_names[0]}
+          {ci.blocking_required_check_names.length > 1 ? ` +${ci.blocking_required_check_names.length - 1}` : ""})
+        </span>
+      )}
     </span>
   );
 }
@@ -263,6 +306,9 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
               {task.pr_url.match(/\/pull\/(\d+)/)?.[0]?.replace("/pull/", "PR #") ?? "PR"}
             </a>
           )}
+
+          {/* CI status badge */}
+          <CiBadge ci={task.ci} />
 
           {/* Reopen badge */}
           {task.reopen_count > 0 && (

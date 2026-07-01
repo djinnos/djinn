@@ -1,4 +1,4 @@
-import type { Epic, Task, AcceptanceCriterion } from "@/api/types";
+import type { Epic, Task, AcceptanceCriterion, CiGateSnapshot } from "@/api/types";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -134,6 +134,76 @@ function TaskActions({ task }: { task: Task }) {
   );
 }
 
+const CI_STATUS_LABELS: Record<string, { label: string; className: string }> = {
+  passing: { label: "Passing", className: "text-emerald-500" },
+  pending: { label: "Pending", className: "text-blue-500" },
+  failing: { label: "Failing", className: "text-red-500" },
+  unknown: { label: "Unknown", className: "text-zinc-400" },
+  awaiting_ci: { label: "Awaiting CI", className: "text-blue-500" },
+};
+
+function CiStatusSection({ ci }: { ci?: CiGateSnapshot | null }) {
+  if (!ci) return null;
+
+  const displayState = ci.gate_state ?? ci.status;
+  const config = CI_STATUS_LABELS[displayState] ?? CI_STATUS_LABELS.unknown;
+
+  return (
+    <SectionCard title="CI Status">
+      <div className="space-y-2 text-sm">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">Required CI:</span>
+          <span className={config.className}>{config.label}</span>
+        </div>
+        {ci.summary_reason && (
+          <div>
+            <span className="font-medium">Summary:</span> {ci.summary_reason}
+          </div>
+        )}
+        {ci.merge_blocked_reason && (
+          <div>
+            <span className="font-medium">Merge blocked reason:</span> {ci.merge_blocked_reason}
+          </div>
+        )}
+        {ci.head_sha && (
+          <div>
+            <span className="font-medium">Head SHA:</span>{" "}
+            <span className="font-mono text-xs">{ci.head_sha.slice(0, 8)}</span>
+          </div>
+        )}
+        {ci.pr_number != null && (
+          <div>
+            <span className="font-medium">PR:</span> #{ci.pr_number}
+          </div>
+        )}
+        {ci.status === "failing" && ci.blocking_required_check_names.length > 0 && (
+          <div>
+            <span className="font-medium">Blocking checks:</span>{" "}
+            <ul className="mt-1 space-y-0.5">
+              {ci.blocking_required_check_names.map((name) => (
+                <li key={name} className="font-mono text-xs text-red-400">
+                  {name}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {ci.status === "failing" && ci.failure_fingerprint && (
+          <div>
+            <span className="font-medium">Failure fingerprint:</span>{" "}
+            <span className="font-mono text-xs">{ci.failure_fingerprint}</span>
+          </div>
+        )}
+        {ci.same_signature_count > 1 && (
+          <div>
+            <span className="font-medium">Repeat count:</span> {ci.same_signature_count}
+          </div>
+        )}
+      </div>
+    </SectionCard>
+  );
+}
+
 export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelProps) {
   if (!open || !task) return null;
 
@@ -186,6 +256,8 @@ export function TaskDetailPanel({ task, epic, open, onClose }: TaskDetailPanelPr
               <div><span className="font-medium">Updated:</span> {formatRelative(task.updated_at)}</div>
             </div>
           </SectionCard>
+
+          <CiStatusSection ci={task.ci} />
 
           <SectionCard title="Description">
             <div className="prose prose-sm max-w-none dark:prose-invert">

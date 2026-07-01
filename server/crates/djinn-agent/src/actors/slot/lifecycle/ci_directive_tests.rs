@@ -314,6 +314,23 @@ fn build_ci_blocking_directive_returns_none_for_passing_ci() {
 }
 
 #[test]
+fn build_ci_blocking_directive_returns_none_for_advisory_failure_when_required_ci_passes() {
+    let task = make_task_with_ci(
+        "passing",
+        Some("advisory1234567890"),
+        Some(46),
+        "[]",
+        None,
+        Some("base-sha-from-pr"),
+    );
+
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "advisory/non-required failures must not create the promoted required-CI BLOCKING directive"
+    );
+}
+
+#[test]
 fn build_ci_blocking_directive_returns_none_for_pending_ci() {
     let task = make_task_with_ci(
         "pending",
