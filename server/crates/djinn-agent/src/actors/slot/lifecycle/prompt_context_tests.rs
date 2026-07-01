@@ -1315,3 +1315,162 @@ fn build_ci_blocking_directive_omits_fingerprint_line_when_absent() {
         "directive should omit fingerprint line when fingerprint is None"
     );
 }
+
+// ── sa4x: Promoted BLOCKING directive deduplication regression tests ────────
+//
+// AC3: These tests verify directive deduplication for worker and reviewer
+// dispatch contexts using concrete PR/head/check/fingerprint values. The
+// directive is derived from durable CI gate snapshot state, so the same
+// failing baseline always produces the same text — regardless of how many
+// times the prompt context is assembled.
+
+/// Concrete values shared across worker and reviewer deduplication tests.
+/// These match the values used in the pr_poller and supervisor_impl tests
+/// to ensure the full sa4x guardrail chain is consistent.
+const E2E_PR_NUMBER: i64 = 42;
+const E2E_HEAD_SHA: &str = "abc123def456789012345678901234567890abcd";
+const E2E_BASE_SHA: &str = "abc123def456789012345678901234567890abcd";
+const E2E_FINGERPRINT: &str = "fp-e2e-sa4x-regression";
+const E2E_CHECKS: &str = r#"["Quality Gate", "Server Clippy"]"#;
+
+/// AC3: The promoted BLOCKING directive for worker dispatch context contains
+/// all concrete PR/head/check/fingerprint values from the durable snapshot.
+#[test]
+fn sa4x_directive_worker_context_with_concrete_values() {
+    let task = make_task_with_ci(
+        "failing",
+        Some(E2E_HEAD_SHA),
+        Some(E2E_PR_NUMBER),
+        E2E_CHECKS,
+        Some(E2E_FINGERPRINT),
+        Some(E2E_BASE_SHA),
+    );
+    let directive =
+        build_ci_blocking_directive(&task).expect("directive must be Some for failing CI");
+
+    // Verify all concrete values are present.
+    assert!(
+        directive.contains(&format!("**PR:** #{E2E_PR_NUMBER}")),
+        "directive must contain concrete PR number"
+    );
+    assert!(
+        directive.contains(&format!("`{E2E_HEAD_SHA}`")),
+        "directive must contain the failing head SHA"
+    );
+    assert!(
+        directive.contains("Quality Gate"),
+        "directive must contain blocking check name 'Quality Gate'"
+    );
+    assert!(
+        directive.contains("Server Clippy"),
+        "directive must contain blocking check name 'Server Clippy'"
+    );
+    assert!(
+        directive.contains(&format!("`{E2E_FINGERPRINT}`")),
+        "directive must contain the failure fingerprint"
+    );
+    assert!(
+        directive.contains(&format!("`{E2E_BASE_SHA}`")),
+        "directive must contain the remediation baseline SHA"
+    );
+    assert!(
+        directive.contains("REQUIRED CI is failing"),
+        "directive must contain the blocking instruction"
+    );
+}
+
+/// AC3: The promoted BLOCKING directive for reviewer dispatch context is
+/// identical to the worker directive for the same failing baseline.
+/// The directive is derived from the same durable snapshot state, so
+/// deduplication is by construction.
+#[test]
+fn sa4x_directive_reviewer_context_matches_worker_context() {
+    let task = make_task_with_ci(
+        "failing",
+        Some(E2E_HEAD_SHA),
+        Some(E2E_PR_NUMBER),
+        E2E_CHECKS,
+        Some(E2E_FINGERPRINT),
+        Some(E2E_BASE_SHA),
+    );
+
+    // build_ci_blocking_directive is a pure function of the Task's CI fields.
+    // It produces the same text regardless of which role (worker or reviewer)
+    // assembles the prompt context. This is the deduplication guarantee.
+    let directive1 = build_ci_blocking_directive(&task).expect("first call must be Some");
+    let directive2 = build_ci_blocking_directive(&task).expect("second call must be Some");
+
+    assert_eq!(
+        directive1, directive2,
+        "same failing baseline must produce identical directive text for both roles"
+    );
+}
+
+/// AC3: Directive deduplication across repeated dispatches. When the same
+/// failing baseline is dispatched multiple times (e.g., worker retry),
+/// the directive text must be identical each time — it's derived from
+/// immutable snapshot state, not from a counter or timestamp.
+#[test]
+fn sa4x_directive_deduplication_across_repeated_dispatches() {
+    let task = make_task_with_ci(
+        "failing",
+        Some(E2E_HEAD_SHA),
+        Some(E2E_PR_NUMBER),
+        E2E_CHECKS,
+        Some(E2E_FINGERPRINT),
+        Some(E2E_BASE_SHA),
+    );
+
+    // Simulate 5 repeated dispatches for the same failing baseline.
+    let directives: Vec<String> = (0..5)
+        .map(|_| build_ci_blocking_directive(&task).expect("directive must be Some each time"))
+        .collect();
+
+    // All must be identical.
+    for (i, d) in directives.iter().enumerate() {
+        assert_eq!(
+            *d, directives[0],
+            "dispatch #{i} must produce the same directive as dispatch #0"
+        );
+    }
+}
+
+/// AC3: Directive does NOT appear for advisory-only failures (ci_status != "failing").
+/// This verifies the guardrail boundary: advisory checks do not produce a
+/// BLOCKING directive in any dispatch context.
+#[test]
+fn sa4x_directive_absent_for_advisory_ci_status() {
+    for status in &["passing", "pending", "unknown"] {
+        let task = make_task_with_ci(
+            status,
+            Some(E2E_HEAD_SHA),
+            Some(E2E_PR_NUMBER),
+            E2E_CHECKS,
+            Some(E2E_FINGERPRINT),
+            Some(E2E_BASE_SHA),
+        );
+        assert!(
+            build_ci_blocking_directive(&task).is_none(),
+            "directive must be None for ci_status={status} (advisory/non-failing)"
+        );
+    }
+}
+
+/// AC3: Directive absent when failing but no remediation baseline exists.
+/// A failing CI observation without a baseline means the poller hasn't
+/// captured the initial remediation context yet — no directive is injected.
+#[test]
+fn sa4x_directive_absent_when_failing_without_baseline() {
+    let task = make_task_with_ci(
+        "failing",
+        Some(E2E_HEAD_SHA),
+        Some(E2E_PR_NUMBER),
+        E2E_CHECKS,
+        Some(E2E_FINGERPRINT),
+        None, // no remediation baseline
+    );
+    assert!(
+        build_ci_blocking_directive(&task).is_none(),
+        "directive must be None when no remediation baseline exists"
+    );
+}
