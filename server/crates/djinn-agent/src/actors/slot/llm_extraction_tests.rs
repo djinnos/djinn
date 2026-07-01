@@ -42,7 +42,10 @@ fn make_tmpdir() -> TempDir {
 // per-task worktree directory is no longer created.  Task #13 will drop the
 // column outright.
 
-static SEMANTIC_DUPLICATE_CANDIDATE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+thread_local! {
+    static SEMANTIC_DUPLICATE_CANDIDATE_ID: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 fn semantic_duplicate_candidate_lookup(
     _project_id: &str,
@@ -50,10 +53,12 @@ fn semantic_duplicate_candidate_lookup(
     _note_type: &str,
     _candidate_abstract: &str,
 ) -> Vec<NoteDedupCandidate> {
-    let existing_id = SEMANTIC_DUPLICATE_CANDIDATE_ID
-        .get()
-        .expect("semantic duplicate candidate id configured");
-    vec![novelty_candidate(existing_id)]
+    let existing_id = SEMANTIC_DUPLICATE_CANDIDATE_ID.with(|cell| {
+        cell.borrow()
+            .clone()
+            .expect("semantic duplicate candidate id configured")
+    });
+    vec![novelty_candidate(&existing_id)]
 }
 
 struct TestFixture {
@@ -765,7 +770,9 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         ],
     ]));
 
-    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+    SEMANTIC_DUPLICATE_CANDIDATE_ID.with(|cell| {
+        *cell.borrow_mut() = Some(existing.id.clone());
+    });
 
     run_llm_extraction_with_provider_and_candidate_lookup(
         fixture.session_id.clone(),
@@ -1705,13 +1712,16 @@ async fn admission_gate_preserves_novelty_dedup() {
 
     // Override the candidate lookup to surface the existing note as the only
     // semantic-duplicate candidate, so the novelty judge picks it.
-    let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
+    SEMANTIC_DUPLICATE_CANDIDATE_ID.with(|cell| {
+        *cell.borrow_mut() = Some(existing.id.clone());
+    });
     let lookup: fn(&str, &str, &str, &str) -> Vec<djinn_db::NoteDedupCandidate> =
         |_project_id, _folder, _note_type, _candidate_abstract| {
-            let id = SEMANTIC_DUPLICATE_CANDIDATE_ID
-                .get()
-                .expect("semantic duplicate candidate id configured")
-                .clone();
+            let id = SEMANTIC_DUPLICATE_CANDIDATE_ID.with(|cell| {
+                cell.borrow()
+                    .clone()
+                    .expect("semantic duplicate candidate id configured")
+            });
             vec![NoteDedupCandidate {
                 id,
                 permalink: "cases/existing-anchor-target".to_string(),
