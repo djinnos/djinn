@@ -5,6 +5,20 @@
 
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoSubmitReviewMetadataPayload {
+    pub task_run_id: String,
+    pub trigger_reason: String,
+    pub diff_fingerprint: String,
+    pub verify_source: Option<String>,
+    pub verify_run_id: Option<String>,
+    pub verify_timestamp: Option<String>,
+    pub session_id: Option<String>,
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub no_progress_streak: i32,
+}
+
 /// Per-criterion verdict from a reviewer's `submit_review` call.
 #[derive(Debug, Deserialize)]
 pub struct AcVerdict {
@@ -31,6 +45,8 @@ pub struct SubmitWork {
     pub files_changed: Vec<String>,
     #[serde(default)]
     pub remaining_concerns: Vec<String>,
+    #[serde(default)]
+    pub auto_submit_review_metadata: Option<AutoSubmitReviewMetadataPayload>,
 }
 
 /// Payload for a reviewer submitting their review outcome.

@@ -1,6 +1,12 @@
-use crate::finalize_types::{AcVerdict, SubmitDecision, SubmitGrooming, SubmitReview, SubmitWork};
+use crate::finalize_types::{
+    AcVerdict, AutoSubmitReviewMetadataPayload, SubmitDecision, SubmitGrooming, SubmitReview,
+    SubmitWork,
+};
 use crate::host::SlotContext;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::verify_run::{
+    AutoSubmitReviewRepository, CreateAutoSubmitReviewParams,
+};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -19,20 +25,48 @@ pub async fn process_finalize_payload(
     task_id: &str,
     app_state: &SlotContext,
 ) {
-    let Some(payload) = payload else { return };
+    let _ = process_finalize_payload_with_outcome(payload, finalize_tool_name, task_id, app_state)
+        .await;
+}
+
+pub async fn process_finalize_payload_with_outcome(
+    payload: &Option<serde_json::Value>,
+    finalize_tool_name: &str,
+    task_id: &str,
+    app_state: &SlotContext,
+) -> bool {
+    let Some(payload) = payload else { return true };
 
     match finalize_tool_name {
-        "submit_work" => handle_submit_work(payload, task_id, app_state).await,
-        "submit_review" => handle_submit_review(payload, task_id, app_state).await,
-        "submit_decision" => handle_submit_decision(payload, task_id, app_state).await,
-        "submit_grooming" => handle_submit_grooming(payload, app_state).await,
+        "submit_work" => handle_submit_work(payload, task_id, app_state, true).await,
+        "submit_review" => {
+            handle_submit_review(payload, task_id, app_state).await;
+            true
+        }
+        "submit_decision" => {
+            handle_submit_decision(payload, task_id, app_state).await;
+            true
+        }
+        "submit_grooming" => {
+            handle_submit_grooming(payload, app_state).await;
+            true
+        }
         other => {
             tracing::debug!(
                 finalize_tool = %other,
                 "finalize_handlers: unrecognized finalize tool; skipping"
             );
+            true
         }
     }
+}
+
+pub async fn process_auto_submit_payload(
+    payload: &serde_json::Value,
+    task_id: &str,
+    app_state: &SlotContext,
+) -> bool {
+    handle_submit_work(payload, task_id, app_state, false).await
 }
 
 /// Persist a budget-park handoff summary using the same payload shape as
@@ -74,7 +108,12 @@ pub async fn handle_budget_park(
 }
 
 /// Log structured work-submission activity for a worker session.
-async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_state: &SlotContext) {
+async fn handle_submit_work(
+    payload: &serde_json::Value,
+    task_id: &str,
+    app_state: &SlotContext,
+    model_called_submit_work: bool,
+) -> bool {
     let work = match serde_json::from_value::<SubmitWork>(payload.clone()) {
         Ok(w) => w,
         Err(e) => {
@@ -83,9 +122,10 @@ async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_stat
                 error = %e,
                 "finalize_handlers: malformed submit_work payload"
             );
-            return;
+            return false;
         }
     };
+    let metadata = work.auto_submit_review_metadata.clone();
 
     let activity_payload = serde_json::json!({
         "commit_title": work.commit_title,
@@ -111,7 +151,57 @@ async fn handle_submit_work(payload: &serde_json::Value, task_id: &str, app_stat
             error = %e,
             "finalize_handlers: failed to log submit_work activity"
         );
+        return false;
     }
+
+    if let Some(metadata) = metadata {
+        return persist_auto_submit_review_metadata(
+            metadata,
+            app_state,
+            model_called_submit_work,
+            task_id,
+        )
+        .await;
+    }
+
+    true
+}
+
+async fn persist_auto_submit_review_metadata(
+    metadata: AutoSubmitReviewMetadataPayload,
+    app_state: &SlotContext,
+    model_called_submit_work: bool,
+    task_id: &str,
+) -> bool {
+    let repo = AutoSubmitReviewRepository::new(app_state.db.clone());
+    let id = uuid::Uuid::now_v7().to_string();
+    let result = repo
+        .create(CreateAutoSubmitReviewParams {
+            id: &id,
+            task_run_id: &metadata.task_run_id,
+            trigger_reason: &metadata.trigger_reason,
+            diff_fingerprint: &metadata.diff_fingerprint,
+            verify_source: metadata.verify_source.as_deref(),
+            verify_run_id: metadata.verify_run_id.as_deref(),
+            verify_timestamp: metadata.verify_timestamp.as_deref(),
+            session_id: metadata.session_id.as_deref(),
+            model_id: metadata.model_id.as_deref(),
+            no_progress_streak: metadata.no_progress_streak,
+            model_called_submit_work,
+        })
+        .await;
+
+    if let Err(e) = result {
+        tracing::warn!(
+            task_id = %task_id,
+            task_run_id = %metadata.task_run_id,
+            error = %e,
+            "finalize_handlers: failed to persist auto-submit review metadata"
+        );
+        return false;
+    }
+
+    true
 }
 
 /// Atomically set AC met/unmet on the task from the criteria array, then log the verdict.
