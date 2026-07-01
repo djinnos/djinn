@@ -29,6 +29,18 @@ pub struct TaskCreateParams {
     pub agent_type: Option<String>,
 }
 
+/// Parse the promoted current-head CI status from the task model, preserving
+/// the upstream `unknown` default when no snapshot has been persisted yet.
+pub fn task_ci_status(t: &Task) -> CiStatus {
+    CiStatus::parse(&t.ci_status).unwrap_or(CiStatus::Unknown)
+}
+
+/// Derive the human/agent-facing CI gate state from the task's promoted CI
+/// status and lifecycle status.
+pub fn task_ci_gate_state(t: &Task) -> CiGateState {
+    derive_gate_state(task_ci_status(t), &t.status)
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct TaskUpdateParams {
     /// Absolute project path.
@@ -285,7 +297,7 @@ pub struct TaskClaimParams {
 /// `merge_blocked_reason`) are computed from the raw CI status combined with
 /// the task's lifecycle status.  They expose human/agent-friendly gate
 /// information without requiring consumers to re-derive policy.
-#[derive(Serialize, schemars::JsonSchema)]
+#[derive(Clone, Serialize, schemars::JsonSchema)]
 pub struct CiGateSnapshot {
     /// Current required-CI status for the PR head.
     pub status: CiStatus,
@@ -404,8 +416,8 @@ fn derive_gate_state(ci_status: CiStatus, task_status: &str) -> CiGateState {
 /// PR snapshot.
 pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
     let head_sha = t.ci_head_sha.as_deref()?;
-    let status = CiStatus::parse(&t.ci_status).unwrap_or(CiStatus::Unknown);
-    let gate_state = derive_gate_state(status, &t.status);
+    let status = task_ci_status(t);
+    let gate_state = task_ci_gate_state(t);
     let blocking_checks = parse_string_array(&t.ci_blocking_required_check_names);
     let primary_blocking_check = if status == CiStatus::Failing && !blocking_checks.is_empty() {
         // blocking_required_check_names is kept sorted alphabetically by
@@ -550,6 +562,21 @@ pub struct TaskResponse {
     /// Current-head required-CI gate snapshot for this task's PR, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiGateSnapshot>,
+    /// Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or
+    /// `unknown`) sourced from the durable current-head CI snapshot.
+    pub ci_status: CiStatus,
+    /// Top-level alias for `ci.gate_state`, including `awaiting_ci` for
+    /// `pr_draft` + pending/unknown.
+    pub ci_gate_state: CiGateState,
+    /// Primary blocking required check/job when required CI is failing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_primary_blocking_check: Option<String>,
+    /// Human-readable structured CI summary reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_summary_reason: Option<String>,
+    /// Structured merge/close blocking reason when current-head CI is not passing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_merge_blocked_reason: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -855,6 +882,21 @@ pub struct TaskListItem {
     /// Current-head required-CI gate snapshot for this task's PR, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiGateSnapshot>,
+    /// Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or
+    /// `unknown`) sourced from the durable current-head CI snapshot.
+    pub ci_status: CiStatus,
+    /// Top-level alias for `ci.gate_state`, including `awaiting_ci` for
+    /// `pr_draft` + pending/unknown.
+    pub ci_gate_state: CiGateState,
+    /// Primary blocking required check/job when required CI is failing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_primary_blocking_check: Option<String>,
+    /// Human-readable structured CI summary reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_summary_reason: Option<String>,
+    /// Structured merge/close blocking reason when current-head CI is not passing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_merge_blocked_reason: Option<String>,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -882,6 +924,7 @@ pub fn parse_any_json(raw: &str) -> AnyJson {
 }
 
 pub fn task_to_response(t: &Task) -> TaskResponse {
+    let ci = task_ci_gate_snapshot(t);
     TaskResponse {
         id: t.id.clone(),
         short_id: t.short_id.clone(),
@@ -915,7 +958,12 @@ pub fn task_to_response(t: &Task) -> TaskResponse {
         agent_type: t.agent_type.clone(),
         created_by_user_id: t.created_by_user_id.clone(),
         warning: None,
-        ci: task_ci_gate_snapshot(t),
+        ci_status: task_ci_status(t),
+        ci_gate_state: task_ci_gate_state(t),
+        ci_primary_blocking_check: ci.as_ref().and_then(|ci| ci.primary_blocking_check.clone()),
+        ci_summary_reason: ci.as_ref().map(|ci| ci.summary_reason.clone()),
+        ci_merge_blocked_reason: ci.as_ref().and_then(|ci| ci.merge_blocked_reason.clone()),
+        ci,
     }
 }
 
@@ -956,6 +1004,11 @@ pub fn task_to_list_item(
         created_by_user_id: base.created_by_user_id,
         active_session,
         session_count,
+        ci_status: base.ci_status,
+        ci_gate_state: base.ci_gate_state,
+        ci_primary_blocking_check: base.ci_primary_blocking_check,
+        ci_summary_reason: base.ci_summary_reason,
+        ci_merge_blocked_reason: base.ci_merge_blocked_reason,
         ci: base.ci,
     }
 }
@@ -1080,6 +1133,16 @@ mod tests {
             ci["merge_blocked_reason"].is_string(),
             "non-passing has merge_blocked_reason"
         );
+        // Top-level aliases expose the requested human/agent field names while
+        // still sourcing values from the durable structured snapshot.
+        assert_eq!(serialized["ci_status"], "failing");
+        assert_eq!(serialized["ci_gate_state"], "failing");
+        assert_eq!(serialized["ci_primary_blocking_check"], "Server Size Guard");
+        assert_eq!(serialized["ci_summary_reason"], ci["summary_reason"]);
+        assert_eq!(
+            serialized["ci_merge_blocked_reason"],
+            ci["merge_blocked_reason"]
+        );
     }
 
     #[test]
@@ -1090,6 +1153,8 @@ mod tests {
         let serialized = serde_json::to_value(&response).unwrap();
 
         assert!(serialized.get("ci").is_none() || serialized["ci"].is_null());
+        assert_eq!(serialized["ci_status"], "unknown");
+        assert_eq!(serialized["ci_gate_state"], "unknown");
         assert!(response.ci.is_none());
     }
 
@@ -1110,6 +1175,9 @@ mod tests {
             serialized["ci"]["primary_blocking_check"],
             "Server Size Guard"
         );
+        assert_eq!(serialized["ci_status"], "failing");
+        assert_eq!(serialized["ci_gate_state"], "failing");
+        assert_eq!(serialized["ci_primary_blocking_check"], "Server Size Guard");
     }
 
     #[test]
@@ -1139,6 +1207,10 @@ mod tests {
                 serialized["ci"]["status"], expected,
                 "ci_status={ci_status_str} should serialize as {expected}"
             );
+            assert_eq!(
+                serialized["ci_status"], expected,
+                "top-level ci_status={ci_status_str} should serialize as {expected}"
+            );
         }
     }
 
@@ -1158,6 +1230,7 @@ mod tests {
         let response = task_to_response(&task);
         let serialized = serde_json::to_value(&response).unwrap();
         assert_eq!(serialized["ci"]["gate_state"], "awaiting_ci");
+        assert_eq!(serialized["ci_gate_state"], "awaiting_ci");
     }
 
     #[test]
@@ -1166,6 +1239,7 @@ mod tests {
         let response = task_to_response(&task);
         let serialized = serde_json::to_value(&response).unwrap();
         assert_eq!(serialized["ci"]["gate_state"], "awaiting_ci");
+        assert_eq!(serialized["ci_gate_state"], "awaiting_ci");
     }
 
     #[test]

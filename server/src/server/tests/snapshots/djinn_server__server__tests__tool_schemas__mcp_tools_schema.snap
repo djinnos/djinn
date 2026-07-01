@@ -19936,6 +19936,32 @@ expression: signatures
           ],
           "type": "object"
         },
+        "CiGateState": {
+          "description": "Derived CI gate state combining raw CI status with task lifecycle.\n\nFollows the upstream low-risk design: when a task is in `pr_draft` and the\nraw CI status is `pending` or `unknown`, the gate state is `awaiting_ci`.\nOtherwise it mirrors the raw CI status.",
+          "oneOf": [
+            {
+              "const": "passing",
+              "type": "string"
+            },
+            {
+              "const": "failing",
+              "type": "string"
+            },
+            {
+              "const": "pending",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "type": "string"
+            },
+            {
+              "const": "awaiting_ci",
+              "description": "Task is in `pr_draft` and CI has not completed yet (pending/unknown).",
+              "type": "string"
+            }
+          ]
+        },
         "CiStatus": {
           "description": "Required-CI status for the current PR head.\n\nSerializes/deserializes to/from the exact wire strings consumed by the\nbackend DTOs and (eventually) the frontend. These values are intentionally\nindependent of `TaskStatus`; lifecycle policy (e.g. `awaiting_ci`) is\nderived downstream, not encoded here.",
           "oneOf": [
@@ -20017,6 +20043,35 @@ expression: signatures
                 }
               ],
               "description": "Current-head required-CI gate snapshot for this task's PR, if any."
+            },
+            "ci_gate_state": {
+              "$ref": "#/$defs/CiGateState",
+              "description": "Top-level alias for `ci.gate_state`, including `awaiting_ci` for\n`pr_draft` + pending/unknown."
+            },
+            "ci_merge_blocked_reason": {
+              "description": "Structured merge/close blocking reason when current-head CI is not passing.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ci_primary_blocking_check": {
+              "description": "Primary blocking required check/job when required CI is failing.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ci_status": {
+              "$ref": "#/$defs/CiStatus",
+              "description": "Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or\n`unknown`) sourced from the durable current-head CI snapshot."
+            },
+            "ci_summary_reason": {
+              "description": "Human-readable structured CI summary reason.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "close_reason": {
               "type": [
@@ -20161,6 +20216,8 @@ expression: signatures
             "intervention_count",
             "created_at",
             "updated_at",
+            "ci_status",
+            "ci_gate_state",
             "unresolved_blocker_count",
             "session_count"
           ],
