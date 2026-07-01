@@ -58,8 +58,7 @@ mod reviewer_diff;
 #[allow(clippy::await_holding_lock)]
 mod tests;
 
-#[allow(unused_imports)]
-pub(crate) use code_context::{
+pub use code_context::{
     build_role_code_graph_context, derive_task_scope_paths, format_knowledge_notes,
     is_role_auto_code_context_enabled,
 };
@@ -82,5 +81,4 @@ pub(crate) use provider_resolution::{
     build_provider_from_resolved, build_telemetry_meta, build_telemetry_meta_with_attribution,
     resolved_needs_base_url,
 };
-#[allow(unused_imports)]
-pub(crate) use reviewer_diff::build_reviewer_diff_context;
+pub use reviewer_diff::build_reviewer_diff_context;

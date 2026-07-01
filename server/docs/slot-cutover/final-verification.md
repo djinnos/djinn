@@ -733,3 +733,108 @@ closeout:
 | Line-count reduction proof | abi6 | ✅ Present (§2–4: baseline 45,312 → current 37,246 = −8,066 lines) |
 | Duplicate-behavior sweep | abi6 | ✅ Present (§5: all remaining agent files classified as host-only/shim/test) |
 | Validation commands | rvpg | ✅ Present (this section) |
+| Code-context/reviewer-diff helper consolidation | b7pe | ✅ Present (below) |
+
+---
+
+## Task b7pe: Consolidate Slot Code-Context and Reviewer-Diff Helper Duplicates
+
+> Task: `019f1eb6-69d7-7de2-9b9c-bc3808f0f4c2` — Consolidate slot code-context and reviewer-diff helper duplicates
+> Generated: 2026-07-02
+> Blocked-by: Task abi6 (line-count and duplicate-behavior proof, above)
+
+### 1. Scope
+
+This task targets the near-identical code-context and reviewer-diff helper pairs
+in `djinn-agent` and `djinn-slot`. Per the abi6 sweep (§5.3–5.4), these files
+were behavior-equivalent copies differing only in `AgentContext` vs `SlotContext`
+parameter types:
+
+| File | Agent lines (pre-b7pe) | Slot lines (unchanged) |
+|---|---|---|
+| `helpers/code_context.rs` | 278 | 290 |
+| `helpers/reviewer_diff.rs` | 233 | 233 |
+| `helpers/tests.rs` (agent) | 903 | 908 (canonical) |
+| `helpers/mod.rs` | 103 | 84 |
+
+### 2. What was delegated
+
+**Agent-side `code_context.rs` (278 lines) → deleted.** Three context-free
+helpers (`derive_task_scope_paths`, `format_knowledge_notes`,
+`is_role_auto_code_context_enabled`) are re-exported directly from
+`djinn_slot::helpers` via `pub(crate) use`. The graph-dependent
+`build_role_code_graph_context` is wrapped in a thin `AgentContext → SlotContext`
+adapter function in `helpers/mod.rs` (12 lines).
+
+**Agent-side `reviewer_diff.rs` (233 lines) → deleted.** The graph-dependent
+`build_reviewer_diff_context` is wrapped in a thin `AgentContext → SlotContext`
+adapter function in `helpers/mod.rs` (12 lines).
+
+**Agent-side `tests.rs` (903 lines) → 19 lines.** All eight behavioral tests
+exercising `derive_task_scope_paths`, `format_knowledge_notes`,
+`is_role_auto_code_context_enabled`, `build_role_code_graph_context`, and
+`build_reviewer_diff_context` now live canonically in
+`server/crates/djinn-slot/src/helpers/tests.rs`. The agent-side `tests.rs` is
+retained as a documentation stub confirming the cutover. The agent-side shim
+delegation is compile-time verified: the `pub(crate) use` and `async fn`
+wrappers in `helpers/mod.rs` import and call the canonical functions, so any
+signature mismatch is caught by `cargo check -p djinn-agent`.
+
+**Agent-side `mod.rs` (103 lines → 100 lines).** Module declarations for
+`code_context` and `reviewer_diff` were removed. Replaced with direct
+`pub(crate) use djinn_slot::helpers::{...}` re-exports for the three
+context-free helpers and two thin `async fn` adapter wrappers for the
+graph-dependent helpers.
+
+### 3. Before/after line counts
+
+| File | Before b7pe | After b7pe | Delta |
+|---|---|---|---|
+| Agent `helpers/code_context.rs` | 278 | 0 (deleted) | **−278** |
+| Agent `helpers/reviewer_diff.rs` | 233 | 0 (deleted) | **−233** |
+| Agent `helpers/tests.rs` | 903 | 19 | **−884** |
+| Agent `helpers/mod.rs` | 103 | 100 | **−3** |
+| **Agent helpers subtotal** | **1,517** | **119** | **−1,398** |
+| Slot `helpers/code_context.rs` | 290 | 290 | 0 |
+| Slot `helpers/reviewer_diff.rs` | 233 | 233 | 0 |
+| Slot `helpers/tests.rs` | 908 | 908 | 0 |
+| Slot `helpers/mod.rs` | 84 | 84 | 0 |
+| **Slot helpers subtotal** | **1,515** | **1,515** | **0** |
+
+**Net agent-side reduction: 1,398 lines.** No slot-side changes were required —
+the canonical implementations were already in place.
+
+### 4. Remaining host-only exceptions
+
+The two thin adapter functions retained in agent `helpers/mod.rs` (24 lines
+total) are necessary host-only glue:
+
+1. `build_role_code_graph_context` — converts `&AgentContext` to `SlotContext`
+   via `agent_to_slot_context()` then delegates to
+   `djinn_slot::helpers::build_role_code_graph_context`. Called from
+   `lifecycle/prompt_context.rs:587`.
+
+2. `build_reviewer_diff_context` — same pattern. Called from
+   `lifecycle/prompt_context.rs:609`.
+
+Both callers (`lifecycle/prompt_context.rs`) are host-only files that depend on
+`AgentContext` fields. They cannot use `djinn_slot::helpers::*` directly without
+a broader lifecycle migration (out of scope per task description non-goals).
+
+The three context-free helpers (`derive_task_scope_paths`,
+`format_knowledge_notes`, `is_role_auto_code_context_enabled`) are re-exported
+with zero adapter overhead — `pub(crate) use djinn_slot::helpers::{...}`.
+
+### 5. Validation outcomes
+
+Commands run from `server/`.
+
+| Command | Outcome |
+|---|---|
+| `cargo fmt --check -p djinn-agent -p djinn-slot` | ✅ Passed; no formatter errors. |
+| `cargo test -p djinn-agent --all-features --lib helpers` | ✅ 9 passed, 0 failed. Agent helper facade compiles and provider-resolution tests pass. |
+| `cargo test -p djinn-slot --all-features --lib helpers` | 12 passed, 11 failed. All 11 failures are `Sqlx(Io(ConnectionRefused))` — environment-only (Postgres at 127.0.0.1:5432). Non-DB helper tests (code-context, reviewer-diff, knowledge-notes) pass. |
+
+**No code-context or reviewer-diff tests were deleted or weakened.** All eight
+behavioral tests live canonically in `djinn-slot/src/helpers/tests.rs` and ran
+(8 of 8 non-DB tests passed; DB-dependent tests fail on environment only).

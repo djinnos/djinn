@@ -488,6 +488,7 @@ mod tests {
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
             pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
             active_refinements: std::collections::HashMap::new(),
             refinement_sessions: std::collections::HashMap::new(),
             dispatched: 0,

@@ -3,7 +3,7 @@ use super::*;
 // ─── Knowledge context helpers ──────────────────────────────────────────────
 
 /// Extract crate/module path prefixes from a task's description, design, and epic context.
-pub(crate) fn derive_task_scope_paths(
+pub fn derive_task_scope_paths(
     task: &djinn_core::models::Task,
     epic_context: Option<&str>,
 ) -> Vec<String> {
@@ -66,7 +66,7 @@ pub(crate) fn derive_task_scope_paths(
 /// Format knowledge notes for injection into the system prompt.
 /// Uses L0 (abstract) for most notes, L1 (overview) for high-confidence ones.
 /// Budget-capped at `budget_chars`, dropping lowest-confidence notes first.
-pub(crate) fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
+pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
     let mut lines = Vec::new();
     let mut used = 0;
 
@@ -110,7 +110,7 @@ pub(crate) fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars:
 ///
 /// Empty / unset env var → false for every role (the safe default).
 /// Whitespace + case are tolerated so `Worker, REVIEWER` works as expected.
-pub(crate) fn is_role_auto_code_context_enabled(role_name: &str) -> bool {
+pub fn is_role_auto_code_context_enabled(role_name: &str) -> bool {
     let Ok(raw) = std::env::var(AUTO_CODE_CONTEXT_ROLES_ENV) else {
         return false;
     };
@@ -174,7 +174,7 @@ fn format_related_names(syms: &[djinn_control_plane::bridge::RelatedSymbol], max
 /// [`AUTO_CODE_CONTEXT_PER_FILE`] symbols, in PageRank order. The whole
 /// block is truncated via `truncate::smart_truncate` to
 /// [`AUTO_CODE_CONTEXT_BUDGET_CHARS`].
-pub(crate) async fn build_role_code_graph_context(
+pub async fn build_role_code_graph_context(
     role_name: &str,
     task: &Task,
     app_state: &SlotContext,

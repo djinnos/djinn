@@ -251,6 +251,7 @@ impl SlotPool {
             project_id,
             token_count,
             turn_count,
+            no_progress_streak: 0,
         })
     }
 
@@ -706,6 +707,7 @@ impl SlotPool {
                     project_id,
                     token_count: 0,
                     turn_count: 0,
+                    no_progress_streak: 0,
                 })
             })
             .collect();

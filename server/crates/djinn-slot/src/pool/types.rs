@@ -77,6 +77,14 @@ pub struct RunningTaskInfo {
     /// `touch_activity` RPC.  Used by the coordinator's per-session turn
     /// ceiling to detect structurally-stuck sessions.
     pub turn_count: u64,
+    /// Live no-progress streak for this session, sourced from the worker's
+    /// durable-progress detector observations (y56l/yttk).  When the worker
+    /// reports consecutive evaluated turns without durable progress, this
+    /// counter increments; it resets on a durable-progress observation.
+    /// Used by the coordinator's no-progress lifecycle enforcement (y8pv).
+    /// Defaults to 0 when the worker has not reported streak data (pre-yttk
+    /// workers or shadow-only mode).
+    pub no_progress_streak: u32,
 }
 
 #[derive(Debug, Clone)]
