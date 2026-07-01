@@ -915,6 +915,7 @@ fn failed_step(name: &str, number: u64) -> ActionsJobStep {
 fn failed_job(id: u64, name: &str, workflow: &str, steps: Vec<ActionsJobStep>) -> ActionsJob {
     ActionsJob {
         id,
+        run_id: None,
         name: name.to_string(),
         status: "completed".to_string(),
         conclusion: Some("failure".to_string()),

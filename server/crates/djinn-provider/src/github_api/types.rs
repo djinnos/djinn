@@ -39,6 +39,8 @@ pub enum PrState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckRun {
     pub id: u64,
+    #[serde(default)]
+    pub run_id: Option<u64>,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -49,6 +51,8 @@ pub struct CheckRun {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionsJob {
     pub id: u64,
+    #[serde(default)]
+    pub run_id: Option<u64>,
     pub name: String,
     pub status: String,
     pub conclusion: Option<String>,
@@ -85,7 +89,13 @@ pub(super) struct ActionsJobsResponse {
 pub struct WorkflowRun {
     pub id: u64,
     #[serde(default)]
+    pub workflow_id: Option<u64>,
+    #[serde(default)]
     pub name: Option<String>,
+    /// Path to the workflow definition in the repository, e.g.
+    /// `.github/workflows/ci.yml`.
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub head_branch: Option<String>,
     pub head_sha: String,
@@ -98,6 +108,64 @@ pub struct WorkflowRun {
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct WorkflowRunsResponse {
     pub(super) workflow_runs: Vec<WorkflowRun>,
+}
+
+/// Request used to derive a repo-agnostic failure reproduction context from a
+/// GitHub Actions run/check failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiFailureContextRequest {
+    pub owner: String,
+    pub repo: String,
+    /// PR head SHA or merge-queue/run head SHA expected by the caller. Used to
+    /// locate a run when `run_id` is not already known and returned as part of
+    /// the bundle for stale-head checks.
+    pub head_sha: String,
+    /// Required check or job name that is currently failing.
+    pub required_check_name: String,
+    #[serde(default)]
+    pub workflow_run_id: Option<u64>,
+    #[serde(default)]
+    pub workflow_id: Option<u64>,
+    #[serde(default)]
+    pub job_id: Option<u64>,
+    /// Optional workflow file path when the caller already knows it.
+    #[serde(default)]
+    pub workflow_path: Option<String>,
+}
+
+/// A setup step preceding the failed step in the same Actions job. `run:`
+/// scripts are directly locally reproducible by later coordinator logic; `uses:`
+/// actions are retained as generic setup context without inventing a command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiSetupStep {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uses: Option<String>,
+}
+
+/// Provider-facing context bundle for a failing required GitHub Actions check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CiFailureContextBundle {
+    pub owner: String,
+    pub repo: String,
+    pub required_check_name: String,
+    pub workflow_run_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_path: Option<String>,
+    pub job_id: u64,
+    pub job_name: String,
+    pub failing_step_name: String,
+    pub failing_step_number: u64,
+    pub step_script: String,
+    pub setup_steps: Vec<CiSetupStep>,
+    pub log_tail: String,
+    pub observed_head_sha: String,
 }
 
 /// A file changed in a PR (subset of GitHub's PR file response).
