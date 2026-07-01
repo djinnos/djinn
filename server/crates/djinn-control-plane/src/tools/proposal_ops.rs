@@ -561,9 +561,20 @@ pub struct ProposalRefinementStatusModel {
     /// the claim and spike task reference. `None` when not parked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_evidence: Option<NeedsEvidenceStatus>,
+    /// Top-level evidence lifecycle state derived from durable proposal
+    /// fields, lifecycle events, and linked-spike task status. Lets
+    /// downstream consumers distinguish Active, AwaitingEvidence,
+    /// EvidenceFailed, PausedOrFrozen, and Terminal without inspecting
+    /// individual sub-fields.
+    pub evidence_lifecycle_state: EvidenceLifecycleState,
 }
 
 /// Evidence lifecycle phase for a needs-evidence parking.
+///
+/// This is the inner phase within a `NeedsEvidenceStatus` and describes
+/// only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
+/// the top-level refinement status discriminator that includes Active,
+/// PausedOrFrozen, and Terminal.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceLifecyclePhase {
@@ -573,6 +584,44 @@ pub enum EvidenceLifecyclePhase {
     EvidenceReceived,
     /// Spike failed (cancelled, errored, force-closed).
     EvidenceFailed,
+}
+
+/// Top-level evidence lifecycle state for the refinement status surface.
+///
+/// Derived from durable proposal fields, debate-trail lifecycle events,
+/// linked-spike task status, and admin freeze state — **not** from
+/// in-memory coordinator state. Downstream control-plane and UI consumers
+/// use this discriminator to determine the refinement's effective state
+/// without needing to inspect individual `needs_evidence` sub-fields.
+///
+/// Precedence (highest → lowest):
+/// 1. `Terminal` — proposal status is done/rejected/archived/superseded.
+/// 2. `PausedOrFrozen` — admin freeze is active (`build_frozen = true`).
+///    This takes precedence over active resume wording.
+/// 3. `EvidenceFailed` — persisted failure lifecycle event exists.
+/// 4. `EvidenceReceived` — persisted receipt lifecycle event exists.
+/// 5. `AwaitingEvidence` — open linked evidence spike.
+/// 6. `Active` — refinement is active, no evidence parking.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceLifecycleState {
+    /// Refinement is active (advocate/adversary/judge loop running).
+    Active,
+    /// Refinement is parked: an evidence spike is in flight and findings
+    /// have not yet arrived.
+    AwaitingEvidence,
+    /// Evidence findings have been recorded; refinement may resume once
+    /// downstream processing completes.
+    EvidenceReceived,
+    /// Evidence spike failed or was force-closed; refinement is blocked
+    /// until the failure is addressed.
+    EvidenceFailed,
+    /// The proposal is administratively paused or frozen. Takes precedence
+    /// over all evidence sub-states and active resume wording.
+    PausedOrFrozen,
+    /// Refinement has reached a terminal outcome (proposal done/rejected/
+    /// archived/superseded).
+    Terminal,
 }
 
 /// Needs-evidence parking state for a proposal.

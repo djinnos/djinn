@@ -9,7 +9,8 @@
 use serde::Deserialize;
 
 use crate::tools::proposal_ops::{
-    EvidenceLifecyclePhase, NeedsEvidenceStatus, ProposalRefinementStatusModel,
+    EvidenceLifecyclePhase, EvidenceLifecycleState, NeedsEvidenceStatus,
+    ProposalRefinementStatusModel,
 };
 use djinn_core::models::NeedsEvidenceClaim;
 use djinn_db::{ProposalRepository, TaskRepository};
@@ -344,6 +345,7 @@ pub async fn build_refinement_status(
             judge_summary: None,
             snapshot_revision_seq: None,
             needs_evidence: None,
+            evidence_lifecycle_state: EvidenceLifecycleState::Active,
         });
     };
 
@@ -554,6 +556,50 @@ pub async fn build_refinement_status(
         None
     };
 
+    // ── Derive top-level evidence lifecycle state ────────────────────────
+    //
+    // Uses durable proposal fields, lifecycle events, and linked-spike
+    // task status.  Precedence (highest → lowest):
+    //
+    //   1. Terminal       — proposal status is done/rejected/archived/superseded
+    //   2. PausedOrFrozen — admin freeze is active (`build_frozen = true`)
+    //   3. EvidenceFailed — persisted failure lifecycle event
+    //   4. EvidenceReceived — persisted receipt lifecycle event
+    //   5. AwaitingEvidence — open linked evidence spike
+    //   6. Active — refinement running, no evidence parking
+    //
+    // `dispatch_paused` is coordinator-internal (in-memory) and not
+    // available to the control-plane, so PausedOrFrozen here is derived
+    // solely from `build_frozen`.
+
+    let proposal_status = proposal.as_ref().map(|p| p.status.as_str()).unwrap_or("");
+
+    let evidence_lifecycle_state = if TERMINAL_PROPOSAL_STATUSES.contains(&proposal_status) {
+        EvidenceLifecycleState::Terminal
+    } else if proposal.as_ref().is_some_and(|p| p.build_frozen) {
+        EvidenceLifecycleState::PausedOrFrozen
+    } else if let Some(ref ne) = needs_evidence {
+        match ne.evidence_phase {
+            Some(EvidenceLifecyclePhase::EvidenceFailed) => EvidenceLifecycleState::EvidenceFailed,
+            Some(EvidenceLifecyclePhase::EvidenceReceived) => {
+                EvidenceLifecycleState::EvidenceReceived
+            }
+            Some(EvidenceLifecyclePhase::AwaitingEvidence) => {
+                EvidenceLifecycleState::AwaitingEvidence
+            }
+            // Linked spike exists but no lifecycle event recorded yet:
+            // the spike was just created and the
+            // `refinement_awaiting_evidence_started` event may not
+            // have been written yet.  Still awaiting.
+            None => EvidenceLifecycleState::AwaitingEvidence,
+        }
+    } else if is_active {
+        EvidenceLifecycleState::Active
+    } else {
+        // Refinement stopped but proposal is not terminal.
+        EvidenceLifecycleState::Active
+    };
+
     Ok(ProposalRefinementStatusModel {
         active: is_active,
         current_round: Some(current_round),
@@ -564,6 +610,7 @@ pub async fn build_refinement_status(
         judge_summary,
         snapshot_revision_seq,
         needs_evidence,
+        evidence_lifecycle_state,
     })
 }
 
