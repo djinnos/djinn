@@ -124,6 +124,23 @@ Whenever `safe_independent_slice == false` or `low_confidence == true`, default 
 
 **Example (why this matters):** Slicing "remove the verification pre-PR gate" into parallel per-crate tasks all branched from main: the djinn-db deletion merged first, every consumer PR (control-plane/k8s/runtime/supervisor) then failed `cargo check --workspace`, and `blocked_by` fix tasks deadlocked behind the already-merged break. `impact_check` would have returned `safe_independent_slice=false` → `atomic_cutover`, forcing one PR (or a spike) instead.
 
+### B4b. Do NOT create verify-after-lands worker tasks (required CI is the coordinator gate)
+
+**Rule:** Once required CI is the coordinator gate, do NOT create standalone deterministic **verify-after-lands** worker tasks whose sole purpose is to wait for, observe, or re-run a post-land deterministic test suite / exit-code check that required CI already gates. The coordinator enforces required-CI pass/fail as merge/close control flow — a metered worker slice that merely confirms "CI passed on the merged head" duplicates that gate and burns execution budget without producing a code change.
+
+This prohibition covers, but is not limited to:
+- A terminal worker task whose only deliverable is "run the full suite and confirm exit code 0 after lands."
+- A worker task whose acceptance criterion is "CI is green" or "required checks pass on the merged head."
+- A verification-only slice chained at the end of a wave whose purpose is to observe or re-run deterministic post-land CI.
+
+**Distinguish implementation-local test commands from verify-only terminal slices:**
+- **Allowed:** Workers MAY run focused, scoped tests (`cargo test -p <crate> --lib <path>`, `pnpm test`, a single integration test) as part of implementing or reviewing their own code changes. Running tests for code you wrote is part of writing code, not a standalone verification slice. Workers MAY also write tests that ship as code in the PR.
+- **Prohibited:** A metered worker task created solely to wait for or re-run deterministic post-land CI that required CI now gates. That is the coordinator's job.
+
+**Do NOT put `CI must be green` in task acceptance criteria.** Required CI pass/fail is coordinator control flow, not planner-authored functional AC. Acceptance criteria must describe the code change the worker ships, not the CI outcome. Adding "CI is green" or "required checks pass" to task AC duplicates the coordinator gate and misrepresents CI enforcement as worker deliverables.
+
+The existing rule still holds and is strengthened here: **workers write code; planners manage task and epic lifecycle. Never create a worker task merely to verify or close other tasks or epics — and never create one merely to observe or re-run post-land deterministic CI that required CI already gates.**
+
 ### B5. Submit Planning
 
 **MANDATORY**: Call `submit_grooming(summary="Wave N: created X tasks — <brief titles>")`.
