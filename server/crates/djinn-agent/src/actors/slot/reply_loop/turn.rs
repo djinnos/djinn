@@ -1,6 +1,7 @@
 // djinn:allow-oversize — reply loop orchestration remains intentionally co-located
 // while rrdr budget wind-down hooks land; split-out is a separate refactor.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -11,10 +12,15 @@ use djinn_db::SessionMessageRepository;
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
+use sha2::{Digest, Sha256};
 
 use super::super::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use super::budget::{
     SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
+};
+use super::durable_progress::{
+    CommandIdentity, CommandResultClass, CommandResultTransition, DurableProgressDetector,
+    DurableProgressObservation, FileClassification, FileEntry, TurnInput, WorktreeSnapshot,
 };
 use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff,
@@ -30,6 +36,7 @@ use super::loop_guard::{
 use super::persistence::{persist_session_message, serialize_llm_input, serialize_message};
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
+use djinn_coordinator::{DurableProgressDetectionMode, WorkerLifecycleConfig};
 
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
@@ -482,6 +489,24 @@ pub(crate) async fn run_reply_loop(
 
         // Track the last assistant text for output parsing.
         let mut last_assistant_text = String::new();
+
+        // Durable-progress shadow detector.  Evaluates per-turn progress
+        // observations without enforcing any session termination.  Observations
+        // are emitted as structured tracing events for calibration.
+        let lifecycle_config = WorkerLifecycleConfig::default();
+        let detection_mode = lifecycle_config.rollout.detection_mode;
+        let mut durable_progress_detector = if matches!(
+            detection_mode,
+            DurableProgressDetectionMode::Shadow | DurableProgressDetectionMode::Enforce
+        ) {
+            Some(DurableProgressDetector::from_threshold_config(
+                &lifecycle_config.no_progress_thresholds,
+            ))
+        } else {
+            None
+        };
+        let mut durable_progress_command_results: HashMap<String, CommandResultClass> =
+            HashMap::new();
 
         let mut turns: u32 = 0;
         let session_budget = SessionBudgetPolicy::from_env()
@@ -1149,6 +1174,13 @@ pub(crate) async fn run_reply_loop(
             // Non-finalize tool calls: reset nudge counter and dispatch normally.
             consecutive_nudge_count = 0;
 
+            let durable_progress_before_snapshot = durable_progress_detector
+                .as_ref()
+                .map(|_| snapshot_worktree_for_durable_progress(worktree_path, task_id));
+            let durable_progress_started_at = durable_progress_detector
+                .as_ref()
+                .map(|_| djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new()));
+
             let tool_result_blocks = collect_tool_results(
                 &turn_tool_calls,
                 streaming_results,
@@ -1157,6 +1189,16 @@ pub(crate) async fn run_reply_loop(
                 &dispatch_ctx,
             )
             .await;
+
+            let durable_progress_command_duration_secs = durable_progress_started_at.and_then(|start| {
+                djinn_core::clock::Clock::now(&djinn_core::clock::SystemClock::new())
+                    .duration_since(start)
+                    .ok()
+                    .map(|duration| duration.as_secs())
+            });
+            let durable_progress_after_snapshot = durable_progress_detector
+                .as_ref()
+                .map(|_| snapshot_worktree_for_durable_progress(worktree_path, task_id));
 
             let signatures_corrected_before_dispatch = corrected_tool_failure_signatures.clone();
             let mut loop_guard_condition_to_inject: Option<LoopGuardCondition> = None;
@@ -1235,6 +1277,20 @@ pub(crate) async fn run_reply_loop(
                 }
             }
 
+            // Extract command result transition for durable-progress
+            // observation before tool_result_blocks are moved into the
+            // conversation message.  Captures the first command-like tool
+            // call's identity and success/failure classification.
+            let shadow_command_transition = if durable_progress_detector.is_some() {
+                durable_progress_command_transition(
+                    &turn_tool_calls,
+                    &tool_result_blocks,
+                    &mut durable_progress_command_results,
+                )
+            } else {
+                None
+            };
+
             // Touch activity after tool execution — tool calls are legitimate
             // work and can take a while (e.g. cargo build).
             {
@@ -1279,6 +1335,90 @@ pub(crate) async fn run_reply_loop(
                     &condition,
                 )
                 .await;
+            }
+
+            // ── Durable-progress shadow observation ──────────────────────────
+            // Evaluate the turn through the durable-progress detector and emit
+            // a structured observation.  In shadow mode this is purely
+            // informational — no session termination, no checkpoint, no
+            // auto-submit, no model rotation is triggered.
+            if let Some(ref mut detector) = durable_progress_detector {
+                // Determine whether all tool calls were read-only.
+                let all_read_only = turn_tool_calls.iter().all(|tc| {
+                    if let ContentBlock::ToolUse { name, .. } = tc {
+                        tool_metadata
+                            .get(name)
+                            .is_some_and(|m| m.read_only)
+                    } else {
+                        true
+                    }
+                });
+
+                let turn_input = TurnInput {
+                    before: durable_progress_before_snapshot,
+                    after: durable_progress_after_snapshot.unwrap_or_default(),
+                    command_result: shadow_command_transition,
+                    is_read_only_turn: all_read_only,
+                    command_duration_secs: durable_progress_command_duration_secs,
+                    turn_index: turns.saturating_sub(1),
+                };
+
+                let no_progress_streak_before = tool_failure_guard_state.no_progress_turn_count();
+                let observation: DurableProgressObservation = detector.evaluate(turn_input);
+
+                // Update the loop guard no-progress streak based on the
+                // detector observation.  In shadow mode this only updates
+                // the counter — no termination is triggered.
+                if observation.is_durable_progress {
+                    tool_failure_guard_state.record_durable_progress();
+                } else if observation.no_progress_streak.should_increment {
+                    tool_failure_guard_state.increment_no_progress_streak();
+                }
+                let no_progress_streak_after = tool_failure_guard_state.no_progress_turn_count();
+
+                tracing::info!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    evaluated_turn_index = observation.evaluated_turn_index,
+                    is_durable_progress = observation.is_durable_progress,
+                    no_progress_streak_before,
+                    no_progress_streak_should_increment =
+                        observation.no_progress_streak.should_increment,
+                    no_progress_streak_after,
+                    reset_reason = ?observation.reset_reason,
+                    no_reset_reason = ?observation.no_reset_reason,
+                    threshold_min_evaluated_turns = lifecycle_config.no_progress_thresholds.min_evaluated_turns,
+                    threshold_warning_turns = lifecycle_config.no_progress_thresholds.warning_turns,
+                    threshold_model_rotation_turns = lifecycle_config.no_progress_thresholds.model_rotation_turns,
+                    threshold_forced_exit_turns = lifecycle_config.no_progress_thresholds.forced_exit_turns,
+                    threshold_long_command_suspension_secs = lifecycle_config.no_progress_thresholds.long_command_suspension_secs,
+                    threshold_flaky_command_grace_turns = lifecycle_config.no_progress_thresholds.flaky_command_grace_turns,
+                    rollout_no_progress_enforcement = ?lifecycle_config.rollout.no_progress_enforcement,
+                    rollout_checkpoint_before_no_progress_exit = lifecycle_config.rollout.checkpoint_before_no_progress_exit,
+                    rollout_auto_submit_if_green = lifecycle_config.rollout.auto_submit_if_green,
+                    rollout_resume_from_checkpoint = lifecycle_config.rollout.resume_from_checkpoint,
+                    rollout_rotate_model_on_no_progress = lifecycle_config.rollout.rotate_model_on_no_progress,
+                    checkpoint_enabled = lifecycle_config.checkpoint.enabled,
+                    auto_submit_enabled = lifecycle_config.auto_submit.enabled,
+                    resume_enabled = lifecycle_config.resume.enabled,
+                    model_rotation_enabled = lifecycle_config.model_rotation.enabled,
+                    tracked_changes =
+                        observation.worktree_outcome.tracked_changes,
+                    generated_only =
+                        observation.worktree_outcome.is_generated_only,
+                    ignored_only =
+                        observation.worktree_outcome.is_ignored_only,
+                    has_command_transition =
+                        observation.command_transition.is_some(),
+                    flaky_observation = observation.flaky_observation,
+                    long_command_suspended =
+                        observation.long_command_suspended,
+                    command_flaky_streak =
+                        observation.command_flaky_streak,
+                    shadow_mode = observation.shadow_mode,
+                    detection_mode = ?detection_mode,
+                    "ReplyLoop: durable-progress shadow observation"
+                );
             }
 
             // ── Post-dispatch finalize check for alternate finalize tools ─────
@@ -1356,10 +1496,247 @@ pub(crate) async fn run_reply_loop(
     )
 }
 
+fn durable_progress_command_transition(
+    turn_tool_calls: &[ContentBlock],
+    tool_result_blocks: &[ContentBlock],
+    command_results: &mut HashMap<String, CommandResultClass>,
+) -> Option<CommandResultTransition> {
+    let (identity, after) = turn_tool_calls.iter().find_map(|tool_call| {
+        let ContentBlock::ToolUse { name, input, id } = tool_call else {
+            return None;
+        };
+        if !is_command_like_tool(name) {
+            return None;
+        }
+        let result_block = tool_result_blocks.iter().find(|result_block| {
+            matches!(result_block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id)
+        })?;
+        let after = if matches!(
+            result_block,
+            ContentBlock::ToolResult { is_error: true, .. }
+        ) {
+            CommandResultClass::Red
+        } else {
+            CommandResultClass::Green
+        };
+        let normalized_args = super::loop_guard::normalize_json(input);
+        let digest = stable_durable_progress_digest(&[name, &normalized_args]);
+        Some((
+            CommandIdentity {
+                tool_name: name.clone(),
+                normalized_args,
+                digest,
+            },
+            after,
+        ))
+    })?;
+    let before = command_results.insert(identity.digest.clone(), after);
+    Some(CommandResultTransition {
+        command: identity,
+        before,
+        after,
+    })
+}
+
+fn is_command_like_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "shell" | "execute_command" | "Bash" | "terminal" | "run_command"
+    )
+}
+
+fn snapshot_worktree_for_durable_progress(worktree_path: &Path, task_id: &str) -> WorktreeSnapshot {
+    match try_snapshot_worktree_for_durable_progress(worktree_path) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            tracing::debug!(
+                task_id = %task_id,
+                error = %err,
+                "ReplyLoop: durable-progress worktree snapshot unavailable"
+            );
+            WorktreeSnapshot::default()
+        }
+    }
+}
+
+fn try_snapshot_worktree_for_durable_progress(
+    worktree_path: &Path,
+) -> anyhow::Result<WorktreeSnapshot> {
+    let output = std::process::Command::new("git")
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("--untracked-files=all")
+        .arg("--ignored=matching")
+        .current_dir(worktree_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "git status failed with status {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let mut entries = parse_git_status_snapshot(&output.stdout, worktree_path)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(WorktreeSnapshot { entries })
+}
+
+fn parse_git_status_snapshot(
+    status: &[u8],
+    worktree_path: &Path,
+) -> anyhow::Result<Vec<FileEntry>> {
+    let mut entries = Vec::new();
+    let mut fields = status
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    while let Some(field) = fields.next() {
+        if field.len() < 4 {
+            continue;
+        }
+        let code = &field[..2];
+        let mut path = String::from_utf8_lossy(&field[3..]).into_owned();
+        if (code[0] == b'R' || code[0] == b'C')
+            && let Some(new_path) = fields.next()
+        {
+            path = String::from_utf8_lossy(new_path).into_owned();
+        }
+        let classification = classify_durable_progress_path(&path, code);
+        let content_hash = durable_progress_file_hash(worktree_path, &path)?;
+        entries.push(FileEntry {
+            path,
+            classification,
+            content_hash,
+        });
+    }
+    Ok(entries)
+}
+
+fn classify_durable_progress_path(path: &str, status_code: &[u8]) -> FileClassification {
+    if status_code == b"!!" {
+        return FileClassification::Ignored;
+    }
+    if is_generated_durable_progress_path(path) {
+        return FileClassification::Generated;
+    }
+    if status_code == b"??" {
+        return FileClassification::Untracked;
+    }
+    FileClassification::Tracked
+}
+
+fn is_generated_durable_progress_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with("target/")
+        || normalized.starts_with("node_modules/")
+        || normalized.starts_with("dist/")
+        || normalized.starts_with("build/")
+        || normalized.starts_with(".cache/")
+        || normalized.contains("/__pycache__/")
+        || normalized.ends_with(".pyc")
+        || normalized.ends_with(".o")
+        || normalized.ends_with(".rlib")
+}
+
+fn durable_progress_file_hash(worktree_path: &Path, relative_path: &str) -> anyhow::Result<String> {
+    let path = worktree_path.join(relative_path);
+    if !path.is_file() {
+        return Ok("deleted-or-non-file".to_string());
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(stable_durable_progress_digest_bytes(&bytes))
+}
+
+fn stable_durable_progress_digest(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(part.as_bytes());
+        hasher.update(b";");
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn stable_durable_progress_digest_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use djinn_provider::provider::ProviderError;
+
+    #[test]
+    fn durable_progress_command_transition_tracks_prior_result() {
+        let tool_call = ContentBlock::ToolUse {
+            id: "tool-1".to_string(),
+            name: "shell".to_string(),
+            input: serde_json::json!({ "command": "cargo test -p djinn-agent durable_progress" }),
+        };
+        let result = ContentBlock::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "ok".to_string(),
+            }],
+            is_error: false,
+        };
+        let mut command_results = HashMap::new();
+
+        let first = durable_progress_command_transition(
+            std::slice::from_ref(&tool_call),
+            std::slice::from_ref(&result),
+            &mut command_results,
+        )
+        .expect("command-like tool result should produce transition");
+        assert_eq!(first.before, None);
+        assert_eq!(first.after, CommandResultClass::Green);
+        assert!(first.command.digest.starts_with("sha256:"));
+
+        let second =
+            durable_progress_command_transition(&[tool_call], &[result], &mut command_results)
+                .expect("second command result should produce transition");
+        assert_eq!(second.before, Some(CommandResultClass::Green));
+        assert_eq!(second.after, CommandResultClass::Green);
+        assert_eq!(second.command.digest, first.command.digest);
+    }
+
+    #[test]
+    fn durable_progress_snapshot_parser_classifies_generated_untracked_and_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("target/debug")).expect("target dir");
+        std::fs::write(dir.path().join("target/debug/out.o"), b"generated").expect("generated");
+        std::fs::write(dir.path().join("new.txt"), b"new").expect("new");
+        std::fs::write(dir.path().join("ignored.log"), b"ignored").expect("ignored");
+        let status = b"?? target/debug/out.o\0?? new.txt\0!! ignored.log\0";
+
+        let entries = parse_git_status_snapshot(status, dir.path()).expect("snapshot parse");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.path == "target/debug/out.o")
+                .map(|entry| entry.classification),
+            Some(FileClassification::Generated)
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.path == "new.txt")
+                .map(|entry| entry.classification),
+            Some(FileClassification::Untracked)
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.path == "ignored.log")
+                .map(|entry| entry.classification),
+            Some(FileClassification::Ignored)
+        );
+    }
 
     #[test]
     fn empty_turn_terminal_error_is_breaker_classifiable() {
@@ -1427,5 +1804,424 @@ mod tests {
         assert!(!is_codex_openai_family("anthropic/claude-sonnet-4-5"));
         assert!(!is_codex_openai_family("synthetic/Kimi-K2.5"));
         assert!(!is_codex_openai_family(""));
+    }
+}
+
+// ─── Durable-progress shadow wiring tests ─────────────────────────────────
+//
+// These tests verify the integration pattern between the durable-progress
+// detector and the loop guard in shadow mode.  They exercise the pure
+// logic (TurnInput construction → observation → guard update) without
+// requiring a live provider, database, or filesystem.
+#[cfg(test)]
+mod durable_progress_shadow_tests {
+    use super::super::durable_progress::{
+        CommandIdentity, CommandResultClass, CommandResultTransition, DurableProgressDetector,
+        DurableProgressObservation, FileClassification, FileEntry, TurnInput, WorktreeSnapshot,
+    };
+    use super::super::loop_guard::LoopGuardState;
+    use djinn_coordinator::{DurableProgressDetectionMode, WorkerLifecycleConfig};
+
+    /// Verify default WorkerLifecycleConfig produces a shadow-mode detector.
+    #[test]
+    fn default_config_creates_shadow_detector() {
+        let config = WorkerLifecycleConfig::default();
+        assert_eq!(
+            config.rollout.detection_mode,
+            DurableProgressDetectionMode::Shadow
+        );
+        assert!(matches!(
+            config.rollout.detection_mode,
+            DurableProgressDetectionMode::Shadow | DurableProgressDetectionMode::Enforce
+        ));
+        // Detector should be constructible from default config.
+        let _detector =
+            DurableProgressDetector::from_threshold_config(&config.no_progress_thresholds);
+    }
+
+    /// Verify that an Off detection mode skips detector creation.
+    #[test]
+    fn off_detection_mode_skips_detector() {
+        let mode = DurableProgressDetectionMode::Off;
+        assert!(!matches!(
+            mode,
+            DurableProgressDetectionMode::Shadow | DurableProgressDetectionMode::Enforce
+        ));
+        // Simulating: if matches!(...) { Some(detector) } else { None }
+        let detector: Option<DurableProgressDetector> = None;
+        assert!(detector.is_none());
+    }
+
+    /// Read-only turn increments the no-progress streak in the loop guard.
+    #[test]
+    fn read_only_turn_increments_streak() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: true,
+            command_duration_secs: None,
+            turn_index: 0,
+        };
+
+        let observation = detector.evaluate(input);
+        assert!(!observation.is_durable_progress);
+        assert!(observation.no_progress_streak.should_increment);
+
+        // Apply to loop guard.
+        if observation.is_durable_progress {
+            guard.record_durable_progress();
+        } else if observation.no_progress_streak.should_increment {
+            guard.increment_no_progress_streak();
+        }
+
+        assert_eq!(guard.no_progress_turn_count(), 1);
+    }
+
+    /// Successful shell command (newly green) resets the no-progress streak.
+    #[test]
+    fn newly_green_command_resets_streak() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        // First turn: no progress.
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: true,
+            command_duration_secs: None,
+            turn_index: 0,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+        assert_eq!(guard.no_progress_turn_count(), 1);
+
+        // Second turn: newly green command (Red → Green).
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: Some(CommandResultTransition {
+                command: CommandIdentity {
+                    tool_name: "shell".to_string(),
+                    normalized_args: "cargo test".to_string(),
+                    digest: "cmd-1".to_string(),
+                },
+                before: Some(CommandResultClass::Red),
+                after: CommandResultClass::Green,
+            }),
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 1,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+
+        assert!(obs.is_durable_progress);
+        assert_eq!(guard.no_progress_turn_count(), 0);
+    }
+
+    /// Generated-only changes do not reset the streak.
+    #[test]
+    fn generated_only_changes_no_reset() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot {
+                entries: vec![FileEntry {
+                    path: "target/debug/deps/foo.d".to_string(),
+                    classification: FileClassification::Generated,
+                    content_hash: "abc".to_string(),
+                }],
+            },
+            command_result: None,
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 0,
+        };
+
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+
+        assert!(!obs.is_durable_progress);
+        assert!(obs.worktree_outcome.is_generated_only);
+        assert_eq!(guard.no_progress_turn_count(), 1);
+    }
+
+    /// Tracked worktree changes count as durable progress.
+    #[test]
+    fn tracked_changes_reset_streak() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        // Build up a streak first.
+        for i in 0..3 {
+            let input = TurnInput {
+                before: None,
+                after: WorktreeSnapshot { entries: vec![] },
+                command_result: None,
+                is_read_only_turn: true,
+                command_duration_secs: None,
+                turn_index: i,
+            };
+            let obs = detector.evaluate(input);
+            apply_observation_to_guard(&obs, &mut guard);
+        }
+        assert_eq!(guard.no_progress_turn_count(), 3);
+
+        // Now a turn with tracked file changes.
+        let input = TurnInput {
+            before: Some(WorktreeSnapshot { entries: vec![] }),
+            after: WorktreeSnapshot {
+                entries: vec![FileEntry {
+                    path: "src/main.rs".to_string(),
+                    classification: FileClassification::Tracked,
+                    content_hash: "new-hash".to_string(),
+                }],
+            },
+            command_result: None,
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 3,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+
+        assert!(obs.is_durable_progress);
+        assert_eq!(guard.no_progress_turn_count(), 0);
+    }
+
+    /// Already-green → green command rerun does not reset streak.
+    #[test]
+    fn already_green_rerun_no_reset() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        let cmd = CommandIdentity {
+            tool_name: "shell".to_string(),
+            normalized_args: "cargo test".to_string(),
+            digest: "cmd-green".to_string(),
+        };
+
+        // First turn: command goes green (newly green → durable progress).
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: Some(CommandResultTransition {
+                command: cmd.clone(),
+                before: None,
+                after: CommandResultClass::Green,
+            }),
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 0,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+        assert!(obs.is_durable_progress);
+        assert_eq!(guard.no_progress_turn_count(), 0);
+
+        // Second turn: same command, still green → already-green rerun.
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: Some(CommandResultTransition {
+                command: cmd,
+                before: Some(CommandResultClass::Green),
+                after: CommandResultClass::Green,
+            }),
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 1,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+
+        assert!(!obs.is_durable_progress);
+        // Should increment because already-green rerun is no-progress.
+        assert_eq!(guard.no_progress_turn_count(), 1);
+    }
+
+    /// Long-command suspension neither increments nor resets the streak.
+    #[test]
+    fn long_command_suspension_neither_resets_nor_increments() {
+        let mut detector = DurableProgressDetector::with_thresholds(2, 600);
+        let mut guard = LoopGuardState::default();
+
+        // Build up a streak.
+        for i in 0..2 {
+            let input = TurnInput {
+                before: None,
+                after: WorktreeSnapshot { entries: vec![] },
+                command_result: None,
+                is_read_only_turn: true,
+                command_duration_secs: None,
+                turn_index: i,
+            };
+            let obs = detector.evaluate(input);
+            apply_observation_to_guard(&obs, &mut guard);
+        }
+        assert_eq!(guard.no_progress_turn_count(), 2);
+
+        // Long-running command.
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: false,
+            command_duration_secs: Some(700),
+            turn_index: 2,
+        };
+        let obs = detector.evaluate(input);
+        // should_increment is false → streak should not change.
+        assert!(!obs.no_progress_streak.should_increment);
+        assert!(obs.long_command_suspended);
+
+        // Only apply if should_increment.
+        if obs.is_durable_progress {
+            guard.record_durable_progress();
+        } else if obs.no_progress_streak.should_increment {
+            guard.increment_no_progress_streak();
+        }
+        // Streak preserved at 2 (not incremented, not reset).
+        assert_eq!(guard.no_progress_turn_count(), 2);
+    }
+
+    /// Shadow mode flag is always true in the observation.
+    #[test]
+    fn shadow_mode_flag_always_true() {
+        let mut detector = DurableProgressDetector::new();
+
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: true,
+            command_duration_secs: None,
+            turn_index: 0,
+        };
+        let obs = detector.evaluate(input);
+        assert!(obs.shadow_mode);
+    }
+
+    /// Multiple consecutive read-only turns increment streak linearly.
+    #[test]
+    fn consecutive_read_only_turns_increment_linearly() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        for i in 0..5 {
+            let input = TurnInput {
+                before: None,
+                after: WorktreeSnapshot { entries: vec![] },
+                command_result: None,
+                is_read_only_turn: true,
+                command_duration_secs: None,
+                turn_index: i,
+            };
+            let obs = detector.evaluate(input);
+            apply_observation_to_guard(&obs, &mut guard);
+        }
+
+        assert_eq!(guard.no_progress_turn_count(), 5);
+    }
+
+    /// Durable-progress observation resets streak after multiple no-progress
+    /// turns, then new no-progress turns increment from zero.
+    #[test]
+    fn reset_then_increment_from_zero() {
+        let mut detector = DurableProgressDetector::new();
+        let mut guard = LoopGuardState::default();
+
+        // Build up streak.
+        for i in 0..4 {
+            let input = TurnInput {
+                before: None,
+                after: WorktreeSnapshot { entries: vec![] },
+                command_result: None,
+                is_read_only_turn: true,
+                command_duration_secs: None,
+                turn_index: i,
+            };
+            let obs = detector.evaluate(input);
+            apply_observation_to_guard(&obs, &mut guard);
+        }
+        assert_eq!(guard.no_progress_turn_count(), 4);
+
+        // Reset with tracked changes.
+        let input = TurnInput {
+            before: Some(WorktreeSnapshot { entries: vec![] }),
+            after: WorktreeSnapshot {
+                entries: vec![FileEntry {
+                    path: "src/lib.rs".to_string(),
+                    classification: FileClassification::Tracked,
+                    content_hash: "hash1".to_string(),
+                }],
+            },
+            command_result: None,
+            is_read_only_turn: false,
+            command_duration_secs: None,
+            turn_index: 4,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+        assert_eq!(guard.no_progress_turn_count(), 0);
+
+        // New no-progress turn starts from 1.
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: true,
+            command_duration_secs: None,
+            turn_index: 5,
+        };
+        let obs = detector.evaluate(input);
+        apply_observation_to_guard(&obs, &mut guard);
+        assert_eq!(guard.no_progress_turn_count(), 1);
+    }
+
+    /// Observation fields are populated correctly for a read-only turn.
+    #[test]
+    fn observation_fields_correct_for_read_only() {
+        let mut detector = DurableProgressDetector::new();
+
+        let input = TurnInput {
+            before: None,
+            after: WorktreeSnapshot { entries: vec![] },
+            command_result: None,
+            is_read_only_turn: true,
+            command_duration_secs: None,
+            turn_index: 7,
+        };
+        let obs = detector.evaluate(input);
+
+        assert!(!obs.is_durable_progress);
+        assert_eq!(obs.evaluated_turn_index, 7);
+        assert!(obs.shadow_mode);
+        assert!(!obs.flaky_observation);
+        assert!(!obs.long_command_suspended);
+        assert!(obs.command_transition.is_none());
+        assert!(obs.reset_reason.is_none());
+        assert!(obs.no_reset_reason.is_some());
+        assert!(obs.no_progress_streak.should_increment);
+    }
+
+    /// Helper: apply an observation to the loop guard using the same logic
+    /// as the production shadow wiring in turn.rs.
+    fn apply_observation_to_guard(
+        observation: &DurableProgressObservation,
+        guard: &mut LoopGuardState,
+    ) {
+        if observation.is_durable_progress {
+            guard.record_durable_progress();
+        } else if observation.no_progress_streak.should_increment {
+            guard.increment_no_progress_streak();
+        }
     }
 }
