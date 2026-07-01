@@ -11,7 +11,7 @@
 // Re-export canonical types from djinn-slot so `super::commands::SlotCommand`,
 // `super::commands::SlotError`, etc. continue to resolve for agent-internal
 // callers (actor.rs, pool/actor.rs, supervisor_runner.rs, etc.).
-pub use djinn_slot::commands::{SlotCommand, SlotError};
+pub use djinn_slot::{SlotCommand, SlotError};
 
 use crate::context::AgentContext;
 use djinn_core::commands::{CommandResult, CommandSpec};
