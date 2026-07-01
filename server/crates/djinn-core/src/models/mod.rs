@@ -13,6 +13,7 @@ pub mod settings;
 pub mod task;
 pub mod task_run;
 pub mod user_settings;
+pub mod verify_run;
 
 pub use agent::Agent;
 pub use credential::Credential;
@@ -36,6 +37,9 @@ pub use task::{
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use user_settings::{ModelLane, ModelLanes, UserSettings};
+pub use verify_run::{
+    AutoSubmitReviewRecord, AutoSubmitTriggerReason, VerifyResult, VerifyRunRecord, VerifySource,
+};
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.
 /// Returns an empty vec on any parse failure.
