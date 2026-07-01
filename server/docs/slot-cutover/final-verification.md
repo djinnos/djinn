@@ -572,9 +572,9 @@ are produced for `djinn-slot`, `djinn-agent`, and every other workspace crate.
 ```
   Executable unittests src/lib.rs (.../deps/djinn_supervisor-7344be4cd7fe1a37)
   Executable unittests src/lib.rs (.../deps/djinn_telemetry-90afcd61e5538ae5)
-  Executable unittests src/lib.rs (.../deps/djinn_workspace-3975be7bd173d7f)
+  Executable unittests src/lib.rs (.../deps/djinn_workspace-3975bc97bd173d7f)
   Executable tests/smoke.rs (.../deps/smoke-a34cb1bbe8f28509)
-  Executable unittests src/lib.rs (.../deps/workspace_hack-c7cea2a035fd75c7)
+  Executable unittests src/lib.rs (.../deps/workspace_hack-c7cea2a035fd75d7)
 ```
 
 </details>
@@ -584,27 +584,27 @@ are produced for `djinn-slot`, `djinn-agent`, and every other workspace crate.
 | Field | Value |
 |---|---|
 | Exit code | **100** (test failures) |
-| Total tests | 5,441 |
-| Passed | 1,142 |
-| Failed | 4,299 |
+| Total tests | 5,475 |
+| Passed | 1,248 |
+| Failed | 4,227 |
 | Skipped | 6 |
 
 #### Failure breakdown
 
 | Error class | Count | Root cause | Scope |
 |---|---|---|---|
-| `[double-spawn] failed to exec ... No such file or directory` | 4,014 | **Environmental**: Nextest cannot locate test binaries after compilation. The sandbox per-run target directory (`CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`) causes binary-path mismatches between `cargo test --no-run` (which produced the binaries) and `cargo nextest run` (which re-resolves paths). This is a sandbox toolchain issue, not a code defect. | Affects 18+ crates with 0-pass/all-fail pattern |
-| `Sqlx(Io(Os { code: 111, kind: ConnectionRefused }))` | 284 | **Environmental**: Postgres at `127.0.0.1:5432` accepts TCP connections but SQLx runtime queries fail. Database `app_test` exists but may lack required schema/migrations. | Affects DB-dependent tests across `djinn-slot`, `djinn-agent`, `djinn-db`, `djinn-control-plane`, `djinn-coordinator`, etc. |
-| `test_helpers.rs:125 panicked ("failed to create test project")` | ~91 | **Environmental**: Agent test helpers panic on DB setup failure (ConnectionRefused propagates to project creation). | `djinn-agent` finalize_handlers tests |
+| `[double-spawn] failed to exec ... No such file or directory` | ~3,900 | **Environmental**: Nextest cannot locate test binaries after compilation. The sandbox per-run target directory (`CARGO_TARGET_DIR=/cache/cargo-target-runs/<task_run_id>`) causes binary-path mismatches between `cargo test --no-run` (which produced the binaries) and `cargo nextest run` (which re-resolves paths). This is a sandbox toolchain issue, not a code defect. | Affects 18+ crates with 0-pass/all-fail pattern |
+| `Sqlx(Io(Os { code: 111, kind: ConnectionRefused }))` | ~236 | **Environmental**: Postgres at `127.0.0.1:5432` accepts TCP connections but SQLx runtime queries fail. Database `app_test` exists but may lack required schema/migrations. | Affects DB-dependent tests across `djinn-slot`, `djinn-agent`, `djinn-db`, `djinn-control-plane`, `djinn-coordinator`, etc. |
+| `test_helpers.rs panicked ("failed to create test project")` | ~91 | **Environmental**: Agent test helpers panic on DB setup failure (ConnectionRefused propagates to project creation). | `djinn-agent` finalize_handlers tests |
 
 **Crates with actual test execution (non-zero passes):**
 
 | Crate | Passed | Failed | Notes |
 |---|---|---|---|
-| `djinn-control-plane` | 360 | 870 | Non-DB tests pass; DB tests fail (ConnectionRefused) |
-| `djinn-agent` | 581 | 182 | Non-DB tests pass; DB + double-spawn mix |
-| `djinn-agent-worker` | 131 | 4 | Mostly passes |
-| `djinn-compaction` | 70 | 0 | All pass ✅ |
+| `djinn-control-plane` | ~360 | ~870 | Non-DB tests pass; DB tests fail (ConnectionRefused) |
+| `djinn-agent` | 581 | 91+ | Non-DB tests pass; DB failures only |
+| `djinn-agent-worker` | ~131 | ~4 | Mostly passes |
+| `djinn-compaction` | ~70 | 0 | All pass ✅ |
 
 **Crates with 0 passes (all double-spawn):** djinn-db, djinn-coordinator,
 djinn-graph, djinn-provider, djinn-server, djinn-slot (workspace run only),
@@ -613,7 +613,7 @@ djinn-lsp, djinn-image-controller, djinn-roles, djinn-workspace,
 djinn-runtime, djinn-image-builder, djinn-telemetry, djinn-git,
 djinn-sandbox, djinn-memory.
 
-**Verdict: ENVIRONMENTAL FAILURE.** All 4,299 failures trace to two
+**Verdict: ENVIRONMENTAL FAILURE.** All 4,227 failures trace to two
 environment issues (sandbox binary-path mismatch and DB connectivity). No
 code/test migration failures were found. The `[double-spawn]` issue means the
 workspace-wide nextest run cannot serve as a reliable validation gate in this
@@ -700,18 +700,18 @@ and passes.
 | Command | Exit code | Compilation | Tests | Failure class |
 |---|---|---|---|---|
 | `cargo build --workspace --all-features` (fallback) | 0 | ✅ All 37 crates | N/A (no-run) | None |
-| `cargo nextest run --workspace --all-features` | 100 | ✅ | 1,142 pass / 4,299 fail | Environmental (4,014 double-spawn + 284 DB) |
+| `cargo nextest run --workspace --all-features` | 100 | ✅ | 1,248 pass / 4,227 fail | Environmental (~3,900 double-spawn + ~236 DB) |
 | `cargo nextest run -p djinn-slot --all-features` | 100 | ✅ | 155 pass / 132 fail | Environmental (132 DB ConnectionRefused) |
 | `cargo nextest run -p djinn-agent --all-features` | 100 | ✅ | 581 pass / 91 fail | Environmental (91 DB ConnectionRefused) |
 
 **No code or test migration failures were found.** All failures are
 environmental:
-1. **Postgres ConnectionRefused** (284 workspace + 132 slot + 91 agent = 507
+1. **Postgres ConnectionRefused** (~236 workspace + 132 slot + 91 agent = ~459
    total): The `app_test` database exists and accepts TCP connections, but
    SQLx runtime queries fail. This indicates the database schema/migrations
    may not be applied, or the connection credentials lack the required
    permissions. This is an environment setup issue, not a code defect.
-2. **Nextest double-spawn** (4,014): A sandbox-specific issue where nextest
+2. **Nextest double-spawn** (~3,900): A sandbox-specific issue where nextest
    cannot locate compiled test binaries due to `CARGO_TARGET_DIR` path
    resolution. This does not affect the package-scoped runs.
 
