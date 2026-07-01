@@ -1,3 +1,5 @@
+#![allow(dead_code)] // compatibility DTO; canonical parsing now lives in djinn-slot
+
 /// Parsed output from an agent session.
 ///
 /// After removing markers and nudging (see ADR-022 revision), this struct only

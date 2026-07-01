@@ -132,13 +132,9 @@ mod memory_enrichment;
 // pool status types. Host-specific wiring to AgentContext.
 mod pool;
 
-// HOST-ONLY: Agent-specific reply loop wiring (uses AgentContext directly).
-// Contains turn, streaming, tool_dispatch, error_handling, loop_guard,
-// budget, and persistence submodules. Not a shim — contains real logic.
+// THIN SHIM: Agent-compatible reply-loop facade that adapts AgentContext and
+// host tool-dispatch glue into the canonical djinn-slot reply-loop API.
 pub(crate) mod reply_loop;
-
-#[cfg(test)]
-mod reply_loop_tests;
 
 // THIN SHIM: `run_extraction_backfill` adapter that converts
 // AgentContext → SlotContext and delegates to `djinn_slot::run_extraction_backfill`.
@@ -164,7 +160,7 @@ mod supervisor_runner;
 // migrate helper imports to `djinn_slot::helpers::*` when available.
 
 pub use actor::*;
-pub(crate) use commands::*;
+pub use commands::{SlotCommand, SlotError};
 pub use helpers::*;
 pub use pool::*;
 
