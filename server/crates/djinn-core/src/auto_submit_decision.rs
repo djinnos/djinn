@@ -179,7 +179,7 @@ pub struct AutoSubmitDecisionInput {
 /// reason (when ineligible), and the freshness evaluation result. Callers
 /// use this to decide whether to proceed with submission and to construct
 /// the structured event payloads.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutoSubmitDecision {
     /// `true` when the diff is eligible for auto-submit.
     pub eligible: bool,
@@ -197,7 +197,7 @@ pub struct AutoSubmitDecision {
 ///
 /// Captures the freshness evaluation inputs and result so metrics and logging
 /// can observe every freshness check without re-evaluating.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyFreshnessEvaluatedEvent {
     /// The diff fingerprint that was evaluated.
     pub diff_fingerprint: String,
@@ -215,7 +215,7 @@ pub struct VerifyFreshnessEvaluatedEvent {
 ///
 /// Captures the full decision context so metrics, logging, and audit systems
 /// can observe the decision without re-evaluation.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReviewAutoSubmitDecisionEvent {
     /// Whether the diff was eligible for auto-submit.
     pub eligible: bool,
