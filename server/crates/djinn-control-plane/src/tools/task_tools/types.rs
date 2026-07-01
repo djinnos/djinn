@@ -280,17 +280,54 @@ pub struct TaskClaimParams {
 /// `None` when no snapshot exists yet (e.g. task has no PR or has not been
 /// polled). Downstream lifecycle/API code reads these fields directly instead
 /// of scraping activity prose.
+///
+/// Derived fields (`gate_state`, `primary_blocking_check`, `summary_reason`,
+/// `merge_blocked_reason`) are computed from the raw CI status combined with
+/// the task's lifecycle status.  They expose human/agent-friendly gate
+/// information without requiring consumers to re-derive policy.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CiGateSnapshot {
     /// Current required-CI status for the PR head.
     pub status: CiStatus,
+    /// Derived CI gate state combining raw CI status with task lifecycle.
+    ///
+    /// Maps to the upstream low-risk design contract:
+    /// - `passing` / `failing` / `pending` / `unknown` mirror `CiStatus`
+    ///   when the task is not in `pr_draft`.
+    /// - `awaiting_ci` when the task is in `pr_draft` *and* the raw CI
+    ///   status is `pending` or `unknown` (CI has not completed yet).
+    ///
+    /// UI consumers render this value directly as the badge text.
+    pub gate_state: CiGateState,
     /// Git SHA of the PR head this snapshot describes.
     pub head_sha: String,
     /// Names of required checks that are currently failing and blocking merge.
     pub blocking_required_check_names: Vec<String>,
+    /// Primary blocking required check name, when CI is failing.
+    ///
+    /// `Some(_)` when `status == failing` and at least one required check
+    /// failed.  This is the first element of `blocking_required_check_names`
+    /// (sorted alphabetically) for compact display.  `None` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_blocking_check: Option<String>,
     /// Stable fingerprint of the current failure signature (e.g. sorted
     /// failing check names + head SHA). `None` when not failing.
     pub failure_fingerprint: Option<String>,
+    /// Human-readable summary of the current CI gate state.
+    ///
+    /// Derived from raw CI status and blocking check names.  Examples:
+    /// - `"All required checks passed"` (passing)
+    /// - `"Required check failing: clippy"` (failing with one check)
+    /// - `"Required checks pending"` (pending)
+    /// - `"CI state unknown"` (unknown)
+    pub summary_reason: String,
+    /// Reason merge/close is blocked by CI, if applicable.
+    ///
+    /// `Some(_)` when the raw CI status is not `passing` (i.e. failing,
+    /// pending, or unknown).  `None` when CI is passing or when no
+    /// snapshot exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_blocked_reason: Option<String>,
     /// ISO-8601 timestamp when this snapshot was first observed.
     pub first_seen_at: String,
     /// ISO-8601 timestamp when this snapshot was last observed/updated.
@@ -306,6 +343,60 @@ pub struct CiGateSnapshot {
     pub pr_number: Option<i64>,
 }
 
+/// Derived CI gate state combining raw CI status with task lifecycle.
+///
+/// Follows the upstream low-risk design: when a task is in `pr_draft` and the
+/// raw CI status is `pending` or `unknown`, the gate state is `awaiting_ci`.
+/// Otherwise it mirrors the raw CI status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CiGateState {
+    Passing,
+    Failing,
+    Pending,
+    Unknown,
+    /// Task is in `pr_draft` and CI has not completed yet (pending/unknown).
+    AwaitingCi,
+}
+
+impl CiGateState {
+    /// The wire/JSON string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Passing => "passing",
+            Self::Failing => "failing",
+            Self::Pending => "pending",
+            Self::Unknown => "unknown",
+            Self::AwaitingCi => "awaiting_ci",
+        }
+    }
+}
+
+impl std::fmt::Display for CiGateState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Derive the [`CiGateState`] from the raw CI status and the task's lifecycle
+/// status string.
+///
+/// When the task is in `pr_draft` and the raw CI status is `pending` or
+/// `unknown`, returns `AwaitingCi`.  Otherwise returns the matching gate
+/// state for the raw CI status.
+fn derive_gate_state(ci_status: CiStatus, task_status: &str) -> CiGateState {
+    if task_status == "pr_draft" && matches!(ci_status, CiStatus::Pending | CiStatus::Unknown) {
+        CiGateState::AwaitingCi
+    } else {
+        match ci_status {
+            CiStatus::Passing => CiGateState::Passing,
+            CiStatus::Failing => CiGateState::Failing,
+            CiStatus::Pending => CiGateState::Pending,
+            CiStatus::Unknown => CiGateState::Unknown,
+        }
+    }
+}
+
 /// Build a `CiGateSnapshot` DTO from a task's repository-backed CI fields.
 ///
 /// Returns `None` when no snapshot exists (signalled by an absent `head_sha`),
@@ -313,11 +404,53 @@ pub struct CiGateSnapshot {
 /// PR snapshot.
 pub fn task_ci_gate_snapshot(t: &Task) -> Option<CiGateSnapshot> {
     let head_sha = t.ci_head_sha.as_deref()?;
+    let status = CiStatus::parse(&t.ci_status).unwrap_or(CiStatus::Unknown);
+    let gate_state = derive_gate_state(status, &t.status);
+    let blocking_checks = parse_string_array(&t.ci_blocking_required_check_names);
+    let primary_blocking_check = if status == CiStatus::Failing && !blocking_checks.is_empty() {
+        // blocking_required_check_names is kept sorted alphabetically by
+        // the pr_poller; the first element is the canonical primary blocker.
+        Some(blocking_checks[0].clone())
+    } else {
+        None
+    };
+    let summary_reason = match status {
+        CiStatus::Passing => "All required checks passed".to_string(),
+        CiStatus::Failing => {
+            if let Some(ref check) = primary_blocking_check {
+                format!("Required check failing: {check}")
+            } else {
+                "Required checks failing".to_string()
+            }
+        }
+        CiStatus::Pending => "Required checks pending".to_string(),
+        CiStatus::Unknown => "CI state unknown".to_string(),
+    };
+    let merge_blocked_reason = if status != CiStatus::Passing {
+        Some(match status {
+            CiStatus::Failing => {
+                if let Some(ref check) = primary_blocking_check {
+                    format!("Blocked by failing required check: {check}")
+                } else {
+                    "Blocked by failing required checks".to_string()
+                }
+            }
+            CiStatus::Pending => "Waiting for required checks to complete".to_string(),
+            CiStatus::Unknown => "CI state unknown; cannot confirm merge safety".to_string(),
+            CiStatus::Passing => unreachable!(),
+        })
+    } else {
+        None
+    };
     Some(CiGateSnapshot {
-        status: CiStatus::parse(&t.ci_status).unwrap_or(CiStatus::Unknown),
+        status,
+        gate_state,
         head_sha: head_sha.to_string(),
-        blocking_required_check_names: parse_string_array(&t.ci_blocking_required_check_names),
+        blocking_required_check_names: blocking_checks,
+        primary_blocking_check,
         failure_fingerprint: t.ci_failure_fingerprint.clone(),
+        summary_reason,
+        merge_blocked_reason,
         first_seen_at: t.ci_first_seen_at.clone().unwrap_or_default(),
         last_seen_at: t.ci_last_seen_at.clone().unwrap_or_default(),
         same_signature_count: t.ci_same_signature_count,
@@ -932,6 +1065,21 @@ mod tests {
         assert_eq!(ci["same_signature_count"], 3);
         assert_eq!(ci["last_remediation_base_sha"], "base1234567890");
         assert_eq!(ci["pr_number"], 42);
+
+        // Derived fields from upstream CI gate model
+        assert_eq!(ci["gate_state"], "failing");
+        assert_eq!(ci["primary_blocking_check"], "Server Size Guard");
+        assert!(
+            ci["summary_reason"]
+                .as_str()
+                .unwrap()
+                .contains("Server Size Guard"),
+            "summary_reason names the primary blocking check"
+        );
+        assert!(
+            ci["merge_blocked_reason"].is_string(),
+            "non-passing has merge_blocked_reason"
+        );
     }
 
     #[test]
@@ -956,6 +1104,12 @@ mod tests {
             serialized["ci"]["head_sha"],
             "deadbeefcafebabe00000000000000000000ffff"
         );
+        // Derived fields also present in list items
+        assert_eq!(serialized["ci"]["gate_state"], "failing");
+        assert_eq!(
+            serialized["ci"]["primary_blocking_check"],
+            "Server Size Guard"
+        );
     }
 
     #[test]
@@ -964,5 +1118,228 @@ mod tests {
         assert_eq!(serde_json::to_value(CiStatus::Failing).unwrap(), "failing");
         assert_eq!(serde_json::to_value(CiStatus::Pending).unwrap(), "pending");
         assert_eq!(serde_json::to_value(CiStatus::Unknown).unwrap(), "unknown");
+    }
+
+    // ── ci_status exact wire values in task DTOs ─────────────────────────
+
+    #[test]
+    fn task_dto_ci_status_serializes_exact_wire_values() {
+        for (ci_status_str, expected) in [
+            ("passing", "passing"),
+            ("failing", "failing"),
+            ("pending", "pending"),
+            ("unknown", "unknown"),
+        ] {
+            let mut task = task_with_merge_commit_sha(None);
+            task.ci_status = ci_status_str.into();
+            task.ci_head_sha = Some("abcdef".into());
+            let response = task_to_response(&task);
+            let serialized = serde_json::to_value(&response).unwrap();
+            assert_eq!(
+                serialized["ci"]["status"], expected,
+                "ci_status={ci_status_str} should serialize as {expected}"
+            );
+        }
+    }
+
+    // ── gate_state: awaiting_ci for pr_draft + pending/unknown ───────────
+
+    fn task_with_ci_status_and_status(ci_status: &str, task_status: &str) -> Task {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = ci_status.into();
+        task.status = task_status.into();
+        task.ci_head_sha = Some("abcdef".into());
+        task
+    }
+
+    #[test]
+    fn gate_state_awaiting_ci_for_pr_draft_pending() {
+        let task = task_with_ci_status_and_status("pending", "pr_draft");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "awaiting_ci");
+    }
+
+    #[test]
+    fn gate_state_awaiting_ci_for_pr_draft_unknown() {
+        let task = task_with_ci_status_and_status("unknown", "pr_draft");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "awaiting_ci");
+    }
+
+    #[test]
+    fn gate_state_passing_for_pr_draft_when_passing() {
+        let task = task_with_ci_status_and_status("passing", "pr_draft");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "passing");
+    }
+
+    #[test]
+    fn gate_state_failing_for_pr_draft_when_failing() {
+        let task = task_with_ci_status_and_status("failing", "pr_draft");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "failing");
+    }
+
+    #[test]
+    fn gate_state_pending_for_non_pr_draft_when_pending() {
+        let task = task_with_ci_status_and_status("pending", "in_progress");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "pending");
+    }
+
+    #[test]
+    fn gate_state_unknown_for_non_pr_draft_when_unknown() {
+        let task = task_with_ci_status_and_status("unknown", "open");
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(serialized["ci"]["gate_state"], "unknown");
+    }
+
+    // ── CiGateState serialization ────────────────────────────────────────
+
+    #[test]
+    fn ci_gate_state_serializes_to_exact_wire_values() {
+        assert_eq!(
+            serde_json::to_value(CiGateState::Passing).unwrap(),
+            "passing"
+        );
+        assert_eq!(
+            serde_json::to_value(CiGateState::Failing).unwrap(),
+            "failing"
+        );
+        assert_eq!(
+            serde_json::to_value(CiGateState::Pending).unwrap(),
+            "pending"
+        );
+        assert_eq!(
+            serde_json::to_value(CiGateState::Unknown).unwrap(),
+            "unknown"
+        );
+        assert_eq!(
+            serde_json::to_value(CiGateState::AwaitingCi).unwrap(),
+            "awaiting_ci"
+        );
+    }
+
+    // ── failing: primary blocking check and summary reason ───────────────
+
+    #[test]
+    fn failing_ci_serializes_primary_blocking_check() {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "failing".into();
+        task.ci_head_sha = Some("abcdef".into());
+        task.ci_blocking_required_check_names = r#"["Quality Gate","clippy"]"#.into();
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let ci = &serialized["ci"];
+
+        // Alphabetically sorted: Quality Gate < clippy
+        assert_eq!(ci["primary_blocking_check"], "Quality Gate");
+        assert!(
+            ci["summary_reason"]
+                .as_str()
+                .unwrap()
+                .contains("Quality Gate"),
+            "summary_reason should name the primary blocking check"
+        );
+        assert!(
+            ci["merge_blocked_reason"]
+                .as_str()
+                .unwrap()
+                .contains("Quality Gate"),
+            "merge_blocked_reason should name the primary blocking check"
+        );
+    }
+
+    #[test]
+    fn failing_ci_with_empty_checks_has_no_primary_blocking_check() {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "failing".into();
+        task.ci_head_sha = Some("abcdef".into());
+        task.ci_blocking_required_check_names = "[]".into();
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let ci = &serialized["ci"];
+
+        assert!(
+            ci.get("primary_blocking_check").is_none() || ci["primary_blocking_check"].is_null(),
+            "no blocking checks means no primary_blocking_check"
+        );
+        assert_eq!(ci["summary_reason"], "Required checks failing");
+    }
+
+    // ── pending/unknown: visible non-terminal states, not failures ──────
+
+    #[test]
+    fn pending_ci_is_visible_non_terminal_not_failure() {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "pending".into();
+        task.ci_head_sha = Some("abcdef".into());
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let ci = &serialized["ci"];
+
+        assert_eq!(ci["status"], "pending");
+        assert_eq!(ci["gate_state"], "pending");
+        assert_eq!(ci["summary_reason"], "Required checks pending");
+        assert_eq!(
+            ci["merge_blocked_reason"],
+            "Waiting for required checks to complete"
+        );
+        // No failure signals
+        assert!(
+            ci.get("primary_blocking_check").is_none() || ci["primary_blocking_check"].is_null()
+        );
+        assert!(ci.get("failure_fingerprint").is_none() || ci["failure_fingerprint"].is_null());
+    }
+
+    #[test]
+    fn unknown_ci_is_visible_non_terminal_not_failure() {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "unknown".into();
+        task.ci_head_sha = Some("abcdef".into());
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let ci = &serialized["ci"];
+
+        assert_eq!(ci["status"], "unknown");
+        assert_eq!(ci["gate_state"], "unknown");
+        assert_eq!(ci["summary_reason"], "CI state unknown");
+        assert!(
+            ci["merge_blocked_reason"]
+                .as_str()
+                .unwrap()
+                .contains("cannot confirm"),
+            "unknown merge_blocked_reason explains uncertainty"
+        );
+        // No failure signals
+        assert!(
+            ci.get("primary_blocking_check").is_none() || ci["primary_blocking_check"].is_null()
+        );
+    }
+
+    // ── passing: no merge_blocked_reason ─────────────────────────────────
+
+    #[test]
+    fn passing_ci_has_no_merge_blocked_reason() {
+        let mut task = task_with_merge_commit_sha(None);
+        task.ci_status = "passing".into();
+        task.ci_head_sha = Some("abcdef".into());
+        let response = task_to_response(&task);
+        let serialized = serde_json::to_value(&response).unwrap();
+        let ci = &serialized["ci"];
+
+        assert_eq!(ci["status"], "passing");
+        assert_eq!(ci["gate_state"], "passing");
+        assert_eq!(ci["summary_reason"], "All required checks passed");
+        assert!(
+            ci.get("merge_blocked_reason").is_none() || ci["merge_blocked_reason"].is_null(),
+            "passing CI should have no merge_blocked_reason"
+        );
     }
 }
