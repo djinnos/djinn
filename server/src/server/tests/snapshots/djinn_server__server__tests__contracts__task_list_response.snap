@@ -31,9 +31,9 @@ expression: task_list
       "merge_commit_sha": null,
       "unresolved_blocker_count": 0,
       "created_by_user_id": null,
+      "session_count": 0,
       "ci_status": "unknown",
-      "ci_gate_state": "unknown",
-      "session_count": 0
+      "ci_gate_state": "unknown"
     }
   ],
   "total_count": 1,
