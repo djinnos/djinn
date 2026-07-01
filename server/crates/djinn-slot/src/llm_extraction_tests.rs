@@ -10,7 +10,7 @@
 //! AC5 - Graceful degradation: LLM unavailable → no notes written, no errors
 //! AC6 - Dedup pipeline: repeated sessions do not create duplicate notes
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,46 @@ use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, 
 /// Creates a temp directory (notes will be written there).
 fn make_tmpdir() -> TempDir {
     crate::test_helpers::test_tempdir("djinn-llm-extraction-")
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    fn take(&self) -> String {
+        let mut buf = self.0.lock().expect("captured logs mutex poisoned");
+        let out = String::from_utf8(buf.clone()).expect("captured log bytes were valid utf-8");
+        buf.clear();
+        out
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogsWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogsWriter {
+            inner: Arc::clone(&self.0),
+        }
+    }
+}
+
+struct CapturedLogsWriter {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for CapturedLogsWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner
+            .lock()
+            .expect("captured logs mutex poisoned")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 // Task #8: the `llm_extraction_routes_durable_writes_into_task_worktree_when_session_has_one`
@@ -683,7 +723,34 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+        .with_target(false)
+        .with_ansi(false)
+        .with_level(true)
+        .finish();
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+
+    let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
+    drop(guard);
+
+    let captured = logs.take();
+    assert!(
+        captured.contains("llm_extraction: no LLM provider available; skipping extraction"),
+        "missing-provider path should emit the provider-unavailable warning; captured: {captured}"
+    );
+    assert!(
+        captured.contains("provider_resolution_stage"),
+        "missing-provider path should include structured resolution-stage diagnostics; captured: {captured}"
+    );
+    assert!(
+        !captured.contains("dropping underspecified note at admission gate"),
+        "missing-provider path must stay distinct from admission/quality-gate rejection; captured: {captured}"
+    );
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
@@ -1332,7 +1399,6 @@ async fn admission_gate_passes_complete_case_note() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
@@ -1432,7 +1498,30 @@ async fn admission_gate_drops_case_missing_required_section() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
 
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(logs.clone())
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+        .with_target(false)
+        .with_ansi(false)
+        .with_level(true)
+        .finish();
+    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+
+    let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
+    drop(guard);
+
+    let captured = logs.take();
+    assert!(
+        captured.contains("llm_extraction: dropping underspecified note at admission gate"),
+        "admission-gate rejection should emit the quality/admission diagnostic; captured: {captured}"
+    );
+    assert!(
+        !captured.contains("llm_extraction: no LLM provider available; skipping extraction"),
+        "provider-backed admission-gate rejection must not be misclassified as missing provider; captured: {captured}"
+    );
 
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo

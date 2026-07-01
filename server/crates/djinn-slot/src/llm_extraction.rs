@@ -93,18 +93,40 @@ async fn resolve_llm_extraction_provider_after_creator_attempt(
         return LlmExtractionProviderResolution::Provider(provider);
     }
 
+    tracing::debug!(
+        session_id = %session_id,
+        provider_resolution_stage = "org_shared_memory_provider_fallback",
+        "llm_extraction: creator-scoped provider unavailable; trying org-shared memory-provider fallback"
+    );
+
     match resolve_memory_provider_for_user(db, None).await {
         Ok(provider) => match provider.config_snapshot() {
             Some(mut config) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    provider_resolution_stage = "org_shared_memory_provider_fallback",
+                    provider = %provider.name(),
+                    model = %config.model_id,
+                    "llm_extraction: org-shared memory-provider fallback resolved provider"
+                );
                 config.telemetry = Some(telemetry);
                 LlmExtractionProviderResolution::Provider(create_provider(config))
             }
-            None => LlmExtractionProviderResolution::Provider(provider),
+            None => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    provider_resolution_stage = "org_shared_memory_provider_fallback",
+                    provider = %provider.name(),
+                    "llm_extraction: org-shared memory-provider fallback resolved provider"
+                );
+                LlmExtractionProviderResolution::Provider(provider)
+            }
         },
         Err(e) => {
             let error = e.to_string();
             tracing::warn!(
                 session_id = %session_id,
+                provider_resolution_stage = "org_shared_memory_provider_fallback",
                 error = %error,
                 "llm_extraction: no LLM provider available; skipping extraction"
             );
@@ -693,22 +715,52 @@ async fn run_llm_extraction_inner(
             .await;
         let via_creator = match creator_scoped {
             Ok(resolved) => {
+                let catalog_provider_id = resolved.catalog_provider_id.clone();
+                let model_name = resolved.model_name.clone();
                 let base_url = if crate::helpers::resolved_needs_base_url(&resolved) {
-                    crate::helpers::default_base_url(&resolved.catalog_provider_id)
+                    crate::helpers::default_base_url(&catalog_provider_id)
                 } else {
                     String::new()
                 };
-                crate::helpers::build_provider_from_resolved(
+                let provider = crate::helpers::build_provider_from_resolved(
                     resolved,
                     MEMORY_CONTEXT_WINDOW,
                     Some(telemetry.clone()),
                     None,
                     base_url,
-                )
+                );
+                match provider.as_ref() {
+                    Some(provider) => tracing::debug!(
+                        session_id = %session_id,
+                        task_id = %task_id,
+                        creator_user_id = ?creator,
+                        provider_resolution_stage = "creator_scoped_model_credential",
+                        catalog_provider_id = %catalog_provider_id,
+                        model_id = %memory_model_id,
+                        resolved_model = %model_name,
+                        provider = %provider.name(),
+                        "llm_extraction: creator-scoped model and credential resolved provider"
+                    ),
+                    None => tracing::warn!(
+                        session_id = %session_id,
+                        task_id = %task_id,
+                        creator_user_id = ?creator,
+                        provider_resolution_stage = "creator_scoped_model_credential",
+                        catalog_provider_id = %catalog_provider_id,
+                        model_id = %memory_model_id,
+                        resolved_model = %model_name,
+                        "llm_extraction: creator-scoped model and credential resolved but provider construction failed; trying scoped memory provider fallback"
+                    ),
+                }
+                provider
             }
             Err(e) => {
                 tracing::debug!(
                     session_id = %session_id,
+                    task_id = %task_id,
+                    creator_user_id = ?creator,
+                    provider_resolution_stage = "creator_scoped_model_credential",
+                    model_id = %memory_model_id,
                     error = %e.reason,
                     "llm_extraction: creator-scoped model resolution failed; trying scoped memory provider fallback"
                 );
