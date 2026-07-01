@@ -572,39 +572,33 @@ pub async fn build_refinement_status(
     // available to the control-plane, so PausedOrFrozen here is derived
     // solely from `build_frozen`.
 
-    let proposal_status = proposal
-        .as_ref()
-        .map(|p| p.status.as_str())
-        .unwrap_or("");
+    let proposal_status = proposal.as_ref().map(|p| p.status.as_str()).unwrap_or("");
 
-    let evidence_lifecycle_state =
-        if TERMINAL_PROPOSAL_STATUSES.contains(&proposal_status) {
-            EvidenceLifecycleState::Terminal
-        } else if proposal.as_ref().is_some_and(|p| p.build_frozen) {
-            EvidenceLifecycleState::PausedOrFrozen
-        } else if let Some(ref ne) = needs_evidence {
-            match ne.evidence_phase {
-                Some(EvidenceLifecyclePhase::EvidenceFailed) => {
-                    EvidenceLifecycleState::EvidenceFailed
-                }
-                Some(EvidenceLifecyclePhase::EvidenceReceived) => {
-                    EvidenceLifecycleState::EvidenceReceived
-                }
-                Some(EvidenceLifecyclePhase::AwaitingEvidence) => {
-                    EvidenceLifecycleState::AwaitingEvidence
-                }
-                // Linked spike exists but no lifecycle event recorded yet:
-                // the spike was just created and the
-                // `refinement_awaiting_evidence_started` event may not
-                // have been written yet.  Still awaiting.
-                None => EvidenceLifecycleState::AwaitingEvidence,
+    let evidence_lifecycle_state = if TERMINAL_PROPOSAL_STATUSES.contains(&proposal_status) {
+        EvidenceLifecycleState::Terminal
+    } else if proposal.as_ref().is_some_and(|p| p.build_frozen) {
+        EvidenceLifecycleState::PausedOrFrozen
+    } else if let Some(ref ne) = needs_evidence {
+        match ne.evidence_phase {
+            Some(EvidenceLifecyclePhase::EvidenceFailed) => EvidenceLifecycleState::EvidenceFailed,
+            Some(EvidenceLifecyclePhase::EvidenceReceived) => {
+                EvidenceLifecycleState::EvidenceReceived
             }
-        } else if is_active {
-            EvidenceLifecycleState::Active
-        } else {
-            // Refinement stopped but proposal is not terminal.
-            EvidenceLifecycleState::Active
-        };
+            Some(EvidenceLifecyclePhase::AwaitingEvidence) => {
+                EvidenceLifecycleState::AwaitingEvidence
+            }
+            // Linked spike exists but no lifecycle event recorded yet:
+            // the spike was just created and the
+            // `refinement_awaiting_evidence_started` event may not
+            // have been written yet.  Still awaiting.
+            None => EvidenceLifecycleState::AwaitingEvidence,
+        }
+    } else if is_active {
+        EvidenceLifecycleState::Active
+    } else {
+        // Refinement stopped but proposal is not terminal.
+        EvidenceLifecycleState::Active
+    };
 
     Ok(ProposalRefinementStatusModel {
         active: is_active,
