@@ -4,7 +4,13 @@
 //! guard. The pure predicate [`unchanged_head_rejection_reason`] is tested
 //! directly — it does not require a database.
 
-use super::unchanged_head_rejection_reason;
+use super::{
+    LocalGateBlockKind, local_gate_block_kind, local_gate_block_reason,
+    unchanged_head_rejection_reason,
+};
+use crate::local_gates::{
+    LocalGateOutcome, LocalGateResult, LocalGateUnreproducible, LocalGateUnreproducibleReason,
+};
 
 // ── Unchanged-head remediation rejection predicate ──────────────────────────
 
@@ -216,4 +222,56 @@ fn rejection_reason_is_deterministic() {
     );
 
     assert_eq!(reason1, reason2, "rejection reason must be deterministic");
+}
+
+#[test]
+fn local_gate_reproduced_failure_blocks_submit_and_approval() {
+    let results = vec![LocalGateResult::ReproducedFailure(LocalGateOutcome {
+        required_check_name: "Quality Gate".to_owned(),
+        command: "scripts/ci.sh".to_owned(),
+        exit_code: 1,
+        log_tail: "assertion failed".to_owned(),
+        observed_head_sha: "failing-head".to_owned(),
+    })];
+
+    assert_eq!(
+        local_gate_block_kind(&results),
+        Some(LocalGateBlockKind::ReproducedFailure)
+    );
+    let reason = local_gate_block_reason(LocalGateBlockKind::ReproducedFailure, &results);
+    assert!(reason.contains("Required CI reproduced locally and failed"));
+    assert!(reason.contains("scripts/ci.sh"));
+    assert!(reason.contains("assertion failed"));
+}
+
+#[test]
+fn local_gate_unreproducible_routes_to_lead_and_is_not_passing() {
+    let results = vec![LocalGateResult::Unreproducible(LocalGateUnreproducible {
+        required_check_name: "Quality Gate".to_owned(),
+        observed_head_sha: "failing-head".to_owned(),
+        reason: LocalGateUnreproducibleReason::ProviderUnreproducible,
+        details: Some("workflow run not found".to_owned()),
+    })];
+
+    assert_eq!(
+        local_gate_block_kind(&results),
+        Some(LocalGateBlockKind::Unreproducible)
+    );
+    let reason = local_gate_block_reason(LocalGateBlockKind::Unreproducible, &results);
+    assert!(reason.contains("could not be reproduced locally"));
+    assert!(reason.contains("not treated as passing"));
+    assert!(reason.contains("Routing to lead/human intervention"));
+}
+
+#[test]
+fn local_gate_passes_only_when_every_implicated_check_reproduces_green() {
+    let results = vec![LocalGateResult::ReproducedPass(LocalGateOutcome {
+        required_check_name: "Quality Gate".to_owned(),
+        command: "scripts/ci.sh".to_owned(),
+        exit_code: 0,
+        log_tail: "ok".to_owned(),
+        observed_head_sha: "failing-head".to_owned(),
+    })];
+
+    assert_eq!(local_gate_block_kind(&results), None);
 }
