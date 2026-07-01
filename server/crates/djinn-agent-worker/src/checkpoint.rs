@@ -467,7 +467,17 @@ pub async fn preserve_checkpoint(
     // ── 3. Get parent SHA ───────────────────────────────────────────────
     result.parent_sha = git_rev_parse(worktree, "HEAD").await.ok();
 
-    // ── 4. Stage safe files (targeted, not add -A) ─────────────────────
+    // ── 4. Reset index and stage safe files (targeted, not add -A) ──────
+    // Reset the index first to avoid stale staging state from prior operations.
+    if let Err(e) = git_cmd(worktree, &["reset", "--mixed", "--quiet", "HEAD", "--"]).await {
+        warn!(
+            task_run_id,
+            branch,
+            error = %e,
+            "checkpoint preservation: failed to reset index before staging (continuing)"
+        );
+    }
+
     for path in &scan.staged {
         let status = git_cmd(worktree, &["add", path]).await;
         if let Err(e) = status {
@@ -705,8 +715,11 @@ async fn push_with_lease_retry(
                     let session_id = &result.session_id;
                     let turn = result.turn;
                     let short_sha = commit_sha.chars().take(12).collect::<String>();
+                    let safe_branch = sanitize_ref_component(branch);
+                    let safe_session = sanitize_ref_component(session_id);
+                    let safe_sha = sanitize_ref_component(&short_sha);
                     let alt_ref = format!(
-                        "refs/djinn/checkpoints/{branch}/{session_id}/turn-{turn}/{short_sha}"
+                        "refs/djinn/checkpoints/{safe_branch}/{safe_session}/turn-{turn}/{safe_sha}"
                     );
 
                     info!(
@@ -770,12 +783,37 @@ async fn push_with_lease_retry(
     PushOutcome::Failed(last_error)
 }
 
+/// Sanitize a string for use as a git ref component. Replaces characters
+/// that are invalid in ref names with hyphens, trims leading/trailing
+/// dots and hyphens, and falls back to "unknown" for empty results.
+fn sanitize_ref_component(input: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches(['.', '-']).to_string();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed
+    }
+}
+
 /// Check if a push stderr indicates a non-fast-forward conflict.
 fn is_push_conflict_error(stderr: &str) -> bool {
-    stderr.contains("rejected")
-        || stderr.contains("non-fast-forward")
-        || stderr.contains("failed to push")
-        || stderr.contains("tip of your current branch is behind")
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("rejected")
+        || lower.contains("non-fast-forward")
+        || lower.contains("failed to push")
+        || lower.contains("stale info")
+        || lower.contains("fetch first")
+        || lower.contains("tip of your current branch is behind")
 }
 
 /// Attempt to rebase the local branch onto `origin/<branch>`.
@@ -961,6 +999,12 @@ mod tests {
             "tip of your current branch is behind its remote counterpart"
         ));
         assert!(is_push_conflict_error("failed to push some refs"));
+        assert!(is_push_conflict_error(
+            "Updates were rejected because the tip of your current branch is behind"
+        ));
+        assert!(is_push_conflict_error(
+            "! [remote rejected] main -> main (stale info)"
+        ));
         assert!(!is_push_conflict_error("permission denied"));
         assert!(!is_push_conflict_error("could not resolve host"));
     }
@@ -1063,6 +1107,19 @@ mod tests {
         assert_eq!(deserialized.conflict_strategy, ConflictStrategy::Rebase);
         assert!(deserialized.turn_known);
         assert_eq!(deserialized.turn, 5);
+    }
+
+    #[test]
+    fn sanitize_ref_component_replaces_special_chars() {
+        assert_eq!(sanitize_ref_component("task/run-1"), "task-run-1");
+        assert_eq!(
+            sanitize_ref_component("branch with spaces"),
+            "branch-with-spaces"
+        );
+        assert_eq!(sanitize_ref_component(""), "unknown");
+        assert_eq!(sanitize_ref_component("..."), "unknown");
+        assert_eq!(sanitize_ref_component("abc_def-123"), "abc_def-123");
+        assert_eq!(sanitize_ref_component("a/b/c"), "a-b-c");
     }
 
     // ── Integration-style tests with real git repos ─────────────────────

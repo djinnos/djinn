@@ -203,6 +203,7 @@ fn truncate_feedback(text: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
 pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
     let mut out = String::new();

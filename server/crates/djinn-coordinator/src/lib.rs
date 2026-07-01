@@ -55,8 +55,6 @@ pub mod environment;
 pub mod events;
 pub mod file_time;
 pub mod github_error_render;
-#[allow(dead_code)] // wired by sibling tasks ujty/t1qr; this wave adds code only
-pub(crate) mod local_gates;
 pub mod output_stash;
 pub mod resource_monitor;
 pub mod roles;
