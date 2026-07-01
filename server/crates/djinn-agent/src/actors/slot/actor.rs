@@ -1,5 +1,4 @@
-use std::future::Future;
-use std::pin::Pin;
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -13,7 +12,8 @@ use super::SlotEvent;
 /// slots with an `AgentContext`. Production actor behavior is owned by
 /// `djinn_slot::SlotHandle`; this type is adapted into the canonical runner in
 /// [`SlotHandle::spawn_with_test_runner`].
-type LifecycleFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
+#[cfg(any(test, feature = "test-support"))]
+type LifecycleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'static>>;
 #[cfg(any(test, feature = "test-support"))]
 pub type TestLifecycleRunner = Arc<
     dyn Fn(

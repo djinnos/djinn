@@ -1,9 +1,13 @@
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
 use tokio::sync::mpsc;
 
+#[cfg(any(test, feature = "test-support"))]
 use crate::context::AgentContext;
 
+#[cfg(any(test, feature = "test-support"))]
 use super::super::SlotHandle;
 
 pub use djinn_slot::{ModelPoolStatus, PoolError, PoolMessage, PoolStatus, RunningTaskInfo};
