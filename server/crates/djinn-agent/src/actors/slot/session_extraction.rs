@@ -291,6 +291,21 @@ mod tests {
 
         let task_run_id = uuid::Uuid::now_v7().to_string();
 
+        // Create the task_run row so the session's FK constraint is satisfied.
+        let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
+        task_run_repo
+            .create(djinn_db::CreateTaskRunParams {
+                id: &task_run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task_run");
+
         let session_repo = SessionRepository::new(db.clone(), noop.clone());
         let session = session_repo
             .create(CreateSessionParams {
