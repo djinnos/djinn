@@ -24,7 +24,8 @@ use crate::context::AgentContext;
 // now live in `djinn-slot`; these re-exports keep `crate::actors::slot::session_extraction::*`
 // paths resolving for agent-internal callers.
 
-pub use djinn_slot::{ExtractionQuality, SessionTaxonomy, derive_scope_paths};
+#[cfg(test)]
+pub use djinn_slot::{ExtractionQuality, SessionTaxonomy};
 // Only needed by llm_extraction_tests; suppressed in non-test builds to avoid
 // unused-import warnings from clippy -D warnings.
 #[cfg(test)]
