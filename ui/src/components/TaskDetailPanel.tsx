@@ -139,12 +139,14 @@ const CI_STATUS_LABELS: Record<string, { label: string; className: string }> = {
   pending: { label: "Pending", className: "text-blue-500" },
   failing: { label: "Failing", className: "text-red-500" },
   unknown: { label: "Unknown", className: "text-zinc-400" },
+  awaiting_ci: { label: "Awaiting CI", className: "text-blue-500" },
 };
 
 function CiStatusSection({ ci }: { ci?: CiGateSnapshot | null }) {
   if (!ci) return null;
 
-  const config = CI_STATUS_LABELS[ci.status] ?? CI_STATUS_LABELS.unknown;
+  const displayState = ci.gate_state ?? ci.status;
+  const config = CI_STATUS_LABELS[displayState] ?? CI_STATUS_LABELS.unknown;
 
   return (
     <SectionCard title="CI Status">
@@ -153,6 +155,16 @@ function CiStatusSection({ ci }: { ci?: CiGateSnapshot | null }) {
           <span className="font-medium">Required CI:</span>
           <span className={config.className}>{config.label}</span>
         </div>
+        {ci.summary_reason && (
+          <div>
+            <span className="font-medium">Summary:</span> {ci.summary_reason}
+          </div>
+        )}
+        {ci.merge_blocked_reason && (
+          <div>
+            <span className="font-medium">Merge blocked reason:</span> {ci.merge_blocked_reason}
+          </div>
+        )}
         {ci.head_sha && (
           <div>
             <span className="font-medium">Head SHA:</span>{" "}

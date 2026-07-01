@@ -91,8 +91,11 @@ export const mockTaskC: Task = {
 
 export const mockCiPassing: CiGateSnapshot = {
   status: "passing",
+  gate_state: "passing",
   head_sha: "abc1234567890def",
   blocking_required_check_names: [],
+  summary_reason: "All required checks passed",
+  merge_blocked_reason: null,
   first_seen_at: "2026-06-01T00:00:00Z",
   last_seen_at: "2026-06-01T00:05:00Z",
   same_signature_count: 1,
@@ -101,8 +104,11 @@ export const mockCiPassing: CiGateSnapshot = {
 
 export const mockCiPending: CiGateSnapshot = {
   status: "pending",
+  gate_state: "pending",
   head_sha: "def4567890abcdef",
   blocking_required_check_names: [],
+  summary_reason: "Required checks pending",
+  merge_blocked_reason: "Waiting for required checks to complete",
   first_seen_at: "2026-06-01T00:00:00Z",
   last_seen_at: "2026-06-01T00:01:00Z",
   same_signature_count: 1,
@@ -111,9 +117,13 @@ export const mockCiPending: CiGateSnapshot = {
 
 export const mockCiFailing: CiGateSnapshot = {
   status: "failing",
+  gate_state: "failing",
   head_sha: "failing1234567890",
-  blocking_required_check_names: ["lint", "tests"],
+  blocking_required_check_names: ["Quality Gate", "Server Tests"],
+  primary_blocking_check: "Quality Gate",
   failure_fingerprint: "lint+tests@failing1234567890",
+  summary_reason: "Required check failing: Quality Gate",
+  merge_blocked_reason: "Blocked by failing required check: Quality Gate",
   first_seen_at: "2026-06-01T00:00:00Z",
   last_seen_at: "2026-06-01T00:10:00Z",
   same_signature_count: 3,
@@ -123,10 +133,21 @@ export const mockCiFailing: CiGateSnapshot = {
 
 export const mockCiUnknown: CiGateSnapshot = {
   status: "unknown",
+  gate_state: "unknown",
   head_sha: "unknown1234567890",
   blocking_required_check_names: [],
+  summary_reason: "CI state unknown",
+  merge_blocked_reason: "CI state unknown; cannot confirm merge safety",
   first_seen_at: "2026-06-01T00:00:00Z",
   last_seen_at: "2026-06-01T00:00:00Z",
   same_signature_count: 0,
   pr_number: 45,
+};
+
+export const mockCiAdvisoryFailure: CiGateSnapshot = {
+  ...mockCiPassing,
+  head_sha: "advisory1234567890",
+  pr_number: 46,
+  summary_reason: "All required checks passed",
+  merge_blocked_reason: null,
 };

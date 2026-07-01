@@ -69,6 +69,7 @@ pub mod cargo_cache_policy;
 pub mod cargo_metrics;
 mod cargo_target_seed;
 mod checkpoint;
+mod checkpoint_safety;
 mod lifecycle;
 mod worker_services;
 

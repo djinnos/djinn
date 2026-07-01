@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+use crate::checkpoint_safety::{
+    CheckpointSafetyConfig, CheckpointSafetyScan, ExcludedFile, SafetyFinding, scan_worktree,
+};
+
 const MAX_PUSH_ATTEMPTS: usize = 3;
 const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(150);
-const MAX_CHECKPOINT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct CheckpointAuthor {
@@ -68,34 +71,13 @@ pub struct CheckpointPreservationResult {
     pub push_result: CheckpointPushResult,
     pub failure_reason: Option<String>,
     pub session_id: String,
-    pub turn: Option<u64>,
+    /// Turn number recorded in the WIP checkpoint metadata. Until lifecycle
+    /// turn wiring is available in this binary, unknown turns are explicitly
+    /// represented as `0` with `turn_known == false`.
+    pub turn: u64,
+    pub turn_known: bool,
     pub reason: String,
     pub safety: CheckpointSafetySummary,
-}
-
-impl CheckpointPreservationResult {
-    fn failed(
-        metadata: &CheckpointMetadata,
-        failure_reason: String,
-        conflict_strategy: CheckpointConflictStrategy,
-        safety: CheckpointSafetySummary,
-    ) -> Self {
-        Self {
-            commit_sha: None,
-            parent_sha: None,
-            local_sha: None,
-            remote_sha: None,
-            target_ref: None,
-            retry_count: 0,
-            conflict_strategy,
-            push_result: CheckpointPushResult::Failed,
-            failure_reason: Some(failure_reason),
-            session_id: metadata.session_id.clone(),
-            turn: metadata.turn,
-            reason: metadata.reason.clone(),
-            safety,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,6 +85,8 @@ pub struct CheckpointSafetySummary {
     pub included_paths: Vec<String>,
     pub excluded_paths: Vec<CheckpointPathDecision>,
     pub blocked_paths: Vec<CheckpointPathDecision>,
+    pub fingerprints: CheckpointDiffFingerprints,
+    pub had_changes: bool,
 }
 
 impl CheckpointSafetySummary {
@@ -115,6 +99,15 @@ impl CheckpointSafetySummary {
 pub struct CheckpointPathDecision {
     pub path: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CheckpointDiffFingerprints {
+    pub worktree_diff: Option<String>,
+    pub staged_diff: Option<String>,
+    pub local_vs_remote_diff: Option<String>,
+    pub head_sha: Option<String>,
+    pub remote_sha: Option<String>,
 }
 
 #[derive(Debug)]
@@ -141,30 +134,26 @@ pub async fn preserve_checkpoint(
         push_result: CheckpointPushResult::NotAttempted,
         failure_reason: None,
         session_id: metadata.session_id.clone(),
-        turn: metadata.turn,
+        turn: metadata.turn_for_ref(),
+        turn_known: metadata.turn.is_some(),
         reason: metadata.reason.clone(),
         safety: CheckpointSafetySummary::default(),
     };
 
-    let safety = match safety_scan(workspace_path).await {
+    let safety = match safety_scan(workspace_path, task_branch).await {
         Ok(safety) => safety,
         Err(e) => {
-            return CheckpointPreservationResult::failed(
-                metadata,
-                format!("safety scan failed: {e}"),
-                CheckpointConflictStrategy::BlockedBySafetyScan,
-                CheckpointSafetySummary::default(),
-            );
+            result.conflict_strategy = CheckpointConflictStrategy::BlockedBySafetyScan;
+            return fail_existing(result, format!("safety scan failed: {e}"));
         }
     };
     result.safety = safety.clone();
 
     if safety.is_blocked() {
-        return CheckpointPreservationResult::failed(
-            metadata,
+        result.conflict_strategy = CheckpointConflictStrategy::BlockedBySafetyScan;
+        return fail_existing(
+            result,
             format!("safety scan blocked {} path(s)", safety.blocked_paths.len()),
-            CheckpointConflictStrategy::BlockedBySafetyScan,
-            safety,
         );
     }
 
@@ -300,147 +289,63 @@ async fn try_safe_refresh_rebase(workspace_path: &Path, task_branch: &str) -> bo
     }
 }
 
-async fn safety_scan(workspace_path: &Path) -> Result<CheckpointSafetySummary, String> {
-    let status = git_output(workspace_path, &["status", "--porcelain=v1", "-z"]).await?;
-    let mut summary = CheckpointSafetySummary::default();
-    for path in parse_porcelain_paths(&status) {
-        if let Some(reason) = exclusion_reason(&path) {
-            summary
-                .excluded_paths
-                .push(CheckpointPathDecision { path, reason });
-            continue;
-        }
-        if let Some(reason) = block_reason(workspace_path, &path).await {
-            summary
-                .blocked_paths
-                .push(CheckpointPathDecision { path, reason });
-            continue;
-        }
-        summary.included_paths.push(path);
-    }
-    summary.included_paths.sort();
-    summary.included_paths.dedup();
-    summary.excluded_paths.sort_by(|a, b| a.path.cmp(&b.path));
-    summary.blocked_paths.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(summary)
+async fn safety_scan(
+    workspace_path: &Path,
+    task_branch: &str,
+) -> Result<CheckpointSafetySummary, String> {
+    let scan = scan_worktree(
+        workspace_path,
+        task_branch,
+        &CheckpointSafetyConfig::default(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(CheckpointSafetySummary::from(scan))
 }
 
-fn parse_porcelain_paths(status: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut parts = status.split('\0').filter(|s| !s.is_empty());
-    while let Some(entry) = parts.next() {
-        if entry.len() < 4 {
-            continue;
+impl From<CheckpointSafetyScan> for CheckpointSafetySummary {
+    fn from(scan: CheckpointSafetyScan) -> Self {
+        Self {
+            included_paths: scan.staged,
+            excluded_paths: scan.excluded.into_iter().map(excluded_decision).collect(),
+            blocked_paths: scan.blocked.into_iter().map(blocked_decision).collect(),
+            fingerprints: CheckpointDiffFingerprints {
+                worktree_diff: scan.fingerprints.worktree_diff,
+                staged_diff: scan.fingerprints.staged_diff,
+                local_vs_remote_diff: scan.fingerprints.local_vs_remote_diff,
+                head_sha: scan.fingerprints.head_sha,
+                remote_sha: scan.fingerprints.remote_sha,
+            },
+            had_changes: scan.had_changes,
         }
-        let code = &entry[..2];
-        let path = entry[3..].to_string();
-        if (code.contains('R') || code.contains('C'))
-            && let Some(new_path) = parts.next()
-        {
-            out.push(new_path.to_string());
-        }
-        out.push(path);
     }
-    out
 }
 
-fn exclusion_reason(path: &str) -> Option<String> {
-    let normalized = path.replace('\\', "/");
-    let components: Vec<&str> = normalized.split('/').collect();
-    let excluded_dir = components.iter().any(|component| {
-        matches!(
-            *component,
-            "target"
-                | ".target"
-                | "node_modules"
-                | "__pycache__"
-                | ".pytest_cache"
-                | "dist"
-                | "build"
-                | ".cache"
-                | "coverage"
-                | ".next"
-                | ".turbo"
-        )
-    });
-    if excluded_dir {
-        return Some("generated/cache/build output path excluded from checkpoint".to_string());
+fn excluded_decision(file: ExcludedFile) -> CheckpointPathDecision {
+    CheckpointPathDecision {
+        path: file.path,
+        reason: format!("{:?}", file.reason),
     }
-    let lower = normalized.to_ascii_lowercase();
-    if lower.ends_with(".log") || lower.ends_with(".lcov") || lower.ends_with(".profraw") {
-        return Some("log/coverage artifact excluded from checkpoint".to_string());
-    }
-    None
 }
 
-async fn block_reason(workspace_path: &Path, path: &str) -> Option<String> {
-    let full = workspace_path.join(path);
-    let meta = match tokio::fs::symlink_metadata(&full).await {
-        Ok(meta) => meta,
-        Err(_) => return None,
+fn blocked_decision(finding: SafetyFinding) -> CheckpointPathDecision {
+    let location = if finding.line > 0 {
+        format!(" line {}", finding.line)
+    } else {
+        String::new()
     };
-    if meta.file_type().is_dir() {
-        return Some("submodule or nested worktree path blocked".to_string());
+    let snippet = finding
+        .snippet
+        .as_deref()
+        .map(|snippet| format!(" snippet {snippet}"))
+        .unwrap_or_default();
+    CheckpointPathDecision {
+        path: finding.path,
+        reason: format!(
+            "{:?} matched {}{}{}",
+            finding.kind, finding.matched_pattern, location, snippet
+        ),
     }
-    if !meta.file_type().is_file() {
-        return None;
-    }
-    if meta.len() > MAX_CHECKPOINT_FILE_BYTES {
-        return Some(format!(
-            "file exceeds checkpoint safety limit ({} bytes > {} bytes)",
-            meta.len(),
-            MAX_CHECKPOINT_FILE_BYTES
-        ));
-    }
-    if secret_like_path(path) {
-        return Some("secret-like path blocked from checkpoint".to_string());
-    }
-    let sample_len = meta.len().min(8192) as usize;
-    if sample_len == 0 {
-        return None;
-    }
-    let bytes = match tokio::fs::read(&full).await {
-        Ok(bytes) => bytes,
-        Err(_) => return None,
-    };
-    let sample = &bytes[..bytes.len().min(sample_len)];
-    if looks_binary(sample) {
-        return Some("binary file blocked from checkpoint".to_string());
-    }
-    let text = String::from_utf8_lossy(sample);
-    if secret_like_content(&text) {
-        return Some("secret-like content blocked from checkpoint".to_string());
-    }
-    None
-}
-
-fn secret_like_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.ends_with(".pem")
-        || lower.ends_with(".key")
-        || lower.ends_with("id_rsa")
-        || lower.ends_with("id_ed25519")
-        || lower.contains(".env")
-        || lower.contains("secret")
-        || lower.contains("credentials")
-}
-
-fn secret_like_content(text: &str) -> bool {
-    const NEEDLES: &[&str] = &[
-        "BEGIN PRIVATE KEY",
-        "BEGIN RSA PRIVATE KEY",
-        "AWS_SECRET_ACCESS_KEY",
-        "GITHUB_TOKEN=",
-        "OPENAI_API_KEY=",
-        "ANTHROPIC_API_KEY=",
-        "api_key=",
-        "access_token=",
-    ];
-    NEEDLES.iter().any(|needle| text.contains(needle))
-}
-
-fn looks_binary(bytes: &[u8]) -> bool {
-    bytes.contains(&0)
 }
 
 async fn unstage_all(workspace_path: &Path) -> Result<(), String> {
