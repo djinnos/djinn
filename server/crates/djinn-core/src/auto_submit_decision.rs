@@ -18,9 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_verify::{
-    FileStatus, FreshnessVerdict, evaluate_freshness,
-};
+use crate::canonical_verify::{FileStatus, FreshnessVerdict, evaluate_freshness};
 use crate::models::{AutoSubmitTriggerReason, VerifyRunRecord};
 
 // ─── Changed-file classification ──────────────────────────────────────────
@@ -350,9 +348,7 @@ fn freshness_to_block_reason(verdict: &FreshnessVerdict) -> AutoSubmitBlockReaso
             AutoSubmitBlockReason::StaleVerify("diff fingerprint mismatch".to_owned())
         }
         Some(FreshnessRejectionReason::FileChangedAfterVerify(path)) => {
-            AutoSubmitBlockReason::StaleVerify(format!(
-                "file changed after verify: {path}"
-            ))
+            AutoSubmitBlockReason::StaleVerify(format!("file changed after verify: {path}"))
         }
         Some(FreshnessRejectionReason::MissingTaskChecks(checks)) => {
             AutoSubmitBlockReason::MissingTaskChecks(checks.clone())
@@ -424,6 +420,16 @@ fn evaluate_diff_safety(changed_files: &[ChangedFile]) -> Option<AutoSubmitBlock
     // Mixed categories are OK as long as at least one safe file is present
     // and no blocked categories (secret/binary/excluded) exist. A diff with
     // safe + generated files is acceptable — only generated-only is blocked.
+    //
+    // If no safe files are present at all (e.g. only generated + wip mixed,
+    // or some future unclassified category), block as unsafe.
+    let has_safe = changed_files
+        .iter()
+        .any(|f| f.category == ChangeFileCategory::Safe);
+    if !has_safe {
+        return Some(AutoSubmitBlockReason::UnsafeDiff);
+    }
+
     None
 }
 
@@ -510,8 +516,7 @@ mod tests {
     #[test]
     fn eligible_green_exact_diff_idle_trigger() {
         let input = make_input(AutoSubmitTriggerReason::Idle);
-        let (decision, freshness_event, review_event) =
-            evaluate_auto_submit_decision(&input);
+        let (decision, freshness_event, review_event) = evaluate_auto_submit_decision(&input);
 
         assert!(decision.eligible);
         assert_eq!(decision.trigger_reason, AutoSubmitTriggerReason::Idle);
@@ -522,7 +527,10 @@ mod tests {
         assert_eq!(freshness_event.diff_fingerprint, "abc123");
         assert!(freshness_event.has_verify_run);
         assert!(freshness_event.freshness_verdict.fresh);
-        assert_eq!(freshness_event.trigger_reason, AutoSubmitTriggerReason::Idle);
+        assert_eq!(
+            freshness_event.trigger_reason,
+            AutoSubmitTriggerReason::Idle
+        );
         assert_eq!(freshness_event.submit_id.as_deref(), Some("submit-1"));
 
         // review.auto_submit_decision event
@@ -561,8 +569,7 @@ mod tests {
         let mut input = make_input(AutoSubmitTriggerReason::Idle);
         input.verify_run = None;
 
-        let (decision, freshness_event, review_event) =
-            evaluate_auto_submit_decision(&input);
+        let (decision, freshness_event, review_event) = evaluate_auto_submit_decision(&input);
 
         assert!(!decision.eligible);
         assert_eq!(
@@ -582,12 +589,7 @@ mod tests {
     #[test]
     fn block_stale_verify_not_pass() {
         let mut input = make_input(AutoSubmitTriggerReason::Looping);
-        input.verify_run = Some(make_run(
-            "fail",
-            "abc123",
-            "2025-01-15T10:30:00.000Z",
-            None,
-        ));
+        input.verify_run = Some(make_run("fail", "abc123", "2025-01-15T10:30:00.000Z", None));
 
         let (decision, _, _) = evaluate_auto_submit_decision(&input);
 
@@ -663,7 +665,9 @@ mod tests {
         assert!(!decision.eligible);
         assert_eq!(
             decision.block_reason,
-            Some(AutoSubmitBlockReason::MissingTaskChecks(vec!["test".to_owned()]))
+            Some(AutoSubmitBlockReason::MissingTaskChecks(vec![
+                "test".to_owned()
+            ]))
         );
     }
 
@@ -800,18 +804,36 @@ mod tests {
         );
     }
 
-    // ── Block: unsafe diff (unclassified) ─────────────────────────────────
-
-    // Note: "UnsafeDiff" is the catch-all for safety violations not covered
-    // by specific categories. Since the current classification covers all
-    // categories, this test ensures the enum variant exists and is properly
-    // handled in Display. In practice, the caller would use this for
-    // unclassified unsafe changes if a new category is introduced.
+    // ── Block: unsafe diff (no safe files) ──────────────────────────────
 
     #[test]
-    fn unsafe_diff_display() {
-        let reason = AutoSubmitBlockReason::UnsafeDiff;
-        assert_eq!(reason.to_string(), "unsafe diff");
+    fn block_unsafe_diff_no_safe_files() {
+        // A diff with mixed generated + wip files (not all one category)
+        // has no safe files and should be blocked as UnsafeDiff.
+        let mut input = make_input(AutoSubmitTriggerReason::Idle);
+        input.changed_files = vec![
+            ChangedFile {
+                path: "generated/api.rs".to_owned(),
+                category: ChangeFileCategory::Generated,
+            },
+            ChangedFile {
+                path: "WIP_notes.md".to_owned(),
+                category: ChangeFileCategory::Wip,
+            },
+        ];
+
+        let (decision, _, review_event) = evaluate_auto_submit_decision(&input);
+
+        assert!(!decision.eligible);
+        assert_eq!(
+            decision.block_reason,
+            Some(AutoSubmitBlockReason::UnsafeDiff)
+        );
+        assert!(!review_event.eligible);
+        assert_eq!(
+            review_event.block_reason,
+            Some(AutoSubmitBlockReason::UnsafeDiff)
+        );
     }
 
     // ── Mixed safe + generated is allowed ─────────────────────────────────
@@ -1147,23 +1169,14 @@ mod tests {
 
         let reason = AutoSubmitBlockReason::SecretChange(vec![".env".into()]);
         let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"secret_change": [".env"]})
-        );
+        assert_eq!(json, serde_json::json!({"secret_change": [".env"]}));
 
         let reason = AutoSubmitBlockReason::StaleVerify("diff mismatch".into());
         let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"stale_verify": "diff mismatch"})
-        );
+        assert_eq!(json, serde_json::json!({"stale_verify": "diff mismatch"}));
 
         let reason = AutoSubmitBlockReason::MissingTaskChecks(vec!["lint".into()]);
         let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"missing_task_checks": ["lint"]})
-        );
+        assert_eq!(json, serde_json::json!({"missing_task_checks": ["lint"]}));
     }
 }
