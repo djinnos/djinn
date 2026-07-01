@@ -2027,6 +2027,7 @@ mod inflight_ledger_tests {
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
             pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
             active_refinements: HashMap::new(),
             refinement_sessions: HashMap::new(),
             dispatched: 0,
