@@ -53,6 +53,7 @@ pub mod environment;
 pub mod events;
 pub mod file_time;
 pub mod github_error_render;
+pub mod local_gates;
 pub mod output_stash;
 pub mod resource_monitor;
 pub mod roles;
