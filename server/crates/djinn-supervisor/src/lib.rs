@@ -1211,27 +1211,104 @@ impl TaskRunSupervisor {
                         // Cancel-gated for the same reason as submit_task_review
                         // above: a cancelled reviewer run must not approve a task
                         // (that's how kw7s reached `approved` with no branch).
+                        //
+                        // Local-gate pre-approve: run deterministic local gates
+                        // (size-guard, rustfmt, clippy, tests) from the task
+                        // branch workspace before approving.  A failing required
+                        // gate prevents approval and routes the task to
+                        // remediation; an unavailable required gate escalates to
+                        // lead intervention.
                         if self.services.cancel().is_cancelled() {
                             tracing::debug!(
                                 task_run_id = %run_id,
                                 task_id = %spec.task_id,
                                 "supervisor: run cancelled — skipping task_review_approve (task stays in_task_review for redispatch)"
                             );
-                        } else if let Err(e) = self
-                            .services
-                            .transition_task(
-                                spec.task_id.clone(),
-                                "task_review_approve".into(),
-                                None,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                task_run_id = %run_id,
-                                task_id = %spec.task_id,
-                                error = %e,
-                                "supervisor: task_review_approve transition skipped"
-                            );
+                        } else {
+                            // Run local gates before approving.
+                            let gate_result = self
+                                .services
+                                .check_local_gates_for_review(
+                                    spec.task_id.clone(),
+                                    workspace.path().to_string_lossy().into_owned(),
+                                    spec.task_branch.clone(),
+                                )
+                                .await;
+
+                            match gate_result {
+                                Ok(()) => {
+                                    // Gates passed (or none apply) — approve.
+                                    if let Err(e) = self
+                                        .services
+                                        .transition_task(
+                                            spec.task_id.clone(),
+                                            "task_review_approve".into(),
+                                            None,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            task_run_id = %run_id,
+                                            task_id = %spec.task_id,
+                                            error = %e,
+                                            "supervisor: task_review_approve transition skipped"
+                                        );
+                                    }
+                                }
+                                Err(block_json) => {
+                                    // Parse the block to determine routing.
+                                    let parsed: serde_json::Value =
+                                        serde_json::from_str(&block_json).unwrap_or_default();
+                                    let has_unavailable = parsed
+                                        .get("has_unavailable")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let blocking_reason = parsed
+                                        .get("blocking_reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("local gate block");
+
+                                    if has_unavailable {
+                                        // Unavailable gate → escalate for lead
+                                        // intervention (environmental issue, not
+                                        // a code problem the worker can fix).
+                                        tracing::warn!(
+                                            task_run_id = %run_id,
+                                            task_id = %spec.task_id,
+                                            reason = %blocking_reason,
+                                            "supervisor: reviewer approval blocked — unavailable required local gate; escalating for lead intervention"
+                                        );
+                                        result = Some(TaskRunOutcome::Escalated {
+                                            reason: format!(
+                                                "reviewer approval blocked: {blocking_reason}"
+                                            ),
+                                        });
+                                        break;
+                                    } else {
+                                        // Failing gate → reject review and route
+                                        // back for remediation.
+                                        let reject_reason = format!(
+                                            "local gate check failed before approval: {blocking_reason}"
+                                        );
+                                        if let Err(e) = self
+                                            .services
+                                            .transition_task(
+                                                spec.task_id.clone(),
+                                                "task_review_reject".into(),
+                                                Some(reject_reason),
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                task_run_id = %run_id,
+                                                task_id = %spec.task_id,
+                                                error = %e,
+                                                "supervisor: task_review_reject (local gate failure) transition skipped"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     StageOutcome::PlannerExecute | StageOutcome::VerifierPassed => {

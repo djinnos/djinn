@@ -433,6 +433,58 @@ impl SupervisorServices for DirectServices {
         .map_err(|e| e.to_string())
     }
 
+    async fn check_local_gates_for_review(
+        &self,
+        task_id: String,
+        workspace_path: String,
+        _task_branch: String,
+    ) -> Result<(), String> {
+        use djinn_coordinator::supervisor_impl::review_local_gates;
+        use djinn_db::TaskRepository;
+
+        let task_repo = TaskRepository::new(
+            self.callbacks.agent_context.db.clone(),
+            self.callbacks.agent_context.event_bus.clone(),
+        );
+
+        // Load the task to get CI metadata.
+        let task = match task_repo.get(&task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "check_local_gates_for_review: task not found — allowing approval"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "check_local_gates_for_review: failed to load task — allowing approval"
+                );
+                return Ok(());
+            }
+        };
+
+        // Only run gates for PR-backed tasks (those with a pr_url).
+        if task.pr_url.is_none() {
+            return Ok(());
+        }
+
+        let workspace_root = std::path::Path::new(&workspace_path);
+        if !workspace_root.is_dir() {
+            tracing::debug!(
+                task_id = %task.short_id,
+                workspace_path = %workspace_path,
+                "check_local_gates_for_review: workspace dir missing — allowing approval"
+            );
+            return Ok(());
+        }
+
+        review_local_gates::check_local_gates_for_review(&task, &task_repo, workspace_root).await
+    }
+
     async fn emit_djinn_event(&self, event: SerializableDjinnEvent) -> Result<(), String> {
         match intern_envelope(event) {
             Ok(envelope) => {
