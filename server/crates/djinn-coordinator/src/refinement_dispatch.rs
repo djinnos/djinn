@@ -224,6 +224,18 @@ impl CoordinatorActor {
             return;
         }
 
+        // Evidence pause gate. The Judge demanded evidence via
+        // `proposal_refinement_demand_evidence` and the demand was accepted.
+        // No further tribunal phases are dispatched until the linked evidence
+        // spike produces findings (resumed by the sibling epic oeqd).
+        if phase == RefinementPhase::AwaitingEvidence {
+            tracing::debug!(
+                proposal_id = %proposal_id,
+                "Refinement parked: awaiting evidence spike findings"
+            );
+            return;
+        }
+
         // Administrative dispatch-pause gate.
         if self.refinement_dispatch_paused(proposal_id).await {
             tracing::info!(

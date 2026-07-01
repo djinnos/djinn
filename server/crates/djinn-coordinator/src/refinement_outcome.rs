@@ -41,7 +41,9 @@ impl CoordinatorActor {
             RefinementPhase::JudgeAdjudication => {
                 self.process_judge_outcome(proposal_id, &state).await;
             }
-            RefinementPhase::AwaitingHumanReview | RefinementPhase::Complete => {}
+            RefinementPhase::AwaitingHumanReview
+            | RefinementPhase::AwaitingEvidence
+            | RefinementPhase::Complete => {}
         }
     }
 
@@ -271,6 +273,35 @@ impl CoordinatorActor {
         };
 
         let round = state.current_round;
+
+        // ── Check for an accepted needs-evidence demand first ───────────
+        //
+        // If the Judge called `proposal_refinement_demand_evidence` and the
+        // demand was accepted, a `kind = "needs_evidence"` entry with valid
+        // metadata exists for the current round. This takes priority over a
+        // normal verdict: the loop parks in AwaitingEvidence and no further
+        // tribunal phases are dispatched until the evidence spike produces
+        // findings.
+        let needs_evidence_entry = entries.iter().find(|e| {
+            e.agent_role == "judge"
+                && e.kind == "needs_evidence"
+                && e.round == round
+                && e.body_metadata.is_some()
+        });
+
+        if let Some(_entry) = needs_evidence_entry {
+            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                state.record_needs_evidence();
+            }
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge demanded evidence — refinement parked (AwaitingEvidence)"
+            );
+            return;
+        }
+
+        // ── Normal verdict path ─────────────────────────────────────────
         let verdict_entry = entries
             .iter()
             .find(|e| e.agent_role == "judge" && e.kind == "verdict" && e.round == round);
@@ -549,7 +580,9 @@ impl CoordinatorActor {
             RefinementPhase::AdvocateRevision => "advocate",
             RefinementPhase::AdversaryAttack => "adversary",
             RefinementPhase::JudgeAdjudication => "judge",
-            RefinementPhase::AwaitingHumanReview | RefinementPhase::Complete => {
+            RefinementPhase::AwaitingHumanReview
+            | RefinementPhase::AwaitingEvidence
+            | RefinementPhase::Complete => {
                 return ("advocate".into(), String::new());
             }
         };
