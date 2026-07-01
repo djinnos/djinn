@@ -108,7 +108,7 @@ struct ReviewerDiffRow {
 /// [`REVIEWER_DIFF_CONTEXT_MAX_BULLETS`] entries and
 /// [`REVIEWER_DIFF_CONTEXT_BUDGET_CHARS`] characters via
 /// `truncate::smart_truncate`.
-pub(crate) async fn build_reviewer_diff_context(
+pub async fn build_reviewer_diff_context(
     role_name: &str,
     task: &Task,
     app_state: &SlotContext,

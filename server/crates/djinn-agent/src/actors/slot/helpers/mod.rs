@@ -23,40 +23,12 @@ const MAX_PR_COMMENT_CHARS: usize = 500;
 /// `RoleConfig::name`) that opt-in to auto-injected `code_graph context`
 /// summaries. Empty / unset → no roles get auto-injection.
 ///
+/// Retained here for agent-side tests that toggle this env var; the canonical
+/// implementation (and its own copy of this constant) lives in `djinn-slot`.
+///
 /// Example: `DJINN_AUTO_CODE_CONTEXT_ROLES=worker,reviewer`.
-const AUTO_CODE_CONTEXT_ROLES_ENV: &str = "DJINN_AUTO_CODE_CONTEXT_ROLES";
-
-/// Char budget for the auto-injected `code_graph context` block. Mirrors
-/// the existing 2000-char knowledge-context cap and is enforced via
-/// `truncate::smart_truncate` so we keep both head + tail of the block.
-const AUTO_CODE_CONTEXT_BUDGET_CHARS: usize = 2000;
-
-/// Cap on the number of high-PageRank symbols we pull from `ranked` before
-/// filtering by scope-path overlap. Bounds the worst-case `context()`
-/// fan-out per dispatch.
-const AUTO_CODE_CONTEXT_RANKED_POOL: usize = 60;
-
-/// Per-file cap on auto-included symbols. The plan calls for "top 3 by
-/// PageRank in F".
-const AUTO_CODE_CONTEXT_PER_FILE: usize = 3;
-
-/// Outer cap on emitted bullets — prevents runaway expansion when many
-/// scope-path files match. Soft cap; the char budget is the hard cap.
-const AUTO_CODE_CONTEXT_MAX_BULLETS: usize = 9;
-
-/// PR E3: char budget for the auto-injected `code_graph detect_changes`
-/// reviewer block. Mirrors the E2 cap so the two slots never collectively
-/// blow past 4k chars in a reviewer prompt.
-const REVIEWER_DIFF_CONTEXT_BUDGET_CHARS: usize = 2000;
-
-/// PR E3: outer cap on emitted touched-symbol bullets in the reviewer
-/// diff context. Soft cap; the char budget is the hard cap.
-const REVIEWER_DIFF_CONTEXT_MAX_BULLETS: usize = 30;
-
-/// PR E3: BFS depth for the per-symbol `impact` lookup that drives risk
-/// classification. Matches the `code_graph impact` default
-/// (`graph_tools.rs:1346`).
-const REVIEWER_DIFF_IMPACT_DEPTH: usize = 3;
+#[cfg(test)]
+pub(crate) const AUTO_CODE_CONTEXT_ROLES_ENV: &str = "DJINN_AUTO_CODE_CONTEXT_ROLES";
 
 mod code_context;
 mod feedback;
