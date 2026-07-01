@@ -297,8 +297,12 @@ impl CoordinatorActor {
                 (and continue through the current latest head if coalesced) so you understand exactly \
                 what changed since the build last reconciled.\n\
              3. Inspect the graduated build graph linked to this proposal: list the proposal's \
-                graduated epics, call `epic_show` for each, and call `epic_tasks` for each epic before \
-                editing anything.\n\
+                graduated epics, call `epic_show` for each, and call `epic_tasks` for EVERY epic — \
+                including closed epics and closed/merged tasks — before editing anything. Build a map of \
+                what scope is already owned or already shipped across ALL graduated epics, not a subset. \
+                Checking only some siblings is how duplicate work gets built: proposal 8now shipped the \
+                same worker-submit / reviewer-approve CI-gate wiring twice because an `[amend]` epic was \
+                created for scope an already-graduated sibling epic already owned.\n\
              4. For each graduated epic, decide one of these outcomes:\n\
                 - **Unchanged / still required:** leave the epic and its tasks alone.\n\
                 - **Open and not yet broken down:** patch the epic in place to match the amended \
@@ -306,8 +310,11 @@ impl CoordinatorActor {
                 - **Partially built / in flight:** add clarifying comments or follow-up instructions to \
                   open tasks as needed, but do **not** re-scope running tasks. Finish-then-next-wave is \
                   the default.\n\
-                - **Newly required work:** create a new `[amend] ...` epic linked to this proposal, then \
-                  let normal epic breakdown produce tasks.\n\
+                - **Newly required work:** ONLY when no existing graduated epic or task — open, in \
+                  flight, OR closed/merged — already covers the scope, create a new `[amend] ...` epic \
+                  linked to this proposal, then let normal epic breakdown produce tasks. If an existing \
+                  graduated epic/task already covers it, patch/extend that epic (or leave it) instead; \
+                  never ship the same scope in two epics.\n\
                - **Obsolete work:** close or unlink only the obsolete epic subtree; do not disturb \
                  unrelated graduated epics. Use the scoped teardown tool \
                  `proposal_reconcile_obsolete_epic(proposal_id=..., epic_id=...)` for obsolete \
@@ -340,6 +347,7 @@ impl CoordinatorActor {
         let ac = serde_json::json!([
             {"criterion": "Latest proposal revision re-read on task open and all drift from last_reconciled_revision_seq through the current latest revision reconciled in one pass without spawning another reconcile task", "met": false},
             {"criterion": "Graduated epics and tasks inspected before acting, with unchanged work left alone, not-yet-broken-down work patched in place, partially built work handled by comments/follow-up without re-scoping running tasks, newly required work represented by linked [amend] epics, and obsolete work retired only through proposal_reconcile_obsolete_epic for its own subtree", "met": false},
+            {"criterion": "Every graduated epic and its tasks (including closed epics and closed/merged tasks) were enumerated across ALL siblings, and no new [amend] epic duplicates scope already covered by an existing graduated epic or task; overlapping scope is handled by patching/extending the existing epic or leaving it, never by creating a duplicate epic", "met": false},
             {"criterion": "Merged-work safety gate applied: any proposal_reconcile_obsolete_epic blocked response for merged work records AI proposal feedback, preserves all state, leaves unrelated epics untouched, stops the reconcile pass, and does not mark reconciled", "met": false},
             {"criterion": "On successful reconciliation, proposal marked reconciled for the latest revision via proposal_ac_set / mark_reconciled only after all required patches, new linked epics, and obsolete teardowns succeeded", "met": false}
         ])
