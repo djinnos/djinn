@@ -101,6 +101,34 @@
         task.id
     }
 
+    /// Create a real spike task row suitable for storing in
+    /// proposals.linked_spike_task_id. The column has an FK to tasks, so tests
+    /// must not use arbitrary UUID strings here.
+    async fn create_spike_task(
+        db: &Database,
+        project_id: &str,
+        short_label: &str,
+    ) -> String {
+        let event_bus = djinn_core::events::EventBus::noop();
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), event_bus);
+        task_repo
+            .create_in_project(
+                project_id,
+                None,
+                &format!("Evidence spike {short_label}"),
+                "Read-only evidence spike fixture",
+                "",
+                "spike",
+                0,
+                "system",
+                Some("open"),
+                None,
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
     /// Set up a proposal with body containing "anchor-text", start
     /// refinement, create a user, project, and Judge task, and return
     /// (server, db, proposal, user_id, judge_task_id).
@@ -648,14 +676,16 @@
             setup_demand_test().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
 
-        // Exhaust the cap with 2 existing demands.
+        // Exhaust the cap with 2 existing demands in the active Judge round so
+        // this test reaches the cap validation path rather than stale-context
+        // validation.
         for i in 1..=2 {
             let link = djinn_db::NeedsEvidenceClaimLink {
                 kind: djinn_db::NeedsEvidenceClaimLink::KIND_MARKER.to_owned(),
                 proposal_id: p.id.clone(),
                 judge_task_id: format!("judge-{i}"),
                 spike_task_id: uuid::Uuid::now_v7().to_string(),
-                round: i,
+                round: 1,
                 against_revision_seq: 1,
             };
             let meta_value = link.to_value();
@@ -669,7 +699,7 @@
                 author_model: None,
                 source_task_id: None,
                 against_revision_seq: 1,
-                round: i,
+                round: 1,
                 body_metadata: Some(&meta_value),
             })
             .await
@@ -709,8 +739,10 @@
             setup_demand_test().await;
         let repo = ProposalRepository::new(db.clone(), EventBus::noop());
 
-        // Simulate an existing open spike by setting linked_spike_task_id.
-        let spike_id = uuid::Uuid::now_v7().to_string();
+        // Simulate an existing open spike by setting linked_spike_task_id to a
+        // real task row (the proposals column has an FK constraint).
+        let project_id = link_proposal_to_project(&db, &repo, &p.id).await;
+        let spike_id = create_spike_task(&db, &project_id, "existing").await;
         repo.set_needs_evidence_spike(&p.id, &spike_id, "existing claim")
             .await
             .unwrap();
