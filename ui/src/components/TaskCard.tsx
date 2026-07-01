@@ -123,20 +123,23 @@ const CI_STATUS_CONFIG: Record<string, { label: string; className: string }> = {
   pending: { label: "CI: pending", className: "text-blue-400 animate-pulse" },
   failing: { label: "CI: failing", className: "text-red-400" },
   unknown: { label: "CI: unknown", className: "text-zinc-400" },
+  awaiting_ci: { label: "CI: awaiting_ci", className: "text-blue-400 animate-pulse" },
 };
 
 function formatCiFailingTitle(ci: CiGateSnapshot): string {
   const checks = ci.blocking_required_check_names;
-  if (checks.length === 0) return "CI: failing";
-  const primary = checks[0];
+  const reason = ci.merge_blocked_reason ?? ci.summary_reason;
+  if (checks.length === 0) return reason ? `CI: failing — ${reason}` : "CI: failing";
+  const primary = ci.primary_blocking_check ?? checks[0];
   const remaining = checks.length > 1 ? ` (+${checks.length - 1} more)` : "";
-  return `CI: failing — ${primary}${remaining}`;
+  return `CI: failing — ${reason ?? primary}${remaining}`;
 }
 
 export function CiBadge({ ci }: { ci?: CiGateSnapshot | null }) {
   if (!ci) return null;
 
-  const config = CI_STATUS_CONFIG[ci.status] ?? CI_STATUS_CONFIG.unknown;
+  const displayState = ci.gate_state ?? ci.status;
+  const config = CI_STATUS_CONFIG[displayState] ?? CI_STATUS_CONFIG.unknown;
   const title = ci.status === "failing" ? formatCiFailingTitle(ci) : undefined;
 
   return (

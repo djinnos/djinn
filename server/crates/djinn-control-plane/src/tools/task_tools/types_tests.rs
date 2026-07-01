@@ -383,3 +383,70 @@ fn passing_ci_has_no_merge_blocked_reason() {
         "passing CI should have no merge_blocked_reason"
     );
 }
+
+#[test]
+fn regression_required_red_ci_blocks_closed_presentation_from_structured_snapshot() {
+    let mut task = task_with_merge_commit_sha(None);
+    task.status = "closed".into();
+    task.ci_status = "failing".into();
+    task.ci_head_sha = Some("failing1234567890".into());
+    task.ci_pr_number = Some(44);
+    task.ci_blocking_required_check_names = r#"["Quality Gate","Server Tests"]"#.into();
+    task.ci_failure_fingerprint = Some("lint+tests@failing1234567890".into());
+    task.ci_first_seen_at = Some("2026-06-01T00:00:00Z".into());
+    task.ci_last_seen_at = Some("2026-06-01T00:10:00Z".into());
+    task.ci_same_signature_count = 3;
+    task.ci_last_remediation_base_sha = Some("base1234567890abc".into());
+
+    let response = task_to_response(&task);
+    let serialized = serde_json::to_value(&response).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(serialized["status"], "closed");
+    assert_eq!(serialized["ci_status"], "failing");
+    assert_eq!(serialized["ci_gate_state"], "failing");
+    assert_eq!(serialized["ci_primary_blocking_check"], "Quality Gate");
+    assert_eq!(
+        serialized["ci_summary_reason"],
+        "Required check failing: Quality Gate"
+    );
+    assert_eq!(
+        serialized["ci_merge_blocked_reason"],
+        "Blocked by failing required check: Quality Gate"
+    );
+    assert_eq!(ci["blocking_required_check_names"][0], "Quality Gate");
+    assert_eq!(ci["blocking_required_check_names"][1], "Server Tests");
+    assert_eq!(ci["failure_fingerprint"], "lint+tests@failing1234567890");
+}
+
+#[test]
+fn regression_advisory_failures_do_not_block_when_required_ci_passes() {
+    let mut task = task_with_merge_commit_sha(None);
+    task.ci_status = "passing".into();
+    task.ci_head_sha = Some("advisory1234567890".into());
+    task.ci_pr_number = Some(46);
+    task.ci_blocking_required_check_names = "[]".into();
+
+    let serialized = serde_json::to_value(task_to_response(&task)).unwrap();
+    let ci = &serialized["ci"];
+
+    assert_eq!(ci["status"], "passing");
+    assert_eq!(ci["gate_state"], "passing");
+    assert_eq!(
+        ci["blocking_required_check_names"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(ci.get("primary_blocking_check").is_none() || ci["primary_blocking_check"].is_null());
+    assert!(ci.get("merge_blocked_reason").is_none() || ci["merge_blocked_reason"].is_null());
+    assert!(
+        serialized.get("ci_primary_blocking_check").is_none()
+            || serialized["ci_primary_blocking_check"].is_null()
+    );
+    assert!(
+        serialized.get("ci_merge_blocked_reason").is_none()
+            || serialized["ci_merge_blocked_reason"].is_null()
+    );
+}

@@ -24,12 +24,20 @@ export type CiStatus = "passing" | "failing" | "pending" | "unknown";
 export interface CiGateSnapshot {
   /** Current required-CI status for the PR head. */
   status: CiStatus;
+  /** Derived display/gate state. `awaiting_ci` appears for pr_draft pending/unknown snapshots. */
+  gate_state?: CiStatus | "awaiting_ci";
   /** Git SHA of the PR head this snapshot describes. */
   head_sha: string;
   /** Names of required checks that are currently failing and blocking merge. */
   blocking_required_check_names: string[];
+  /** Primary blocking required check name, when CI is failing. */
+  primary_blocking_check?: string | null;
   /** Stable fingerprint of the current failure signature. */
   failure_fingerprint?: string | null;
+  /** Human-readable summary derived from the structured CI gate snapshot. */
+  summary_reason?: string | null;
+  /** Structured merge/close blocking reason when required CI is not passing. */
+  merge_blocked_reason?: string | null;
   /** ISO-8601 timestamp when this snapshot was first observed. */
   first_seen_at: string;
   /** ISO-8601 timestamp when this snapshot was last observed/updated. */
