@@ -257,6 +257,153 @@ mod tests {
         }
     }
 
+    /// Regression: prove the live post-session extraction entrypoint reaches
+    /// slot-side credential resolution through the real `agent_to_slot_context`
+    /// / `ExtractionCallbacks` adapter — not through an injected-provider
+    /// helper or a direct unit call to `resolve_provider_credential`.
+    ///
+    /// Sets up minimal DB fixtures (project, task, session with messages and a
+    /// stored credential), calls `run_post_session_extraction` (the real agent
+    /// entrypoint), and asserts that:
+    /// 1. `resolve_model_and_credential` emits a `credential_loading` lifecycle
+    ///    event (proving the model-resolution → credential-loading path ran).
+    /// 2. Structural extraction completed (event_taxonomy stored on session).
+    ///
+    /// The LLM call itself fails gracefully (fake key, no network); the proof
+    /// is that the credential-resolution callback was invoked through the real
+    /// adapter seam, not bypassed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_session_extraction_reaches_credential_resolution_through_real_adapter() {
+        use std::sync::Arc;
+
+        use djinn_core::events::EventBus;
+        use djinn_core::message::{ContentBlock, Message, Role};
+        use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
+
+        // ── 1. DB + fixtures ────────────────────────────────────────────
+        let db = Database::open_in_memory().expect("db");
+        db.ensure_initialized().await.expect("init db");
+        let noop = EventBus::noop();
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+
+        // Create the task_run row so the session's FK constraint is satisfied.
+        let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
+        task_run_repo
+            .create(djinn_db::CreateTaskRunParams {
+                id: &task_run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: None,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task_run");
+
+        let session_repo = SessionRepository::new(db.clone(), noop.clone());
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "anthropic/claude-sonnet-4-20250514",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&task_run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+
+        // ≥2 messages so structural extraction runs
+        let msg_repo = SessionMessageRepository::new(db.clone(), noop.clone());
+        msg_repo
+            .insert_messages_batch(
+                &session.id,
+                &task.id,
+                &[
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::text("I'll help with that.")],
+                        metadata: None,
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::text("Thanks!")],
+                        metadata: None,
+                    },
+                ],
+            )
+            .await
+            .expect("insert messages");
+
+        // Store credential for "anthropic" — the real ExtractionCallbacks
+        // adapter will load this through the agent-side credential loader.
+        let credential_repo = CredentialRepository::new(db.clone(), noop.clone());
+        credential_repo
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-extraction", None)
+            .await
+            .expect("store credential");
+
+        // ── 2. AgentContext with capturing event bus ────────────────────
+        let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = captured_events.clone();
+        let capturing_bus = EventBus::new(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        let mut agent =
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        agent.event_bus = capturing_bus;
+
+        // ── 3. Invoke the real entrypoint ───────────────────────────────
+        super::run_post_session_extraction(task.id.clone(), task_run_id.clone(), agent).await;
+
+        // ── 4. Assert credential_loading lifecycle event was emitted ────
+        // `resolve_model_and_credential` emits this event before calling
+        // `load_provider_credential` → `ctx.callbacks.resolve_provider_credential`.
+        // Its presence proves the real adapter/callback seam was exercised.
+        // Clone the events so we can drop the lock before any `.await`.
+        let events: Vec<_> = captured_events.lock().unwrap().clone();
+        let credential_loading = events.iter().find(|e| {
+            e.entity_type == "lifecycle"
+                && e.action == "step"
+                && e.payload.get("step").and_then(|v| v.as_str()) == Some("credential_loading")
+        });
+        assert!(
+            credential_loading.is_some(),
+            "expected credential_loading lifecycle event from \
+             resolve_model_and_credential through the real \
+             ExtractionCallbacks adapter; events captured: {events:?}"
+        );
+        let detail = &credential_loading.unwrap().payload;
+        assert_eq!(
+            detail
+                .get("detail")
+                .and_then(|d| d.get("provider_id"))
+                .and_then(|v| v.as_str()),
+            Some("anthropic"),
+            "credential_loading event must reference the anthropic provider"
+        );
+
+        // ── 5. Structural extraction completed ─────────────────────────
+        let taxonomy_json = session_repo
+            .get_event_taxonomy_json(&session.id)
+            .await
+            .expect("get taxonomy");
+        assert!(
+            taxonomy_json.is_some(),
+            "structural extraction must store event_taxonomy on the session"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extraction_credential_errors_include_provider_context() {
         let db = Database::open_in_memory().expect("db");
