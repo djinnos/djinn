@@ -6913,6 +6913,93 @@ export namespace ProposalReconcileObsoleteEpicOutputSchema {
 
 }
 export type ProposalReconcileObsoleteEpicOutput = ProposalReconcileObsoleteEpicOutputSchema.ProposalReconcileObsoleteEpicOutput;
+export namespace ProposalRefinementDemandEvidenceInputSchema {
+  export interface ProposalRefinementDemandEvidenceInput {
+  /**
+   * The proposal revision sequence the demand targets.
+   */
+  against_revision_seq: number
+  /**
+   * What the evidence spike should produce to resolve the claim.
+   */
+  expected_findings: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   */
+  insufficient_in_session_research: string
+  /**
+   * Proposal UUID or short_id.
+   */
+  proposal_id: string
+  /**
+   * The feasibility question the evidence spike must answer.
+   */
+  question: string
+  /**
+   * The debate round when the demand is issued (from the Judge's task
+   * description).
+   */
+  round: number
+  /**
+   * What in the spec is unknown or unverified.
+   */
+  spec_unknown_anchor: string
+  /**
+   * The subsystem or module under investigation.
+   */
+  target_subsystem: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementDemandEvidenceInput = ProposalRefinementDemandEvidenceInputSchema.ProposalRefinementDemandEvidenceInput;
+export namespace ProposalRefinementDemandEvidenceOutputSchema {
+  export interface ProposalRefinementDemandEvidenceOutput {
+  /**
+   * True when the demand was accepted and recorded.
+   */
+  accepted: boolean
+  /**
+   * Error message for a rejected demand.
+   */
+  error?: string
+  proposal_id?: string
+  /**
+   * Details for an accepted demand.
+   */
+  result?: (NeedsEvidenceDemandResult | null)
+  [k: string]: any
+  }
+  /**
+   * Accepted demand result for `proposal_refinement_demand_evidence`.
+   * 
+   * Returned inside [`NeedsEvidenceDemandResponse`] when the Judge's demand
+   * passes validation and is recorded. Spike creation is wired in a later
+   * task — until then `spike_task_id` is `None` and the proposal is parked.
+   */
+  export interface NeedsEvidenceDemandResult {
+  /**
+   * The pre-refinement snapshot revision seq the demand targets.
+   */
+  against_revision_seq: number
+  /**
+   * The recorded needs-evidence claim question.
+   */
+  claim: string
+  /**
+   * The debate round when the demand was issued.
+   */
+  round: number
+  /**
+   * The spike task id (UUID) once linked. `None` until spike creation is
+   * wired in a subsequent task.
+   */
+  spike_task_id?: string
+  [k: string]: any
+  }
+
+}
+export type ProposalRefinementDemandEvidenceOutput = ProposalRefinementDemandEvidenceOutputSchema.ProposalRefinementDemandEvidenceOutput;
 export namespace ProposalRefinementDemandRoundInputSchema {
   export interface ProposalRefinementDemandRoundInput {
   /**
@@ -6929,6 +7016,11 @@ export namespace ProposalRefinementDemandRoundInputSchema {
 }
 export type ProposalRefinementDemandRoundInput = ProposalRefinementDemandRoundInputSchema.ProposalRefinementDemandRoundInput;
 export namespace ProposalRefinementDemandRoundOutputSchema {
+  /**
+   * Evidence lifecycle phase for a needs-evidence parking.
+   */
+  export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
+
   export interface ProposalRefinementDemandRoundOutput {
   /**
    * True when the demand was accepted and a new round started.
@@ -6997,9 +7089,44 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   export interface NeedsEvidenceStatus {
   /**
+   * Proposal revision sequence the demand targets.
+   */
+  against_revision_seq?: number
+  /**
    * The named feasibility claim that the Judge identified.
+   * For structured claims this is the `question` field; for legacy
+   * plain-string claims this is the raw string.
    */
   claim: string
+  /**
+   * The Judge task id that issued the demand.
+   */
+  created_by_task_id?: string
+  /**
+   * Current evidence lifecycle phase (awaiting, received, or failed).
+   * Derived from persisted `proposal_revisions` lifecycle events.
+   * `None` when no lifecycle event has been recorded yet.
+   */
+  evidence_phase?: (EvidenceLifecyclePhase | null)
+  /**
+   * For `evidence_failed`, the failure reason (`spike_cancelled`,
+   * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+   * `None` for other phases.
+   */
+  failure_reason?: string
+  /**
+   * The feasibility question the spike must answer (from the structured
+   * claim). `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  question?: string
+  /**
+   * Debate round when the demand was issued.
+   */
+  round?: number
+  /**
+   * What in the spec is unknown/unverified.
+   */
+  spec_unknown_anchor?: string
   /**
    * The spike task short id (human-readable).
    */
@@ -7012,6 +7139,10 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    * The spike task id (UUID).
    */
   spike_task_id: string
+  /**
+   * The subsystem or module under investigation.
+   */
+  target_subsystem?: string
   [k: string]: any
   }
 
@@ -7069,6 +7200,11 @@ export namespace ProposalRefinementStartInputSchema {
 }
 export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.ProposalRefinementStartInput;
 export namespace ProposalRefinementStartOutputSchema {
+  /**
+   * Evidence lifecycle phase for a needs-evidence parking.
+   */
+  export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
+
   export interface ProposalRefinementStartOutput {
   error?: string
   proposal_id?: string
@@ -7133,9 +7269,44 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   export interface NeedsEvidenceStatus {
   /**
+   * Proposal revision sequence the demand targets.
+   */
+  against_revision_seq?: number
+  /**
    * The named feasibility claim that the Judge identified.
+   * For structured claims this is the `question` field; for legacy
+   * plain-string claims this is the raw string.
    */
   claim: string
+  /**
+   * The Judge task id that issued the demand.
+   */
+  created_by_task_id?: string
+  /**
+   * Current evidence lifecycle phase (awaiting, received, or failed).
+   * Derived from persisted `proposal_revisions` lifecycle events.
+   * `None` when no lifecycle event has been recorded yet.
+   */
+  evidence_phase?: (EvidenceLifecyclePhase | null)
+  /**
+   * For `evidence_failed`, the failure reason (`spike_cancelled`,
+   * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+   * `None` for other phases.
+   */
+  failure_reason?: string
+  /**
+   * The feasibility question the spike must answer (from the structured
+   * claim). `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  question?: string
+  /**
+   * Debate round when the demand was issued.
+   */
+  round?: number
+  /**
+   * What in the spec is unknown/unverified.
+   */
+  spec_unknown_anchor?: string
   /**
    * The spike task short id (human-readable).
    */
@@ -7148,6 +7319,10 @@ export namespace ProposalRefinementStartOutputSchema {
    * The spike task id (UUID).
    */
   spike_task_id: string
+  /**
+   * The subsystem or module under investigation.
+   */
+  target_subsystem?: string
   [k: string]: any
   }
 
@@ -7165,6 +7340,11 @@ export namespace ProposalRefinementStatusInputSchema {
 }
 export type ProposalRefinementStatusInput = ProposalRefinementStatusInputSchema.ProposalRefinementStatusInput;
 export namespace ProposalRefinementStatusOutputSchema {
+  /**
+   * Evidence lifecycle phase for a needs-evidence parking.
+   */
+  export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
+
   export interface ProposalRefinementStatusOutput {
   error?: string
   proposal_id?: string
@@ -7226,9 +7406,44 @@ export namespace ProposalRefinementStatusOutputSchema {
    */
   export interface NeedsEvidenceStatus {
   /**
+   * Proposal revision sequence the demand targets.
+   */
+  against_revision_seq?: number
+  /**
    * The named feasibility claim that the Judge identified.
+   * For structured claims this is the `question` field; for legacy
+   * plain-string claims this is the raw string.
    */
   claim: string
+  /**
+   * The Judge task id that issued the demand.
+   */
+  created_by_task_id?: string
+  /**
+   * Current evidence lifecycle phase (awaiting, received, or failed).
+   * Derived from persisted `proposal_revisions` lifecycle events.
+   * `None` when no lifecycle event has been recorded yet.
+   */
+  evidence_phase?: (EvidenceLifecyclePhase | null)
+  /**
+   * For `evidence_failed`, the failure reason (`spike_cancelled`,
+   * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+   * `None` for other phases.
+   */
+  failure_reason?: string
+  /**
+   * The feasibility question the spike must answer (from the structured
+   * claim). `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  question?: string
+  /**
+   * Debate round when the demand was issued.
+   */
+  round?: number
+  /**
+   * What in the spec is unknown/unverified.
+   */
+  spec_unknown_anchor?: string
   /**
    * The spike task short id (human-readable).
    */
@@ -7241,6 +7456,10 @@ export namespace ProposalRefinementStatusOutputSchema {
    * The spike task id (UUID).
    */
   spike_task_id: string
+  /**
+   * The subsystem or module under investigation.
+   */
+  target_subsystem?: string
   [k: string]: any
   }
 
@@ -7303,6 +7522,10 @@ export namespace ProposalShowInputSchema {
 }
 export type ProposalShowInput = ProposalShowInputSchema.ProposalShowInput;
 export namespace ProposalShowOutputSchema {
+  /**
+   * Evidence lifecycle phase for a needs-evidence parking.
+   */
+  export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
 
   export interface ProposalShowOutput {
@@ -7507,9 +7730,44 @@ export namespace ProposalShowOutputSchema {
    */
   export interface NeedsEvidenceStatus {
   /**
+   * Proposal revision sequence the demand targets.
+   */
+  against_revision_seq?: number
+  /**
    * The named feasibility claim that the Judge identified.
+   * For structured claims this is the `question` field; for legacy
+   * plain-string claims this is the raw string.
    */
   claim: string
+  /**
+   * The Judge task id that issued the demand.
+   */
+  created_by_task_id?: string
+  /**
+   * Current evidence lifecycle phase (awaiting, received, or failed).
+   * Derived from persisted `proposal_revisions` lifecycle events.
+   * `None` when no lifecycle event has been recorded yet.
+   */
+  evidence_phase?: (EvidenceLifecyclePhase | null)
+  /**
+   * For `evidence_failed`, the failure reason (`spike_cancelled`,
+   * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+   * `None` for other phases.
+   */
+  failure_reason?: string
+  /**
+   * The feasibility question the spike must answer (from the structured
+   * claim). `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  question?: string
+  /**
+   * Debate round when the demand was issued.
+   */
+  round?: number
+  /**
+   * What in the spec is unknown/unverified.
+   */
+  spec_unknown_anchor?: string
   /**
    * The spike task short id (human-readable).
    */
@@ -7522,6 +7780,10 @@ export namespace ProposalShowOutputSchema {
    * The spike task id (UUID).
    */
   spike_task_id: string
+  /**
+   * The subsystem or module under investigation.
+   */
+  target_subsystem?: string
   [k: string]: any
   }
   /**
@@ -9219,6 +9481,32 @@ export namespace TaskListOutputSchema {
    * Specialist role name assigned to this task, if any.
    */
   agent_type?: string
+  /**
+   * Current-head required-CI gate snapshot for this task's PR, if any.
+   */
+  ci?: (CiGateSnapshot | null)
+  /**
+   * Top-level alias for `ci.gate_state`, including `awaiting_ci` for
+   * `pr_draft` + pending/unknown.
+   */
+  ci_gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  /**
+   * Structured merge/close blocking reason when current-head CI is not passing.
+   */
+  ci_merge_blocked_reason?: string
+  /**
+   * Primary blocking required check/job when required CI is failing.
+   */
+  ci_primary_blocking_check?: string
+  /**
+   * Top-level alias for `ci.status` (`passing`, `failing`, `pending`, or
+   * `unknown`) sourced from the durable current-head CI snapshot.
+   */
+  ci_status: ("passing" | "failing" | "pending" | "unknown")
+  /**
+   * Human-readable structured CI summary reason.
+   */
+  ci_summary_reason?: string
   close_reason?: string
   closed_at?: string
   continuation_count: number
@@ -9267,6 +9555,99 @@ export namespace TaskListOutputSchema {
   export interface AcceptanceCriterionStatus {
   criterion: string
   met?: boolean
+  [k: string]: any
+  }
+  /**
+   * Snapshot of the current-head required-CI gate for a task's PR.
+   * 
+   * Populated from the repository-backed CI snapshot (`task_pr_ci_snapshots`).
+   * `None` when no snapshot exists yet (e.g. task has no PR or has not been
+   * polled). Downstream lifecycle/API code reads these fields directly instead
+   * of scraping activity prose.
+   * 
+   * Derived fields (`gate_state`, `primary_blocking_check`, `summary_reason`,
+   * `merge_blocked_reason`) are computed from the raw CI status combined with
+   * the task's lifecycle status.  They expose human/agent-friendly gate
+   * information without requiring consumers to re-derive policy.
+   */
+  export interface CiGateSnapshot {
+  /**
+   * Names of required checks that are currently failing and blocking merge.
+   */
+  blocking_required_check_names: string[]
+  /**
+   * Stable fingerprint of the current failure signature (e.g. sorted
+   * failing check names + head SHA). `None` when not failing.
+   */
+  failure_fingerprint?: string
+  /**
+   * ISO-8601 timestamp when this snapshot was first observed.
+   */
+  first_seen_at: string
+  /**
+   * Derived CI gate state combining raw CI status with task lifecycle.
+   * 
+   * Maps to the upstream low-risk design contract:
+   * - `passing` / `failing` / `pending` / `unknown` mirror `CiStatus`
+   *   when the task is not in `pr_draft`.
+   * - `awaiting_ci` when the task is in `pr_draft` *and* the raw CI
+   *   status is `pending` or `unknown` (CI has not completed yet).
+   * 
+   * UI consumers render this value directly as the badge text.
+   */
+  gate_state: (("passing" | "failing" | "pending" | "unknown") | "awaiting_ci")
+  /**
+   * Git SHA of the PR head this snapshot describes.
+   */
+  head_sha: string
+  /**
+   * Base SHA of the last remediation attempt for this failing signature.
+   * `None` when no remediation has been attempted yet.
+   */
+  last_remediation_base_sha?: string
+  /**
+   * ISO-8601 timestamp when this snapshot was last observed/updated.
+   */
+  last_seen_at: string
+  /**
+   * Reason merge/close is blocked by CI, if applicable.
+   * 
+   * `Some(_)` when the raw CI status is not `passing` (i.e. failing,
+   * pending, or unknown).  `None` when CI is passing or when no
+   * snapshot exists.
+   */
+  merge_blocked_reason?: string
+  /**
+   * GitHub PR number the CI snapshot belongs to, when available.
+   */
+  pr_number?: number
+  /**
+   * Primary blocking required check name, when CI is failing.
+   * 
+   * `Some(_)` when `status == failing` and at least one required check
+   * failed.  This is the first element of `blocking_required_check_names`
+   * (sorted alphabetically) for compact display.  `None` otherwise.
+   */
+  primary_blocking_check?: string
+  /**
+   * How many consecutive observations carried the same failure fingerprint
+   * for the same head SHA.
+   */
+  same_signature_count: number
+  /**
+   * Current required-CI status for the PR head.
+   */
+  status: ("passing" | "failing" | "pending" | "unknown")
+  /**
+   * Human-readable summary of the current CI gate state.
+   * 
+   * Derived from raw CI status and blocking check names.  Examples:
+   * - `"All required checks passed"` (passing)
+   * - `"Required check failing: clippy"` (failing with one check)
+   * - `"Required checks pending"` (pending)
+   * - `"CI state unknown"` (unknown)
+   */
+  summary_reason: string
   [k: string]: any
   }
 
@@ -9771,7 +10152,7 @@ export namespace UserSettingsSetOutputSchema {
 }
 export type UserSettingsSetOutput = UserSettingsSetOutputSchema.UserSettingsSetOutput;
 
-export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
+export type McpToolName = "agent_create" | "agent_list" | "agent_metrics" | "agent_show" | "agent_update" | "board_health" | "board_reconcile" | "code_graph" | "credential_delete" | "credential_list" | "credential_set" | "dispatch_pause" | "dispatch_pause_status" | "dispatch_resume" | "doctor_fix" | "doctor_list_findings" | "doctor_run" | "epic_add_read_source" | "epic_blocked_list" | "epic_blockers_list" | "epic_close" | "epic_count" | "epic_create" | "epic_delete" | "epic_list" | "epic_list_read_sources" | "epic_remove_read_source" | "epic_reopen" | "epic_show" | "epic_tasks" | "epic_update" | "execution_kill_task" | "get_block_catalog" | "get_project_devcontainer_status" | "get_project_stack" | "github_app_install_url" | "github_app_installations" | "github_fetch_file" | "github_list_repos" | "github_search" | "image_create" | "image_delete" | "image_list" | "image_set_services" | "image_update" | "memory_associations" | "memory_broken_links" | "memory_build_context" | "memory_catalog" | "memory_confirm" | "memory_delete" | "memory_diff" | "memory_edit" | "memory_extracted_audit" | "memory_graph" | "memory_health" | "memory_history" | "memory_list" | "memory_move" | "memory_orphans" | "memory_read" | "memory_recent" | "memory_repair_embeddings" | "memory_run_enrichment" | "memory_search" | "memory_task_refs" | "memory_write" | "model_health" | "org_policy_get" | "org_policy_set" | "pr_review_context" | "project_add_from_github" | "project_branches" | "project_config_get" | "project_config_set" | "project_environment_config_get" | "project_environment_config_reset" | "project_environment_config_set" | "project_graph_exclusions_get" | "project_graph_exclusions_set" | "project_list" | "project_remove" | "project_set_image" | "proposal_add_target" | "proposal_block_patch" | "proposal_blocks" | "proposal_create" | "proposal_debate_append" | "proposal_debate_list" | "proposal_debate_reopen" | "proposal_debate_resolve" | "proposal_delete" | "proposal_export" | "proposal_feedback_add" | "proposal_feedback_resolve" | "proposal_graduate" | "proposal_import" | "proposal_list" | "proposal_reconcile_obsolete_epic" | "proposal_refinement_demand_evidence" | "proposal_refinement_demand_round" | "proposal_refinement_resolve" | "proposal_refinement_start" | "proposal_refinement_status" | "proposal_remove_target" | "proposal_show" | "proposal_signoff" | "proposal_signoff_clear" | "proposal_stop_build" | "proposal_update" | "proposal_verdict_override" | "provider_catalog" | "provider_connected" | "provider_model_lookup" | "provider_models" | "provider_models_connected" | "provider_oauth_start" | "provider_remove" | "provider_validate" | "retrigger_image_build" | "service_preset_list" | "session_active" | "session_for_task" | "session_list" | "session_messages" | "session_show" | "settings_get" | "settings_reset" | "settings_set" | "system_ping" | "task_activity_list" | "task_blocked_list" | "task_blockers_list" | "task_claim" | "task_comment_add" | "task_count" | "task_create" | "task_list" | "task_memory_refs" | "task_ready" | "task_show" | "task_timeline" | "task_transition" | "task_update" | "toolchain_versions" | "user_settings_get" | "user_settings_set";
 
 export interface McpToolMap {
   "agent_create": { input: AgentCreateInput; output: AgentCreateOutput };
@@ -9873,6 +10254,7 @@ export interface McpToolMap {
   "proposal_import": { input: ProposalImportInput; output: ProposalImportOutput };
   "proposal_list": { input: ProposalListInput; output: ProposalListOutput };
   "proposal_reconcile_obsolete_epic": { input: ProposalReconcileObsoleteEpicInput; output: ProposalReconcileObsoleteEpicOutput };
+  "proposal_refinement_demand_evidence": { input: ProposalRefinementDemandEvidenceInput; output: ProposalRefinementDemandEvidenceOutput };
   "proposal_refinement_demand_round": { input: ProposalRefinementDemandRoundInput; output: ProposalRefinementDemandRoundOutput };
   "proposal_refinement_resolve": { input: ProposalRefinementResolveInput; output: ProposalRefinementResolveOutput };
   "proposal_refinement_start": { input: ProposalRefinementStartInput; output: ProposalRefinementStartOutput };

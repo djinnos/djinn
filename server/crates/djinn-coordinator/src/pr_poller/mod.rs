@@ -71,6 +71,7 @@ const SAME_CI_SIGNATURE_EVENT: &str = "same_ci_signature";
 /// and an unchanged head SHA before the review-stuck trigger fires. Prevents
 /// escalating a PR that is mid-CI or has a pending check-run.
 const REVIEW_STUCK_WINDOW_MINUTES: i64 = 10;
+mod ci_failure_analysis;
 mod ci_helpers;
 mod conversation_resolution;
 mod installation;
@@ -87,6 +88,10 @@ mod tests;
 #[cfg(test)]
 mod pr_cleanup_tests;
 
+use crate::ci_preflight_gate::{
+    CiPreflightGateKind, CiPreflightGateVerdict, latest_task_workdir,
+    run_ci_reproduction_preflight_gate,
+};
 use crate::github_error_render::render_github_write_error;
 use ci_helpers::{
     advisory_checks_section, blocking_failed_checks, build_ci_failure_sections, is_already_queued,
@@ -106,14 +111,14 @@ pub use pr_review_handlers::parse_pr_url;
 #[cfg(test)]
 pub(crate) use pr_watcher::{PrDraftCiAction, decide_pr_draft_ci_action};
 
-use ci_helpers::compute_ci_failure_fingerprint;
+use ci_failure_analysis::compute_ci_failure_fingerprint;
+#[cfg(test)]
+use ci_failure_analysis::{
+    count_consecutive_identical, detect_scope_inversion, extract_crate_name, extract_crate_names,
+};
 #[cfg(test)]
 use ci_helpers::is_advisory_check_name;
 use ci_helpers::{CiMergeGateVerdict, ci_merge_gate_verdict};
-#[cfg(test)]
-use ci_helpers::{
-    count_consecutive_identical, detect_scope_inversion, extract_crate_name, extract_crate_names,
-};
 #[cfg(test)]
 use pr_commands::{dequeue_reason_is_failure, dequeue_requires_rework};
 #[cfg(test)]
