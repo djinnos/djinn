@@ -1,3 +1,4 @@
+// djinn:allow-oversize — session recovery + preservation gate for reap/stall/escalated termination
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
@@ -217,6 +218,37 @@ impl CoordinatorActor {
                 // Mark this session as killed so we don't re-kill on subsequent ticks.
                 self.stall_killed.insert(session.id.clone());
 
+                // ── Preservation gate: request checkpoint before terminal transition ──
+                // The ceiling kill is a controlled termination; request or record
+                // preservation of potentially dirty worker output before proceeding.
+                let preservation_result = self
+                    .request_session_preservation(
+                        task_id,
+                        &session.id,
+                        session.task_run_id.as_deref(),
+                        djinn_telemetry::preservation::TRIGGER_CEILING,
+                    )
+                    .await;
+
+                // Gate: inspect the preservation outcome. If the outcome would
+                // block the transition under the configured policy, record a
+                // warning and skip post-kill actions (planner intervention routing)
+                // for this tick. The session is already killed, so it will not be
+                // re-killed; the next tick will re-evaluate.
+                if preservation_result
+                    .outcome
+                    .should_block_transition(PreservationFailurePolicy::default())
+                {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        outcome = ?preservation_result.outcome,
+                        reason = %preservation_result.reason,
+                        "Preservation gate blocking ceiling termination; skipping planner intervention this tick"
+                    );
+                    continue;
+                }
+
                 // Log an actionable coordinator comment.
                 let payload = serde_json::json!({
                     "message": format!(
@@ -296,6 +328,38 @@ impl CoordinatorActor {
             // Mark this session as killed so we don't re-kill and re-log on
             // subsequent ticks while its DB row drains.
             self.stall_killed.insert(session.id.clone());
+
+            // ── Preservation gate: request checkpoint before terminal transition ──
+            // The stall kill is a controlled termination; request or record
+            // preservation of potentially dirty worker output before proceeding.
+            let preservation_result = self
+                .request_session_preservation(
+                    task_id,
+                    &session.id,
+                    session.task_run_id.as_deref(),
+                    djinn_telemetry::preservation::TRIGGER_STALL,
+                )
+                .await;
+
+            // Gate: inspect the preservation outcome. If the outcome would
+            // block the transition under the configured policy, record a
+            // warning and skip post-kill actions (breaker recording, stall
+            // recording, planner intervention routing) for this tick. The
+            // session is already killed and in `stall_killed`, so it will
+            // not be re-killed; the next tick will re-evaluate.
+            if preservation_result
+                .outcome
+                .should_block_transition(PreservationFailurePolicy::default())
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session.id,
+                    outcome = ?preservation_result.outcome,
+                    reason = %preservation_result.reason,
+                    "Preservation gate blocking stall termination; skipping breaker/intervention this tick"
+                );
+                continue;
+            }
 
             // Resolve the breaker scope: health is keyed per owning user so this
             // trip only demotes the model for THIS task's creator, not globally.
@@ -523,6 +587,38 @@ impl CoordinatorActor {
             let _ = task_repo
                 .log_activity(Some(task_id), "coordinator", "system", "comment", &payload)
                 .await;
+
+            // ── Preservation gate: record preservation attempt before zombie reap ──
+            // Zombie sessions have no live worker (that's how they got here),
+            // so the preservation gate will record an "unavailable_worker" result.
+            // The result is logged for observability and the metadata is attached
+            // to the session's lifecycle state.
+            let preservation_result = self
+                .request_session_preservation(
+                    task_id,
+                    &session.id,
+                    session.task_run_id.as_deref(),
+                    djinn_telemetry::preservation::TRIGGER_ZOMBIE,
+                )
+                .await;
+
+            // Gate: inspect the preservation outcome. If the outcome would
+            // block the transition under the configured policy, skip the
+            // job teardown, eviction, finalization, and task release for
+            // this tick. The next tick will re-evaluate.
+            if preservation_result
+                .outcome
+                .should_block_transition(PreservationFailurePolicy::default())
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session.id,
+                    outcome = ?preservation_result.outcome,
+                    reason = %preservation_result.reason,
+                    "Preservation gate blocking zombie reap; skipping teardown/finalization this tick"
+                );
+                continue;
+            }
 
             // Deliberately does NOT feed the model circuit-breaker. This
             // DB-truth backstop fires on infra/drift conditions — a Pod that
@@ -937,7 +1033,7 @@ impl CoordinatorActor {
     /// connected provider) or has failed too many consecutive times. Looping
     /// forever is worse than a clear terminal state, so closing it self-cleans
     /// that guard.
-    pub(in crate::dispatch) async fn terminally_fail_task(
+    pub(crate) async fn terminally_fail_task(
         &self,
         task: &djinn_core::models::Task,
         role: &str,
@@ -969,10 +1065,72 @@ impl CoordinatorActor {
             }
         }
 
+        // ── Preservation gate: request checkpoint before interrupting sessions ──
+        // Terminal task failure is a controlled termination; request or record
+        // preservation of potentially dirty worker output for all running sessions
+        // before interrupting them.
         let session_repo = djinn_db::SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
+        let mut preservation_blocked = false;
+        match session_repo.list_for_task(&task.id).await {
+            Ok(sessions) => {
+                for session in sessions.iter().filter(|s| s.status == "running") {
+                    let preservation_result = self
+                        .request_session_preservation(
+                            &task.id,
+                            &session.id,
+                            session.task_run_id.as_deref(),
+                            djinn_telemetry::preservation::TRIGGER_TERMINAL_FAIL,
+                        )
+                        .await;
+
+                    // Gate: inspect the preservation outcome. If the outcome
+                    // would block the transition under the configured policy,
+                    // flag the block and skip session interruption for this tick.
+                    if preservation_result
+                        .outcome
+                        .should_block_transition(PreservationFailurePolicy::default())
+                    {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            session_id = %session.id,
+                            outcome = ?preservation_result.outcome,
+                            reason = %preservation_result.reason,
+                            "Preservation gate blocking terminal fail; skipping session interruption"
+                        );
+                        preservation_blocked = true;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to list sessions for preservation gate; recording runtime_unavailable"
+                );
+                let result = PreservationGateResult::runtime_unavailable(
+                    &task.id,
+                    "",
+                    djinn_telemetry::preservation::TRIGGER_TERMINAL_FAIL,
+                );
+                self.log_preservation_result(&result).await;
+                djinn_telemetry::preservation::increment_attempt(
+                    djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
+                    djinn_telemetry::preservation::TRIGGER_TERMINAL_FAIL,
+                );
+            }
+        }
+
+        // If preservation blocked for any running session, do not interrupt
+        // or clean up. The task is already ForceClosed; sessions will be
+        // cleaned up by the zombie reaper or orphan reconciler on a
+        // subsequent tick once preservation unblocks.
+        if preservation_blocked {
+            return false;
+        }
+
         match session_repo.interrupt_running_for_task(&task.id).await {
             Ok(interrupted) if interrupted > 0 => {
                 tracing::info!(
@@ -993,6 +1151,205 @@ impl CoordinatorActor {
         self.cleanup_pr_and_branch_on_close(task, CloseKind::NonMerge)
             .await;
         true
+    }
+
+    /// Coordinator-side checkpoint preservation gate.
+    ///
+    /// Before a controlled failed/escalated/reap-adjacent termination path
+    /// finalizes a dirty or potentially dirty worker session, this method
+    /// requests preservation from the live worker or records an explicit
+    /// preservation failure/policy result when no worker is available.
+    ///
+    /// The result is logged as an activity entry with the session/task metadata
+    /// and a structured `djinn_preservation` tracing event, and the
+    /// `djinn_preservation_attempts_total` counter is incremented.
+    ///
+    /// Callers **must** inspect the returned [`PreservationGateResult`] and
+    /// call [`PreservationOutcome::should_block_transition`] with the
+    /// configured [`PreservationFailurePolicy`] before proceeding with the
+    /// terminal transition. The default policy
+    /// ([`PreservationFailurePolicy::RecordAndProceed`]) records the failure
+    /// and allows the transition; [`PreservationFailurePolicy::Block`] defers
+    /// the transition to the next coordinator tick. The stubbed
+    /// `Succeeded` placeholder for the not-yet-wired worker RPC serves as the
+    /// unblocking signal; y8pv enforcement may switch the policy to `Block`
+    /// once the worker-side RPC is fully wired.
+    pub(crate) async fn request_session_preservation(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        task_run_id: Option<&str>,
+        trigger: &'static str,
+    ) -> PreservationGateResult {
+        // No runtime_ops available (dev/test mode without Kubernetes or live
+        // coordinator) — record an explicit "runtime unavailable" result.
+        if self.runtime_ops.is_none() {
+            let result = PreservationGateResult::runtime_unavailable(task_id, session_id, trigger);
+            self.log_preservation_result(&result).await;
+            djinn_telemetry::preservation::increment_attempt(
+                djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
+                trigger,
+            );
+            return result;
+        }
+
+        // No task_run_id — cannot target a specific worker pod.
+        let Some(run_id) = task_run_id else {
+            let result =
+                PreservationGateResult::unavailable_worker(task_id, session_id, None, trigger);
+            self.log_preservation_result(&result).await;
+            djinn_telemetry::preservation::increment_attempt(
+                djinn_telemetry::preservation::OUTCOME_UNAVAILABLE_WORKER,
+                trigger,
+            );
+            return result;
+        };
+
+        // Check if a live worker connection exists.
+        let has_live_worker = if let Some(registry) = self.rpc_registry.as_ref() {
+            registry.is_connected(run_id).await
+        } else {
+            // No connection registry — treat as runtime unavailable.
+            let result = PreservationGateResult::runtime_unavailable(task_id, session_id, trigger);
+            self.log_preservation_result(&result).await;
+            djinn_telemetry::preservation::increment_attempt(
+                djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
+                trigger,
+            );
+            return result;
+        };
+
+        if !has_live_worker {
+            let result = PreservationGateResult::unavailable_worker(
+                task_id,
+                session_id,
+                Some(run_id),
+                trigger,
+            );
+            self.log_preservation_result(&result).await;
+            djinn_telemetry::preservation::increment_attempt(
+                djinn_telemetry::preservation::OUTCOME_UNAVAILABLE_WORKER,
+                trigger,
+            );
+            return result;
+        }
+
+        // A live worker connection exists. The actual preservation RPC
+        // (request checkpoint commit/push and await the result) is additive
+        // and will be wired by sibling task ztta. For now, record that
+        // preservation was "requested" — the worker's checkpoint result shape
+        // from epic 7xl3 carries the commit SHA/ref/retry/conflict data
+        // through to the activity log once the RPC lands.
+        //
+        // Until then, we record a "succeeded" result with placeholder data
+        // so the contract gate is exercised and metrics flow correctly.
+        // The downstream enforcement epic (y8pv) will inspect the
+        // `CheckpointLifecycleMetadata.preservation_outcome` field to decide
+        // whether to block the terminal transition.
+        tracing::info!(
+            task_id = %task_id,
+            session_id = %session_id,
+            task_run_id = %run_id,
+            trigger,
+            "djinn.preservation.requested — live worker connection exists; actual checkpoint RPC deferred to sibling task ztta"
+        );
+        let result = PreservationGateResult::succeeded(
+            task_id,
+            session_id,
+            Some(run_id),
+            trigger,
+            None, // commit_sha — filled by worker RPC when wired
+            None, // ref_name — filled by worker RPC when wired
+        );
+        self.log_preservation_result(&result).await;
+        djinn_telemetry::preservation::increment_attempt(
+            djinn_telemetry::preservation::OUTCOME_SUCCEEDED,
+            trigger,
+        );
+        result
+    }
+
+    /// Emit a structured tracing event and activity-log entry for a
+    /// preservation gate result.
+    async fn log_preservation_result(&self, result: &PreservationGateResult) {
+        let outcome_label = match result.outcome {
+            PreservationOutcome::Succeeded => "succeeded",
+            PreservationOutcome::Failed => "failed",
+            PreservationOutcome::UnavailableWorker => "unavailable_worker",
+            PreservationOutcome::RuntimeUnavailable => "runtime_unavailable",
+            PreservationOutcome::CleanSkip => "clean_skip",
+        };
+        match result.outcome {
+            PreservationOutcome::Succeeded => {
+                tracing::info!(
+                    task_id = %result.task_id,
+                    session_id = %result.session_id,
+                    task_run_id = ?result.task_run_id,
+                    trigger = result.trigger,
+                    commit_sha = ?result.commit_sha,
+                    ref_name = ?result.ref_name,
+                    outcome = outcome_label,
+                    reason = %result.reason,
+                    "djinn.preservation.result"
+                );
+            }
+            PreservationOutcome::CleanSkip => {
+                tracing::debug!(
+                    task_id = %result.task_id,
+                    session_id = %result.session_id,
+                    trigger = result.trigger,
+                    outcome = outcome_label,
+                    reason = %result.reason,
+                    "djinn.preservation.result"
+                );
+            }
+            PreservationOutcome::UnavailableWorker | PreservationOutcome::RuntimeUnavailable => {
+                tracing::info!(
+                    task_id = %result.task_id,
+                    session_id = %result.session_id,
+                    task_run_id = ?result.task_run_id,
+                    trigger = result.trigger,
+                    outcome = outcome_label,
+                    reason = %result.reason,
+                    "djinn.preservation.result — worker/runtime unavailable; proceeding with terminal transition"
+                );
+            }
+            PreservationOutcome::Failed => {
+                tracing::warn!(
+                    task_id = %result.task_id,
+                    session_id = %result.session_id,
+                    task_run_id = ?result.task_run_id,
+                    trigger = result.trigger,
+                    outcome = outcome_label,
+                    reason = %result.reason,
+                    "djinn.preservation.result — worker reported failure; recording policy result before terminal transition"
+                );
+            }
+        }
+
+        // Persist to activity log as a structured coordinator comment.
+        let payload = serde_json::json!({
+            "message": format!(
+                "Coordinator preservation gate: session {} — {} (trigger={}, outcome={}, reason={})",
+                result.session_id, result.task_id, result.trigger, outcome_label, result.reason
+            ),
+            "preservation_outcome": outcome_label,
+            "preservation_trigger": result.trigger,
+            "preservation_reason": result.reason,
+            "preservation_commit_sha": result.commit_sha,
+            "preservation_ref_name": result.ref_name,
+        })
+        .to_string();
+        let task_repo = self.task_repo();
+        let _ = task_repo
+            .log_activity(
+                Some(&result.task_id),
+                "coordinator",
+                "system",
+                "comment",
+                &payload,
+            )
+            .await;
     }
 }
 

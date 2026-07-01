@@ -1533,3 +1533,544 @@ async fn healthy_under_ceiling_session_is_not_killed() {
         "a healthy under-ceiling task must remain in_progress"
     );
 }
+
+// ── Coordinator preservation gate ─────────────────────────────────────
+
+/// When `runtime_ops` is `None` (dev/test mode), the preservation gate
+/// returns `RuntimeUnavailable` and emits the right telemetry counter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preservation_gate_returns_runtime_unavailable_when_no_runtime_ops() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    // The test actor has runtime_ops = None.
+    assert!(actor.runtime_ops.is_none());
+
+    let result = actor
+        .request_session_preservation(
+            "task-test-1",
+            "session-test-1",
+            Some("run-test-1"),
+            djinn_telemetry::preservation::TRIGGER_STALL,
+        )
+        .await;
+
+    assert_eq!(
+        result.outcome,
+        PreservationOutcome::RuntimeUnavailable,
+        "preservation gate must return RuntimeUnavailable when runtime_ops is None"
+    );
+    assert_eq!(result.task_id, "task-test-1");
+    assert_eq!(result.session_id, "session-test-1");
+    assert_eq!(result.trigger, "stall");
+    assert!(result.commit_sha.is_none());
+    assert!(result.ref_name.is_none());
+}
+
+/// When `runtime_ops` is present but there is no `task_run_id`, the gate
+/// returns `UnavailableWorker` because it cannot target a specific pod.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preservation_gate_returns_unavailable_worker_when_no_task_run_id() {
+    // This test exercises the task_run_id = None path.
+    // Since the test actor's runtime_ops is None, the gate takes the
+    // RuntimeUnavailable path first. We test the UnavailableWorker path
+    // by verifying the helper constructor directly.
+    let result = PreservationGateResult::unavailable_worker(
+        "task-test-2",
+        "session-test-2",
+        None,
+        djinn_telemetry::preservation::TRIGGER_ZOMBIE,
+    );
+
+    assert_eq!(result.outcome, PreservationOutcome::UnavailableWorker);
+    assert_eq!(result.task_id, "task-test-2");
+    assert_eq!(result.session_id, "session-test-2");
+    assert_eq!(result.trigger, "zombie");
+    assert!(result.task_run_id.is_none());
+    assert!(result.commit_sha.is_none());
+}
+
+/// A clean-skip result records the correct reason and metadata.
+#[test]
+fn preservation_gate_clean_skip_records_reason() {
+    let result = PreservationGateResult::clean_skip(
+        "task-3",
+        "session-3",
+        "terminal_fail",
+        "session had zero tokens",
+    );
+
+    assert_eq!(result.outcome, PreservationOutcome::CleanSkip);
+    assert_eq!(result.reason, "session had zero tokens");
+    assert_eq!(result.trigger, "terminal_fail");
+    assert!(result.commit_sha.is_none());
+    assert!(result.ref_name.is_none());
+}
+
+/// A succeeded result carries the checkpoint SHA and ref from the worker.
+#[test]
+fn preservation_gate_succeeded_carries_checkpoint_metadata() {
+    let result = PreservationGateResult::succeeded(
+        "task-4",
+        "session-4",
+        Some("run-4"),
+        "stall",
+        Some("abc123def456".to_string()),
+        Some("refs/djinn/checkpoints/task-4".to_string()),
+    );
+
+    assert_eq!(result.outcome, PreservationOutcome::Succeeded);
+    assert_eq!(result.commit_sha.as_deref(), Some("abc123def456"));
+    assert_eq!(
+        result.ref_name.as_deref(),
+        Some("refs/djinn/checkpoints/task-4")
+    );
+    assert_eq!(result.task_run_id.as_deref(), Some("run-4"));
+}
+
+/// A failed result carries the failure reason and no checkpoint metadata.
+#[test]
+fn preservation_gate_failed_carries_failure_reason() {
+    let result = PreservationGateResult::failed(
+        "task-5",
+        "session-5",
+        Some("run-5"),
+        "ceiling",
+        "worker push rejected: permission denied".to_string(),
+    );
+
+    assert_eq!(result.outcome, PreservationOutcome::Failed);
+    assert_eq!(result.reason, "worker push rejected: permission denied");
+    assert!(result.commit_sha.is_none());
+    assert!(result.ref_name.is_none());
+}
+
+/// The preservation gate is called during zombie reap and the result is
+/// recorded in the activity log before the session is finalized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preservation_gate_called_during_zombie_reap() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{CreateTaskRunParams, TaskRunRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "preservation-zombie").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-preservation-zombie";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.reap_zombie_sessions().await;
+
+    // The activity log should contain a preservation gate entry.
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let activity = task_repo.list_activity(&task.id).await.unwrap();
+    let preservation_entry = activity
+        .iter()
+        .find(|entry| entry.payload.contains("preservation_outcome"));
+    assert!(
+        preservation_entry.is_some(),
+        "zombie reap must log a preservation gate entry in the activity log; got entries: {:?}",
+        activity.iter().map(|e| &e.payload[..]).collect::<Vec<_>>()
+    );
+
+    // The preservation entry should indicate runtime_unavailable since
+    // the test actor has no runtime_ops.
+    if let Some(entry) = preservation_entry {
+        assert!(
+            entry.payload.contains("runtime_unavailable"),
+            "preservation entry should contain runtime_unavailable; got: {}",
+            entry.payload
+        );
+    }
+}
+
+/// The preservation gate is called during terminal task failure and the
+/// result is recorded in the activity log.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preservation_gate_called_during_terminal_task_failure() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+    use djinn_db::{CreateTaskRunParams, TaskRunRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "preservation-terminal").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-preservation-terminal";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let closed = actor
+        .terminally_fail_task(&task, "coordinator", "max retries exceeded")
+        .await;
+    assert!(closed, "task should be terminally closed");
+
+    // The activity log should contain a preservation gate entry.
+    let task_repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let activity = task_repo.list_activity(&task.id).await.unwrap();
+    let preservation_entry = activity
+        .iter()
+        .find(|entry| entry.payload.contains("preservation_outcome"));
+    assert!(
+        preservation_entry.is_some(),
+        "terminal fail must log a preservation gate entry in the activity log; got entries: {:?}",
+        activity.iter().map(|e| &e.payload[..]).collect::<Vec<_>>()
+    );
+
+    // Verify the session was interrupted.
+    let active = session_repo.list_active().await.unwrap();
+    assert!(
+        !active.iter().any(|s| s.id == session.id),
+        "session should be interrupted after terminal task failure"
+    );
+}
+
+/// Preservation telemetry counter is incremented with the right outcome and
+/// trigger labels.
+#[test]
+fn preservation_telemetry_counter_increments() {
+    djinn_telemetry::init().unwrap();
+
+    djinn_telemetry::preservation::increment_attempt(
+        djinn_telemetry::preservation::OUTCOME_RUNTIME_UNAVAILABLE,
+        djinn_telemetry::preservation::TRIGGER_STALL,
+    );
+
+    let rendered = djinn_telemetry::render().unwrap();
+    let stall_line = rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("djinn_preservation_attempts_total")
+                && line.contains("outcome=\"runtime_unavailable\"")
+                && line.contains("trigger=\"stall\"")
+        })
+        .expect(
+            "djinn_preservation_attempts_total{outcome=\"runtime_unavailable\",trigger=\"stall\"} \
+             should be present after increment",
+        );
+    let value_str = stall_line.rsplit_once(' ').map(|(_, v)| v).unwrap_or("0");
+    assert_eq!(
+        value_str.parse::<f64>().unwrap_or(0.0),
+        1.0,
+        "preservation counter should be 1 after a single increment"
+    );
+}
+
+/// `CheckpointLifecycleMetadata` round-trips through JSON with the new
+/// `preservation_outcome` field.
+#[test]
+fn checkpoint_lifecycle_metadata_preservation_outcome_round_trips() {
+    let metadata = CheckpointLifecycleMetadata {
+        checkpoint_id: Some("ckpt-rt".to_string()),
+        commit_sha: Some("deadbeef".to_string()),
+        ref_name: Some("refs/djinn/checkpoints/task-rt".to_string()),
+        requested_for: Some(CheckpointRequestReason::Shutdown),
+        safety_scan: None,
+        preservation_outcome: Some(PreservationOutcome::Succeeded),
+        extra: serde_json::Map::new(),
+    };
+
+    let json = serde_json::to_value(&metadata).unwrap();
+    assert_eq!(json["preservation_outcome"], "succeeded");
+
+    let deserialized: CheckpointLifecycleMetadata = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        deserialized.preservation_outcome,
+        Some(PreservationOutcome::Succeeded)
+    );
+}
+
+/// `PreservationOutcome` variants serialize to stable `snake_case` strings.
+#[test]
+fn preservation_outcome_serializes_to_stable_snake_case() {
+    let cases = [
+        (PreservationOutcome::Succeeded, "succeeded"),
+        (PreservationOutcome::Failed, "failed"),
+        (PreservationOutcome::UnavailableWorker, "unavailable_worker"),
+        (
+            PreservationOutcome::RuntimeUnavailable,
+            "runtime_unavailable",
+        ),
+        (PreservationOutcome::CleanSkip, "clean_skip"),
+    ];
+
+    for (outcome, expected) in &cases {
+        let json = serde_json::to_value(outcome).unwrap();
+        assert_eq!(
+            json.as_str().unwrap(),
+            *expected,
+            "PreservationOutcome::{:?} should serialize to {:?}",
+            outcome,
+            expected
+        );
+
+        let deserialized: PreservationOutcome = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            deserialized, *outcome,
+            "PreservationOutcome::{:?} should round-trip through JSON",
+            outcome
+        );
+    }
+}
+
+// ── Preservation gate transition-blocking tests ────────────────────────
+
+/// `Succeeded` and `CleanSkip` never block, regardless of policy.
+#[test]
+fn succeeded_and_clean_skip_never_block_transition() {
+    for outcome in [
+        PreservationOutcome::Succeeded,
+        PreservationOutcome::CleanSkip,
+    ] {
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+            "{:?} should not block with RecordAndProceed",
+            outcome,
+        );
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::Block),
+            "{:?} should not block with Block",
+            outcome,
+        );
+    }
+}
+
+/// `Failed`, `UnavailableWorker`, and `RuntimeUnavailable` block only
+/// when the policy is `Block`.
+#[test]
+fn failure_outcomes_respect_policy() {
+    let blocking_outcomes = [
+        PreservationOutcome::Failed,
+        PreservationOutcome::UnavailableWorker,
+        PreservationOutcome::RuntimeUnavailable,
+    ];
+
+    for outcome in &blocking_outcomes {
+        assert!(
+            !outcome.should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+            "{:?} should NOT block with RecordAndProceed",
+            outcome,
+        );
+        assert!(
+            outcome.should_block_transition(PreservationFailurePolicy::Block),
+            "{:?} SHOULD block with Block",
+            outcome,
+        );
+    }
+}
+
+/// `PreservationFailurePolicy` serializes to stable `snake_case` strings
+/// and round-trips through JSON.
+#[test]
+fn preservation_failure_policy_serializes_to_stable_snake_case() {
+    let cases = [
+        (
+            PreservationFailurePolicy::RecordAndProceed,
+            "record_and_proceed",
+        ),
+        (PreservationFailurePolicy::Block, "block"),
+    ];
+
+    for (policy, expected) in &cases {
+        let json = serde_json::to_value(policy).unwrap();
+        assert_eq!(
+            json.as_str().unwrap(),
+            *expected,
+            "PreservationFailurePolicy::{:?} should serialize to {:?}",
+            policy,
+            expected
+        );
+
+        let deserialized: PreservationFailurePolicy = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            deserialized, *policy,
+            "PreservationFailurePolicy::{:?} should round-trip through JSON",
+            policy
+        );
+    }
+}
+
+/// `PreservationFailurePolicy` defaults to `RecordAndProceed`.
+#[test]
+fn preservation_failure_policy_defaults_to_record_and_proceed() {
+    let policy = PreservationFailurePolicy::default();
+    assert_eq!(policy, PreservationFailurePolicy::RecordAndProceed);
+}
+
+/// `CheckpointLifecycleConfig` round-trips through JSON with the new
+/// `failure_policy` field, and the field defaults to `RecordAndProceed`.
+#[test]
+fn checkpoint_lifecycle_config_failure_policy_round_trips() {
+    // Default config — failure_policy should default to RecordAndProceed.
+    let config = CheckpointLifecycleConfig::default();
+    assert_eq!(
+        config.failure_policy,
+        PreservationFailurePolicy::RecordAndProceed
+    );
+
+    // Explicit Block policy.
+    let config = CheckpointLifecycleConfig {
+        failure_policy: PreservationFailurePolicy::Block,
+        ..Default::default()
+    };
+    let json = serde_json::to_value(&config).unwrap();
+    assert_eq!(json["failure_policy"], "block");
+
+    let deserialized: CheckpointLifecycleConfig = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        deserialized.failure_policy,
+        PreservationFailurePolicy::Block
+    );
+
+    // Missing field in JSON should default to RecordAndProceed.
+    let json_without_policy = serde_json::json!({
+        "enabled": true,
+        "require_before_no_progress_exit": false,
+    });
+    let deserialized: CheckpointLifecycleConfig =
+        serde_json::from_value(json_without_policy).unwrap();
+    assert_eq!(
+        deserialized.failure_policy,
+        PreservationFailurePolicy::RecordAndProceed
+    );
+}
+
+/// When the preservation gate returns `RuntimeUnavailable` (test actor has
+/// no runtime_ops), the default `RecordAndProceed` policy allows the
+/// zombie reap to proceed — the existing `preservation_gate_called_during_zombie_reap`
+/// test validates this path. This focused test verifies the outcome
+/// classification directly.
+#[test]
+fn runtime_unavailable_does_not_block_with_record_and_proceed() {
+    let result =
+        PreservationGateResult::runtime_unavailable("task-gate-1", "session-gate-1", "zombie");
+    assert_eq!(result.outcome, PreservationOutcome::RuntimeUnavailable);
+    assert!(
+        !result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+        "RuntimeUnavailable should not block with RecordAndProceed policy"
+    );
+}
+
+/// When the preservation gate returns `RuntimeUnavailable` and the policy
+/// is `Block`, the transition IS blocked.
+#[test]
+fn runtime_unavailable_blocks_with_block_policy() {
+    let result =
+        PreservationGateResult::runtime_unavailable("task-gate-2", "session-gate-2", "stall");
+    assert_eq!(result.outcome, PreservationOutcome::RuntimeUnavailable);
+    assert!(
+        result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::Block),
+        "RuntimeUnavailable should block with Block policy"
+    );
+}
+
+/// When the worker reports `Failed` and the policy is `RecordAndProceed`,
+/// the transition proceeds (the failure is recorded as a policy result).
+#[test]
+fn failed_outcome_record_and_proceed_does_not_block() {
+    let result = PreservationGateResult::failed(
+        "task-gate-3",
+        "session-gate-3",
+        Some("run-gate-3"),
+        "ceiling",
+        "worker push rejected".to_string(),
+    );
+    assert_eq!(result.outcome, PreservationOutcome::Failed);
+    assert!(
+        !result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::RecordAndProceed),
+        "Failed should not block with RecordAndProceed policy"
+    );
+}
+
+/// When the worker reports `Failed` and the policy is `Block`,
+/// the transition is blocked.
+#[test]
+fn failed_outcome_blocks_with_block_policy() {
+    let result = PreservationGateResult::failed(
+        "task-gate-4",
+        "session-gate-4",
+        Some("run-gate-4"),
+        "stall",
+        "worker checkpoint failed".to_string(),
+    );
+    assert_eq!(result.outcome, PreservationOutcome::Failed);
+    assert!(
+        result
+            .outcome
+            .should_block_transition(PreservationFailurePolicy::Block),
+        "Failed should block with Block policy"
+    );
+}

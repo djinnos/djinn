@@ -67,6 +67,9 @@ const STALE_BRANCH_REAPED_TOTAL: &str = "djinn_stale_branch_reaped_total";
 const STALE_PR_SKIPPED_TOTAL: &str = "djinn_stale_pr_skipped_total";
 const ORPHAN_WORKER_SESSIONS_REAPED_TOTAL: &str = "djinn_orphan_worker_sessions_reaped_total";
 
+// ─── Coordinator checkpoint preservation gate ─────────────────────────
+const PRESERVATION_ATTEMPTS_TOTAL: &str = "djinn_preservation_attempts_total";
+
 static HANDLE: OnceLock<Result<PrometheusHandle, String>> = OnceLock::new();
 
 /// Install the process-global Prometheus recorder.
@@ -714,6 +717,41 @@ pub mod slot_pool {
     pub fn set_slots(state: &'static str, model: &str, count: usize) {
         metrics::gauge!(super::SLOT_POOL, "state" => state, "model" => model.to_owned())
             .set(count as f64);
+    }
+}
+
+pub mod preservation {
+    //! Coordinator-side checkpoint preservation gate metrics.
+    //!
+    //! These counters track the outcomes of preservation attempts before
+    //! terminal failed/escalated/reap-adjacent session state transitions.
+    //! Each outcome label maps to a variant of
+    //! `djinn_coordinator::PreservationOutcome`.
+
+    /// Stable outcome labels matching `PreservationOutcome` variants.
+    pub const OUTCOME_SUCCEEDED: &str = "succeeded";
+    pub const OUTCOME_FAILED: &str = "failed";
+    pub const OUTCOME_UNAVAILABLE_WORKER: &str = "unavailable_worker";
+    pub const OUTCOME_RUNTIME_UNAVAILABLE: &str = "runtime_unavailable";
+    pub const OUTCOME_CLEAN_SKIP: &str = "clean_skip";
+
+    /// Stable trigger labels for the termination path that initiated
+    /// the preservation request.
+    pub const TRIGGER_STALL: &str = "stall";
+    pub const TRIGGER_CEILING: &str = "ceiling";
+    pub const TRIGGER_ZOMBIE: &str = "zombie";
+    pub const TRIGGER_TERMINAL_FAIL: &str = "terminal_fail";
+
+    /// Increment the preservation-attempt counter for an `(outcome, trigger)`
+    /// bucket.  The outcome label is one of the `OUTCOME_*` constants above;
+    /// the trigger label is one of the `TRIGGER_*` constants.
+    pub fn increment_attempt(outcome: &'static str, trigger: &'static str) {
+        metrics::counter!(
+            super::PRESERVATION_ATTEMPTS_TOTAL,
+            "outcome" => outcome,
+            "trigger" => trigger,
+        )
+        .increment(1);
     }
 }
 
