@@ -46,6 +46,7 @@ use djinn_slot::{PoolError, SlotPoolHandle};
 use actor::CoordinatorActor;
 use types::*;
 
+pub mod ci_reproduction;
 pub mod context;
 pub mod dispatch_pause;
 pub mod doctor;
