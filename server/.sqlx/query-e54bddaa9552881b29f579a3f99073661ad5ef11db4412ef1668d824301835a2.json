@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, task_run_id, trigger_reason, diff_fingerprint,\n                verify_source, verify_run_id, verify_timestamp,\n                session_id, model_id,\n                no_progress_streak, model_called_submit_work, created_at\n             FROM auto_submit_reviews WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "trigger_reason",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "diff_fingerprint",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "verify_source",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "verify_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "verify_timestamp",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "session_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "model_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "no_progress_streak",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "model_called_submit_work",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e54bddaa9552881b29f579a3f99073661ad5ef11db4412ef1668d824301835a2"
+}
