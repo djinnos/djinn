@@ -236,6 +236,7 @@ impl DjinnMcpServer {
             judge_summary: None,
             snapshot_revision_seq: None,
             needs_evidence: None,
+            evidence_lifecycle_state: crate::tools::proposal_ops::EvidenceLifecycleState::Active,
         };
 
         Json(ProposalRefinementStartResponse {
@@ -425,6 +426,7 @@ impl DjinnMcpServer {
             judge_summary: None,
             snapshot_revision_seq: None,
             needs_evidence: None,
+            evidence_lifecycle_state: crate::tools::proposal_ops::EvidenceLifecycleState::Active,
         };
 
         Json(DemandRoundResponse {
