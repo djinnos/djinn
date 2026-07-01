@@ -22,8 +22,6 @@ pub(crate) struct PostSessionParams {
 
 pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
     params.ctx.register_background_work(&params.task_id);
-    let ctx = params.ctx.clone();
-    let task_id = params.task_id.clone();
     tokio::spawn(async move {
         let PostSessionParams {
             task_id,
@@ -356,8 +354,7 @@ mod tests {
             .iter()
             .find(|event| event.action == "auto_submit_fallback_checkpoint_requested");
         assert!(fallback.is_some(), "expected no_decision fallback event");
-        let payload: serde_json::Value =
-            serde_json::from_str(&fallback.unwrap().payload).unwrap_or_default();
+        let payload = &fallback.unwrap().payload;
         assert_eq!(payload["reason"], "no_decision");
 
         // No auto_submit_decision event because there was no settlement.
