@@ -558,6 +558,25 @@ impl CoordinatorActor {
                         );
                         continue;
                     }
+                    CiPreflightGateVerdict::RouteToLeadIntervention { reason } => {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            pr = pull_number,
+                            reason = %reason,
+                            "PR poller: unreproducible required-CI check routing to lead/human intervention"
+                        );
+                        let handled = self
+                            .route_planner_intervention(&task, "worker", &reason, None)
+                            .await;
+                        if handled {
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                pr = pull_number,
+                                "PR poller: unreproducible CI check routed task to Planner intervention"
+                            );
+                        }
+                        continue;
+                    }
                     CiPreflightGateVerdict::Allow | CiPreflightGateVerdict::NotApplicable => {}
                 }
             } else {

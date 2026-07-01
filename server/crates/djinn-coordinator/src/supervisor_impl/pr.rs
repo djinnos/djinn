@@ -278,6 +278,9 @@ pub async fn supervisor_pr_open(
             CiPreflightGateVerdict::Block { reason } => {
                 return TaskRunOutcome::Escalated { reason };
             }
+            CiPreflightGateVerdict::RouteToLeadIntervention { reason } => {
+                return TaskRunOutcome::Escalated { reason };
+            }
             CiPreflightGateVerdict::Allow | CiPreflightGateVerdict::NotApplicable => {}
         }
     } else {
