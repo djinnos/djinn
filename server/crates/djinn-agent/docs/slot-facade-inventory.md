@@ -3,7 +3,7 @@
 > **Task:** hw3r — Inventory and document djinn-agent slot facade compatibility exports
 > **Epic:** p6i4 — Slot cut-over host facade: remove djinn-agent duplicate behavior while preserving callers
 > **Generated:** 2026-07-01  
-> **Updated:** 2026-07-01 — p6i4 slice `019f1ad9-e93b-7f01-9494-f7a497982162`
+> **Updated:** 2026-07-01 — p6i4 task bohx: final host-dispatch facade cleanup and duplicate-file proof
 
 ## Overview
 
@@ -50,15 +50,10 @@ djinn-agent/src/actors/slot/
 │                                 production behavior removed in favor of djinn-slot
 ├── memory_enrichment.rs      ← EMPTY SHIM: mod file exists; types/re-exports are in mod.rs
 ├── pool/                     ← HOST-ONLY: SlotPoolHandle, SlotFactory, PoolStatus, etc.
-├── reply_loop/               ← HOST-ONLY: AgentContext-based reply loop wiring
-│   ├── mod.rs                ← re-exports ReplyLoopContext, run_reply_loop
-│   ├── turn.rs               ← actual loop implementation (host-specific)
-│   ├── streaming.rs
-│   ├── tool_dispatch.rs
-│   ├── error_handling.rs
-│   ├── loop_guard.rs
-│   ├── budget.rs
-│   └── persistence.rs
+├── reply_loop/               ← THIN SHIM: adapts AgentContext into canonical
+│   │                           djinn-slot reply-loop API
+│   ├── mod.rs                ← ReplyLoopContext, AgentToolDispatcher, run_reply_loop adapter;
+│   │                           error_handling + loop_guard re-exported from djinn-slot
 ├── session_extraction.rs     ← THIN SHIM: AgentContext→SlotContext adapter,
 │                                 delegates to djinn_slot::run_extraction_backfill
 └── supervisor_runner.rs      ← HOST-ONLY: dispatch_task_runtime (host-side dispatch logic)
@@ -165,7 +160,7 @@ Re-exported via `pub use helpers::*`:
 | `actors/coordinator/mod.rs` | `crate::actors::slot::SlotPoolHandle` | Host-only |
 | `actors/slot/lifecycle/*.rs` | `crate::actors::slot::{helpers, MergeConflictMetadata, commands}` | Host-only |
 | `actors/slot/llm_extraction*.rs` | `crate::actors::slot::{helpers, lifecycle, session_extraction}` | Host-only |
-| `actors/slot/reply_loop/*.rs` | `crate::actors::slot::{finalize_handlers, helpers}` | Host-only |
+| `actors/slot/reply_loop/mod.rs` | `crate::actors::slot::{host_callbacks, output_stash, extension}` | Host-only (thin adapter) |
 | `actors/slot/supervisor_runner.rs` | `crate::actors::slot::{lifecycle, session_extraction, helpers}` | Host-only |
 
 ---
@@ -183,8 +178,8 @@ to `djinn-slot`:
   `mcp_resolve`, `prompt_context`, `role_overrides`, `task_classifier`,
   `teardown`, `retry`) used by `supervisor_impl/stage.rs`
 - **`supervisor_runner.rs`** — `dispatch_task_runtime` host-side dispatch
-- **`reply_loop/`** — Agent-specific reply loop wiring (uses `AgentContext`
-  directly)
+- **`reply_loop/`** — Agent-context reply loop adapter: wraps `AgentContext` into
+  `SlotContext` + `AgentToolDispatcher` and delegates to `djinn_slot::reply_loop::*`
 - **`pool/`** — `SlotPoolHandle` and pool actor (host-specific wiring)
 - **`actor.rs`** — `SlotActor` (uses `AgentContext` directly)
 - **`helpers/`** — Provider resolution, feedback, code context (pub + pub(crate))
@@ -251,3 +246,91 @@ This slice thinned the extraction/enrichment-facing agent modules as follows:
 
 No independent extraction, enrichment, prompt, deduplication, admission-gate,
 finalization, or command-activity behavior remains in these agent files.
+
+---
+
+## p6i4 task bohx — Final host-dispatch facade cleanup and duplicate-file proof
+
+**Task:** bohx — Finish slot host-dispatch facade cleanup and final duplicate-file proof
+**Date:** 2026-07-01
+
+### Files deleted (dead duplicate code)
+
+| Deleted file | Lines | Reason |
+|---|---|---|
+| `reply_loop/turn.rs` | 2,227 | Not declared in `reply_loop/mod.rs`; canonical implementation in `djinn_slot::reply_loop::turn`. Dead file — unreachable from the module graph. |
+| `reply_loop/durable_progress/mod.rs` | 634 | Not declared in `reply_loop/mod.rs`; only referenced from dead `turn.rs`. Dead directory — unreachable from the module graph. |
+
+**Total dead code removed:** 2,861 lines.
+
+### Files confirmed as host-only (retained intentionally)
+
+| File | Lines | Category | Rationale |
+|---|---|---|---|
+| `supervisor_runner.rs` | 1,755 | HOST-ONLY | Contains the actual host-side dispatch logic (`dispatch_task_runtime`) that resolves tasks, builds `TaskRunSpec`, drives K8s/Test runtimes, handles provider failover, and persists loop-guard activity. djinn-slot's `supervisor_runner.rs` (29 lines) is a thin delegation to host callbacks. This file IS the host callback implementation. |
+| `host_callbacks.rs` | 185 | HOST-ONLY | `AgentDispatchCallbacks` implementing `SlotHostCallbacks`; bridges `AgentContext` → `SlotContext` for the dispatch pathway. |
+| `lifecycle/*.rs` | ~various | HOST-ONLY | Per-stage helpers used by `supervisor_impl/stage.rs`, depend on `AgentContext`. |
+| `actor.rs` | 125 | HOST-ONLY | `SlotHandle` compatibility wrapper that adapts `AgentContext` at spawn time. |
+| `pool/` | ~200 | HOST-ONLY | `SlotPoolHandle` wrapper, `SlotFactory` test type. |
+| `helpers/` | ~various | HOST-ONLY | Provider resolution, feedback, code context. |
+
+### Files confirmed as thin shims (retained for compatibility)
+
+| File | Lines | Category | Notes |
+|---|---|---|---|
+| `commands.rs` | 32 | THIN SHIM | Re-exports `SlotCommand`/`SlotError`; thin `log_commands_run_event` adapter. |
+| `finalize_handlers.rs` | 477 | THIN SHIM | Adapters + test coverage for `process_finalize_payload`/`handle_budget_park`. |
+| `session_extraction.rs` | 215 | THIN SHIM | `agent_to_slot_context` + backfill/post-session adapters. |
+| `llm_extraction.rs` | 65 | THIN SHIM | Test-only adapters (all `#[cfg(test)]`). |
+| `memory_enrichment.rs` | 25 | EMPTY SHIM | Module file only; re-exports in `mod.rs`. |
+| `reply_loop/mod.rs` | 243 | THIN SHIM | `AgentToolDispatcher` adapter + `run_reply_loop` wrapper; re-exports `error_handling`/`loop_guard` from djinn-slot. |
+
+### Final module tree
+
+```
+djinn-agent/src/actors/slot/
+├── mod.rs                    (175 lines) — facade: re-exports + submodule declarations
+├── actor.rs                  (125 lines) — HOST-ONLY: SlotHandle wrapper
+├── commands.rs               (32 lines)  — THIN SHIM
+├── finalize_handlers.rs      (477 lines) — THIN SHIM + tests
+├── helpers/
+│   ├── mod.rs                — HOST-ONLY: pub re-exports
+│   ├── provider_resolution   — HOST-ONLY
+│   ├── feedback.rs           — HOST-ONLY (pub(crate))
+│   ├── code_context.rs       — HOST-ONLY (pub(crate))
+│   ├── reviewer_diff.rs      — HOST-ONLY (pub(crate))
+│   └── tests.rs              — test coverage
+├── host_callbacks.rs         (185 lines) — HOST-ONLY
+├── lifecycle/
+│   ├── mcp_resolve.rs        — HOST-ONLY
+│   ├── model_resolution.rs   — HOST-ONLY
+│   ├── prompt_context.rs     — HOST-ONLY
+│   ├── prompt_context_tests.rs — test coverage
+│   ├── ci_directive_tests.rs — test coverage
+│   ├── retry.rs              — HOST-ONLY
+│   ├── role_overrides.rs     — HOST-ONLY
+│   ├── setup.rs              — HOST-ONLY
+│   ├── task_classifier.rs    — HOST-ONLY
+│   └── teardown.rs           — HOST-ONLY
+├── llm_extraction.rs         (65 lines)  — THIN SHIM (test-only)
+├── llm_extraction_tests.rs   — test coverage
+├── memory_enrichment.rs      (25 lines)  — EMPTY SHIM
+├── pool/
+│   ├── mod.rs                — HOST-ONLY: re-exports
+│   ├── handle.rs             — HOST-ONLY: SlotPoolHandle wrapper
+│   └── types.rs              — HOST-ONLY: re-exports + SlotFactory
+├── reply_loop/
+│   └── mod.rs                (243 lines) — THIN SHIM: adapter + re-exports
+├── session_extraction.rs     (215 lines) — THIN SHIM
+├── supervisor_runner.rs      (1,755 lines) — HOST-ONLY: dispatch_task_runtime
+├── helpers_tests.rs          — test coverage
+```
+
+### Duplicate-proof summary
+
+Every file remaining under `djinn-agent/src/actors/slot/` is one of:
+1. **Host-only** — contains agent-specific dispatch/callback/lifecycle logic that depends on `AgentContext` and has no duplicate in `djinn-slot`
+2. **Thin shim** — re-exports canonical types from `djinn-slot` and provides `AgentContext` → `SlotContext` adapters for backward compatibility
+3. **Test coverage** — tests for host-only or thin-shim code
+
+No file contains an independent copy of logic that exists in `djinn-slot`. The facade `mod.rs` re-exports canonical types (`SlotEvent`, enrichment types, `SlotCommand`, `SlotError`, etc.) so existing `djinn_agent::actors::slot::*` import paths continue to resolve.

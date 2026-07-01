@@ -1,19 +1,23 @@
 // djinn:allow-oversize
 use super::{
-    AutoMergeFastPathState, AutoMergeTickDecision, CiMergeGateVerdict, PrDraftCiAction, Task,
-    advisory_checks_section, blocking_failed_checks, build_ci_failure_sections,
-    ci_merge_gate_verdict, compute_ci_failure_fingerprint, count_consecutive_identical,
-    decide_auto_merge_tick, decide_pr_draft_ci_action, dequeue_reason_is_failure,
-    dequeue_requires_rework, detect_scope_inversion, effective_review_decision, extract_crate_name,
-    extract_crate_names, is_advisory_check_name, is_conversation_resolution_block,
-    is_merge_queue_405, is_racing_unmerged_status, parse_actions_run_id, parse_pr_url,
-    pick_conflict_blocker_sibling, pr_transition_increments_reopen_count,
-    record_auto_merge_decision_metrics, record_pr_transition_reopen_metric,
-    should_auto_resolve_conversations,
+    AutoMergeFastPathState, AutoMergeTickDecision, CiMergeGateVerdict, PrDraftCiAction,
+    SameSignatureEscalationRoute, SameSignatureReproContext, Task, advisory_checks_section,
+    blocking_failed_checks, build_ci_failure_sections, build_generic_same_signature_reason,
+    build_reproduction_plan_same_signature_reason, build_unreproducible_same_signature_reason,
+    ci_merge_gate_verdict, classify_same_signature_escalation, compute_ci_failure_fingerprint,
+    count_consecutive_identical, decide_auto_merge_tick, decide_pr_draft_ci_action,
+    dequeue_reason_is_failure, dequeue_requires_rework, detect_scope_inversion,
+    effective_review_decision, extract_crate_name, extract_crate_names, is_advisory_check_name,
+    is_conversation_resolution_block, is_merge_queue_405, is_racing_unmerged_status,
+    parse_actions_run_id, parse_pr_url, pick_conflict_blocker_sibling,
+    pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
+    record_pr_transition_reopen_metric, should_auto_resolve_conversations,
 };
 use djinn_core::models::TransitionAction;
 use djinn_provider::github_api::{
     ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubApiError, GitHubUser, PrReview,
+    ReproductionJob, ReproductionSetupStep, ReproductionStep, RequiredCheckReproductionContext,
+    RequiredCheckUnreproducible, RequiredCheckUnreproducibleReason,
 };
 use reqwest::StatusCode;
 use std::collections::HashMap;
@@ -3770,4 +3774,330 @@ fn different_fingerprint_on_same_head_restarts_counter() {
     assert_eq!(carried, 0, "different fingerprint on same head → restart");
     let total = carried + 1;
     assert_eq!(total, 1, "progress detected → count 1, no escalation");
+}
+
+// ── zx3r: Same-signature CI escalation reproduction-plan regression tests ──
+//
+// These tests verify AC#4: the same-signature escalation path emits a focused
+// reproduction plan (failing check, job/step, command/setup, log tail, head
+// SHA, reproduce-fix-verify-resubmit) when at least one bundle is reproducible,
+// and routes to intervention with the concrete unreproducible reason when no
+// bundle is reproducible.
+
+/// Build a sample reproducible context for the reproduction-plan tests.
+fn sample_reproducible_context() -> RequiredCheckReproductionContext {
+    RequiredCheckReproductionContext {
+        required_check_name: "Quality Gate".into(),
+        observed_head_sha: "abc123def456".into(),
+        check_run_id: 100,
+        workflow_run_id: 42,
+        workflow_name: Some("CI".into()),
+        job: ReproductionJob {
+            id: 200,
+            name: "Server Test".into(),
+            html_url: "https://example.test/job/200".into(),
+        },
+        failing_step: ReproductionStep {
+            number: 3,
+            name: "Run cargo test".into(),
+        },
+        command: "cargo test -p djinn-coordinator --lib pr_poller".into(),
+        setup_steps: vec![ReproductionSetupStep {
+            number: 2,
+            name: "Install deps".into(),
+            command: "cargo fetch".into(),
+        }],
+        log_tail: "test ci_reproduction::tests::reproduced_failure ... FAILED".into(),
+    }
+}
+
+/// Build a sample unreproducible bundle reason for the unreproducible tests.
+fn sample_unreproducible() -> RequiredCheckUnreproducible {
+    RequiredCheckUnreproducible {
+        required_check_name: "Deploy Preview".into(),
+        observed_head_sha: "abc123def456".into(),
+        reason: RequiredCheckUnreproducibleReason::CommandNotFound,
+        details: Some("no shell command in the failing Actions step".into()),
+    }
+}
+
+/// AC#4: When at least one blocking check has a reproducible bundle, the
+/// escalation reason includes the full reproduction plan with failing check,
+/// job/step, derived command/setup, log tail, observed head SHA, and
+/// reproduce → fix → verify → resubmit instructions.
+#[test]
+fn zx3r_same_signature_reproducible_escalation_includes_reproduction_plan() {
+    let ctx = sample_reproducible_context();
+    let reproducible_ctxs = vec![ctx];
+    let unreproducible_reasons: Vec<String> = vec![];
+    let blocking_names = vec!["Quality Gate"];
+
+    let route = classify_same_signature_escalation(&SameSignatureReproContext {
+        reproducible_ctxs: reproducible_ctxs.clone(),
+        unreproducible_reasons: unreproducible_reasons.clone(),
+        any_fetch_succeeded: true,
+    });
+    assert_eq!(
+        route,
+        SameSignatureEscalationRoute::ReproductionPlan,
+        "reproducible bundle must route to ReproductionPlan"
+    );
+
+    let reason = build_reproduction_plan_same_signature_reason(
+        42,
+        2, // total_consecutive (at threshold)
+        &blocking_names,
+        &reproducible_ctxs,
+        &unreproducible_reasons,
+    );
+
+    // The reason must include the reproduction plan with all required fields.
+    for expected in [
+        "Quality Gate",
+        "abc123def456",
+        "Server Test",
+        "Run cargo test",
+        "cargo test -p djinn-coordinator --lib pr_poller",
+        "Install deps",
+        "cargo fetch",
+        "test ci_reproduction::tests::reproduced_failure ... FAILED",
+        "**Reproduce:**",
+        "**Fix:**",
+        "**Verify:**",
+        "**Resubmit:**",
+    ] {
+        assert!(
+            reason.contains(expected),
+            "reproduction plan reason must contain {expected:?}:\n{reason}"
+        );
+    }
+}
+
+/// AC#4: When at least one reproducible bundle exists alongside an
+/// unreproducible one, the reproduction plan is emitted and the unreproducible
+/// reason is appended as a note.
+#[test]
+fn zx3r_same_signature_mixed_reproducible_and_unreproducible_appends_note() {
+    let ctx = sample_reproducible_context();
+    let unreproducible = sample_unreproducible();
+    let unreproducible_reason =
+        crate::ci_reproduction::format_unreproducible_intervention_reason(&unreproducible);
+    let blocking_names = vec!["Quality Gate", "Deploy Preview"];
+
+    let reason = build_reproduction_plan_same_signature_reason(
+        99,
+        2,
+        &blocking_names,
+        &[ctx],
+        &[unreproducible_reason],
+    );
+
+    // Must contain the reproduction plan.
+    assert!(reason.contains("Quality Gate"));
+    assert!(reason.contains("cargo test -p djinn-coordinator"));
+    assert!(reason.contains("**Reproduce:**"));
+
+    // Must also contain the unreproducible note.
+    assert!(reason.contains("**Unreproducible checks:**"));
+    assert!(reason.contains("Deploy Preview"));
+    assert!(reason.contains("CommandNotFound"));
+    assert!(reason.contains("no shell command"));
+}
+
+/// AC#4: When all fetched bundles are unreproducible, the escalation routes to
+/// UnreproducibleIntervention and the reason contains only the concrete
+/// unreproducible reasons — NOT a reproduction plan, NOT a fake passing
+/// verification, and NOT scope-reshaping language.
+#[test]
+fn zx3r_same_signature_all_unreproducible_routes_to_intervention_with_reason() {
+    let unreproducible = sample_unreproducible();
+    let unreproducible_reason =
+        crate::ci_reproduction::format_unreproducible_intervention_reason(&unreproducible);
+    let unreproducible_reasons = vec![unreproducible_reason];
+    let blocking_names = vec!["Deploy Preview"];
+
+    let route = classify_same_signature_escalation(&SameSignatureReproContext {
+        reproducible_ctxs: vec![],
+        unreproducible_reasons: unreproducible_reasons.clone(),
+        any_fetch_succeeded: true,
+    });
+    assert_eq!(
+        route,
+        SameSignatureEscalationRoute::UnreproducibleIntervention,
+        "all-unreproducible must route to UnreproducibleIntervention"
+    );
+
+    let reason =
+        build_unreproducible_same_signature_reason(55, 2, &blocking_names, &unreproducible_reasons);
+
+    // Must contain the concrete unreproducible reason.
+    assert!(reason.contains("Deploy Preview"));
+    assert!(reason.contains("CommandNotFound"));
+    assert!(reason.contains("no shell command in the failing Actions step"));
+    assert!(reason.contains("could not be reproduced locally"));
+
+    // Must NOT contain reproduction-plan elements (no fake local verification).
+    assert!(
+        !reason.contains("**Reproduce:**"),
+        "unreproducible reason must not contain a reproduction plan"
+    );
+    assert!(
+        !reason.contains("**Verify:**"),
+        "unreproducible reason must not contain local verification instructions"
+    );
+    assert!(
+        !reason.to_lowercase().contains("scope reshape"),
+        "unreproducible reason must not use scope-reshaping language"
+    );
+}
+
+/// AC#4: When every provider fetch fails (API down, timeout), the escalation
+/// falls back to GenericIntervention — the same-signature path is never
+/// silently skipped.
+#[test]
+fn zx3r_same_signature_all_fetch_fail_routes_to_generic_intervention() {
+    let route = classify_same_signature_escalation(&SameSignatureReproContext {
+        reproducible_ctxs: vec![],
+        unreproducible_reasons: vec![],
+        any_fetch_succeeded: false,
+    });
+    assert_eq!(
+        route,
+        SameSignatureEscalationRoute::GenericIntervention,
+        "all fetches failing must fall back to generic intervention"
+    );
+
+    let reason = build_generic_same_signature_reason(77, 2, &["Quality Gate"]);
+    assert!(reason.contains("PR #77"));
+    assert!(reason.contains("Quality Gate"));
+    assert!(reason.contains("identical fingerprint"));
+    assert!(reason.contains("2 consecutive times"));
+}
+
+/// AC#2: The reproduction plan reason is derived entirely from the CI context
+/// bundle data — it contains no hardcoded repo/language command registry.
+/// The command in the reason comes from the bundle's `command` field, not
+/// from a constant in the engine.
+#[test]
+fn zx3r_reproduction_plan_derived_from_bundle_not_hardcoded() {
+    // Use a deliberately unusual command to prove the engine does not
+    // hardcode it.
+    let ctx = RequiredCheckReproductionContext {
+        required_check_name: "Custom Check".into(),
+        observed_head_sha: "zzz999".into(),
+        check_run_id: 1,
+        workflow_run_id: 1,
+        workflow_name: Some("Custom Workflow".into()),
+        job: ReproductionJob {
+            id: 1,
+            name: "Custom Job".into(),
+            html_url: "https://example.test/custom".into(),
+        },
+        failing_step: ReproductionStep {
+            number: 1,
+            name: "Custom Step".into(),
+        },
+        command: "./bin/custom-verify --strict".into(),
+        setup_steps: vec![ReproductionSetupStep {
+            number: 0,
+            name: "Build".into(),
+            command: "make build-custom".into(),
+        }],
+        log_tail: "custom error: validation failed".into(),
+    };
+
+    let reason =
+        build_reproduction_plan_same_signature_reason(1, 2, &["Custom Check"], &[ctx], &[]);
+
+    // The reason must contain the bundle-derived command, not a hardcoded one.
+    assert!(reason.contains("./bin/custom-verify --strict"));
+    assert!(reason.contains("make build-custom"));
+    assert!(reason.contains("Custom Check"));
+    assert!(reason.contains("Custom Job"));
+    assert!(reason.contains("Custom Step"));
+    assert!(reason.contains("custom error: validation failed"));
+    assert!(reason.contains("zzz999"));
+
+    // Guard: the production reason builder does NOT hardcode language commands.
+    // (The plan text is entirely derived from the bundle data above.)
+    let forbidden_in_hardcoded_registry = ["scripts/check-file-size.sh", "cargo fmt"];
+    for term in &forbidden_in_hardcoded_registry {
+        // The reason should not contain these as hardcoded engine commands.
+        // (They could appear in a real bundle, but our test bundle doesn't.)
+        assert!(
+            !reason.contains(term),
+            "reason must not contain hardcoded engine command '{term}'"
+        );
+    }
+}
+
+/// AC#3: An unreproducible bundle with various typed reasons produces a
+/// distinct intervention reason that names the specific check and reason
+/// without conflating it with a passing plan.
+#[test]
+fn zx3r_unreproducible_with_various_reasons_routes_correctly() {
+    let reasons = vec![
+        RequiredCheckUnreproducibleReason::CheckRunNotFound,
+        RequiredCheckUnreproducibleReason::WorkflowRunNotFound,
+        RequiredCheckUnreproducibleReason::JobNotFound,
+        RequiredCheckUnreproducibleReason::FailingStepNotFound,
+        RequiredCheckUnreproducibleReason::CommandNotFound,
+        RequiredCheckUnreproducibleReason::CheckRunNotFailed,
+    ];
+
+    for typed_reason in &reasons {
+        let unreproducible = RequiredCheckUnreproducible {
+            required_check_name: "Required Check".into(),
+            observed_head_sha: "sha-test".into(),
+            reason: typed_reason.clone(),
+            details: Some("test detail".into()),
+        };
+        let formatted =
+            crate::ci_reproduction::format_unreproducible_intervention_reason(&unreproducible);
+
+        // The formatted reason must contain the check name, SHA, and typed reason.
+        assert!(formatted.contains("Required Check"));
+        assert!(formatted.contains("sha-test"));
+        assert!(formatted.contains(&format!("{typed_reason:?}")));
+        assert!(formatted.contains("could not be reproduced locally"));
+
+        // It must NOT look like a passing plan.
+        assert!(!formatted.contains("**Reproduce:**"));
+        assert!(!formatted.contains("**Verify:**"));
+    }
+
+    // When all are unreproducible, the escalation reason includes each.
+    let all_reasons: Vec<String> = reasons
+        .iter()
+        .map(|r| {
+            crate::ci_reproduction::format_unreproducible_intervention_reason(
+                &RequiredCheckUnreproducible {
+                    required_check_name: "Required Check".into(),
+                    observed_head_sha: "sha-test".into(),
+                    reason: r.clone(),
+                    details: None,
+                },
+            )
+        })
+        .collect();
+
+    let route = classify_same_signature_escalation(&SameSignatureReproContext {
+        reproducible_ctxs: vec![],
+        unreproducible_reasons: all_reasons.clone(),
+        any_fetch_succeeded: true,
+    });
+    assert_eq!(
+        route,
+        SameSignatureEscalationRoute::UnreproducibleIntervention
+    );
+
+    let reason =
+        build_unreproducible_same_signature_reason(1, 2, &["Required Check"], &all_reasons);
+    for r in &reasons {
+        assert!(
+            reason.contains(&format!("{r:?}")),
+            "unreproducible reason must list typed reason {:?}",
+            r
+        );
+    }
 }
