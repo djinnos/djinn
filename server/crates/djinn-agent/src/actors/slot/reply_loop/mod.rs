@@ -15,6 +15,7 @@
 //! resolving identically.
 
 pub(crate) mod budget;
+pub(crate) mod durable_progress;
 pub(crate) mod error_handling;
 pub(crate) mod loop_guard;
 mod persistence;
