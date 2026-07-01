@@ -13,7 +13,6 @@ use djinn_provider::provider::LlmProvider;
 
 pub mod disposition;
 pub(crate) mod pr;
-pub mod review_local_gates;
 
 pub use disposition::{
     LiveMoverEvidence, LiveMoverReason, LiveMoverSummary, has_live_mover, live_mover_reasons,

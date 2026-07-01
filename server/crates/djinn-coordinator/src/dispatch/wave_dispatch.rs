@@ -353,19 +353,6 @@ impl CoordinatorActor {
                         );
                     }
                 }
-                djinn_runtime::TaskRunOutcome::Escalated { reason } => {
-                    // Local gate block or other escalation from
-                    // supervisor_pr_open.  The gate check already logged
-                    // structured activity and a human-readable comment, and
-                    // transitioned the task to `open` via
-                    // ParkForRemediation.  Log the escalation at the
-                    // coordinator level for observability.
-                    tracing::info!(
-                        task_id = %task.short_id,
-                        reason = %reason,
-                        "CoordinatorActor: supervisor_pr_open escalated — local gate block or other pre-flight failure"
-                    );
-                }
                 other => {
                     tracing::warn!(
                         task_id = %task.short_id,

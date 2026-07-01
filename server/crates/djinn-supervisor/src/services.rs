@@ -298,26 +298,4 @@ pub trait SupervisorServices: Send + Sync + 'static {
         action: String,
         reason: Option<String>,
     ) -> Result<(), String>;
-
-    /// Run deterministic local gates for a PR-backed task before the
-    /// reviewer approval transition.  Returns `Ok(())` when all required
-    /// gates pass (or no gates apply), allowing the caller to proceed with
-    /// `task_review_approve`.  Returns `Err(block_json)` when a required
-    /// gate fails or is unavailable — the caller must prevent approval and
-    /// route the task to remediation or lead intervention.
-    ///
-    /// `block_json` is a JSON string carrying structured gate-failure
-    /// details (gate_id, outcome, command, exit code, stdout/stderr
-    /// summaries).  The caller is responsible for logging it as activity
-    /// and choosing the appropriate rejection/escalation transition.
-    ///
-    /// Default is `Ok(())` so test doubles and RPC stubs are unaffected.
-    async fn check_local_gates_for_review(
-        &self,
-        _task_id: String,
-        _workspace_path: String,
-        _task_branch: String,
-    ) -> Result<(), String> {
-        Ok(())
-    }
 }

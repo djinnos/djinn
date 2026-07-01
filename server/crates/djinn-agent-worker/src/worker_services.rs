@@ -479,17 +479,6 @@ impl SupervisorServices for WorkerSupervisorServices {
         self.rpc.transition_task(task_id, action, reason).await
     }
 
-    async fn check_local_gates_for_review(
-        &self,
-        task_id: String,
-        workspace_path: String,
-        task_branch: String,
-    ) -> Result<(), String> {
-        self.rpc
-            .check_local_gates_for_review(task_id, workspace_path, task_branch)
-            .await
-    }
-
     async fn tool_github_search(
         &self,
         project_id: Option<String>,
