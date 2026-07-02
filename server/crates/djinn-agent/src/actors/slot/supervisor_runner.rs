@@ -1,3 +1,4 @@
+// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -191,7 +192,8 @@ pub(super) async fn dispatch_task_runtime(
     announce_dispatch(&app_state, &spec, &model_id);
 
     // ── Resolve credentials → construct runtime ───────────────────────────
-    let credentials = resolve_credentials(&spec, &app_state, &model_id, creator_scope.clone()).await?;
+    let credentials =
+        resolve_credentials(&spec, &app_state, &model_id, creator_scope.clone()).await?;
     let runtime = build_runtime(&app_state, &task, &kill).await?;
     let runtime_kind = runtime_kind();
 
