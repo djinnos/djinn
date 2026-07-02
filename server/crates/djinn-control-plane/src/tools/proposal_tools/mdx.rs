@@ -454,6 +454,7 @@ mod import_tests {
     use crate::state::stubs::test_mcp_state;
     use djinn_core::events::EventBus;
     use djinn_db::{Database, ProposalCreateInput};
+    use serde_json::Value as JsonValue;
 
     async fn test_server() -> (DjinnMcpServer, Database) {
         let db = Database::open_in_memory().unwrap();
