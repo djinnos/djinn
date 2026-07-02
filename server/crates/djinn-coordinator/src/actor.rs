@@ -1151,6 +1151,8 @@ impl CoordinatorActor {
                     {
                         self.record_merge_event(epic_id);
                     }
+                    self.persist_terminal_linked_spike_evidence_from_closed_task(&task)
+                        .await;
                     // Fire epic completion rules (spike/batch).
                     self.on_task_closed(&task).await;
                 }
