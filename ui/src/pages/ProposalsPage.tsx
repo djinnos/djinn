@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
@@ -74,62 +74,62 @@ import type {
 } from "@/api/types";
 
 /**
- * Compact tribunal + gate chips for a proposal list row.
- *
- * `summary` is populated by `proposal_list` only for non-terminal proposals
- * (draft/in_review), so absence of a summary means "no chips". Renders at most
- * two chips, right-aligned before the short id, each with a `title` tooltip:
- *
- * - Tribunal chip (one variant, by priority): accent `⚖ Review` when the
- *   tribunal has converged and a human is the bottleneck; `🧪 evidence` when
- *   parked on a needs-evidence spike; a pulsing `⚖ R{n}` while a refinement
- *   round is running. Absent when the tribunal is idle.
- * - Gate chip: a green/red dot. When blocked it also shows the leading reason
- *   textually — `DoR ✗` when Definition-of-Ready fails, `⛔{n}` for unresolved
- *   blocking objections — and always names the reason in the tooltip.
+ * A tribunal has "engaged" once any refinement/debate activity has touched the
+ * proposal — an active round, a converged-and-awaiting state, a needs-evidence
+ * park, or any debate round on record. A fresh draft that has never been
+ * refined has NOT engaged, so its failing Definition-of-Ready is the expected
+ * state and must not be alarmed in red.
  */
-function ProposalListChips({
-  summary,
-}: {
-  summary?: ProposalListSummary | null;
-}) {
-  if (!summary) return null;
-  const {
-    refinement_active,
-    awaiting_review,
-    current_round,
-    needs_evidence,
-    dor_ready,
-    gate_ready,
-    unresolved_blocking_count,
-  } = summary;
-  const round = current_round || 1;
+function tribunalEngaged(summary: ProposalListSummary): boolean {
+  return (
+    summary.refinement_active ||
+    summary.awaiting_review ||
+    summary.current_round > 0 ||
+    summary.needs_evidence
+  );
+}
 
-  let tribunal: ReactNode = null;
-  if (awaiting_review) {
-    tribunal = (
+/**
+ * One unified tribunal chip for a list row, resolved as a single state machine
+ * (priority order, first match wins):
+ *
+ *  1. awaiting_review → accent `⚖ Review` — the actionable, human-bottleneck
+ *     state; the most prominent thing on the row.
+ *  2. needs_evidence → muted `🧪 evidence` — parked on a needs-evidence spike.
+ *  3. refinement_active → pulsing `⚖ R{n} running` — a round is in flight.
+ *  4. tribunal ran (round > 0), idle, and left blocking objections →
+ *     red `⚖ R{n} · {count} open`.
+ *  5. otherwise → nothing (the slot stays empty but keeps its width).
+ */
+function TribunalChip({ summary }: { summary: ProposalListSummary }) {
+  const round = summary.current_round || 1;
+
+  if (summary.awaiting_review) {
+    return (
       <span
-        className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-amber-500"
+        className="flex items-center gap-0.5 text-xs font-semibold text-amber-500"
         title="Tribunal converged — awaiting your review"
       >
         <HugeiconsIcon icon={JusticeScale01Icon} size={13} />
         Review
       </span>
     );
-  } else if (needs_evidence) {
-    tribunal = (
+  }
+  if (summary.needs_evidence) {
+    return (
       <span
-        className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
+        className="flex items-center gap-0.5 text-xs text-muted-foreground"
         title="Parked on a needs-evidence spike"
       >
         <HugeiconsIcon icon={TestTube01Icon} size={13} />
         evidence
       </span>
     );
-  } else if (refinement_active) {
-    tribunal = (
+  }
+  if (summary.refinement_active) {
+    return (
       <span
-        className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
+        className="flex items-center gap-0.5 text-xs text-muted-foreground"
         title={`Tribunal refinement running (round ${round})`}
       >
         <HugeiconsIcon
@@ -137,55 +137,70 @@ function ProposalListChips({
           size={13}
           className="animate-pulse"
         />
-        R{round}
+        R{round} running
       </span>
     );
   }
+  if (summary.current_round > 0 && summary.unresolved_blocking_count > 0) {
+    const n = summary.unresolved_blocking_count;
+    return (
+      <span
+        className="flex items-center gap-0.5 text-xs font-medium text-red-500"
+        title={`Tribunal round ${summary.current_round} left ${n} unresolved blocking objection${
+          n === 1 ? "" : "s"
+        }`}
+      >
+        <HugeiconsIcon icon={JusticeScale01Icon} size={13} />
+        R{summary.current_round} · {n} open
+      </span>
+    );
+  }
+  return null;
+}
 
-  // A blocked gate with DoR passing, no blocking objections, and no evidence
-  // park can only mean the latest judge verdict is needs-work.
-  const judgeNeedsWork =
-    !gate_ready &&
-    dor_ready &&
-    unresolved_blocking_count === 0 &&
-    !needs_evidence;
-  let gateText: string | null = null;
-  let gateTitle: string;
-  if (gate_ready) {
-    gateTitle = "Gate ready";
-  } else if (!dor_ready) {
-    gateText = "DoR ✗";
-    gateTitle = "DoR failing";
-  } else if (unresolved_blocking_count > 0) {
-    gateText = `⛔${unresolved_blocking_count}`;
-    gateTitle = `${unresolved_blocking_count} unresolved blocking objection${
-      unresolved_blocking_count === 1 ? "" : "s"
-    }`;
-  } else if (needs_evidence) {
-    gateTitle = "Parked on evidence";
-  } else if (judgeNeedsWork) {
-    gateTitle = "Judge needs work";
+/**
+ * Gate readiness as a single dot. Red is RESERVED for "a tribunal engaged and
+ * the gate is actually stuck" — the only time an operator needs to act:
+ *
+ *  - gate_ready → subtle, quiet green dot.
+ *  - blocked AND a tribunal has engaged → red dot, the reason in the tooltip.
+ *  - blocked but no tribunal ever engaged (a fresh draft naturally failing
+ *    Definition of Ready) → neutral hollow dot; the tooltip still explains it,
+ *    but there is no red and no "DoR ✗" shouting on the row.
+ */
+function GateDot({ summary }: { summary: ProposalListSummary }) {
+  let dotClass: string;
+  let title: string;
+
+  if (summary.gate_ready) {
+    dotClass = "bg-emerald-500/50";
+    title = "Gate ready";
+  } else if (tribunalEngaged(summary)) {
+    dotClass = "bg-red-500";
+    if (summary.unresolved_blocking_count > 0) {
+      const n = summary.unresolved_blocking_count;
+      title = `Gate blocked — ${n} unresolved blocking objection${
+        n === 1 ? "" : "s"
+      }`;
+    } else if (!summary.dor_ready) {
+      title = "Gate blocked — Definition of Ready not met";
+    } else if (summary.needs_evidence) {
+      title = "Gate blocked — parked on evidence";
+    } else {
+      title = "Gate blocked — judge verdict: needs work";
+    }
   } else {
-    gateTitle = "Gate blocked";
+    dotClass = "border border-muted-foreground/40 bg-transparent";
+    title = "Definition of Ready not yet met";
   }
 
   return (
-    <>
-      {tribunal}
+    <span className="flex items-center" title={title}>
       <span
-        className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
-        title={gateTitle}
-      >
-        <span
-          className={cn(
-            "inline-block size-2 rounded-full",
-            gate_ready ? "bg-green-500" : "bg-red-500",
-          )}
-          aria-hidden="true"
-        />
-        {gateText}
-      </span>
-    </>
+        className={cn("inline-block size-2 rounded-full", dotClass)}
+        aria-hidden="true"
+      />
+    </span>
   );
 }
 
@@ -308,7 +323,14 @@ function ProposalsListView() {
       status,
       items: visible
         .filter((p) => p.status === status)
-        .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)),
+        // Awaiting-review rows float to the top of their group (the human is
+        // the bottleneck), then the existing recency order (updated_at desc).
+        .sort((a, b) => {
+          const aw = a.list_summary?.awaiting_review ? 1 : 0;
+          const bw = b.list_summary?.awaiting_review ? 1 : 0;
+          if (aw !== bw) return bw - aw;
+          return a.updated_at < b.updated_at ? 1 : -1;
+        }),
     })).filter((g) => g.items.length > 0);
   }, [listQuery.data, showArchived]);
 
@@ -355,12 +377,19 @@ function ProposalsListView() {
               const isCollapsed =
                 collapsedGroups[g.status] ?? defaultCollapsed(g.status);
               const listId = `proposal-status-group-${g.status}`;
+              const awaitingCount = g.items.filter(
+                (p) => p.list_summary?.awaiting_review,
+              ).length;
+              const ariaLabel =
+                awaitingCount > 0
+                  ? `${statusLabel(g.status)} ${g.items.length} · ${awaitingCount} awaiting review`
+                  : `${statusLabel(g.status)} ${g.items.length}`;
 
               return (
                 <section key={g.status}>
                   <button
                     type="button"
-                    aria-label={`${statusLabel(g.status)} ${g.items.length}`}
+                    aria-label={ariaLabel}
                     aria-expanded={!isCollapsed}
                     aria-controls={listId}
                     onClick={() =>
@@ -380,6 +409,11 @@ function ProposalsListView() {
                     <StatusIcon status={g.status} />
                     <span>{statusLabel(g.status)}</span>
                     <span className="text-muted-foreground/60">{g.items.length}</span>
+                    {awaitingCount > 0 && (
+                      <span className="font-normal text-amber-500/80">
+                        · {awaitingCount} awaiting review
+                      </span>
+                    )}
                   </button>
                   {!isCollapsed && (
                     <ul id={listId}>
@@ -393,31 +427,46 @@ function ProposalsListView() {
                             <span className="min-w-0 flex-1 truncate text-sm">
                               {p.title}
                             </span>
-                            {(p.unresolved_feedback_count ?? 0) > 0 && (
-                              <span
-                                className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
-                                title={`${p.unresolved_feedback_count} unresolved comment${
-                                  p.unresolved_feedback_count === 1 ? "" : "s"
-                                }`}
-                              >
-                                <HugeiconsIcon icon={Comment01Icon} size={13} />
-                                {p.unresolved_feedback_count}
-                              </span>
-                            )}
-                            <AcceptanceProgressBadge
-                              criteria={p.acceptance_criteria}
-                              className="shrink-0"
-                            />
-                            <ProposalListChips summary={p.list_summary} />
-                            <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
+                            {/* Right rail — fixed-width slots so every row's
+                                columns line up down the list. Empty slots keep
+                                their width so nothing shifts. */}
+                            <span className="flex w-28 shrink-0 items-center justify-start">
+                              {p.list_summary && (
+                                <TribunalChip summary={p.list_summary} />
+                              )}
+                            </span>
+                            <span className="flex w-4 shrink-0 justify-center">
+                              {p.list_summary && (
+                                <GateDot summary={p.list_summary} />
+                              )}
+                            </span>
+                            <span className="flex w-9 shrink-0 justify-end">
+                              {(p.unresolved_feedback_count ?? 0) > 0 && (
+                                <span
+                                  className="flex items-center gap-1 text-xs text-muted-foreground"
+                                  title={`${p.unresolved_feedback_count} unresolved comment${
+                                    p.unresolved_feedback_count === 1 ? "" : "s"
+                                  }`}
+                                >
+                                  <HugeiconsIcon icon={Comment01Icon} size={13} />
+                                  {p.unresolved_feedback_count}
+                                </span>
+                              )}
+                            </span>
+                            <span className="flex w-11 shrink-0 justify-end">
+                              <AcceptanceProgressBadge
+                                criteria={p.acceptance_criteria}
+                              />
+                            </span>
+                            <span className="hidden w-10 shrink-0 text-right font-mono text-xs text-muted-foreground sm:inline-block">
                               {p.short_id}
                             </span>
-                            <span className="shrink-0 text-xs text-muted-foreground">
+                            <span className="w-16 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground">
                               {relativeTime(p.updated_at)}
                             </span>
                             <UserAvatar
                               user={userFor(p.author_user_id)}
-                              className="size-5"
+                              className="size-5 shrink-0"
                             />
                           </button>
                         </li>
