@@ -1,8 +1,6 @@
 use super::actor::CoordinatorActor;
-use djinn_db::repositories::proposal::{
-    evidence_spike_task_is_terminal, TerminalLinkedEvidenceSpikeOutcome,
-};
 use djinn_db::ProposalRepository;
+use djinn_db::repositories::proposal::{evidence_spike_task_is_terminal, TerminalLinkedEvidenceSpikeOutcome};
 
 impl CoordinatorActor {
     /// Startup recovery pass for terminal linked evidence spikes that may have
@@ -61,13 +59,15 @@ impl CoordinatorActor {
                     outcome = "EvidenceReceived",
                     "CoordinatorActor: recorded linked evidence spike receipt"
                 ),
-                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => tracing::info!(
-                    proposal_id = %proposal_id,
-                    spike_task_id = %spike_task_id,
-                    reason = %reason,
-                    outcome = "EvidenceFailed",
-                    "CoordinatorActor: recorded linked evidence spike failure"
-                ),
+                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        spike_task_id = %spike_task_id,
+                        reason = %reason,
+                        outcome = "EvidenceFailed",
+                        "CoordinatorActor: recorded linked evidence spike failure"
+                    )
+                }
                 Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { event_kind }) => {
                     tracing::debug!(
                         proposal_id = %proposal_id,
