@@ -1,3 +1,7 @@
+// djinn:allow-oversize — MDX/block-patch module is intentionally larger than the
+// size-guard threshold for this bootstrap step because the test suite for
+// import/export/selector behavior is moved with the owning code. This module will
+// be further split as the epic continues (feedback, signoff, lifecycle, etc.).
 //! MDX frontmatter import/export parsing and block-patch selector resolution.
 //!
 //! This module owns the pure helpers shared by the server-side proposal tools
