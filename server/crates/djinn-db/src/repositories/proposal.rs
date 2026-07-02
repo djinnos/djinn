@@ -3368,7 +3368,7 @@ impl ProposalRepository {
     }
 }
 
-fn evidence_spike_task_is_terminal(status: &str) -> bool {
+pub fn evidence_spike_task_is_terminal(status: &str) -> bool {
     matches!(
         status,
         "closed" | "failed" | "cancelled" | "canceled" | "done" | "rejected" | "archived"
