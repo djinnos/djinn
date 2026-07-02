@@ -138,8 +138,11 @@ describe("UsageBreakdownsTab — split cost column labels", () => {
       />,
     );
 
-    // Default sort is desc by actual_spend, so High spend should appear first
-    const rows = screen.getAllByText(/spend/);
+    // Default sort is desc by actual_spend, so High spend should appear first.
+    // Match only the row-name cells (exact "Low spend" / "High spend") so the
+    // intro description and column headers that also contain "spend" don't
+    // shadow the rows in DOM order.
+    const rows = screen.getAllByText(/^(Low|High) spend$/);
     expect(rows[0]).toHaveTextContent("High spend");
   });
 });

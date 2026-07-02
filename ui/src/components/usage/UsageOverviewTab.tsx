@@ -363,7 +363,7 @@ function SimpleKpiCard({
 }) {
   return (
     <div
-      className="min-w-0 rounded-lg border border-border bg-card p-4"
+      className="flex h-full min-w-0 flex-col rounded-lg border border-border bg-card p-4"
       data-testid={testId}
     >
       <p className="truncate text-xs text-muted-foreground">{label}</p>
@@ -372,7 +372,7 @@ function SimpleKpiCard({
       </p>
       {caption && (
         <p
-          className="mt-1 truncate text-[11px] text-muted-foreground"
+          className="mt-auto truncate pt-1 text-[11px] text-muted-foreground"
           title={caption}
         >
           {caption}
@@ -384,7 +384,7 @@ function SimpleKpiCard({
 
 function BreakdownKpiCard({ kpi }: { kpi: UsageKpi }) {
   return (
-    <div className="min-w-0 rounded-lg border border-border bg-card p-4">
+    <div className="flex h-full min-w-0 flex-col rounded-lg border border-border bg-card p-4">
       <p className="truncate text-xs text-muted-foreground">{kpi.label}</p>
       <p className="mt-1 truncate text-2xl font-semibold tabular-nums tracking-tight text-foreground">
         {formatKpiValue(kpi)}
@@ -398,7 +398,7 @@ function BreakdownKpiCard({ kpi }: { kpi: UsageKpi }) {
         </p>
       )}
       {kpi.breakdown && kpi.breakdown.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+        <div className="mt-auto flex flex-wrap gap-x-3 gap-y-1 pt-2">
           {kpi.breakdown.map((part) => (
             <span
               key={part.label}
