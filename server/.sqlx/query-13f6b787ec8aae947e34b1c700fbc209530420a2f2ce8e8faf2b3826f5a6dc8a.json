@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis\n             FROM sessions\n             WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot,\n                    s.cost_basis,\n                    s.billing_source\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat' AND s.created_by_user_id = $1\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
   "describe": {
     "columns": [
       {
@@ -107,6 +107,11 @@
         "ordinal": 20,
         "name": "cost_basis",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "billing_source",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -135,8 +140,9 @@
       true,
       true,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "fc09e6d68952b3a9e562ad7d7ed7601c85b5f9515b268b3a5e514d925a9fef5e"
+  "hash": "13f6b787ec8aae947e34b1c700fbc209530420a2f2ce8e8faf2b3826f5a6dc8a"
 }

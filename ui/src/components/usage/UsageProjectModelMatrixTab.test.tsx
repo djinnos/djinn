@@ -19,9 +19,12 @@ function matrixCell(
     project_name: "Project Alpha",
     model: "model-a",
     cost_per_task: 1.25,
+    actual_cost_per_task: 1.0,
+    list_price_cost_per_task: 1.25,
     success_rate: 0.5,
     avg_reopens: 0.25,
     total_cost: 2.5,
+    list_price_usd: 2.5,
     total_tokens: 1000,
     ...overrides,
   };
@@ -65,7 +68,9 @@ describe("UsageProjectModelMatrixTab", () => {
       "Project Beta",
     ]);
     expect(matrix.models).toEqual(["model-a", "model-b"]);
-    expect(formatMatrixMetricValue(undefined, "cost_per_task")).toBe("—");
+    expect(formatMatrixMetricValue(undefined, "list_price_cost_per_task")).toBe(
+      "—",
+    );
   });
 
   it("renders never-ran cells distinctly from zero-valued and unpriced metrics", () => {
@@ -76,7 +81,7 @@ describe("UsageProjectModelMatrixTab", () => {
             project_id: "project-a",
             project_name: "Project Alpha",
             model: "model-a",
-            cost_per_task: null,
+            list_price_cost_per_task: null,
             total_cost: null,
             total_tokens: 1234,
           }),
@@ -84,7 +89,7 @@ describe("UsageProjectModelMatrixTab", () => {
             project_id: "project-b",
             project_name: "Project Beta",
             model: "model-b",
-            cost_per_task: 0,
+            list_price_cost_per_task: 0,
             total_cost: 0,
             // Zero *cost* but non-zero tokens: still rendered (only zero-token
             // rows/columns are hidden — see the dedicated test below).
@@ -98,9 +103,9 @@ describe("UsageProjectModelMatrixTab", () => {
     expect(
       screen.getByTitle("Project Alpha / model-b: never ran"),
     ).toBeInTheDocument();
-    // The default metric is now "actual_spend_usd" which shows "No actual spend" for null values.
-    // Multiple cells may show this label when actual_spend_usd is absent.
-    expect(screen.getAllByText("No actual spend").length).toBeGreaterThan(0);
+    // The default metric is now "list_price_cost_per_task", which renders
+    // "No priced cost/task" for null cells.
+    expect(screen.getAllByText("No priced cost/task").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Tokens/).length).toBeGreaterThan(0);
   });
 

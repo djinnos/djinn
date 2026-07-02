@@ -282,13 +282,17 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
     assert_eq!(status, StatusCode::OK);
 
     let kpis = array_field(&body, "kpis");
-    assert_eq!(kpis.len(), 5, "expected five KPI cards, got {}", kpis.len());
+    assert_eq!(kpis.len(), 6, "expected six KPI cards, got {}", kpis.len());
 
     // ── Generic shape coverage (label, value, delta_pct, formatted) ──
     let labels: Vec<&str> = kpis
         .iter()
         .filter_map(|k| k.get("label").and_then(Value::as_str))
         .collect();
+    assert!(
+        labels.contains(&"Total cost (list-price)"),
+        "expected a Total cost (list-price) KPI: {labels:?}"
+    );
     assert!(
         labels.contains(&"Actual API Spend"),
         "expected an Actual API Spend KPI: {labels:?}"
@@ -394,6 +398,14 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
                 .unwrap_or(false)
         })
         .collect();
+    let list_price_contributors: Vec<&Value> = kpis
+        .iter()
+        .filter(|k| {
+            k.get("list_price_usd")
+                .map(|v| !v.is_null())
+                .unwrap_or(false)
+        })
+        .collect();
 
     assert_eq!(
         actual_contributors.len(),
@@ -410,11 +422,34 @@ async fn split_kpi_reducer_invariant_and_seeded_totals() {
         1,
         "exactly one KPI must carry unpriced_count"
     );
+    assert_eq!(
+        list_price_contributors.len(),
+        1,
+        "exactly one KPI must carry list_price_usd"
+    );
 
     // ── Non-contributor cards must not duplicate aggregate fields ──
     for kpi in kpis {
         let label = kpi.get("label").and_then(Value::as_str).unwrap_or("");
         match label {
+            "Total cost (list-price)" => {
+                assert!(
+                    kpi.get("list_price_usd").is_some(),
+                    "Total cost (list-price) must carry list_price_usd"
+                );
+                assert!(
+                    kpi.get("actual_spend_usd").is_none(),
+                    "Total cost (list-price) must not carry actual_spend_usd"
+                );
+                assert!(
+                    kpi.get("projected_usd").is_none(),
+                    "Total cost (list-price) must not carry projected_usd"
+                );
+                assert!(
+                    kpi.get("unpriced_count").is_none(),
+                    "Total cost (list-price) must not carry unpriced_count"
+                );
+            }
             "Actual API Spend" => {
                 assert!(
                     kpi.get("actual_spend_usd").is_some(),
@@ -745,8 +780,10 @@ async fn model_effectiveness_uses_frontend_field_names() {
         "success_rate",
         "avg_reopens",
         "actual_cost_per_task",
+        "list_price_cost_per_task",
         "actual_spend_usd",
         "projected_usd",
+        "list_price_usd",
         "unpriced_session_count",
         "total_tokens",
         "session_count",

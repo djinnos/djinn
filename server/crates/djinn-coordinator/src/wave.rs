@@ -127,9 +127,15 @@ impl CoordinatorActor {
              2. Review any previous wave results (closed tasks, session reflections).\n\
              3. Decide: is the epic's goal fully met? If YES → call `epic_close({})`, \
              then `submit_grooming`. Do NOT create new tasks.\n\
-             4. If NO → write or update the epic roadmap design note, \
+             4. If the epic is BLOCKED on another epic (a foundation/ownership \
+             gate that is still open) and you can create no useful work yet, \
+             create NO tasks and call \
+             `submit_grooming(decision=\"escalate\", blocked_on=[<blocking epic short_id(s)>])`. \
+             This parks the epic until the blocker closes — the coordinator \
+             wakes it automatically. Do NOT restate a known block on every run.\n\
+             5. Otherwise → write or update the epic roadmap design note, \
              create 3–5 worker tasks (or a spike if uncertainty is high).\n\
-             5. Call `submit_grooming` when done.",
+             6. Call `submit_grooming` when done.",
             epic.title, epic.short_id, epic.short_id
         );
         let originating_adr_section = match epic.originating_adr_id.as_deref() {

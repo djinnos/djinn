@@ -281,6 +281,124 @@ describe("ProposalsPage", () => {
     });
   });
 
+  it("renders tribunal and gate chips from each row's list summary", async () => {
+    const proposals = [
+      makeProposal({
+        id: "p-review",
+        short_id: "rvw1",
+        title: "Awaiting review proposal",
+        status: "in_review",
+        list_summary: {
+          refinement_active: true,
+          awaiting_review: true,
+          current_round: 4,
+          needs_evidence: false,
+          dor_ready: true,
+          gate_ready: true,
+          unresolved_blocking_count: 0,
+        },
+      }),
+      makeProposal({
+        id: "p-running",
+        short_id: "rvw2",
+        title: "Refinement running proposal",
+        status: "in_review",
+        list_summary: {
+          refinement_active: true,
+          awaiting_review: false,
+          current_round: 3,
+          needs_evidence: false,
+          dor_ready: false,
+          gate_ready: false,
+          unresolved_blocking_count: 0,
+        },
+      }),
+      makeProposal({
+        id: "p-evidence",
+        short_id: "rvw3",
+        title: "Evidence parked proposal",
+        status: "in_review",
+        list_summary: {
+          refinement_active: true,
+          awaiting_review: false,
+          current_round: 2,
+          needs_evidence: true,
+          dor_ready: true,
+          gate_ready: false,
+          unresolved_blocking_count: 0,
+        },
+      }),
+      makeProposal({
+        id: "p-blocked",
+        short_id: "rvw4",
+        title: "Blocked by objections proposal",
+        status: "in_review",
+        list_summary: {
+          refinement_active: false,
+          awaiting_review: false,
+          current_round: 1,
+          needs_evidence: false,
+          dor_ready: true,
+          gate_ready: false,
+          unresolved_blocking_count: 2,
+        },
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    const reviewSection = (await screen.findByText("In Review")).closest(
+      "section",
+    );
+    expect(reviewSection).not.toBeNull();
+    const section = within(reviewSection!);
+
+    // Tribunal chip variants.
+    expect(section.getByText("Review")).toBeInTheDocument();
+    expect(section.getByText("R3")).toBeInTheDocument();
+    expect(section.getByText("evidence")).toBeInTheDocument();
+
+    // Gate chip: DoR blocker (running row) + objection blocker + ready dot.
+    expect(section.getByText("DoR ✗")).toBeInTheDocument();
+    expect(section.getByText("⛔2")).toBeInTheDocument();
+    expect(
+      section.getByTitle("2 unresolved blocking objections"),
+    ).toBeInTheDocument();
+    expect(section.getByTitle("Gate ready")).toBeInTheDocument();
+    expect(section.getByTitle("Parked on evidence")).toBeInTheDocument();
+  });
+
+  it("renders no chips for a row without a list summary", async () => {
+    const proposals = [
+      makeProposal({
+        id: "p-nosummary",
+        short_id: "nos1",
+        title: "No summary proposal",
+        status: "in_review",
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    expect(await screen.findByText("No summary proposal")).toBeInTheDocument();
+    expect(screen.queryByTitle("Gate ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
+  });
+
   it("defaults terminal proposal groups collapsed and active groups expanded with counts visible", async () => {
     const proposals = [
       makeProposal({

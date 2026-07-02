@@ -1591,6 +1591,7 @@ mod tests {
                         cache_read_price_per_million_snapshot: None,
                         cache_write_price_per_million_snapshot: None,
                         cost_basis: "unpriced".into(),
+                        billing_source: None,
                     };
                     let reply = Frame {
                         correlation_id: frame.correlation_id,
@@ -1612,6 +1613,7 @@ mod tests {
             metadata_json: None,
             task_run_id: Some("run-1".into()),
             cost_basis_hint: None,
+            billing_source: None,
         };
         let got = services
             .create_session(params)

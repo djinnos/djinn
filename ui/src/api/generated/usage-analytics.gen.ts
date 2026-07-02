@@ -95,6 +95,11 @@ actual_spend_usd?: number
  */
 projected_usd?: number
 /**
+ * Combined list-price cost (actual + projected) contributed by this KPI
+ * card's aggregate. Present only on the "Total cost (list-price)" card.
+ */
+list_price_usd?: number
+/**
  * Unpriced session count contributed by this KPI card's aggregate.
  * Present only on the "Sessions" card.
  */
@@ -122,6 +127,11 @@ actual_spend_usd?: number
  * Projected subscription-equivalent cost; `null` when no projected sessions.
  */
 projected_usd?: number
+/**
+ * Combined list-price cost (actual + projected); `null` when no priced
+ * sessions exist in this bucket.
+ */
+list_price_usd?: number
 tokens_in: number
 tokens_out: number
 /**
@@ -152,6 +162,11 @@ id: string
 name: string
 actual_spend_usd?: number
 projected_usd?: number
+/**
+ * Combined list-price cost (actual + projected). `None` when no priced
+ * sessions exist for this entity.
+ */
+list_price_usd?: number
 unpriced_session_count: number
 tokens_in: number
 tokens_out: number
@@ -166,6 +181,11 @@ avg_reopens?: number
  * Actual API spend per task. `None` when no actual-basis sessions.
  */
 actual_cost_per_task?: number
+/**
+ * Combined list-price cost per task (actual + projected). `None` when no
+ * priced sessions or no tasks.
+ */
+list_price_cost_per_task?: number
 /**
  * Present only for the by_task breakdown; lets the UI build a task link.
  */
@@ -188,6 +208,11 @@ avg_reopens?: number
  */
 actual_cost_per_task?: number
 /**
+ * Combined list-price cost per completed task (actual + projected). This
+ * is the primary, apples-to-apples "Cost / task" figure in the UI.
+ */
+list_price_cost_per_task?: number
+/**
  * Actual API spend total.
  */
 actual_spend_usd?: number
@@ -195,6 +220,10 @@ actual_spend_usd?: number
  * Projected subscription-equivalent cost total.
  */
 projected_usd?: number
+/**
+ * Combined list-price cost total (actual + projected).
+ */
+list_price_usd?: number
 /**
  * Sessions excluded from both dollar figures.
  */
@@ -224,6 +253,11 @@ model: string
  * Actual API spend per task.
  */
 actual_cost_per_task?: number
+/**
+ * Combined list-price cost per task (actual + projected). This is the
+ * primary, apples-to-apples "Cost / task" figure in the UI.
+ */
+list_price_cost_per_task?: number
 success_rate?: number
 avg_reopens?: number
 /**
@@ -234,6 +268,10 @@ actual_spend_usd?: number
  * Projected subscription-equivalent cost total.
  */
 projected_usd?: number
+/**
+ * Combined list-price cost total (actual + projected).
+ */
+list_price_usd?: number
 /**
  * Sessions excluded from both dollar figures.
  */

@@ -16,7 +16,7 @@ import {
 } from "./usageFormatters";
 
 interface MetricSpec {
-  key: "cost_per_task" | "success_rate" | "avg_reopens";
+  key: "list_price_cost_per_task" | "success_rate" | "avg_reopens";
   label: string;
   format: (value: number | null | undefined) => string;
   lowerIsBetter: boolean;
@@ -24,7 +24,9 @@ interface MetricSpec {
 
 const METRICS: MetricSpec[] = [
   {
-    key: "cost_per_task",
+    // Combined list-price cost per task (actual + projected) — the
+    // apples-to-apples axis across API-key and flat-rate-plan models.
+    key: "list_price_cost_per_task",
     label: "Cost / task",
     format: formatCurrency,
     lowerIsBetter: true,

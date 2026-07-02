@@ -1,9 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowLeft01Icon, Comment01Icon, Robot01Icon } from "@hugeicons/core-free-icons";
+import {
+  ArrowLeft01Icon,
+  Comment01Icon,
+  JusticeScale01Icon,
+  Robot01Icon,
+  TestTube01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
@@ -59,8 +65,129 @@ import {
   proposalDetailQueryOptions,
   proposalListQueryOptions,
 } from "@/lib/proposalQueries";
+import { cn } from "@/lib/utils";
 import type { Project } from "@/api/server";
-import type { Proposal, ProposalFeedback } from "@/api/types";
+import type {
+  Proposal,
+  ProposalFeedback,
+  ProposalListSummary,
+} from "@/api/types";
+
+/**
+ * Compact tribunal + gate chips for a proposal list row.
+ *
+ * `summary` is populated by `proposal_list` only for non-terminal proposals
+ * (draft/in_review), so absence of a summary means "no chips". Renders at most
+ * two chips, right-aligned before the short id, each with a `title` tooltip:
+ *
+ * - Tribunal chip (one variant, by priority): accent `⚖ Review` when the
+ *   tribunal has converged and a human is the bottleneck; `🧪 evidence` when
+ *   parked on a needs-evidence spike; a pulsing `⚖ R{n}` while a refinement
+ *   round is running. Absent when the tribunal is idle.
+ * - Gate chip: a green/red dot. When blocked it also shows the leading reason
+ *   textually — `DoR ✗` when Definition-of-Ready fails, `⛔{n}` for unresolved
+ *   blocking objections — and always names the reason in the tooltip.
+ */
+function ProposalListChips({
+  summary,
+}: {
+  summary?: ProposalListSummary | null;
+}) {
+  if (!summary) return null;
+  const {
+    refinement_active,
+    awaiting_review,
+    current_round,
+    needs_evidence,
+    dor_ready,
+    gate_ready,
+    unresolved_blocking_count,
+  } = summary;
+  const round = current_round || 1;
+
+  let tribunal: ReactNode = null;
+  if (awaiting_review) {
+    tribunal = (
+      <span
+        className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-amber-500"
+        title="Tribunal converged — awaiting your review"
+      >
+        <HugeiconsIcon icon={JusticeScale01Icon} size={13} />
+        Review
+      </span>
+    );
+  } else if (needs_evidence) {
+    tribunal = (
+      <span
+        className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
+        title="Parked on a needs-evidence spike"
+      >
+        <HugeiconsIcon icon={TestTube01Icon} size={13} />
+        evidence
+      </span>
+    );
+  } else if (refinement_active) {
+    tribunal = (
+      <span
+        className="flex shrink-0 items-center gap-0.5 text-xs text-muted-foreground"
+        title={`Tribunal refinement running (round ${round})`}
+      >
+        <HugeiconsIcon
+          icon={JusticeScale01Icon}
+          size={13}
+          className="animate-pulse"
+        />
+        R{round}
+      </span>
+    );
+  }
+
+  // A blocked gate with DoR passing, no blocking objections, and no evidence
+  // park can only mean the latest judge verdict is needs-work.
+  const judgeNeedsWork =
+    !gate_ready &&
+    dor_ready &&
+    unresolved_blocking_count === 0 &&
+    !needs_evidence;
+  let gateText: string | null = null;
+  let gateTitle: string;
+  if (gate_ready) {
+    gateTitle = "Gate ready";
+  } else if (!dor_ready) {
+    gateText = "DoR ✗";
+    gateTitle = "DoR failing";
+  } else if (unresolved_blocking_count > 0) {
+    gateText = `⛔${unresolved_blocking_count}`;
+    gateTitle = `${unresolved_blocking_count} unresolved blocking objection${
+      unresolved_blocking_count === 1 ? "" : "s"
+    }`;
+  } else if (needs_evidence) {
+    gateTitle = "Parked on evidence";
+  } else if (judgeNeedsWork) {
+    gateTitle = "Judge needs work";
+  } else {
+    gateTitle = "Gate blocked";
+  }
+
+  return (
+    <>
+      {tribunal}
+      <span
+        className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"
+        title={gateTitle}
+      >
+        <span
+          className={cn(
+            "inline-block size-2 rounded-full",
+            gate_ready ? "bg-green-500" : "bg-red-500",
+          )}
+          aria-hidden="true"
+        />
+        {gateText}
+      </span>
+    </>
+  );
+}
 
 /** Render a full proposal as markdown — title + spec + acceptance criteria —
  * so it can be copied into an AI to discuss. */
@@ -281,6 +408,7 @@ function ProposalsListView() {
                               criteria={p.acceptance_criteria}
                               className="shrink-0"
                             />
+                            <ProposalListChips summary={p.list_summary} />
                             <span className="hidden shrink-0 font-mono text-xs text-muted-foreground sm:inline">
                               {p.short_id}
                             </span>
@@ -599,15 +727,15 @@ function ProposalDetailView({
           )}
         </div>
 
-        <ProposalHistory detail={detail} />
-
-        <Separator />
-
-        <ProposalSignoffs detail={detail} onChanged={onChanged} />
-
+        {/* Tribunal: refinement kickoff / status ribbon, and — once converged —
+            the review card (verdict / spec diff / debate trail tabs plus the
+            human accept / another-round / reject actions). */}
         <ProposalRefinement
           proposalId={proposal.id}
           status={detail.refinement}
+          gateStatus={detail.gate_status}
+          debateTrail={detail.debate_trail}
+          revisions={detail.revisions}
           canStart={
             (proposal.status === "draft" || proposal.status === "in_review") &&
             !detail.refinement?.active
@@ -615,23 +743,32 @@ function ProposalDetailView({
           onChanged={onChanged}
         />
 
-        {/* Readiness panel: DoR status, tribunal metrics, blocked explanations,
-            and needs-evidence spike parking. */}
+        {/* Readiness gate: per-condition checklist (DoR, judge verdict,
+            unresolved blocking debate entries, evidence spike) rendered
+            straight from gate_status — no client-side recomputation. */}
         <ReadinessPanel
           proposalId={proposal.id}
           gateStatus={detail.gate_status}
           refinement={detail.refinement}
+          debateTrail={detail.debate_trail}
           onChanged={onChanged}
         />
+
+        <Separator />
+
+        <ProposalSignoffs detail={detail} onChanged={onChanged} />
 
         <ProposalKickoff detail={detail} onChanged={onChanged} />
 
         <Separator />
 
+        <ProposalHistory detail={detail} />
+
+        <Separator />
+
         {/* Human feedback thread. The tribunal debate trail (objections /
-            rebuttals / verdicts) is intentionally NOT rendered here — the
-            judge's verdict in the refinement panel above is the human-facing
-            summary; the raw trail is audit data available via the API. */}
+            rebuttals / verdicts) now lives in the Tribunal review card above;
+            this thread is for human discussion only. */}
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}

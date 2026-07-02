@@ -99,7 +99,8 @@ pub use repositories::{
     proposal::{
         NeedsEvidenceCapStatus, NeedsEvidenceClaimLink, ProposalCreateInput,
         ProposalDebateTrailCreateInput, ProposalFeedbackCreateInput, ProposalListQuery,
-        ProposalListResult, ProposalMemoryRef, ProposalRepository, ProposalUpdateInput,
+        ProposalListResult, ProposalListSummaryRow, ProposalMemoryRef, ProposalRepository,
+        ProposalUpdateInput,
     },
     repo_graph_cache::{CachedRepoGraph, RepoGraphCacheInsert, RepoGraphCacheRepository},
     service::{ServicePreset, ServicePresetRepository},

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
+use djinn_supervisor::SupervisorServices;
 
 /// Construct a [`djinn_slot::host::SlotContext`] from an [`AgentContext`] for
 /// the dispatch pathway.
@@ -39,9 +40,48 @@ pub(crate) fn agent_to_dispatch_slot_context(
         runtime_ops: agent.runtime_ops.clone(),
         repo_graph_ops: agent.repo_graph_ops.clone(),
         clock: Arc::new(djinn_core::clock::SystemClock::new()),
-        callbacks: Arc::new(AgentDispatchCallbacks(agent.clone())),
+        callbacks: Arc::new(AgentDispatchCallbacks {
+            agent: agent.clone(),
+            services: None,
+        }),
         tool_dispatcher: None,
     }
+}
+
+/// Construct a reply-loop [`djinn_slot::host::SlotContext`] whose callbacks
+/// carry a live [`SupervisorServices`] handle.
+///
+/// The canonical reply loop (djinn-slot) emits liveness (`touch_activity_rpc`)
+/// and mid-flight token (`flush_session_tokens_rpc`) heartbeats through
+/// `SlotHostCallbacks`. In the dispatch-only [`agent_to_dispatch_slot_context`]
+/// those are inert stubs, but the reply loop MUST route them to the host:
+///
+/// - host (in-process): `DirectServices` writes the host's shared
+///   `ActivityTracker` / session row directly.
+/// - K8s worker pod: `WorkerSupervisorServices` forwards them over RPC to the
+///   host, where `DirectServices` applies them.
+///
+/// Wiring these through `services` restores the pre-slot-extraction contract
+/// (see `SupervisorServices::touch_activity` docs). Without it the worker's
+/// heartbeats were dropped on the floor and the coordinator's stall poller —
+/// reading its own untouched tracker — false-killed every worker session that
+/// ran past the 30-minute idle threshold.
+pub(crate) fn agent_to_reply_loop_slot_context(
+    agent: &AgentContext,
+    services: &dyn SupervisorServices,
+) -> djinn_slot::host::SlotContext {
+    let mut ctx = agent_to_dispatch_slot_context(agent);
+    // SAFETY: mirrors `AgentToolDispatcher::new`'s lifetime discipline — the
+    // reply loop awaits every callback future before returning, so this erased
+    // `'static` reference never outlives the borrow it was created from.
+    let services_static = unsafe {
+        std::mem::transmute::<&dyn SupervisorServices, &'static dyn SupervisorServices>(services)
+    };
+    ctx.callbacks = Arc::new(AgentDispatchCallbacks {
+        agent: agent.clone(),
+        services: Some(services_static),
+    });
+    ctx
 }
 
 /// Host callback implementation for the dispatch pathway.
@@ -54,7 +94,16 @@ pub(crate) fn agent_to_dispatch_slot_context(
 /// Other `SlotHostCallbacks` methods are stubs: the host-side dispatch path
 /// uses `AgentContext` directly (not through callbacks) for MCP resolution,
 /// prompt rendering, provider credentials, etc.
-struct AgentDispatchCallbacks(AgentContext);
+///
+/// `services` is `Some` only on the reply-loop path (built via
+/// [`agent_to_reply_loop_slot_context`]); there `touch_activity_rpc` and
+/// `flush_session_tokens_rpc` route through it to the host. On the dispatch
+/// path it is `None` and those heartbeats stay inert stubs (they are never
+/// invoked there).
+struct AgentDispatchCallbacks {
+    agent: AgentContext,
+    services: Option<&'static dyn SupervisorServices>,
+}
 
 impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
     fn interrupt_paused_worker_session<'a>(
@@ -151,7 +200,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
         kill: CancellationToken,
         pause: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
-        let app_state = self.0.clone();
+        let app_state = self.agent.clone();
         Box::pin(async move {
             super::supervisor_runner::dispatch_task_runtime(
                 task_id,
@@ -167,19 +216,41 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
 
     fn touch_activity_rpc<'a>(
         &'a self,
-        _task_id: String,
+        task_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        // Reply-loop path: route the liveness heartbeat to the host so the
+        // coordinator's stall poller sees the session is alive. Dispatch path
+        // (`services == None`): inert — never invoked there.
+        match self.services {
+            Some(services) => Box::pin(async move { services.touch_activity(task_id).await }),
+            None => Box::pin(async { Ok(()) }),
+        }
     }
 
     fn flush_session_tokens_rpc<'a>(
         &'a self,
-        _session_id: String,
-        _tokens_in: i64,
-        _tokens_out: i64,
-        _cache_read: i64,
-        _cache_write: i64,
+        session_id: String,
+        tokens_in: i64,
+        tokens_out: i64,
+        cache_read: i64,
+        cache_write: i64,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async { Ok(()) })
+        // Reply-loop path: persist mid-flight token counters to the session row
+        // so long-running sessions expose real progress (also feeds the stall
+        // backstop's DB-visible-progress signal). Dispatch path: inert.
+        match self.services {
+            Some(services) => Box::pin(async move {
+                services
+                    .flush_session_tokens(
+                        session_id,
+                        tokens_in,
+                        tokens_out,
+                        cache_read,
+                        cache_write,
+                    )
+                    .await
+            }),
+            None => Box::pin(async { Ok(()) }),
+        }
     }
 }

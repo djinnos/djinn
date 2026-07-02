@@ -150,10 +150,20 @@ pub struct ModelHealthOutput {
     pub total_failures: u32,
     #[schemars(with = "i64")]
     pub total_successes: u32,
+    /// Current escalating-cooldown tier (how many trips since the last success).
+    /// Each tier triples the auto-disable cooldown (5s → 15s → … → 4h cap).
     #[schemars(with = "i64")]
     pub disable_ttl_trips: u32,
     #[schemars(with = "Option<i64>")]
     pub cooldown_seconds_remaining: Option<u64>,
+    /// Hard-disabled by the trip-rate ceiling: held unavailable with no
+    /// auto-expiry until a human re-enables it via `model_health(action=enable)`.
+    /// When true, `cooldown_seconds_remaining` is null (there is no auto-expiry).
+    pub hard_disabled: bool,
+    /// Number of breaker trips inside the rolling trip-rate window (6h). When it
+    /// reaches the ceiling (8) the bucket hard-disables.
+    #[schemars(with = "i64")]
+    pub trips_in_window: u32,
 }
 
 impl From<ModelHealth> for ModelHealthOutput {
@@ -167,6 +177,8 @@ impl From<ModelHealth> for ModelHealthOutput {
             total_successes: value.total_successes,
             disable_ttl_trips: value.disable_ttl_trips,
             cooldown_seconds_remaining: value.cooldown_seconds_remaining,
+            hard_disabled: value.hard_disabled,
+            trips_in_window: value.trips_in_window,
         }
     }
 }
