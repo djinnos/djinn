@@ -51,7 +51,7 @@ pub mod commands;
 pub mod finalize_handlers;
 pub mod finalize_types;
 pub mod helpers;
-pub(crate) mod lifecycle;
+pub mod lifecycle;
 pub mod llm_extraction;
 pub mod memory_enrichment;
 pub mod pool;
