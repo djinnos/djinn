@@ -171,6 +171,7 @@ impl CoordinatorActor {
                 // PR-open-only flow creates no commits, so no author identity.
                 commit_author_name: None,
                 commit_author_email: None,
+                resume_lifecycle_metadata: None,
             };
             // E6 Part B: proactively rebase the (approved) task branch onto its
             // current target before the PR-open push, so the PR opens/updates on

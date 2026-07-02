@@ -2341,6 +2341,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
 
         let report = supervisor.run(spec).await.expect("supervisor run");
@@ -2409,6 +2410,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
 
         let _report = supervisor.run(spec).await.expect("supervisor run");
@@ -2567,6 +2569,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
 
         let logs = CapturedLogs::default();
@@ -2640,6 +2643,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
         let provider_report = provider_supervisor
             .run(provider_spec)
@@ -2739,6 +2743,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
 
         let logs = CapturedLogs::default();
@@ -2803,6 +2808,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: None,
             commit_author_email: None,
+            resume_lifecycle_metadata: None,
         };
         let summary_report = summary_supervisor
             .run(summary_spec)

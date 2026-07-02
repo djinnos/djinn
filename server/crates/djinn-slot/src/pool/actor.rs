@@ -134,6 +134,32 @@ impl SlotPool {
                 let result = self.dispatch(&task_id, &project_path, &model_id).await;
                 let _ = respond_to.send(result);
             }
+            PoolMessage::DispatchWithResume {
+                task_id,
+                project_path,
+                model_id,
+                resume_lifecycle_metadata,
+                respond_to,
+            } => {
+                // Re-dispatch with optional resume-via-git lifecycle metadata.
+                // The legacy `dispatch` path is reused: it spawns the slot, and
+                // the slot actor hands the metadata to its lifecycle runner via
+                // `SlotCommand::RunTaskWithResume`. Selection metadata is not
+                // used to mutate the worktree here — the integration task
+                // (`twsk`) reads it from the `TaskRunSpec`. Keeping this path
+                // mechanically identical to the legacy `Dispatch` ensures the
+                // existing capacity/slot-busy/recovery semantics apply
+                // unchanged when resume selection is enabled.
+                let result = self
+                    .dispatch_with_resume(
+                        &task_id,
+                        &project_path,
+                        &model_id,
+                        resume_lifecycle_metadata,
+                    )
+                    .await;
+                let _ = respond_to.send(result);
+            }
             PoolMessage::HasSession {
                 task_id,
                 respond_to,
@@ -261,6 +287,27 @@ impl SlotPool {
         project_path: &str,
         model_id: &str,
     ) -> Result<(), PoolError> {
+        self.dispatch_with_resume(task_id, project_path, model_id, None)
+            .await
+    }
+
+    /// Re-dispatch with optional resume-via-git lifecycle metadata. This is
+    /// the additive re-dispatch path used when the coordinator's
+    /// `select_resume_lifecycle_metadata_for_dispatch` produced a selection
+    /// (the enabled branch of the `worker_lifecycle_config.resume` gate).
+    /// When `resume_lifecycle_metadata` is `None` the path is mechanically
+    /// identical to [`Self::dispatch`]; when it is `Some` the metadata blob
+    /// rides the slot pipeline through
+    /// `SlotCommand::RunTaskWithResume` so the lifecycle runner can put it on
+    /// the `TaskRunSpec`. No worktree/checkout mutation is performed in this
+    /// task — that remains `twsk`.
+    async fn dispatch_with_resume(
+        &mut self,
+        task_id: &str,
+        project_path: &str,
+        model_id: &str,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
+    ) -> Result<(), PoolError> {
         if self.task_to_slot.contains_key(task_id) {
             return Err(PoolError::SessionAlreadyActive {
                 task_id: task_id.to_string(),
@@ -304,7 +351,14 @@ impl SlotPool {
             };
 
             let slot = self.slot(slot_id)?;
-            match slot.run_task(task_owned.clone(), proj_owned.clone()).await {
+            match slot
+                .run_task_with_resume(
+                    task_owned.clone(),
+                    proj_owned.clone(),
+                    resume_lifecycle_metadata.clone(),
+                )
+                .await
+            {
                 Ok(()) => {}
                 Err(SlotError::SlotBusy) => {
                     // Stale free-list entry: the slot's actor never truly freed.

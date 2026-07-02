@@ -37,8 +37,8 @@ use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
-    BiStream, LoopGuardKind, ProviderFailureClass, ResolvedCredentials, SessionRuntime,
-    StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
+    BiStream, LoopGuardKind, ProviderFailureClass, ResolvedCredentials, ResumeLifecycleMetadata,
+    SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
 };
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
@@ -182,6 +182,7 @@ pub(super) async fn dispatch_task_runtime(
     app_state: AgentContext,
     kill: CancellationToken,
     _pause: CancellationToken,
+    resume_lifecycle_metadata: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     // ── Load the task ─────────────────────────────────────────────────────
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -396,6 +397,30 @@ pub(super) async fn dispatch_task_runtime(
     };
 
     let task_run_id = uuid::Uuid::now_v7().to_string();
+    // The slot pipeline hands us a JSON-encoded `ResumeLifecycleMetadata`
+    // blob (see `djinn_runtime::spec::ResumeLifecycleMetadata`). Decode it
+    // into the typed mirror so it lands on the spec as
+    // `Option<ResumeLifecycleMetadata>` rather than as a generic
+    // `serde_json::Value`. A `None` input or a corrupt blob yields
+    // `None` and is logged as a warning — the spec keeps the legacy
+    // default-off path (no resume metadata) so dispatch semantics stay
+    // unchanged.
+    let resume_lifecycle_metadata: Option<ResumeLifecycleMetadata> = match resume_lifecycle_metadata
+    {
+        Some(value) => match serde_json::from_value::<ResumeLifecycleMetadata>(value) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %err,
+                    "dispatch_task_runtime: failed to decode resume_lifecycle_metadata blob; \
+                     proceeding without resume metadata"
+                );
+                None
+            }
+        },
+        None => None,
+    };
     let spec = TaskRunSpec {
         task_run_id,
         task_id: task.id.clone(),
@@ -410,6 +435,7 @@ pub(super) async fn dispatch_task_runtime(
         github_install_token,
         commit_author_name,
         commit_author_email,
+        resume_lifecycle_metadata,
     };
 
     // ── Announce dispatch live (pre-session UI tracking) ──────────────────

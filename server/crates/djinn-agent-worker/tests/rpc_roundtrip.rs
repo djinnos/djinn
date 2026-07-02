@@ -97,6 +97,7 @@ fn fixture_spec(task_id: &str) -> TaskRunSpec {
         github_install_token: None,
         commit_author_name: None,
         commit_author_email: None,
+        resume_lifecycle_metadata: None,
     }
 }
 

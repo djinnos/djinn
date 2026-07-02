@@ -393,6 +393,7 @@ pub fn agent_context_from_db_with_dispatcher(
             _ctx: SlotContext,
             _kill: tokio_util::sync::CancellationToken,
             _pause: tokio_util::sync::CancellationToken,
+            _resume_lifecycle_metadata: Option<serde_json::Value>,
         ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
             Box::pin(async { Ok(()) })
         }

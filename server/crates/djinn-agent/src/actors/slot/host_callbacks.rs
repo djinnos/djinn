@@ -199,6 +199,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
         _ctx: djinn_slot::host::SlotContext,
         kill: CancellationToken,
         pause: CancellationToken,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>> {
         let app_state = self.agent.clone();
         Box::pin(async move {
@@ -209,6 +210,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentDispatchCallbacks {
                 app_state,
                 kill,
                 pause,
+                resume_lifecycle_metadata,
             )
             .await
         })

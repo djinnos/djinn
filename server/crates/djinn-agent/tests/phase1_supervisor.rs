@@ -257,6 +257,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         github_install_token: None,
         commit_author_name: None,
         commit_author_email: None,
+        resume_lifecycle_metadata: None,
     };
 
     // 6. Drive the run.  In this infrastructure-slice test we do NOT stub the
@@ -512,6 +513,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         github_install_token: None,
         commit_author_name: None,
         commit_author_email: None,
+        resume_lifecycle_metadata: None,
     };
 
     // 4. Drive the run — with the provider stubbed, the architect stage
@@ -751,6 +753,7 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         github_install_token: None,
         commit_author_name: None,
         commit_author_email: None,
+        resume_lifecycle_metadata: None,
     };
 
     // 5. Drive the run. The stubbed worker/reviewer may not perfectly satisfy

@@ -1,8 +1,11 @@
 mod admission;
 mod outcome;
-/// Pure resume-source selector; not wired into the dispatch path yet (see task
-/// 9tun). The API is exported for the follow-up dispatch integration task.
-#[allow(dead_code)]
+/// Pure resume-source selector and candidate builder. Wired into the dispatch
+/// path for re-dispatch after controlled terminations; returns `None` when
+/// resume selection is disabled so default/off dispatch behavior is unchanged.
+// Note: the public API is still exported for the follow-up worktree checkout
+// task (twsk). The dispatcher uses the helpers directly to attach selection
+// metadata to the session lifecycle path.
 pub mod resume_source;
 mod retry;
 pub(crate) mod session_recovery;
