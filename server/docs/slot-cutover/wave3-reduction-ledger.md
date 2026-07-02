@@ -73,3 +73,106 @@ Environment limitations encountered:
 - Running the broader focused lifecycle prompt-context test filter compiled successfully with `OPENSSL_NO_VENDOR=1`, but DB-backed tests failed at fixture setup because the local Postgres sidecar lacks the expected `djinn_test_template` database:
   - `template database "djinn_test_template" does not exist`
 - Because that DB template is unavailable in this session, the strongest local fallback was the successfully compiled and passing pure helper/directive subset above.
+
+---
+
+## Slice: provider and MCP resolution helper parameterization
+
+Task: `019f23f0-c130-7d21-93cd-74432e30e2e0` — Parameterize slot provider and MCP resolution helpers.
+
+### Line-count proof
+
+Commands from the task description:
+
+```sh
+find server/crates/djinn-agent/src/actors/slot -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+```
+
+Post-iwap baseline (from origin/main at `e46c0b389`):
+
+- `server/crates/djinn-agent/src/actors/slot`: 8,806 lines
+- `server/crates/djinn-slot/src`: 28,622 lines
+- Combined: 37,428 lines
+
+After this slice (current workspace with dzog changes applied):
+
+- `server/crates/djinn-agent/src/actors/slot`: 8,378 lines
+- `server/crates/djinn-slot/src`: 28,622 lines
+- Combined: 37,000 lines
+
+Net delta for this slice: **-428 scoped Rust lines in djinn-agent/src/actors/slot**.
+
+Combined iwap + dzog Wave 3 reduction from the pre-Wave-3 baseline: **1,055 lines** (9,433 → 8,378).
+
+### What changed
+
+- `server/crates/djinn-agent/src/actors/slot/helpers/provider_resolution.rs` (741 → 532 lines, -209)
+  - Replaced four thin wrapper functions (`format_family_for_provider`, `capabilities_for_provider`, `auth_method_for_provider`, `default_base_url`) with direct `pub use` re-exports from `djinn_slot::helpers::provider_resolution`.
+  - Extracted shared `effective_oauth_provider_id` helper used by both `load_provider_credential` and `refresh_oauth_credential_after_401`.
+  - Consolidated Codex and Copilot OAuth load/refresh logic into `try_load_or_refresh_codex` and `try_load_or_refresh_copilot`, eliminating the near-duplicate match arms between the two public functions.
+  - Removed the `build_telemetry_meta` wrapper; callers now use `build_telemetry_meta_with_attribution(..., None, None)` directly.
+  - Trimmed verbose module-level, struct-field, and function doc comments while preserving essential behavioral contracts.
+  - All existing wire round-trip tests preserved.
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs` (491 → 362 lines, -129)
+  - Split monolithic `resolve_mcp_and_skills` into parameterized private helpers: `resolve_mcp_server_entries`, `connect_mcp_registry`, and `load_project_skills`.
+  - Consolidated `#[cfg(test)]` / `#[cfg(not(test))]` branches for MCP registry connection into a single code path with a `#[cfg(test)]` early-return for the override.
+  - Consolidated four non-planner role tests (worker, reviewer, lead, architect) into a single data-driven test.
+  - Trimmed verbose module-level and inline comments.
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/role_overrides.rs` (466 → 388 lines, -78)
+  - Extracted `resolve_runtime_role_override` helper that handles both the specialist (Worker stage) and tribunal (Refinement stage) override paths.
+  - Trimmed verbose module-level, struct-field, and function doc comments.
+- `server/crates/djinn-agent/src/actors/slot/helpers/mod.rs` (82 → 70 lines, -12)
+  - Removed `build_telemetry_meta` re-export.
+  - Removed `#[cfg(test)] mod tests;` declaration (the stub file was just comments).
+- `server/crates/djinn-agent/src/actors/slot/helpers/tests.rs` (19 → 0 lines, deleted)
+  - Removed empty stub file that contained only comments about tests living in djinn-slot.
+- `server/crates/djinn-agent/src/actors/slot/mod.rs` (169 → 153 lines, -16)
+  - Trimmed stale re-export comment block.
+- `server/crates/djinn-agent/src/supervisor_impl/stage.rs`
+  - Updated `build_telemetry_meta` call to `build_telemetry_meta_with_attribution`.
+- `server/crates/djinn-agent/src/direct_services.rs`
+  - Updated `build_telemetry_meta` call to `build_telemetry_meta_with_attribution`.
+
+### Touched files
+
+- `server/crates/djinn-agent/src/actors/slot/helpers/provider_resolution.rs`
+- `server/crates/djinn-agent/src/actors/slot/helpers/mod.rs`
+- `server/crates/djinn-agent/src/actors/slot/helpers/tests.rs` (deleted)
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs`
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/role_overrides.rs`
+- `server/crates/djinn-agent/src/actors/slot/mod.rs`
+- `server/crates/djinn-agent/src/supervisor_impl/stage.rs`
+- `server/crates/djinn-agent/src/direct_services.rs`
+- `server/docs/slot-cutover/wave3-reduction-ledger.md`
+
+### Validation
+
+Formatting:
+
+```sh
+cargo fmt --manifest-path server/Cargo.toml -p djinn-agent
+```
+
+Result: applied.
+
+Type-check / lint:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-agent --all-features
+```
+
+Result: passed, no warnings or errors.
+
+Focused tests:
+
+| Command | Outcome |
+|---|---|
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features mcp_resolve` | 12 passed, 0 failed |
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features provider_resolution` | 5 passed, 0 failed |
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features role_overrides` | 5 failed on `ConnectionRefused` / missing `djinn_test_template` (DB-dependent; no Postgres reachable) |
+
+Environment limitations encountered:
+
+- DB-dependent tests (`role_overrides`) fail on `ConnectionRefused` / missing `djinn_test_template` database in this sandbox. No tests were disabled or weakened.
+- `OPENSSL_NO_VENDOR=1` is required; the container lacks `make` for vendored OpenSSL.
