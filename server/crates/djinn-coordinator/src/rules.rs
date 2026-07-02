@@ -1102,36 +1102,6 @@ mod tests {
         }
     }
 
-    async fn insert_raw_evidence_findings_entry(
-        db: &Database,
-        proposal_id: &str,
-        spike_task_id: &str,
-        round: i32,
-        against_revision_seq: i32,
-        body_metadata: Option<&serde_json::Value>,
-    ) -> String {
-        db.ensure_initialized().await.unwrap();
-        let id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO proposal_debate_trail
-                (id, proposal_id, kind, body, blocking, agent_role, author_kind,
-                 author_user_id, author_model, source_task_id,
-                 against_revision_seq, round, body_metadata)
-             VALUES ($1, $2, 'evidence_findings', 'raw malformed fixture', false, 'spike', 'agent',
-                     NULL, NULL, $3, $4, $5, $6)",
-        )
-        .bind(&id)
-        .bind(proposal_id)
-        .bind(spike_task_id)
-        .bind(against_revision_seq)
-        .bind(round)
-        .bind(body_metadata)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        id
-    }
-
     async fn setup_linked_evidence_spike_fixture(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -2589,62 +2559,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_closed_event_records_failed_without_findings_or_with_malformed_findings() {
-        for (title, metadata) in [
-            ("Event No Findings", None),
-            (
-                "Event Malformed Findings",
-                Some(serde_json::json!({
-                    "answer":"",
-                    "evidence":[],
-                    "code_paths_inspected":[],
-                    "confidence":0.7,
-                    "residual_risks":[],
-                    "recommendation_for_advocate":""
-                })),
-            ),
-        ] {
-            let db = test_helpers::create_test_db();
-            let (tx, _rx) = broadcast::channel(256);
-            let (proposal_repo, task_repo, proposal, spike_task, claim) =
-                setup_linked_evidence_spike_fixture(&db, &tx, title).await;
-            if let Some(metadata) = metadata.as_ref() {
-                insert_raw_evidence_findings_entry(
-                    &db,
-                    &proposal.id,
-                    &spike_task.id,
-                    claim.round,
-                    claim.against_revision_seq,
-                    Some(metadata),
-                )
-                .await;
-            }
-            let closed = task_repo
-                .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
-                .await
-                .unwrap();
+    async fn task_closed_event_records_failed_without_findings() {
+        // Malformed-findings classification is covered by the repository primitive
+        // tests from furi; this coordinator seam test verifies only the "no valid
+        // findings" path through the event delegation.
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, _claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Event No Findings").await;
+        let closed = task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
 
-            let mut actor = make_coordinator_actor(&db, &tx);
-            actor
-                .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
-                .await;
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor
+            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
+            .await;
 
-            assert_eq!(
-                count_evidence_lifecycle_events(
-                    &proposal_repo,
-                    &proposal.id,
-                    evidence_lifecycle_kind::EVIDENCE_FAILED,
-                )
-                .await,
-                1,
-                "completed linked spike without valid findings must fail"
-            );
-            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-            assert_eq!(
-                still_linked.linked_spike_task_id.as_deref(),
-                Some(spike_task.id.as_str())
-            );
-            assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
-        }
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_FAILED,
+            )
+            .await,
+            1,
+            "completed linked spike without valid findings must fail"
+        );
+        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task.id.as_str())
+        );
+        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 }
