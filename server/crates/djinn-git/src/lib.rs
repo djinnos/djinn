@@ -170,6 +170,13 @@ pub enum GitError {
 pub mod actor;
 pub use actor::{GitActorHandle, get_or_spawn};
 
+pub mod submission_diff;
+pub use submission_diff::{
+    DEFAULT_SUBMISSION_BASE_REF, SubmissionDiffDigest, SubmissionDiffFingerprint,
+    SubmissionDiffFingerprintConfig, SubmissionNoDiff, compute_submission_diff_fingerprint,
+    compute_submission_diff_fingerprint_with_config,
+};
+
 #[cfg(test)]
 mod test_support;
 
