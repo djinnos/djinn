@@ -938,3 +938,99 @@ Commands run from `server/`.
 canonically in `djinn-slot/src/helpers/tests.rs`. The `log_snippet` test utility
 was removed from the agent-side since the agent test module is a documentation
 stub (b7pe cutover) and `log_snippet` was unused in agent tests.
+
+---
+
+## Wave 2 lifecycle adapter thinning (task 560g)
+
+### Scope consumed from helper chain
+
+This pass was run after the helper-slice updates from b7pe, qicv, and 2sy0. The
+post-helper-chain lifecycle target counts matched the planner checkpoint before
+editing: agent lifecycle targets totaled 2,681 lines and the corresponding
+`djinn-slot/src/lifecycle/*` files totaled 681 lines (3,362 combined).
+
+### Lifecycle classification and before/after counts
+
+| File | Classification after 560g | Before | After | Delta |
+|---|---|---:|---:|---:|
+| `djinn-agent/src/actors/slot/lifecycle/task_classifier.rs` | Thin facade over canonical `djinn_slot::lifecycle::task_classifier` | 326 | 5 | -321 |
+| `djinn-slot/src/lifecycle/task_classifier.rs` | Canonical host-independent classifier and focused tests | 11 | 62 | +51 |
+| `djinn-agent/src/actors/slot/lifecycle/retry.rs` | Thin facade over canonical `djinn_slot::lifecycle::retry` | 45 | 6 | -39 |
+| `djinn-slot/src/lifecycle/retry.rs` | Canonical locked-database retry policy, preserving SQLite and Postgres lock detection | 30 | 45 | +15 |
+| `djinn-agent/src/actors/slot/lifecycle/prompt_context.rs` | Host-only adapter: DB repositories, task/activity loading, git worktree SHAs, memory context | 796 | 796 | 0 |
+| `djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs` | Host-only adapter: environment config, MCP registry discovery/connect, agent native skill assets | 491 | 491 | 0 |
+| `djinn-agent/src/actors/slot/lifecycle/role_overrides.rs` | Host-only adapter: AgentRepository lookups and `AgentType`/`AgentRole` runtime selection | 466 | 466 | 0 |
+| `djinn-agent/src/actors/slot/lifecycle/setup.rs` | Host-only adapter: command execution and command activity logging through agent command stack | 145 | 145 | 0 |
+| `djinn-agent/src/actors/slot/lifecycle/teardown.rs` | Host-only adapter: task transitions, coordinator triggers, background work tracker, merge/extraction kickoff | 225 | 225 | 0 |
+| `djinn-agent/src/actors/slot/lifecycle/model_resolution.rs` | Mixed: slot has canonical parse+credential callback path; agent keeps host-only role-preference DB/OAuth credential shape | 187 | 187 | 0 |
+
+**Combined target count:** 3,362 before → 3,068 after (**net -294**).
+
+### Consolidated behavior
+
+- `NativeSkillTrigger` and both classifier entry points now live canonically in
+  `djinn-slot`; the agent lifecycle file is a facade re-export so existing
+  `djinn_agent::actors::slot::lifecycle::task_classifier::*` imports continue to
+  compile.
+- Locked-database detection and transition retry backoff now live canonically in
+  `djinn-slot`; the agent lifecycle retry file is a facade re-export. The
+  canonical slot implementation preserves the agent behavior for SQLite lock
+  codes/messages and keeps the existing Postgres serialization/deadlock codes.
+- `djinn_slot::lifecycle` is public so agent-side lifecycle adapters can delegate
+  to canonical stage helpers without opening new duplicate copies.
+
+### Blockers to a safe 2,500-line lifecycle reduction in this slice
+
+This session intentionally stopped short of mechanically moving the remaining
+large lifecycle files because their current public signatures are still bound to
+agent-only types and call paths that the next supervisor-dispatch slice owns:
+
+1. `prompt_context.rs` depends on `AgentContext` repositories, role prompt
+   rendering, `helpers::initial_user_message_for_task`, git subprocesses in the
+   task worktree, and memory context loading. Moving it safely requires a richer
+   prompt-context callback/context seam rather than copying those host adapters.
+2. `mcp_resolve.rs` depends on agent `ResolvedSkill`, `native_skills`,
+   `skills_manifest`, `mcp_settings`, and `McpToolRegistry`. The host-independent
+   native-skill merge can move after `ResolvedSkill`/native skill assets have a
+   canonical slot home; otherwise `djinn-slot` would need a second copy of the
+   native registry.
+3. `role_overrides.rs` returns `Arc<dyn AgentRole>` and maps `djinn-agent`
+   `AgentType` values through `role_impl_for`. This is intentionally host-only
+   until runtime role construction is moved behind a slot callback.
+4. `setup.rs` runs commands through `crate::commands`, formats command details
+   through agent helper facades, and logs command activity with `AgentContext`.
+   Moving it before command execution/logging callbacks would duplicate command
+   behavior.
+5. `teardown.rs` coordinates task transitions, background work tracking,
+   coordinator triggers, merge/extraction work, and provider session follow-up.
+   It should be collapsed with the supervisor host-callback work reserved for
+   the next task, not moved piecemeal here.
+6. `model_resolution.rs` still exposes agent `ProviderCredential` for worker
+   Secret serialization and performs role-preference DB/OAuth lookup through
+   `AgentContext`; slot already owns the callback-based credential path used by
+   canonical extraction code, but replacing this public agent facade requires
+   updating all provider-resolution consumers together.
+
+These are public-API/caller blockers, not test blockers. The duplicate
+agent-local task-classifier test matrix was replaced by focused canonical slot
+tests for the same role/issue-type behavior; no assertions were intentionally
+weakened. The agent facade was compile-checked through its existing callers.
+
+### Validation outcomes
+
+Commands run from `server/`:
+
+| Command | Outcome |
+|---|---|
+| `cargo fmt --check` | Passed. |
+| `cargo clippy -p djinn-agent --all-features --lib` | Passed after adapter-warning cleanup. |
+| `cargo test -p djinn-slot --all-features --lib lifecycle::task_classifier` | Passed: 2 tests. |
+| `cargo test -p djinn-agent --all-features --lib lifecycle::task_classifier` | Passed compile/facade filter: 0 tests matched after migration, 657 filtered. |
+| `cargo test -p djinn-agent --all-features --lib lifecycle::task_classifier lifecycle::retry` | Not a valid Cargo invocation (Cargo accepts only one test filter); superseded by the focused commands above. |
+
+The full workspace `cargo test --workspace --all-features --no-run` was not run
+manually in-session per worker rules against workspace-wide commands; the
+strongest scoped fallback was the successful `djinn-agent` all-feature clippy
+compile plus focused `djinn-slot` lifecycle test run above. Automated post-session
+verification remains responsible for the workspace-wide no-run gate.
