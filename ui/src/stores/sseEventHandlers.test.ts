@@ -3,6 +3,7 @@ import { initSSEEventHandlers } from './sseEventHandlers';
 import { sseStore } from './sseStore';
 import { taskStore } from './taskStore';
 import { epicStore } from './epicStore';
+import { proposalStore } from './proposalStore';
 import { projectStore } from './projectStore';
 import { dispatchPauseStore } from './dispatchPauseStore';
 import { fetchProjects } from '@/api/server';
@@ -11,6 +12,10 @@ import {
   queryClient,
   SSE_QUERY_DEBOUNCE_MS,
 } from '@/lib/queryClient';
+import {
+  SERVER_SSE_EVENT_NAMES,
+  resolveServerSSEEventName,
+} from './sseEventContract';
 
 vi.mock('@/lib/queryClient', () => {
   type PendingInvalidation = {
@@ -73,6 +78,7 @@ describe('sseEventHandlers', () => {
     vi.clearAllMocks();
     taskStore.getState().clearTasks();
     epicStore.getState().clearEpics();
+    proposalStore.getState().clearProposals();
     dispatchPauseStore.getState().clearAll();
     projectStore.setState({ selectedProjectId: null, projects: [] });
   });
@@ -491,5 +497,142 @@ describe('sseEventHandlers', () => {
     expect(dispatchPauseStore.getState().projects['project-1']).toBeUndefined();
 
     cleanup();
+  });
+
+  it('routes proposal.updated envelope to proposalStore and invalidates ["proposals"] (covering detail queries)', () => {
+    const cleanup = initSSEEventHandlers();
+
+    // First, seed the store with an existing proposal (simulates prior list fetch)
+    proposalStore.getState().addProposal({
+      id: 'prop-1',
+      title: 'Original Title',
+      status: 'draft',
+      acceptance_criteria: '[]',
+    } as never);
+
+    // Emit a raw DjinnEventEnvelope for proposal.updated
+    sseStore.getState().emit({
+      type: 'proposal_updated',
+      data: {
+        entity_type: 'proposal',
+        action: 'updated',
+        payload: {
+          proposal: {
+            id: 'prop-1',
+            title: 'Updated Title',
+            status: 'approved',
+            acceptance_criteria: '["Must pass CI"]',
+          },
+        },
+      },
+      timestamp: 10,
+    });
+
+    // Store is updated immediately (synchronous path)
+    const updated = proposalStore.getState().getProposal('prop-1');
+    expect(updated).toBeTruthy();
+    expect(updated?.title).toBe('Updated Title');
+    expect(updated?.status).toBe('approved');
+
+    // The debounced ["proposals"] invalidation hasn't fired yet
+    expect(queryClient.invalidateQueries).not.toHaveBeenCalled();
+
+    // After debounce window, ["proposals"] is invalidated once — this covers
+    // both ["proposals", "list", ...] and ["proposals", "detail", id] queries,
+    // so an open detail page refetches without manual refresh.
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['proposals'] });
+
+    cleanup();
+  });
+
+  it('routes proposal.created and proposal.deleted via the same ["proposals"] invalidation path', () => {
+    const cleanup = initSSEEventHandlers();
+
+    // proposal.created
+    sseStore.getState().emit({
+      type: 'proposal_created',
+      data: {
+        entity_type: 'proposal',
+        action: 'created',
+        payload: {
+          proposal: {
+            id: 'prop-new',
+            title: 'New Proposal',
+            status: 'draft',
+            acceptance_criteria: '[]',
+          },
+        },
+      },
+      timestamp: 1,
+    });
+    expect(proposalStore.getState().getProposal('prop-new')).toBeTruthy();
+
+    // proposal.deleted
+    sseStore.getState().emit({
+      type: 'proposal_deleted',
+      data: {
+        entity_type: 'proposal',
+        action: 'deleted',
+        payload: { id: 'prop-new' },
+      },
+      timestamp: 2,
+    });
+    expect(proposalStore.getState().getProposal('prop-new')).toBeUndefined();
+
+    // Both events debounced under the same ["proposals"] key → one invalidation
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['proposals'] });
+
+    cleanup();
+  });
+
+  it('proposal_feedback.created invalidates ["proposals"] to refresh open detail views', () => {
+    const cleanup = initSSEEventHandlers();
+
+    sseStore.getState().emit({
+      type: 'proposal_feedback_created',
+      data: {
+        entity_type: 'proposal_feedback',
+        action: 'created',
+        payload: { proposal_id: 'prop-1', body: 'Looks good', author: 'reviewer-1' },
+      },
+      timestamp: 1,
+    });
+
+    vi.advanceTimersByTime(SSE_QUERY_DEBOUNCE_MS);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledTimes(1);
+    expect(queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['proposals'] });
+
+    cleanup();
+  });
+
+  it('contract resolves proposal.updated as dispatch → proposal_updated and guards debate-trail events are absent', () => {
+    // Verify the SSE contract maps proposal.updated correctly
+    expect(resolveServerSSEEventName('proposal.updated')).toEqual({
+      kind: 'dispatch',
+      eventType: 'proposal_updated',
+    });
+
+    // Also verify the full proposal family
+    expect(resolveServerSSEEventName('proposal.created')).toEqual({
+      kind: 'dispatch',
+      eventType: 'proposal_created',
+    });
+    expect(resolveServerSSEEventName('proposal.deleted')).toEqual({
+      kind: 'dispatch',
+      eventType: 'proposal_deleted',
+    });
+    expect(resolveServerSSEEventName('proposal_feedback.created')).toEqual({
+      kind: 'dispatch',
+      eventType: 'proposal_feedback_created',
+    });
+
+    // Guard: debate-trail SSE events must NOT be in the contract
+    const eventNames = SERVER_SSE_EVENT_NAMES as readonly string[];
+    expect(eventNames).not.toContain('proposal_debate_trail.created');
+    expect(eventNames).not.toContain('proposal_debate_trail.updated');
   });
 });
