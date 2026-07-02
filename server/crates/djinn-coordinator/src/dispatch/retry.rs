@@ -421,6 +421,90 @@ impl CoordinatorActor {
             .await
     }
 
+    /// Trigger D: consecutive provider-error FAILED sessions without progress.
+    ///
+    /// A session that dies on a terminal provider/session error — the
+    /// poisoned-transcript 400 (an assistant `tool_calls` message replayed
+    /// without its tool results), a dead credential, a persistent server fault —
+    /// is redispatched and fails identically, riding the escalating cooldown
+    /// ladder toward the terminal close at [`MAX_DISPATCH_FAILURES`] with nobody
+    /// deciding what to do. The cycling gate (trigger B) excludes provider
+    /// faults by design and the stall-cancel escalation only covers
+    /// coordinator-initiated stall kills, so these failures had no Planner path.
+    ///
+    /// Advances the per-task `provider_failure_streak` — sibling of the
+    /// stall-cancel streak, reset when the task's status advances (durable
+    /// progress) between strikes — and on the
+    /// [`FAILURE_ESCALATION_THRESHOLD`]-th consecutive strike routes the task to
+    /// a Planner intervention (decompose / rescope / close), clearing its
+    /// backoff state so a post-intervention run starts fresh. Returns `true`
+    /// when an intervention was routed (the caller skips the ordinary backoff
+    /// ladder for this reappearance); `false` while still below threshold.
+    ///
+    /// Callers gate this on a genuine, non-throttle typed provider failure — a
+    /// transient throttle must decay on the cooldown ladder, not escalate.
+    pub(crate) async fn maybe_escalate_provider_failure_streak(
+        &mut self,
+        task: &djinn_core::models::Task,
+        role: &'static str,
+    ) -> bool {
+        let strike_count = {
+            let streak = self
+                .provider_failure_streak
+                .entry(task.id.clone())
+                .and_modify(|s| {
+                    if s.last_status == task.status {
+                        s.count += 1;
+                    } else {
+                        // Durable status progress between strikes — reset.
+                        s.count = 1;
+                        s.last_status = task.status.clone();
+                    }
+                })
+                .or_insert_with(|| StallCancelStreak {
+                    count: 1,
+                    last_status: task.status.clone(),
+                });
+            streak.count
+        };
+
+        if strike_count < FAILURE_ESCALATION_THRESHOLD {
+            return false;
+        }
+
+        tracing::warn!(
+            task_id = %task.short_id,
+            role,
+            strike_count,
+            status = %task.status,
+            "CoordinatorActor: consecutive provider-error session failures without status progress — routing to Planner intervention instead of redispatch"
+        );
+        let intervention_reason = format!(
+            "Task failed on {strike_count} consecutive sessions with a terminal \
+             provider/session error and no durable status progress between them (status \
+             `{}`). The redispatched worker reproduces the same failure each time (e.g. a \
+             poisoned resume transcript that the provider rejects, or an unusable \
+             credential), so it is being handed to the Planner to decompose, rescope, or \
+             close rather than redispatched again.",
+            task.status
+        );
+
+        // Clear the streak and backoff state so a post-intervention run starts
+        // fresh and a re-armed intervention is not double-counted.
+        self.provider_failure_streak.remove(&task.id);
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "failure_streak_planner_intervention_handoff_clear",
+        )
+        .await;
+
+        self.route_loop_guard_planner_intervention(&task.id, role, &intervention_reason)
+            .await
+    }
+
     /// Trigger C: a worker/reviewer run completed degenerate because the
     /// reply-loop guard saw repeated identical behavior. This is not a provider
     /// fault and not a dispatch failure; route it directly to the same Planner

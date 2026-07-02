@@ -547,7 +547,17 @@ pub async fn run_reply_loop(
             });
 
             let tool_choice = tool_choice_for_turn(model_id, tools);
-            let stream_result = provider.stream(conversation, tools, tool_choice).await;
+            // Repair any dangling tool calls (assistant tool_use ids with no
+            // persisted result) left by a prior session that was cancelled
+            // mid-tool-execution. Replaying such a transcript verbatim 400s the
+            // whole request on strict OpenAI/Anthropic-compatible APIs, wedging
+            // the task on every redispatch. Sanitizing here — one pass on the
+            // provider-agnostic conversation — covers all wire formats without
+            // mutating stored history.
+            let request_conversation = conversation.with_synthesized_tool_results();
+            let stream_result = provider
+                .stream(request_conversation.as_ref(), tools, tool_choice)
+                .await;
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e))

@@ -311,16 +311,38 @@ pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 /// than dispatch a third doomed session.
 pub(super) const STALL_CANCEL_ESCALATION_THRESHOLD: u32 = 2;
 
-/// Per-task record of consecutive stall cancellations without durable
-/// task-status progress, driving the second-strike Planner escalation
-/// (see [`STALL_CANCEL_ESCALATION_THRESHOLD`]).
+/// Number of CONSECUTIVE provider-error FAILED sessions (with no durable
+/// task-status progress between them) after which the coordinator routes the
+/// task to a Planner intervention instead of another backoff+redispatch cycle.
+///
+/// A session that dies on a terminal provider error — the poisoned-transcript
+/// 400 (an assistant `tool_calls` message replayed without its tool results),
+/// a dead credential, a persistent server fault — is redispatched and fails
+/// identically, riding the escalating cooldown ladder toward the terminal close
+/// at [`MAX_DISPATCH_FAILURES`] (10) with nobody deciding what to do. The
+/// cycling-intervention gate (trigger B) deliberately excludes provider faults
+/// (`!had_provider_failure`), and the stall-cancel escalation only covers
+/// coordinator-initiated stall kills — so provider-error failures had no
+/// planner path at all. Mirroring the stall second-strike, on the THIRD
+/// consecutive failed session we hand the task to the Planner (decompose /
+/// rescope / close) rather than dispatch a fourth doomed run. Set to `3` (one
+/// higher than the stall threshold of 2): the escalating backoff already gives
+/// breathing room at streaks 1-2, so a transient provider blip decays without
+/// escalating, while a genuinely poisoned/undispatchable task is caught well
+/// before the streak-10 terminal close.
+pub(super) const FAILURE_ESCALATION_THRESHOLD: u32 = 3;
+
+/// Per-task record of consecutive same-class session failures without durable
+/// task-status progress, driving a second-strike Planner escalation. Shared by
+/// the stall-cancel streak (see [`STALL_CANCEL_ESCALATION_THRESHOLD`]) and the
+/// provider-error failure streak (see [`FAILURE_ESCALATION_THRESHOLD`]).
 #[derive(Debug, Clone)]
 pub(super) struct StallCancelStreak {
-    /// Consecutive stall-cancelled sessions with no status change between them.
+    /// Consecutive same-class failures with no status change between them.
     pub(super) count: u32,
-    /// Task status observed at the most recent stall cancel. A different status
-    /// on the next cancel means the task made durable progress in between, so
-    /// the streak resets rather than escalating.
+    /// Task status observed at the most recent failure. A different status on
+    /// the next failure means the task made durable progress in between, so the
+    /// streak resets rather than escalating.
     pub(super) last_status: String,
 }
 
