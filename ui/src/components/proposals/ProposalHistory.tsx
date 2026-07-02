@@ -58,10 +58,22 @@ function revisionBodyPreview(revision: ProposalHistoryEntry): string {
   return textPreview ? `${blockSummary} · ${textPreview}` : blockSummary;
 }
 
+/** One entry in an AC-amendment audit list (from `proposal_ac_amend`). */
+type AmendmentEntry = {
+  operation?: string;
+  index?: number;
+  old_criterion?: unknown;
+  new_criterion?: unknown;
+};
+
 /** Parsed `event_metadata` (it arrives as a JSON string on the wire). */
-function parsedMeta(
-  r: ProposalHistoryEntry,
-): { source?: string; round?: number } | null {
+function parsedMeta(r: ProposalHistoryEntry): {
+  source?: string;
+  round?: number;
+  kind?: string;
+  reason?: string;
+  amendments?: AmendmentEntry[];
+} | null {
   const meta = (r as { event_metadata?: unknown }).event_metadata;
   if (!meta) return null;
   try {
@@ -74,6 +86,35 @@ function parsedMeta(
 /** A spec revision produced by the autonomous refinement tribunal. */
 function isRefinementRevision(r: ProposalHistoryEntry): boolean {
   return r.event_kind === "spec_revision" && parsedMeta(r)?.source === "refinement_loop";
+}
+
+/** A spec revision that carries an acceptance-criteria amendment audit. */
+function isAcAmendmentRevision(r: ProposalHistoryEntry): boolean {
+  return r.event_kind === "spec_revision" && parsedMeta(r)?.kind === "ac_amendment";
+}
+
+/** Human-readable criterion text from a criterion value (string or object). */
+function criterionText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const criterion = (value as Record<string, unknown>).criterion;
+    if (typeof criterion === "string") return criterion;
+  }
+  return "";
+}
+
+/** Short verb for an amendment operation ("rewritten" / "waived" / "dropped"). */
+function amendmentVerb(operation: string | undefined): string {
+  switch (operation) {
+    case "rewrite":
+      return "rewritten";
+    case "waive":
+      return "waived";
+    case "drop":
+      return "dropped";
+    default:
+      return operation ?? "changed";
+  }
 }
 
 /**
@@ -253,6 +294,119 @@ export function ProposalHistory({ detail }: { detail: ProposalDetail }) {
           const isSpecRevision = r.event_kind === "spec_revision";
           const bodyFormat = revisionBodyFormat(r);
           const titleChanged = !!prev && prev.title !== r.title;
+
+          // ── Acceptance-criteria amendment ───────────────────────────────
+          // A spec revision whose only change is an AC amendment (via
+          // `proposal_ac_amend`). Its body is unchanged, so render the reason
+          // and a human-readable list of operations instead of a body diff.
+          if (isAcAmendmentRevision(r)) {
+            const meta = parsedMeta(r);
+            const reason = meta?.reason?.trim() ?? "";
+            const amendments = meta?.amendments ?? [];
+            const summary =
+              amendments
+                .map((a) => `criterion ${(a.index ?? 0) + 1} ${amendmentVerb(a.operation)}`)
+                .join(", ") || "acceptance criteria amended";
+            return (
+              <li key={r.id}>
+                <button
+                  onClick={() => toggle(r.id)}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/40"
+                >
+                  <HugeiconsIcon
+                    icon={ArrowDown01Icon}
+                    size={14}
+                    className={cn(
+                      "shrink-0 text-muted-foreground transition-transform",
+                      isOpen && "rotate-180",
+                    )}
+                  />
+                  <Badge
+                    variant={isHead ? "default" : "outline"}
+                    className="font-mono"
+                  >
+                    rev {r.seq}
+                  </Badge>
+                  <Badge variant="secondary">AC amendment</Badge>
+                  {isHead && (
+                    <span className="text-xs text-muted-foreground">current</span>
+                  )}
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <UserAvatar user={editor} className="size-4" />
+                    <span className="truncate">
+                      {editor
+                        ? userDisplayName(editor)
+                        : r.edited_by_user_id
+                          ? "unknown"
+                          : "—"}
+                    </span>
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                    {summary}
+                  </span>
+                  <time
+                    dateTime={r.created_at}
+                    title={r.created_at}
+                    className="ml-auto shrink-0 text-xs text-muted-foreground"
+                  >
+                    {relativeTime(r.created_at)}
+                  </time>
+                </button>
+                {isOpen && (
+                  <div className="space-y-2 px-3 pb-3">
+                    {reason && (
+                      <p className="text-xs text-muted-foreground">
+                        Reason:{" "}
+                        <span className="text-foreground">{reason}</span>
+                      </p>
+                    )}
+                    {amendments.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        Acceptance criteria amended.
+                      </p>
+                    ) : (
+                      <ul className="space-y-1 text-xs">
+                        {amendments.map((a, i) => {
+                          const oldText = criterionText(a.old_criterion);
+                          const newText = criterionText(a.new_criterion);
+                          const showNew =
+                            a.operation === "rewrite" && !!newText && newText !== oldText;
+                          return (
+                            <li
+                              key={i}
+                              className="rounded-md border border-border/60 px-2 py-1.5"
+                            >
+                              <span className="font-medium">
+                                Criterion {(a.index ?? 0) + 1} {amendmentVerb(a.operation)}
+                              </span>
+                              {oldText && (
+                                <span className="block text-muted-foreground">
+                                  <span
+                                    className={cn(showNew && "line-through")}
+                                  >
+                                    {oldText}
+                                  </span>
+                                  {showNew && (
+                                    <>
+                                      {" → "}
+                                      <span className="text-foreground">
+                                        {newText}
+                                      </span>
+                                    </>
+                                  )}
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          }
+
           if (!isSpecRevision) {
             // Only genuine status transitions belong in the spec revision
             // history. Refinement lifecycle events (refinement_start/stop) are

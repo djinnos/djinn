@@ -1,6 +1,8 @@
 use super::actor::CoordinatorActor;
 use djinn_db::ProposalRepository;
-use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
+use djinn_db::repositories::proposal::{
+    TerminalLinkedEvidenceSpikeOutcome, evidence_spike_task_is_terminal,
+};
 
 impl CoordinatorActor {
     /// Startup recovery pass for terminal linked evidence spikes that may have
@@ -34,7 +36,7 @@ impl CoordinatorActor {
             let spike_task_id = &candidate.linked_spike_task_id;
             let task_status = &candidate.linked_spike_task_status;
             let close_reason = candidate.linked_spike_task_close_reason.as_deref();
-            if task_status != "closed" {
+            if !evidence_spike_task_is_terminal(task_status) {
                 tracing::debug!(
                     proposal_id = %proposal_id,
                     spike_task_id = %spike_task_id,
