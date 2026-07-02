@@ -10,10 +10,15 @@
 //!   clone per project (`<root>/{project_id}/`) for the chat subsystem.
 //!   Refreshed whenever the mirror fetcher advances the project's refs.
 
+pub mod merge_safety;
 pub mod mirror;
 pub mod workspace;
 pub mod workspace_store;
 
+pub use merge_safety::{
+    CHECKPOINT_REF_PREFIX, MergeSafetyDecision, PROTECTED_REFS, RefRole, classify_ref,
+    evaluate_merge_head, is_checkpoint_ref, is_protected_ref,
+};
 pub use mirror::{
     GcGuardError, MirrorError, MirrorManager, gc_mirror_under, gc_project_clone_under,
     mirror_path_for, mirrors_root,
