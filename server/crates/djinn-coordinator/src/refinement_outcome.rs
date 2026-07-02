@@ -5,7 +5,9 @@
 // per-user/model cap admission. Split to keep both files under the
 // size-guard threshold.
 
-use djinn_control_plane::tools::epic_ops::AcceptanceCriterionItem;
+use djinn_control_plane::tools::epic_ops::{
+    AcceptanceCriterionItem, parse_acceptance_criteria_array,
+};
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_core::models::TransitionAction;
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
@@ -852,11 +854,15 @@ impl CoordinatorActor {
             _ => 0,
         };
 
+        // Parse ACs with the tolerant, structure-aware parser that every read
+        // path uses (proposal_show et al.). `djinn_core::models::parse_json_array`
+        // deserializes to `Vec<String>` and therefore fails wholesale on
+        // structured `{ "criterion", "met" }` ACs, silently yielding an empty
+        // vec — which made the injected "Current DoR status" report "At least
+        // one acceptance criterion is required" even when the live proposal head
+        // already had structured ACs attached (proposal 019f0c32 rounds 1–3).
         let ac_items: Vec<AcceptanceCriterionItem> =
-            djinn_core::models::parse_json_array(&proposal.acceptance_criteria)
-                .into_iter()
-                .map(AcceptanceCriterionItem::Text)
-                .collect();
+            parse_acceptance_criteria_array(&proposal.acceptance_criteria);
 
         Some(evaluate_proposal_readiness(
             &proposal.body,

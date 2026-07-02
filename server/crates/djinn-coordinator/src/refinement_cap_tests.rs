@@ -23,17 +23,17 @@ const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
 
 // ── Fixture ──────────────────────────────────────────────────────────
 
-struct RefinementFixture {
+pub(super) struct RefinementFixture {
     #[allow(dead_code)]
     db: djinn_db::Database,
     project_id: String,
-    user_id: String,
-    proposal_id: String,
+    pub(super) user_id: String,
+    pub(super) proposal_id: String,
 }
 
 /// Create a project, user, and proposal (with a project target) ready
 /// for refinement dispatch.
-async fn seed_refinement_fixture(db: &djinn_db::Database) -> RefinementFixture {
+pub(super) async fn seed_refinement_fixture(db: &djinn_db::Database) -> RefinementFixture {
     let event_bus = EventBus::noop();
     let project = crate::test_helpers::create_test_project(db).await;
     let user = UserRepository::new(db.clone())
@@ -81,7 +81,7 @@ async fn seed_refinement_fixture(db: &djinn_db::Database) -> RefinementFixture {
 // ── Actor construction ───────────────────────────────────────────────
 
 /// Build a `CoordinatorActor` wired to the given pool and DB.
-fn build_refinement_actor(
+pub(super) fn build_refinement_actor(
     db: &djinn_db::Database,
     events_tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     pool: djinn_slot::SlotPoolHandle,
@@ -154,7 +154,10 @@ fn build_refinement_actor(
 }
 
 /// Create a slot pool with the test model configured.
-fn spawn_test_pool(db: &djinn_db::Database, max_slots: u32) -> djinn_slot::SlotPoolHandle {
+pub(super) fn spawn_test_pool(
+    db: &djinn_db::Database,
+    max_slots: u32,
+) -> djinn_slot::SlotPoolHandle {
     let cancel = CancellationToken::new();
     djinn_slot::SlotPoolHandle::spawn(
         crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone()),
