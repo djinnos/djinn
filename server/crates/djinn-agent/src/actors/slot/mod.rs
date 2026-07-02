@@ -101,9 +101,8 @@ pub(crate) mod finalize_handlers;
 // `pub` surface: ProviderCredential, auth_method_for_provider,
 // capabilities_for_provider, default_base_url, format_family_for_provider,
 // load_provider_credential, parse_model_id, OAuthConfigWire, etc.
-// `pub(crate)` surface: build_role_code_graph_context,
-// conflict_context_for_dispatch, extract_worker_context, format_command_details,
-// initial_user_message_for_task, load_task, etc.
+// `pub(crate)` surface: conflict_context_for_dispatch, extract_worker_context,
+// format_command_details, initial_user_message_for_task, load_task, etc.
 // Used by: server chat handler, system_message, agent-worker, supervisor_impl.
 pub mod helpers;
 

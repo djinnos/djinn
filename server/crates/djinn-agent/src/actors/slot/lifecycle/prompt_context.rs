@@ -26,9 +26,9 @@ use djinn_core::models::Task;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
-    build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
-    extract_worker_context, format_knowledge_notes, recent_feedback,
+    derive_task_scope_paths, extract_worker_context, format_knowledge_notes, recent_feedback,
 };
+use crate::actors::slot::session_extraction::agent_to_slot_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
@@ -584,14 +584,17 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
     // task-scope-path inference already used by the knowledge context block.
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
-    let code_graph_context = build_role_code_graph_context(
-        runtime_role.config().name,
-        task,
-        app_state,
-        project_path,
-        &task_paths_for_code_graph,
-    )
-    .await;
+    let code_graph_context = {
+        let slot_ctx = agent_to_slot_context(app_state);
+        djinn_slot::helpers::build_role_code_graph_context(
+            runtime_role.config().name,
+            task,
+            &slot_ctx,
+            project_path,
+            &task_paths_for_code_graph,
+        )
+        .await
+    };
 
     // PR E3: auto-include `code_graph detect_changes` summary for the
     // reviewer role. Resolves base/head SHAs by running `git merge-base
@@ -606,10 +609,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             let (from_sha, to_sha) =
                 resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state).await;
             if from_sha.is_some() || to_sha.is_some() {
-                build_reviewer_diff_context(
+                let slot_ctx = agent_to_slot_context(app_state);
+                djinn_slot::helpers::build_reviewer_diff_context(
                     role_name,
                     task,
-                    app_state,
+                    &slot_ctx,
                     project_path,
                     from_sha.as_deref(),
                     to_sha.as_deref(),

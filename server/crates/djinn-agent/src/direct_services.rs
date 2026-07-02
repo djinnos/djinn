@@ -291,8 +291,12 @@ impl SupervisorServices for DirectServices {
             .await
             .unwrap_or(0)
             .max(0) as u32;
-        let telemetry_meta =
-            crate::actors::slot::helpers::build_telemetry_meta("invoke_llm", &synthetic_task_id);
+        let telemetry_meta = crate::actors::slot::helpers::build_telemetry_meta_with_attribution(
+            "invoke_llm",
+            &synthetic_task_id,
+            None,
+            None,
+        );
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own); then build the provider via the shared helper.
         let base_url = if crate::actors::slot::helpers::resolved_needs_base_url(&resolved) {

@@ -1,25 +1,8 @@
 //! Per-session MCP server + skills resolution for the task lifecycle.
 //!
-//! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
-//! preparatory work). It reads the MCP default + global-skill fields of
-//! `environment_config` from Dolt, resolves the effective MCP
-//! servers and skills (role-level list merged with project defaults),
-//! connects to the resolved MCP servers (best-effort; unreachable servers are
-//! logged and skipped), and loads skill markdown files from the worktree.
-//!
-//! Native skills (platform-owned, compiled-in) are resolved separately from the
-//! native skill registry and prepended to the project-resolved list so they
-//! appear first in the prompt's skills section.  A project/worktree skill whose
-//! name collides with a native skill is filtered out — the native body is
-//! immutable and must not be shadowed.  Native skills are only loaded when the
-//! [`super::task_classifier::NativeSkillTrigger`] indicates a proposal-authoring
-//! session; non-authoring planner sessions (wave planning, dispatch) skip native
-//! skill loading to avoid paying the context cost.
-//!
-//! No failure modes here propagate errors: missing environment config, unknown
-//! server names, unreachable endpoints, and missing skill files are all
-//! non-fatal and emit a `tracing::warn!` on the existing log path. There is
-//! therefore no error type — the helper always returns the populated struct.
+//! Resolves effective MCP servers and skills from `environment_config`, connects
+//! to servers, loads skill markdown files, and merges native skills for authoring
+//! planner sessions. All failures are non-fatal and logged.
 
 use std::path::Path;
 
@@ -83,125 +66,29 @@ pub(crate) async fn resolve_mcp_and_skills(
     #[cfg(test)] mcp_registry_override: Option<McpToolRegistry>,
     app_state: &AgentContext,
 ) -> McpAndSkills {
+    let role_name = runtime_role.config().name;
     let env_cfg = environment_config_for_path(&app_state.db, worktree_path).await;
-
-    let effective_mcp_servers = effective_mcp_server_names(
-        &env_cfg.agent_mcp_defaults,
-        runtime_role.config().name,
-        role_mcp_servers,
-    );
+    let effective_mcp_servers =
+        effective_mcp_server_names(&env_cfg.agent_mcp_defaults, role_name, role_mcp_servers);
     let effective_skills = effective_skill_names(&env_cfg.global_skills, role_skills);
 
-    // ── Resolve role-level MCP servers ────────────────────────────────────────
-    // Load the project MCP server registry from standard discovery files
-    // (`mcp.json`, `.cursor/mcp.json`, `.opencode/mcp.json`). Unknown names
-    // are logged as warnings and skipped — they never block the session from
-    // starting.
-    //
-    // Default roles have empty mcp_servers, so this block is a no-op for them.
-    let resolved_mcp_servers = if !effective_mcp_servers.is_empty() {
-        let registry = crate::mcp_settings::load_mcp_server_registry(worktree_path);
-        let resolved = crate::mcp_settings::resolve_mcp_servers(
-            task_short_id,
-            runtime_role.config().name,
-            &effective_mcp_servers,
-            &registry,
-        );
-        tracing::info!(
-            task_id = %task_short_id,
-            role = %runtime_role.config().name,
-            requested_count = effective_mcp_servers.len(),
-            resolved_count = resolved.len(),
-            "Lifecycle: resolved role MCP servers"
-        );
-        resolved
-            .into_iter()
-            .map(|(name, cfg)| (name, cfg.clone()))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    // Connect to resolved MCP servers and discover their tool definitions.
-    // Unreachable or misconfigured servers are logged and skipped (non-fatal).
-    let mcp_registry = {
+    let resolved_mcp_servers = resolve_mcp_server_entries(
+        worktree_path,
+        task_short_id,
+        role_name,
+        &effective_mcp_servers,
+    );
+    let mcp_registry = connect_mcp_registry(
+        task_short_id,
+        role_name,
+        &resolved_mcp_servers,
         #[cfg(test)]
-        {
-            if let Some(registry) = mcp_registry_override {
-                Some(registry)
-            } else if !resolved_mcp_servers.is_empty() {
-                crate::mcp_client::connect_and_discover(
-                    task_short_id,
-                    runtime_role.config().name,
-                    &resolved_mcp_servers,
-                    app_state,
-                )
-                .await
-            } else {
-                None
-            }
-        }
-        #[cfg(not(test))]
-        {
-            if !resolved_mcp_servers.is_empty() {
-                crate::mcp_client::connect_and_discover(
-                    task_short_id,
-                    runtime_role.config().name,
-                    &resolved_mcp_servers,
-                    app_state,
-                )
-                .await
-            } else {
-                None
-            }
-        }
-    };
-
-    // ── Load and resolve skills from worktree .djinn/skills/ ─────────────────
-    // Skills are markdown files with YAML frontmatter. Missing skills are logged
-    // as warnings and skipped when no checked manifest exists. If
-    // `.djinn/skills.json` exists, stale/tampered materialized skills fail
-    // closed so prompt summaries and inlined bodies cannot drift from the
-    // generated hashes.
-    let project_skills = if !effective_skills.is_empty() {
-        match crate::skills_manifest::load_verified_skills(worktree_path, &effective_skills) {
-            Ok(loaded) => {
-                tracing::info!(
-                    task_id = %task_short_id,
-                    role = %runtime_role.config().name,
-                    requested_count = effective_skills.len(),
-                    resolved_count = loaded.len(),
-                    "Lifecycle: resolved role skills"
-                );
-                loaded
-            }
-            Err(error) => {
-                tracing::error!(
-                    task_id = %task_short_id,
-                    role = %runtime_role.config().name,
-                    requested_count = effective_skills.len(),
-                    error = %error,
-                    "Lifecycle: skills manifest verification failed"
-                );
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
-
-    // ── Merge native skills for the role ──────────────────────────────────────
-    // Native skills are platform-owned, compiled-in, and immutable.  They are
-    // resolved from the native registry (not from worktree files) and prepended
-    // before project skills so they appear first in the prompt's skills section.
-    // A project/worktree skill whose name collides with a native skill is
-    // filtered out — the native body must not be shadowed or mutated.
-    //
-    // Native skills are only merged when the authoring trigger fires for the
-    // current task.  This gates `visual-spec` (and future native authoring
-    // skills) to proposal-authoring/grooming/refinement planner sessions,
-    // keeping ordinary wave-planning/dispatch sessions free of context cost.
-    let role_name = runtime_role.config().name;
+        mcp_registry_override,
+        app_state,
+    )
+    .await;
+    let project_skills =
+        load_project_skills(worktree_path, task_short_id, role_name, &effective_skills).await;
     let (resolved_skills, native_skill_names) =
         merge_native_skills(role_name, project_skills, authoring_trigger);
 
@@ -222,6 +109,96 @@ pub(crate) async fn resolve_mcp_and_skills(
         mcp_registry,
         resolved_skills,
         native_skill_names,
+    }
+}
+
+/// Resolve role-level MCP server entries from the project registry.
+fn resolve_mcp_server_entries(
+    worktree_path: &Path,
+    task_short_id: &str,
+    role_name: &str,
+    effective_mcp_servers: &[String],
+) -> Vec<(String, crate::mcp_settings::McpServerConfig)> {
+    if effective_mcp_servers.is_empty() {
+        return Vec::new();
+    }
+    let registry = crate::mcp_settings::load_mcp_server_registry(worktree_path);
+    let resolved = crate::mcp_settings::resolve_mcp_servers(
+        task_short_id,
+        role_name,
+        effective_mcp_servers,
+        &registry,
+    );
+    tracing::info!(
+        task_id = %task_short_id,
+        role = %role_name,
+        requested_count = effective_mcp_servers.len(),
+        resolved_count = resolved.len(),
+        "Lifecycle: resolved role MCP servers"
+    );
+    resolved
+        .into_iter()
+        .map(|(name, cfg)| (name, cfg.clone()))
+        .collect()
+}
+
+/// Connect to resolved MCP servers and discover their tool definitions.
+async fn connect_mcp_registry(
+    task_short_id: &str,
+    role_name: &str,
+    resolved_mcp_servers: &[(String, crate::mcp_settings::McpServerConfig)],
+    #[cfg(test)] mcp_registry_override: Option<McpToolRegistry>,
+    app_state: &AgentContext,
+) -> Option<McpToolRegistry> {
+    #[cfg(test)]
+    {
+        if let Some(registry) = mcp_registry_override {
+            return Some(registry);
+        }
+    }
+    if resolved_mcp_servers.is_empty() {
+        return None;
+    }
+    crate::mcp_client::connect_and_discover(
+        task_short_id,
+        role_name,
+        resolved_mcp_servers,
+        app_state,
+    )
+    .await
+}
+
+/// Load and resolve project skills from the worktree.
+async fn load_project_skills(
+    worktree_path: &Path,
+    task_short_id: &str,
+    role_name: &str,
+    effective_skills: &[String],
+) -> Vec<ResolvedSkill> {
+    if effective_skills.is_empty() {
+        return Vec::new();
+    }
+    match crate::skills_manifest::load_verified_skills(worktree_path, effective_skills) {
+        Ok(loaded) => {
+            tracing::info!(
+                task_id = %task_short_id,
+                role = %role_name,
+                requested_count = effective_skills.len(),
+                resolved_count = loaded.len(),
+                "Lifecycle: resolved role skills"
+            );
+            loaded
+        }
+        Err(error) => {
+            tracing::error!(
+                task_id = %task_short_id,
+                role = %role_name,
+                requested_count = effective_skills.len(),
+                error = %error,
+                "Lifecycle: skills manifest verification failed"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -314,14 +291,6 @@ mod tests {
         assert_eq!(merged[2].name, "testing");
     }
 
-    #[test]
-    fn empty_project_skills_with_authoring_planner() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING);
-        assert_eq!(native_names, vec!["visual-spec"]);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].name, "visual-spec");
-    }
-
     // ── Non-authoring planner: native skills NOT loaded ──────────────────
 
     #[test]
@@ -394,62 +363,38 @@ mod tests {
     // ── Non-planner roles (unchanged behaviour) ─────────────────────────
 
     #[test]
-    fn worker_does_not_receive_visual_spec_with_authoring_trigger() {
-        // Non-planner roles should not receive native skills even with
-        // an authoring trigger (the classifier returns None for non-planner
-        // roles, but merge_native_skills also filters by role in the
-        // native registry).
-        let (merged, native_names) = merge_native_skills("worker", Vec::new(), AUTHORING);
-        assert!(
-            native_names.is_empty(),
-            "worker should have no native skills even with authoring trigger"
-        );
-        assert!(merged.is_empty());
-    }
-
-    #[test]
-    fn reviewer_does_not_receive_visual_spec() {
-        let (merged, native_names) = merge_native_skills("reviewer", Vec::new(), AUTHORING);
-        assert!(native_names.is_empty());
-        assert!(merged.is_empty());
-    }
-
-    #[test]
-    fn lead_does_not_receive_visual_spec() {
-        let (merged, native_names) = merge_native_skills("lead", Vec::new(), AUTHORING);
-        assert!(native_names.is_empty());
-        assert!(merged.is_empty());
-    }
-
-    #[test]
-    fn architect_does_not_receive_visual_spec() {
-        let (merged, native_names) = merge_native_skills("architect", Vec::new(), AUTHORING);
-        assert!(native_names.is_empty());
-        assert!(merged.is_empty());
+    fn non_planner_roles_do_not_load_native_skills() {
+        for role in ["worker", "reviewer", "lead", "architect"] {
+            let (merged, native_names) = merge_native_skills(role, Vec::new(), AUTHORING);
+            assert!(
+                native_names.is_empty(),
+                "{role} should have no native skills even with authoring trigger"
+            );
+            assert!(merged.is_empty(), "{role} should have empty merged skills");
+        }
     }
 
     #[test]
     fn non_planner_roles_with_project_skills_are_unchanged() {
         let project = vec![project_skill("git"), project_skill("visual-spec")];
-        let (merged, native_names) = merge_native_skills("worker", project, None);
-
-        assert!(native_names.is_empty());
-        // Both project skills pass through unmodified for non-planner roles.
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].name, "git");
-        assert_eq!(merged[1].name, "visual-spec");
-        assert_eq!(merged[1].trust_level, "project");
+        for role in ["worker", "reviewer", "lead", "architect"] {
+            let (merged, native_names) = merge_native_skills(role, project.clone(), None);
+            assert!(
+                native_names.is_empty(),
+                "{role} should have no native names"
+            );
+            assert_eq!(
+                merged.len(),
+                2,
+                "{role} should preserve both project skills"
+            );
+            assert_eq!(merged[0].name, "git");
+            assert_eq!(merged[1].name, "visual-spec");
+            assert_eq!(merged[1].trust_level, "project");
+        }
     }
 
     // ── effective_skills telemetry ───────────────────────────────────────
-
-    #[test]
-    fn empty_project_skills_with_planner() {
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), AUTHORING);
-        assert_eq!(native_names, vec!["visual-spec"]);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].name, "visual-spec");
-    }
 
     #[test]
     fn effective_skills_excludes_native_names() {
@@ -468,24 +413,5 @@ mod tests {
         assert_eq!(merged[0].name, "visual-spec");
         assert_eq!(merged[0].trust_level, "platform");
         assert_eq!(merged[1].name, "git");
-    }
-
-    #[test]
-    fn no_authoring_trigger_means_no_native_skills() {
-        // Without the authoring trigger, native skills are not merged.
-        let (merged, native_names) = merge_native_skills("planner", Vec::new(), None);
-        assert!(native_names.is_empty(), "no native skills without trigger");
-        assert!(merged.is_empty());
-    }
-
-    #[test]
-    fn no_trigger_preserves_project_skills() {
-        // Without the authoring trigger, project skills pass through unchanged.
-        let project = vec![project_skill("git"), project_skill("testing")];
-        let (merged, native_names) = merge_native_skills("planner", project, None);
-        assert!(native_names.is_empty());
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].name, "git");
-        assert_eq!(merged[1].name, "testing");
     }
 }
