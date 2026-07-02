@@ -234,6 +234,19 @@ pub(super) struct CoordinatorActor {
     /// Planner intervention instead of blindly redispatching a third time.
     /// Reset when the task's status advances or it leaves execution.
     pub(super) stall_cancel_streak: HashMap<String, StallCancelStreak>,
+    /// Restart-safe-to-lose: consecutive provider-error FAILED sessions per TASK
+    /// id with no durable task-status progress between them. A task whose
+    /// session dies on a terminal provider error (e.g. a poisoned transcript
+    /// 400, an auth/server fault) is redispatched and fails the same way,
+    /// burning attempts in the escalating backoff ladder with nobody deciding
+    /// what to do — the cycling-intervention gate (trigger B) deliberately
+    /// excludes provider faults, and the stall-cancel escalation only covers
+    /// coordinator-initiated stall kills. On the Nth consecutive strike we route
+    /// the task to a Planner intervention instead of another doomed redispatch.
+    /// Reset when the task's status advances or it leaves execution. Sibling of
+    /// `stall_cancel_streak` (see [`STALL_CANCEL_ESCALATION_THRESHOLD`] /
+    /// [`FAILURE_ESCALATION_THRESHOLD`]).
+    pub(super) provider_failure_streak: HashMap<String, StallCancelStreak>,
     /// Timestamp of the last completed idle-time consolidation sweep (ADR-048 §3A).
     pub(super) last_idle_consolidation: Option<StdInstant>,
     /// Cancellation token for an in-flight idle consolidation sweep.
@@ -450,6 +463,7 @@ impl CoordinatorActor {
             stall_killed: HashSet::new(),
             stall_progress_watermark: HashMap::new(),
             stall_cancel_streak: HashMap::new(),
+            provider_failure_streak: HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
