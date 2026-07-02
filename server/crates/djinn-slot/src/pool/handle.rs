@@ -83,6 +83,39 @@ impl SlotPoolHandle {
         .await
     }
 
+    /// Additive re-dispatch entry point that threads an optional
+    /// resume-via-git lifecycle metadata blob (a JSON-serialized
+    /// `djinn_runtime::ResumeLifecycleMetadata`) through the slot pipeline
+    /// into the host's `dispatch_task_runtime` and onto
+    /// `TaskRunSpec::resume_lifecycle_metadata`. `None` is the
+    /// default-off signal: when `worker_lifecycle_config.resume.enabled`
+    /// is false (or the coordinator's selector returned no selection),
+    /// the helper threads `None` so the existing default dispatch
+    /// behavior is byte-for-byte preserved.
+    ///
+    /// The blob is opaque to the slot pool — it is only forwarded onto
+    /// the slot pipeline and decoded by the host. This is the smallest
+    /// additive seam that lets the coordinator's
+    /// `select_resume_lifecycle_metadata_for_dispatch` reach
+    /// `TaskRunSpec` without coupling the slot pool to the coordinator
+    /// crate.
+    pub async fn dispatch_with_resume_metadata(
+        &self,
+        task_id: &str,
+        project_path: &str,
+        model_id: &str,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
+    ) -> Result<(), PoolError> {
+        self.request(|tx| PoolMessage::DispatchWithResume {
+            task_id: task_id.to_owned(),
+            project_path: project_path.to_owned(),
+            model_id: model_id.to_owned(),
+            resume_lifecycle_metadata,
+            respond_to: tx,
+        })
+        .await
+    }
+
     pub async fn has_session(&self, task_id: &str) -> Result<bool, PoolError> {
         self.request(|tx| PoolMessage::HasSession {
             task_id: task_id.to_owned(),

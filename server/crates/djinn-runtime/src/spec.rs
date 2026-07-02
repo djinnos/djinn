@@ -265,6 +265,132 @@ pub struct TaskRunSpec {
     /// creator can review/approve their own commits.
     #[serde(default)]
     pub commit_author_email: Option<String>,
+    /// Passive resume-via-git lifecycle metadata selected by the coordinator
+    /// at re-dispatch time. This is a serde-only mirror of the coordinator's
+    /// `ResumeLifecycleMetadata` (deliberately duplicated so the runtime/spec
+    /// crate does not gain a coordinator dependency). `None` for the
+    /// default/off path: when resume selection is disabled, or the task was
+    /// not a re-dispatch candidate, the field stays absent and the existing
+    /// dispatch behavior is preserved byte-for-byte on the wire.
+    ///
+    /// The field carries the full selection output: chosen source kind,
+    /// checkpoint SHA or submit/review id when applicable, target ref, prior
+    /// session/lineage context, and machine-readable rejected-candidate skip
+    /// reasons (in the `extra.skipped` array). Downstream prompt/model/merge
+    /// work (siblings `48ru`, `twsk`, `sy0g`) consume this from the
+    /// task-run lifecycle payload rather than re-querying the coordinator.
+    #[serde(default)]
+    pub resume_lifecycle_metadata: Option<ResumeLifecycleMetadata>,
+}
+
+/// Resume-via-git lifecycle metadata selected by the coordinator at
+/// re-dispatch time. This is a serde-only mirror of the coordinator's
+/// `ResumeLifecycleMetadata` (see `djinn_coordinator::worker_lifecycle`). The
+/// field shapes are intentionally aligned so the coordinator can serialize its
+/// selection directly into a [`TaskRunSpec`] without a translation layer, and
+/// the worker can deserialize the same shape when reading the spec off the
+/// bincode wire.
+///
+/// All fields are `#[serde(default)]` so the older worker pods (running before
+/// this additive change rolled out) continue to deserialize new specs
+/// without an `EOF` on bincode decode. The default `None`/`false` value on
+/// `considered` is the "resume selection was not consulted" signal; the
+/// presence of `selection_reason` is the "a selection was made" signal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResumeLifecycleMetadata {
+    /// Whether resume selection was considered for this dispatch/session.
+    #[serde(default)]
+    pub considered: bool,
+    /// Selected checkpoint identifier, if any.
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
+    /// Commit SHA selected as the resume base.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Outcome of resume selection.
+    #[serde(default)]
+    pub selection_reason: Option<ResumeSelectionReason>,
+    /// Chosen source kind (mirror of `djinn_coordinator::dispatch::resume_source::ResumeSourceKind`).
+    /// `None` when the selection reason is not tied to a single source class
+    /// (e.g. `MergeConflict`).
+    #[serde(default)]
+    pub source_kind: Option<ResumeSourceKind>,
+    /// Target ref the future integration should check out. The selector only
+    /// records it; the worker pod does not mutate the worktree from this
+    /// task — that is `twsk`'s responsibility.
+    #[serde(default)]
+    pub target_ref: Option<String>,
+    /// Submit/review id for accepted auto-submit candidates. `None` for
+    /// checkpoint and clean-task-branch selections.
+    #[serde(default)]
+    pub submit_or_review_id: Option<String>,
+    /// Prior session or lineage identifier that produced the chosen source.
+    /// Used by the resume-prompt context (`48ru`) and as a hint for
+    /// observability + decision telemetry.
+    #[serde(default)]
+    pub prior_session_lineage: Option<String>,
+    /// Machine-readable record of every rejected candidate and its skip
+    /// reason. Typed (not `serde_json::Value`) so the bincode wire format
+    /// used for the worker→host frame can serialize/deserialize it.
+    #[serde(default)]
+    pub skipped: Vec<RejectedResumeSourceWire>,
+}
+
+/// Rejected candidate + machine-readable skip reason. Typed mirror of
+/// `djinn_coordinator::dispatch::resume_source::RejectedResumeSource`, sized
+/// for the bincode worker→host wire frame (no `serde_json::Value` in the
+/// fields). Snake-case serde names match the coordinator definition so the
+/// two stay wire-compatible.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RejectedResumeSourceWire {
+    #[serde(default)]
+    pub kind: Option<ResumeSourceKind>,
+    #[serde(default)]
+    pub target_ref: Option<String>,
+    #[serde(default)]
+    pub checkpoint_sha: Option<String>,
+    #[serde(default)]
+    pub submit_or_review_id: Option<String>,
+    /// Reuse [`ResumeSelectionReason`] for the bucket the candidate fell
+    /// into (e.g. `CheckpointUnsafe`, `MergeConflict`, `CheckpointMissing`,
+    /// `Disabled`). This is the closest stable enum the runtime surface
+    /// already exposes; siblings `48ru`/`twsk` interpret the value the
+    /// same way the coordinator does.
+    #[serde(default)]
+    pub reason: Option<ResumeSelectionReason>,
+}
+
+/// Machine-readable resume source kind chosen by the selector. Mirror of
+/// `djinn_coordinator::dispatch::resume_source::ResumeSourceKind`; aligned
+/// `snake_case` serde names so the two definitions are wire-compatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeSourceKind {
+    /// Accepted auto-submit/review state from the normal submission path.
+    AutoSubmit,
+    /// A safety-scanned checkpoint commit on the task branch.
+    TaskBranchCheckpoint,
+    /// A safety-scanned checkpoint commit on an alternate checkpoint ref.
+    AlternateCheckpointRef,
+    /// Clean task branch fallback when no prior output can be resumed safely.
+    CleanTaskBranch,
+}
+
+/// Machine-readable classification for resume checkpoint selection decisions.
+/// Mirror of `djinn_coordinator::ResumeSelectionReason`; aligned `snake_case`
+/// serde names so the two definitions are wire-compatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeSelectionReason {
+    AutoSubmitAccepted,
+    LatestSafeCheckpoint,
+    AlternateCheckpointRef,
+    CleanTaskBranchFallback,
+    NewerTaskBranch,
+    CheckpointMissing,
+    CheckpointUnsafe,
+    MergeConflict,
+    Disabled,
 }
 
 /// Wire-capable classification of a stage failure that was caused by a typed
@@ -499,6 +625,7 @@ mod tests {
             github_install_token: None,
             commit_author_name: Some("Ada Lovelace".to_string()),
             commit_author_email: Some("1+ada@users.noreply.github.com".to_string()),
+            resume_lifecycle_metadata: None,
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");
@@ -515,6 +642,141 @@ mod tests {
         assert_eq!(back.model_id_per_role, spec.model_id_per_role);
         assert_eq!(back.commit_author_name, spec.commit_author_name);
         assert_eq!(back.commit_author_email, spec.commit_author_email);
+    }
+
+    /// AC: "Selection metadata attached to the dispatch/session lifecycle path
+    /// includes chosen source kind, checkpoint SHA or submit/review id when
+    /// applicable, target ref, prior session/lineage context, and
+    /// rejected-candidate skip reasons." A `TaskRunSpec` with a populated
+    /// `resume_lifecycle_metadata` must round-trip through bincode (the
+    /// worker→host wire format) and surface all selection fields so the
+    /// downstream prompt/model/merge work in siblings `48ru`/`twsk`/`sy0g`
+    /// can read the chosen source, the target ref, the checkpoint SHA (or
+    /// submit/review id), the prior session lineage, and the rejected-
+    /// candidate skip reasons — every field needed for the integration
+    /// without dropping the metadata on the wire.
+    #[test]
+    fn task_run_spec_carries_full_resume_lifecycle_metadata_through_bincode() {
+        let mut per_role = HashMap::new();
+        per_role.insert(RoleKind::Worker, "anthropic/claude-opus-4.7".to_string());
+
+        let spec = TaskRunSpec {
+            task_run_id: "019f1a03-8aef-7201-9c9d-d7ba17613a0b".to_string(),
+            task_id: "task-resume".to_string(),
+            project_id: "proj-xyz".to_string(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".to_string(),
+            task_branch: "djinn/task-resume".to_string(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: per_role,
+            read_source_project_ids: vec![],
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: Some(ResumeLifecycleMetadata {
+                considered: true,
+                checkpoint_id: Some("ckpt-1".to_string()),
+                commit_sha: Some("deadbeef".to_string()),
+                selection_reason: Some(ResumeSelectionReason::LatestSafeCheckpoint),
+                source_kind: Some(ResumeSourceKind::TaskBranchCheckpoint),
+                target_ref: Some("refs/heads/task/resume-target".to_string()),
+                submit_or_review_id: Some("review-7".to_string()),
+                prior_session_lineage: Some("session-prev".to_string()),
+                skipped: vec![RejectedResumeSourceWire {
+                    kind: Some(ResumeSourceKind::AutoSubmit),
+                    target_ref: Some("refs/heads/task/resume-target".to_string()),
+                    checkpoint_sha: None,
+                    submit_or_review_id: Some("review-7".to_string()),
+                    reason: Some(ResumeSelectionReason::CheckpointUnsafe),
+                }],
+            }),
+        };
+
+        // Bincode round-trip (the worker→host wire format).
+        let bytes = bincode::serialize(&spec).expect("serialize");
+        let back: TaskRunSpec = bincode::deserialize(&bytes).expect("deserialize");
+
+        let meta = back
+            .resume_lifecycle_metadata
+            .as_ref()
+            .expect("resume_lifecycle_metadata must round-trip through bincode");
+        assert!(meta.considered, "considered flag must survive the wire");
+        assert_eq!(meta.checkpoint_id.as_deref(), Some("ckpt-1"));
+        assert_eq!(meta.commit_sha.as_deref(), Some("deadbeef"));
+        assert_eq!(
+            meta.selection_reason,
+            Some(ResumeSelectionReason::LatestSafeCheckpoint)
+        );
+        // Every machine-readable selection field the AC requires must
+        // be present after the round-trip.
+        assert_eq!(
+            meta.source_kind,
+            Some(ResumeSourceKind::TaskBranchCheckpoint),
+            "chosen source kind must reach the spec"
+        );
+        assert_eq!(
+            meta.target_ref.as_deref(),
+            Some("refs/heads/task/resume-target"),
+            "target ref must reach the spec"
+        );
+        assert_eq!(
+            meta.submit_or_review_id.as_deref(),
+            Some("review-7"),
+            "submit/review id must reach the spec when applicable"
+        );
+        assert_eq!(
+            meta.prior_session_lineage.as_deref(),
+            Some("session-prev"),
+            "prior session/lineage context must reach the spec"
+        );
+        assert_eq!(
+            meta.skipped.len(),
+            1,
+            "rejected-candidate skip reasons must reach the spec"
+        );
+        assert_eq!(
+            meta.skipped[0].kind,
+            Some(ResumeSourceKind::AutoSubmit),
+            "rejected-candidate kind must reach the spec"
+        );
+        assert_eq!(
+            meta.skipped[0].reason,
+            Some(ResumeSelectionReason::CheckpointUnsafe),
+            "rejected-candidate skip reason must reach the spec"
+        );
+    }
+
+    /// Disabled / no-resume path: when the coordinator did not select a
+    /// resume source, the spec keeps `resume_lifecycle_metadata` as `None`
+    /// and the legacy default/off dispatch behavior is preserved byte-for-
+    /// byte on the bincode wire.
+    #[test]
+    fn task_run_spec_default_off_has_no_resume_lifecycle_metadata() {
+        let spec = TaskRunSpec {
+            task_run_id: "run-default".to_string(),
+            task_id: "task-default".to_string(),
+            project_id: "proj-1".to_string(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".to_string(),
+            task_branch: "djinn/task-default".to_string(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: vec![],
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+        };
+
+        let bytes = bincode::serialize(&spec).expect("serialize");
+        let back: TaskRunSpec = bincode::deserialize(&bytes).expect("deserialize");
+
+        assert!(
+            back.resume_lifecycle_metadata.is_none(),
+            "default/off dispatch must not inject a resume metadata payload"
+        );
     }
 
     #[test]

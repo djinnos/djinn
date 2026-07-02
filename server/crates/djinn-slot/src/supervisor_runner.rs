@@ -14,7 +14,11 @@ use crate::host::SlotContext;
 ///
 /// Delegates to the host's `run_task_dispatch` callback, which encapsulates
 /// the full supervisor dispatch logic (runtime selection, task-run lifecycle,
-/// stage execution, reply loop, teardown).
+/// stage execution, reply loop, teardown). The final `resume_lifecycle_metadata`
+/// argument is the optional coordinator-selected resume-via-git selection
+/// blob; `None` for the default/off path so the legacy call sites compile
+/// unchanged and the host callback receives `None` when resume selection is
+/// disabled.
 pub async fn run_supervisor_dispatch(
     task_id: String,
     project_path: String,
@@ -22,8 +26,17 @@ pub async fn run_supervisor_dispatch(
     ctx: SlotContext,
     kill: CancellationToken,
     pause: CancellationToken,
+    resume_lifecycle_metadata: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
     ctx.callbacks
-        .run_task_dispatch(task_id, project_path, model_id, ctx.clone(), kill, pause)
+        .run_task_dispatch(
+            task_id,
+            project_path,
+            model_id,
+            ctx.clone(),
+            kill,
+            pause,
+            resume_lifecycle_metadata,
+        )
         .await
 }

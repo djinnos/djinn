@@ -13,6 +13,18 @@ pub enum SlotCommand {
         project_path: String,
         respond_to: oneshot::Sender<Result<(), SlotError>>,
     },
+    /// Additive re-dispatch path that also carries an optional
+    /// resume-via-git lifecycle metadata blob (see
+    /// `djinn_runtime::ResumeLifecycleMetadata`). The slot actor routes this
+    /// through the lifecycle runner with the blob attached so the runner
+    /// can set `TaskRunSpec::resume_lifecycle_metadata`. Default/dispatch
+    /// callers (and tests) keep using the plain `RunTask` variant.
+    RunTaskWithResume {
+        task_id: String,
+        project_path: String,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
+        respond_to: oneshot::Sender<Result<(), SlotError>>,
+    },
     /// Kill the currently running task.
     Kill,
     /// Pause the currently running task (commit WIP, preserve worktree).

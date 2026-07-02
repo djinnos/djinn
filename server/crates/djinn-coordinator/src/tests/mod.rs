@@ -422,9 +422,13 @@ fn coordinator_actor_for_tests(
             },
             Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
                 let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                    |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
-                        Box::pin(async { Ok(()) })
-                    },
+                    |_task_id,
+                     _project_path,
+                     _model_id,
+                     _app_state,
+                     _kill,
+                     _pause,
+                     _resume_lifecycle_metadata| { Box::pin(async { Ok(()) }) },
                 );
                 SlotHandle::spawn_with_test_runner(
                     slot_id, model_id, event_tx, app_state, cancel, runner,
@@ -946,7 +950,13 @@ async fn live_mover_evidence_collects_active_session() {
         },
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, _kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 _kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async { std::future::pending::<anyhow::Result<()>>().await })
                 },
             );

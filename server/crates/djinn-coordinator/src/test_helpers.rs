@@ -124,6 +124,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
             _ctx: SlotContext,
             _kill: CancellationToken,
             _pause: CancellationToken,
+            _resume_lifecycle_metadata: Option<serde_json::Value>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>
         {
             Box::pin(async { Ok(()) })

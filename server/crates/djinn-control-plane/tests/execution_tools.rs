@@ -64,7 +64,13 @@ fn controlled_completion_slot_factory(
         let race = race.clone();
         let signal_tx = signal_tx.clone();
         let runner: djinn_agent::actors::slot::TestLifecycleRunner = Arc::new(
-            move |task_id, _project_path, _model_id, app_state, kill, _pause| {
+            move |task_id,
+                  _project_path,
+                  _model_id,
+                  app_state,
+                  kill,
+                  _pause,
+                  _resume_lifecycle_metadata| {
                 let race = race.clone();
                 let signal_tx = signal_tx.clone();
                 Box::pin(async move {
@@ -821,7 +827,13 @@ fn test_slot_factory(
     Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
         let signal_tx = signal_tx.clone();
         let runner: djinn_agent::actors::slot::TestLifecycleRunner = Arc::new(
-            move |task_id, _project_path, _model_id, _app_state, kill, _pause| {
+            move |task_id,
+                  _project_path,
+                  _model_id,
+                  _app_state,
+                  kill,
+                  _pause,
+                  _resume_lifecycle_metadata| {
                 let signal_tx = signal_tx.clone();
                 Box::pin(async move {
                     let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));

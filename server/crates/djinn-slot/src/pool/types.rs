@@ -104,6 +104,28 @@ pub enum PoolMessage {
         model_id: String,
         respond_to: Reply<()>,
     },
+    /// Additive variant for re-dispatch with optional resume-via-git
+    /// lifecycle metadata. Carries the same fields as [`PoolMessage::Dispatch`]
+    /// plus a JSON-serialized `ResumeLifecycleMetadata` blob (or `None` for
+    /// disabled/default behavior — that is the canonical "no resume selection
+    /// was made" signal, equivalent to the legacy `Dispatch` path). Selected
+    /// resume metadata rides the slot pipeline unchanged into
+    /// `TaskRunSpec::resume_lifecycle_metadata`; downstream prompt/model/
+    /// merge work (`48ru`/`twsk`/`sy0g`) reads it from there. The legacy
+    /// `Dispatch` variant stays byte-compatible so existing callers and the
+    /// `#[cfg(any(test, feature = "test-support"))]` injection points keep
+    /// compiling without re-plumbing the resume blob.
+    DispatchWithResume {
+        task_id: String,
+        project_path: String,
+        model_id: String,
+        /// JSON-serialized `djinn_runtime::ResumeLifecycleMetadata` (the
+        /// serde-only mirror defined in `djinn_runtime::spec`). `None` means
+        /// resume selection was not consulted (default/off path) and is
+        /// equivalent to a legacy `Dispatch` call for runtime purposes.
+        resume_lifecycle_metadata: Option<serde_json::Value>,
+        respond_to: Reply<()>,
+    },
     HasSession {
         task_id: String,
         respond_to: Reply<bool>,

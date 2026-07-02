@@ -247,6 +247,170 @@ impl CoordinatorActor {
         }
     }
 
+    async fn select_resume_lifecycle_metadata_for_dispatch(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Option<crate::ResumeLifecycleMetadata> {
+        if !self.worker_lifecycle_config.resume.enabled {
+            return None;
+        }
+
+        let target_ref = format!("task/{}", task.short_id);
+        let lifecycle = self
+            .resume_lifecycle_metadata_from_existing_rows(task)
+            .await;
+        let prior_lineage = lifecycle
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.extra.get("session_id"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                lifecycle
+                    .auto_submit
+                    .as_ref()
+                    .and_then(|auto_submit| auto_submit.extra.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+            });
+        let candidates = crate::dispatch::resume_source::build_resume_source_candidates(
+            &task.id,
+            &target_ref,
+            prior_lineage,
+            &lifecycle,
+        );
+        let selection = crate::dispatch::resume_source::select_resume_source(
+            &self.worker_lifecycle_config.resume,
+            &task.id,
+            prior_lineage,
+            &candidates,
+        )?;
+        let metadata = crate::dispatch::resume_source::selection_to_metadata(&selection);
+
+        let payload = serde_json::json!({
+            "event": "resume_source_selected",
+            "worker_lifecycle": {
+                "resume": metadata,
+            }
+        });
+        if let Err(e) = self
+            .task_repo()
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                "comment",
+                &payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to persist resume-source selection metadata"
+            );
+        }
+        Some(metadata)
+    }
+
+    async fn resume_lifecycle_metadata_from_existing_rows(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> crate::WorkerLifecycleMetadata {
+        let mut lifecycle = crate::WorkerLifecycleMetadata::default();
+        let mut latest_task_run_id: Option<String> = None;
+
+        match djinn_db::TaskRunRepository::new(self.db.clone())
+            .list_for_task(&task.id)
+            .await
+        {
+            Ok(task_runs) => {
+                latest_task_run_id = task_runs.first().map(|run| run.id.clone());
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to load task-runs for resume selection");
+            }
+        }
+
+        if let Some(task_run_id) = latest_task_run_id.as_deref() {
+            lifecycle.auto_submit = self.auto_submit_lifecycle_for_task_run(task_run_id).await;
+        }
+        lifecycle.checkpoint = self.checkpoint_lifecycle_from_activity(task).await;
+        lifecycle
+    }
+
+    async fn auto_submit_lifecycle_for_task_run(
+        &self,
+        task_run_id: &str,
+    ) -> Option<crate::AutoSubmitLifecycleMetadata> {
+        let repo =
+            djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(self.db.clone());
+        let reviews = match repo.list_for_task_run(task_run_id).await {
+            Ok(reviews) => reviews,
+            Err(e) => {
+                tracing::warn!(task_run_id = %task_run_id, error = %e, "CoordinatorActor: failed to load auto-submit reviews for resume selection");
+                return None;
+            }
+        };
+        let review = reviews.first()?;
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "task_run_id".to_string(),
+            serde_json::json!(review.task_run_id),
+        );
+        if let Some(session_id) = &review.session_id {
+            extra.insert("session_id".to_string(), serde_json::json!(session_id));
+        }
+        if let Some(model_id) = &review.model_id {
+            extra.insert("model_id".to_string(), serde_json::json!(model_id));
+        }
+        Some(crate::AutoSubmitLifecycleMetadata {
+            considered: true,
+            green: Some(review.model_called_submit_work),
+            verification_command: review.verify_source.clone(),
+            submission_id: review.model_called_submit_work.then(|| review.id.clone()),
+            skipped_reason: (!review.model_called_submit_work)
+                .then_some(crate::AutoSubmitSkipReason::ReviewRequired),
+            extra,
+        })
+    }
+
+    async fn checkpoint_lifecycle_from_activity(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Option<crate::CheckpointLifecycleMetadata> {
+        let entries = match self.task_repo().list_activity(&task.id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(task_id = %task.short_id, error = %e, "CoordinatorActor: failed to load activity for resume checkpoint selection");
+                return None;
+            }
+        };
+        entries.iter().rev().find_map(|entry| {
+            let value: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+            let commit_sha = value.get("preservation_commit_sha")?.as_str()?.to_owned();
+            let ref_name = value
+                .get("preservation_ref_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let mut extra = serde_json::Map::new();
+            if let Some(session_id) = value.get("session_id").and_then(serde_json::Value::as_str) {
+                extra.insert("session_id".to_string(), serde_json::json!(session_id));
+            }
+            Some(crate::CheckpointLifecycleMetadata {
+                checkpoint_id: None,
+                commit_sha: Some(commit_sha),
+                ref_name,
+                requested_for: None,
+                safety_scan: Some(crate::CheckpointSafetyScanMetadata {
+                    passed: true,
+                    scanner: Some("preservation_activity".to_string()),
+                    findings: vec![],
+                }),
+                preservation_outcome: Some(crate::PreservationOutcome::Succeeded),
+                extra,
+            })
+        })
+    }
+
     // ─── Shared per-(user, model) admission surface ────────────────────────
     //
     // The methods below compose the pure primitives in [`super::admission`]
@@ -1545,6 +1709,34 @@ impl CoordinatorActor {
                     .await;
             }
 
+            // Coordinator-side resume-via-git selection: when resume is
+            // enabled and the selector produced a metadata struct, serialize
+            // it and route the dispatch through `dispatch_with_resume_metadata`
+            // so the selection lands on `TaskRunSpec::resume_lifecycle_metadata`
+            // (read by downstream prompt/model/merge work in siblings `48ru`/
+            // `twsk`/`sy0g`). When resume is disabled OR the selector
+            // returned `None`, fall back to the legacy `dispatch` call so
+            // existing default/off dispatch behavior is byte-for-byte
+            // preserved.
+            let resume_metadata = self
+                .select_resume_lifecycle_metadata_for_dispatch(&task)
+                .await;
+            let resume_metadata_json = resume_metadata
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: failed to serialize ResumeLifecycleMetadata for re-dispatch; \
+                         proceeding without resume metadata"
+                    );
+                    e
+                })
+                .ok()
+                .flatten();
+
             let task_id = task.id.clone();
             let project_path_owned = project_path.clone();
             let outcome = self
@@ -1559,7 +1751,21 @@ impl CoordinatorActor {
                         let tid = task_id.clone();
                         let pp = project_path_owned.clone();
                         let mid = model_id.to_owned();
-                        async move { pool.dispatch(&tid, &pp, &mid).await }
+                        let resume = resume_metadata_json.clone();
+                        async move {
+                            match resume {
+                                Some(metadata) => {
+                                    pool.dispatch_with_resume_metadata(
+                                        &tid,
+                                        &pp,
+                                        &mid,
+                                        Some(metadata),
+                                    )
+                                    .await
+                                }
+                                None => pool.dispatch(&tid, &pp, &mid).await,
+                            }
+                        }
                     },
                 )
                 .await;
@@ -1891,7 +2097,13 @@ mod inflight_ledger_tests {
                     let started_tx = started_tx.clone();
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                        move |task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                        move |task_id,
+                              _project_path,
+                              _model_id,
+                              _app_state,
+                              kill,
+                              _pause,
+                              _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
                             let releases = releases.clone();
                             Box::pin(async move {

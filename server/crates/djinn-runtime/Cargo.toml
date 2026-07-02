@@ -22,6 +22,10 @@ bincode = "1.3"
 bytes = "1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Needed for the in-test fixtures in `spec.rs::tests` that
+# construct `TaskRunSpec` with `serde_json` content (e.g. activity
+# payloads); also required by the credentials comment reference.
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "macros", "io-util", "time", "net", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["codec"] }
