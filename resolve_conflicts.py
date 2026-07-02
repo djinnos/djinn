@@ -1,205 +1,195 @@
+#!/usr/bin/env python3
+"""Resolve merge conflicts in proposal_tools.rs by keeping both sides."""
+
 import re
-from pathlib import Path
 
-ROOT = Path("server/crates/djinn-control-plane/src/tools/proposal_tools")
+filepath = "/workspace/.tmpKjG9tO/server/crates/djinn-control-plane/src/tools/proposal_tools.rs"
 
+with open(filepath, 'r') as f:
+    lines = f.readlines()
 
-def main():
-    create = (ROOT / "create.rs").read_text()
-    mod = (ROOT / "mod.rs").read_text()
+# Parse the file into segments: non-conflict lines and conflict regions
+segments = []
+i = 0
+current_non_conflict = []
 
-    # ── create.rs ───────────────────────────────────────────────────────────
+while i < len(lines):
+    line = lines[i]
+    if line.startswith('<<<<<<< HEAD'):
+        # Save accumulated non-conflict lines
+        if current_non_conflict:
+            segments.append(('normal', current_non_conflict))
+            current_non_conflict = []
+        
+        # Collect HEAD side
+        head_lines = []
+        i += 1
+        while i < len(lines) and not lines[i].startswith('======='):
+            head_lines.append(lines[i])
+            i += 1
+        
+        # Skip ======= marker
+        i += 1
+        
+        # Collect origin/main side
+        main_lines = []
+        while i < len(lines) and not lines[i].startswith('>>>>>>> origin/main'):
+            main_lines.append(lines[i])
+            i += 1
+        
+        # Skip >>>>>>> marker
+        i += 1
+        
+        segments.append(('conflict', head_lines, main_lines))
+    else:
+        current_non_conflict.append(line)
+        i += 1
 
-    create = resolve_header_conflict(create)
-    create = resolve_import_conflict(create)
-    create = resolve_params_conflict(create)
-    create = resolve_tool_methods_conflict(create)
+if current_non_conflict:
+    segments.append(('normal', current_non_conflict))
 
-    # ── mod.rs ──────────────────────────────────────────────────────────────
+# Now reconstruct: keep both sides from conflicts
+output = []
 
-    mod = resolve_reexports_conflict(mod)
-    mod = resolve_mod_import_conflict(mod)
-    mod = resolve_mod_params_conflict(mod)
-    mod = resolve_mod_tool_methods_conflict(mod)
+# Track which conflict we're in to handle correctly
+# We need to combine: signoff_readiness_tests (HEAD) + end_to_end_planner_refinement_loop_tests (main)
 
-    assert "<<<<<<< HEAD" not in create
-    assert "=======" not in create
-    assert ">>>>>>> origin/main" not in create
-    assert "<<<<<<< HEAD" not in mod
-    assert "=======" not in mod
-    assert ">>>>>>> origin/main" not in mod
+# Strategy: for each conflict, emit HEAD side first, then the normal lines, then the main side
+# But we need to be smarter - the normal lines between conflicts serve as continuation for both sides
 
-    (ROOT / "create.rs").write_text(create)
-    (ROOT / "mod.rs").write_text(mod)
-    print("Conflicts resolved.")
+# Let me look at the specific structure:
+# Conflict 1: HEAD = signoff_tests module start; MAIN = e2e_tests module start
+# Shared 1: continuation of create() (status: None, body_format: None, }) .await .unwrap();)
+# Conflict 2: HEAD = signoff test cont; MAIN = e2e test cont
+# Shared 2: continuation (}) .await .unwrap();)  
+# Conflict 3: HEAD = signoff assertions; MAIN = e2e tests rest
 
+# The signoff module from HEAD needs: Conflict1-HEAD + Shared1 + Conflict2-HEAD + Shared2 + Conflict3-HEAD + closing braces
+# The e2e module from main needs: Conflict1-MAIN + Shared1 + Conflict2-MAIN + Shared2 + Conflict3-MAIN + closing braces
 
-def between(text, start, end):
-    s = text.find(start)
-    if s == -1:
-        raise RuntimeError(f"could not locate {start!r}")
-    e = text.find(end, s + len(start))
-    if e == -1:
-        raise RuntimeError(f"could not locate {end!r} after {start!r}")
-    return text[s:e + len(end)]
+# Let me extract the content properly
 
+head_module = []  # signoff_readiness_tests
+main_module = []  # end_to_end_planner_refinement_loop_tests
 
-def replace_block(text, start, end, replacement):
-    block = between(text, start, end)
-    return text.replace(block, replacement, 1)
+conflict_count = 0
+for seg in segments:
+    if seg[0] == 'normal':
+        normal_lines = seg[1]
+        if conflict_count > 0 and conflict_count < 4:
+            # These shared lines go into BOTH modules
+            head_module.extend(normal_lines)
+            main_module.extend(normal_lines)
+        # The closing braces (after conflict 3) need special handling
+        # Lines 5212-5213: "    }\n" and "}\n" - these close each module
+        # But they should only appear once per module at the end
+    elif seg[0] == 'conflict':
+        conflict_count += 1
+        head_lines = seg[1]
+        main_lines = seg[2]
+        head_module.extend(head_lines)
+        main_module.extend(main_lines)
 
+# Now head_module contains the signoff test module body
+# and main_module contains the e2e test module body
+# Each needs its own closing braces
 
-def resolve_header_conflict(text):
-    return replace_block(
-        text,
-        "// Create/read/import/export/list/update/block-patch/delete CRUD tools for the\n",
-        ">>>>>>> origin/main\n",
-        """// Create/read/import/export/list/update/block-patch/delete CRUD tools for the
-// global Proposals layer.
-//
-// This submodule owns the create/import/export/show/list/update/block-patch/
-// delete mutation surface plus target add/remove and the cohesive list/show/
-// target response shaping used by those tools.
-//
-// CRUD/target ownership checklist for task xpj0:
-// - moved here: `proposal_add_target`, `proposal_remove_target`,
-//   `target_models`, `finish_targets`, and `graduated_epic_models`;
-// - already owned here: create/import/export/show/list tools and list-summary
-//   tests; update/delete/block-patch moved here from the py7d sibling slice;
-// - intentionally shared in `mod.rs`: composed gate/readiness helpers and
-//   `err_single`/`err_show`/`err_targets` response constructors used by later
-//   feedback, signoff, lifecycle, and refinement slices.
-//
-""",
-    )
+# The closing "    }\n}\n" was in the shared normal segment after conflict 3
+# We need to add them to each module
 
+print(f"Conflict count: {conflict_count}")
+print(f"Head module lines: {len(head_module)}")
+print(f"Main module lines: {len(main_module)}")
 
-def resolve_import_conflict(text):
-    return replace_block(
-        text,
-        "use crate::tools::proposal_ops::{\n",
-        ">>>>>>> origin/main\n",
-        """use crate::tools::proposal_ops::{
-    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListSummary,
-    ProposalModel, ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
-    ProposalTargetModel, ProposalTargetsResponse,
-};
-""",
-    )
+# Build the final output: everything before conflicts + head_module + closing + main_module + closing
+final_output = []
 
+# Everything before first conflict (non-conflict segments before conflict_count > 0)
+pre_conflict = []
+for seg in segments:
+    if seg[0] == 'normal':
+        # Check if this is before the first conflict
+        # We need to be smarter about this
+        break
 
-def resolve_params_conflict(text):
-    return replace_block(
-        text,
-        "#[derive(Deserialize, schemars::JsonSchema)]\n",
-        ">>>>>>> origin/main\n",
-        """#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalTargetParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    /// Target project: UUID or owner/repo slug (must be registered).
-    pub project: String,
-    /// `primary` (a write-target, default) or `reference` (read-only context).
-    pub role: Option<String>,
-}
+# Actually, let me just rebuild the whole file properly
+final_lines = []
+seen_conflicts = 0
+added_head_closing = False
 
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalUpdateParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
-    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
-    /// draft | in_review | approved | building | done | rejected | archived | superseded.
-    pub status: Option<String>,
-    /// UUID or short_id of the proposal that supersedes this one.
-    pub superseded_by: Option<String>,
-    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
-    pub body_format: Option<String>,
-}
+for seg in segments:
+    if seg[0] == 'normal':
+        normal_lines = seg[1]
+        if seen_conflicts == 0:
+            # Before any conflict - just emit normally
+            final_lines.extend(normal_lines)
+        elif seen_conflicts >= 1 and seen_conflicts <= 3:
+            # Between conflicts - emit the shared continuation as part of both modules
+            # These lines have already been incorporated into head_module and main_module
+            # So we skip them here, and handle them through the module reconstruction
+            pass
+        elif seen_conflicts > 3:
+            # After all conflicts
+            final_lines.extend(normal_lines)
+    elif seg[0] == 'conflict':
+        seen_conflicts += 1
 
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalDeleteParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-}
+# Now I realize this approach is getting complex. Let me try a different, simpler approach.
+# I'll just construct the final file directly.
 
-// ── Tool router: create / import / export / show / list / update / block-patch / delete / target ──
-""",
-    )
+# First, get all lines before the first conflict marker
+pre_conflict_end = 0
+for idx, line in enumerate(lines):
+    if line.startswith('<<<<<<< HEAD'):
+        pre_conflict_end = idx
+        break
 
+# Get the head_module and main_module content
+# head_module ends with the HEAD side of conflict 3 (assertions)
+# main_module ends with the MAIN side of conflict 3 (rest of e2e tests)
 
-def resolve_tool_methods_conflict(text):
-    # The last conflict block in create.rs is the tool methods one.
-    markers = [m.start() for m in re.finditer(r"<<<<<<< HEAD", text)]
-    marker = markers[-1]
-    end_marker = text.find(">>>>>>> origin/main", marker)
-    if end_marker == -1:
-        raise RuntimeError("no closing marker for create.rs tool methods")
-    end = end_marker + len(">>>>>>> origin/main\n")
+# The closing braces were in the post-conflict shared lines
+# Line 5212: "    }\n" closes the last test function
+# Line 5213: "}\n" closes the module
 
-    block = text[marker:end]
-    sep = block.find("=======\n")
-    if sep == -1:
-        raise RuntimeError("no separator in create.rs tool methods conflict")
-    head = block[len("<<<<<<< HEAD\n"):sep]
-    tail = block[sep + len("=======\n"):block.find(">>>>>>> origin/main")]
+# For signoff module: head_module already has all test functions except the closing of the last one and module close
+# For e2e module: main_module already has all test functions except the closing of the last one and module close
 
-    # HEAD side is missing the closing `}` for proposal_remove_target.
-    head = head.rstrip() + "\n    }\n"
+# Actually wait - let me check: does the last test function in each module need its closing brace from the shared lines?
 
-    return text[:marker] + head + "\n" + tail + text[end:]
+# The HEAD conflict 3 content (signoff assertions) ends with:
+#         assert!(signoffs.is_empty(), "no sign-offs should be recorded");
+# Then the shared "    }\n" closes the test fn, and "}\n" closes the module
 
+# The MAIN conflict 3 content (e2e tests) ends with:
+#         assert!(exported_ids.contains("tradeoffs"));
+# Then the shared "    }\n" closes the test fn, and "}\n" closes the module
 
-def resolve_reexports_conflict(text):
-    return replace_block(
-        text,
-        "pub use create::{\n",
-        ">>>>>>> origin/main\n",
-        """pub use create::{
-    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalImportParams,
-    ProposalListParams, ProposalListResponse, ProposalShowParams, ProposalTargetParams,
-    ProposalUpdateParams,
-};
-""",
-    )
+# So I need to add those closing braces to each module
 
+# Write the resolved file
+with open(filepath, 'w') as f:
+    # Write everything before the first conflict
+    for line in lines[:pre_conflict_end]:
+        f.write(line)
+    
+    # Write the signoff readiness tests module (HEAD)
+    for line in head_module:
+        f.write(line)
+    
+    # Add closing braces for the signoff module
+    f.write("    }\n")
+    f.write("}\n")
+    f.write("\n")
+    
+    # Write the end-to-end planner refinement loop tests module (origin/main)
+    for line in main_module:
+        f.write(line)
+    
+    # Add closing braces for the e2e module
+    f.write("    }\n")
+    f.write("}\n")
 
-def resolve_mod_import_conflict(text):
-    return replace_block(
-        text,
-        "use crate::tools::proposal_ops::{\n",
-        ">>>>>>> origin/main\n",
-        """use crate::tools::proposal_ops::{
-    ProposalFeedbackResponse, ProposalModel, ProposalReconcileObsoleteEpicResponse,
-    ProposalShowResponse, ProposalSingleResponse,
-};
-""",
-    )
-
-
-def resolve_mod_params_conflict(text):
-    # Remove the entire update/delete/target params block from mod.rs.
-    return replace_block(
-        text,
-        "#[derive(Deserialize, schemars::JsonSchema)]\n",
-        ">>>>>>> origin/main\n",
-        "#[derive(Deserialize, schemars::JsonSchema)]\npub struct ProposalFeedbackAddParams {\n",
-    )
-
-
-def resolve_mod_tool_methods_conflict(text):
-    markers = [m.start() for m in re.finditer(r"<<<<<<< HEAD", text)]
-    if len(markers) != 4:
-        raise RuntimeError(f"expected 4 HEAD markers in mod.rs, found {len(markers)}")
-    marker = markers[3]
-    end_marker = text.find(">>>>>>> origin/main", marker)
-    if end_marker == -1:
-        raise RuntimeError("no closing marker for mod.rs tool methods")
-    end = end_marker + len(">>>>>>> origin/main\n")
-    return text[:marker] + text[end:]
-
-
-if __name__ == "__main__":
-    main()
+print("Conflict resolution complete!")
+print(f"Total lines in head_module: {len(head_module)}")
+print(f"Total lines in main_module: {len(main_module)}")
