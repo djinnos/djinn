@@ -457,6 +457,89 @@ impl MirrorManager {
         Ok(Workspace::new(dir, branch.to_string()))
     }
 
+    /// Hardlinked local clone checked out at an arbitrary ref/SHA, returned as
+    /// a detached-HEAD [`Workspace`].
+    ///
+    /// Used by the resume-via-git worktree-setup path to materialize the work
+    /// pod from a non-branch source: a safety-scanned checkpoint ref
+    /// (`refs/djinn/checkpoints/...`), a checkpoint SHA, or any other named ref
+    /// already present in the mirror. The resulting workspace is intentionally
+    /// NOT pinned to a branch ref: callers (the supervisor's `ensure_branch`
+    /// following step) move `task_branch` to the resumed commit so a downstream
+    /// `push_to_origin(task_branch)` lands the resumed state durably.
+    ///
+    /// Performs the clone WITHOUT `--branch` (so no branch ref is required),
+    /// then resolves and checks out the chosen ref in detached HEAD against
+    /// the resulting clone. `ref` may be:
+    /// - a fully-qualified branch ref (`refs/heads/<branch>`) — already in
+    ///   the clone, resolved via `git rev-parse`;
+    /// - any other fully-qualified ref (`refs/djinn/checkpoints/...`, etc.) —
+    ///   explicitly fetched into a namespaced local ref so `git checkout`
+    ///   resolves it as a ref rather than treating slashes as a path
+    ///   separator;
+    /// - a short ref (`task/<id>`, `main`, …) — resolved against the
+    ///   `refs/remotes/origin/*` namespace populated by the initial clone;
+    /// - a full commit SHA (`abc123def…`) — verified via `git cat-file -e`
+    ///   against the shared object db.
+    ///
+    /// Underlying error is surfaced as `MirrorError::Git` so the caller can
+    /// machine-classify the failure and fall back to the legacy task-branch
+    /// clone when the chosen ref is missing or otherwise unavailable.
+    pub async fn clone_ephemeral_at_ref(
+        &self,
+        project_id: &str,
+        ref_selector: &str,
+    ) -> Result<Workspace, MirrorError> {
+        let mirror = self.mirror_path(project_id);
+        if !mirror.exists() {
+            return Err(MirrorError::Missing(project_id.to_string()));
+        }
+        let dir = TempDir::new()?;
+
+        debug!(
+            project_id,
+            ref_selector,
+            path = ?dir.path(),
+            "cloning ephemeral workspace at ref"
+        );
+        // Clone WITHOUT `--branch` so the mirror need not contain `ref_selector`
+        // as a `refs/heads/*` ref — checks out the mirror's HEAD (whatever
+        // local branch git happens to pick) and we will immediately switch to
+        // `ref_selector`. Hardlinked object db is preserved (no network).
+        run_git_command(
+            self.root.clone(),
+            vec![
+                "clone".into(),
+                "--local".into(),
+                "--shared".into(),
+                mirror.display().to_string(),
+                dir.path().display().to_string(),
+            ],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git clone --local (at-ref)", e))?;
+
+        let resolved_sha = resolve_to_sha(dir.path(), ref_selector)
+            .await
+            .map_err(|e| git_err_to_mirror("git resolve (at-ref)", e))?;
+
+        // Detach HEAD on the resolved SHA. `--detach` is required so the
+        // subsequent `ensure_branch(task_branch)` creates a new branch
+        // instead of failing on a detached HEAD; the workspace still
+        // carries every tracked file at the chosen ref's tree.
+        run_git_command(
+            dir.path().to_path_buf(),
+            vec!["checkout".into(), "--detach".into(), resolved_sha.clone()],
+        )
+        .await
+        .map_err(|e| git_err_to_mirror("git checkout --detach (at-ref)", e))?;
+
+        // Mirror `clone_ephemeral`'s `Workspace::new(dir, branch)` shape: the
+        // branch label is informational (used for `push_to_origin`-style
+        // helpers) and `ensure_branch(task_branch)` will rewrite it.
+        Ok(Workspace::new(dir, resolved_sha))
+    }
+
     /// Cheap host-side check that `branch`'s commits are durably present in the
     /// mirror AND carry work not already on `base` — i.e. `branch` has at least
     /// one commit beyond its merge-base with `base`.
@@ -1036,4 +1119,107 @@ mod fetch_prune_tests {
         .stdout;
         assert!(!refs.contains("refs/heads/task/ab12"));
     }
+}
+
+/// Cheap SHA hex check used to disambiguate raw-SHA selectors from short refs
+/// in [`resolve_to_sha`]. Conservative: only matches ≥7 hex chars (the
+/// shortest unique SHA length git accepts by default).
+fn looks_like_sha(s: &str) -> bool {
+    let len = s.len();
+    (7..=40).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Monotonic counter feeding the temporary local-ref name used by
+/// [`resolve_to_sha`] when fetching non-branch refs. Used as a uniqueness
+/// suffix so concurrent calls never collide on the same local ref name.
+/// A 64-bit counter never repeats in any realistic process lifetime.
+static NEXT_RESUME_FETCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Resolve `ref_selector` against `clone_path` to a full commit SHA, fetching
+/// the ref into a namespaced local ref first when git's default clone refspec
+/// does not cover it (i.e. when the ref is non-branch).
+///
+/// Git's `git clone --local` default refspec is `refs/heads/*:refs/remotes/origin/*`
+/// which leaves non-branch refs (e.g. `refs/djinn/checkpoints/...`) invisible
+/// to `git checkout` because they were never pulled. Worse, `git fetch <remote>
+/// <ref>` puts the ref only in `FETCH_HEAD`, which `git checkout` does not
+/// resolve as a ref — slashes in `refs/djinn/...` get parsed as path
+/// separators and the call errors with `--detach does not take a path
+/// argument`. The fix is the explicit `<remote>:<local>` refspec that lands
+/// the ref in the local namespaced form `refs/remotes/origin/<ref>` so
+/// callers (the subsequent `git checkout --detach`) can resolve it as a ref.
+async fn resolve_to_sha(
+    clone_path: &Path,
+    ref_selector: &str,
+) -> Result<String, djinn_git::GitError> {
+    // Branch refs (`refs/heads/*`) were already pulled by the clone.
+    if let Some(branch) = ref_selector.strip_prefix("refs/heads/") {
+        return rev_parse_in(clone_path, branch).await;
+    }
+
+    if ref_selector.starts_with("refs/") {
+        // Non-branch ref — must fetch it explicitly into a namespaced local
+        // ref so `git checkout` later sees it as a ref. Suffix is a unique
+        // counter so concurrent resume-setup calls cannot race on the same
+        // local ref name (the clone is a fresh TempDir per call so the
+        // collision would only happen if two calls ran in the same tempdir,
+        // but the counter keeps it bulletproof either way).
+        let local_ref = format!(
+            "refs/remotes/origin/__djinn_resume__{}",
+            std::sync::atomic::AtomicU64::fetch_add(
+                &NEXT_RESUME_FETCH_SEQ,
+                1,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+        );
+        run_git_command(
+            clone_path.to_path_buf(),
+            vec![
+                "fetch".into(),
+                "--no-tags".into(),
+                "origin".into(),
+                format!("{}:{}", ref_selector, local_ref),
+            ],
+        )
+        .await?;
+        return rev_parse_in(clone_path, &local_ref).await;
+    }
+
+    if looks_like_sha(ref_selector) {
+        // Verify the object exists in the shared object db and return the
+        // SHA unchanged. `cat-file -e` is the canonical existence probe.
+        run_git_command(
+            clone_path.to_path_buf(),
+            vec!["cat-file".into(), "-e".into(), ref_selector.to_string()],
+        )
+        .await?;
+        return Ok(ref_selector.to_string());
+    }
+
+    // Short ref (`main`, `task/1`, …) — resolved against the
+    // `refs/remotes/origin/*` namespace populated by the initial clone.
+    rev_parse_in(clone_path, &format!("refs/remotes/origin/{ref_selector}")).await
+}
+
+/// `git rev-parse --verify <rev>` against `clone_path`. Returns the trimmed
+/// full SHA on success, surfaces the underlying `GitError` otherwise so the
+/// caller can classify unknown / ambiguous refs.
+async fn rev_parse_in(clone_path: &Path, rev: &str) -> Result<String, djinn_git::GitError> {
+    let out = run_git_command(
+        clone_path.to_path_buf(),
+        vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "-q".into(),
+            rev.to_string(),
+        ],
+    )
+    .await?;
+    let sha = out.stdout.trim().to_string();
+    if sha.is_empty() {
+        return Err(djinn_git::GitError::Other(anyhow::anyhow!(
+            "git rev-parse returned no SHA for {rev}"
+        )));
+    }
+    Ok(sha)
 }

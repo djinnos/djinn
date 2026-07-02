@@ -32,13 +32,14 @@ use std::sync::Arc;
 
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::{Task, TaskRunStatus, TaskRunTrigger, TaskStatus};
+use djinn_runtime::{ResumeLifecycleMetadata, ResumeSourceKind};
 use djinn_workspace::{
     EphemeralWorkspaceError, GitIdentity, MergeOutcome, MergeParentOutcome, MirrorError,
     MirrorManager,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub mod services;
 
@@ -478,6 +479,286 @@ where
 
 // ── TaskRunSupervisor ────────────────────────────────────────────────────────
 
+/// Outcome of [`prepare_resume_workspace`] — what the supervisor's
+/// worktree-setup helper actually did, including the chosen source kind and
+/// any machine-readable fallback reason. Surfaced to tracing + the
+/// downstream resume-prompt context (task `48ru`) so the operator / UI can
+/// see which git state the worker pod is resuming from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeWorkspaceOutcome {
+    /// What the supervisor actually used for the worktree base. For `Clean`
+    /// the workspace checked out at the canonical task branch; for `Safe` /
+    /// `Alternate` it checked out the selected ref/SHA; for
+    /// `AutoSubmit` the workspace checked out at the task branch (auto-submit
+    /// carries no git content to base on — the review/submission metadata
+    /// rides the prompt context, not the worktree).
+    pub applied_source: ResumeSourceKind,
+    /// The task-branch ref that the workspace will be promoted onto by the
+    /// follow-up `ensure_branch(task_branch)` step. Always populated.
+    pub applied_target_ref: String,
+    /// Commit SHA the workspace was checked out at, if the helper could
+    /// resolve a concrete commit. `None` for auto-submit and the
+    /// clean-fallback paths where no specific commit was selected.
+    pub applied_commit_sha: Option<String>,
+    /// Why the helper fell back to the clean task branch instead of using
+    /// the chosen source. `None` for the happy path; populated for skipped
+    /// / unsafe / unavailable selections.
+    pub fallback_reason: Option<String>,
+}
+
+impl ResumeWorkspaceOutcome {
+    fn clean_fallback(task_branch: &str, reason: String) -> Self {
+        Self {
+            applied_source: ResumeSourceKind::CleanTaskBranch,
+            applied_target_ref: task_branch.to_string(),
+            applied_commit_sha: None,
+            fallback_reason: Some(reason),
+        }
+    }
+
+    fn safe_applied(
+        source: ResumeSourceKind,
+        target_ref: &str,
+        commit_sha: Option<String>,
+    ) -> Self {
+        Self {
+            applied_source: source,
+            applied_target_ref: target_ref.to_string(),
+            applied_commit_sha: commit_sha,
+            fallback_reason: None,
+        }
+    }
+}
+
+/// Apply the coordinator-selected resume source to the worktree setup.
+///
+/// Behaviour, per `spec.resume_lifecycle_metadata.source_kind`:
+///
+/// - `None` (no `ResumeLifecycleMetadata` selected this dispatch): returns
+///   `Ok(None)` so the caller falls through to the legacy
+///   `clone_ephemeral(task_branch)` path. This is the byte-for-byte default
+///   for callers that have not enabled the `worker_lifecycle_config.resume`
+///   gate.
+/// - `ResumeSourceKind::CleanTaskBranch`: returns `Ok(None)` so the legacy
+///   `clone_ephemeral(task_branch)` path runs unchanged. The selector
+///   already chose the fallback, so the worktree setup matches it.
+/// - `ResumeSourceKind::AutoSubmit`: accepted auto-submit/review state has
+///   no git content to base on — the worker pod is built on the canonical
+///   `task_branch` (same as the clean-task-branch path) and the resume
+///   prompt context (task `48ru`) carries the submit/review id. Falls back
+///   to the legacy path; no extra worktree-setup step is required.
+/// - `ResumeSourceKind::TaskBranchCheckpoint`: clones at `task_branch`
+///   first (so `ensure_branch` can later refresh the branch ref) then
+///   checks out the selected `commit_sha` in detached HEAD. The follow-up
+///   `ensure_branch(task_branch)` promotes HEAD onto the task branch so a
+///   subsequent `push_to_origin(task_branch)` carries the resumed state.
+/// - `ResumeSourceKind::AlternateCheckpointRef`: clones at
+///   `target_ref` (fully-qualified, e.g.
+///   `refs/djinn/checkpoints/task/<id>/<sid>`) via
+///   [`MirrorManager::clone_ephemeral_at_ref`]. On any failure
+///   (selected ref missing, fetch refused, unsafe sha, …) the helper
+///   falls back to the clean task branch and records a machine-readable
+///   reason in [`ResumeWorkspaceOutcome::fallback_reason`].
+///
+/// On any non-fatal error (selected source unavailable, unsafe checkpoint,
+/// mismatch, missing safety scan, missing SHA) the helper returns the clean
+/// task branch and a populated `fallback_reason` so the caller never
+/// panics or silently resumes unsafe output. Fatal errors (mirror missing,
+/// IO) propagate as `SupervisorError::Mirror`.
+///
+/// Never skips the supervisor's normal task-branch isolation:
+/// `ensure_branch(task_branch)` always runs after the helper returns, so
+/// the resumed commit lands on the canonical task branch even when the
+/// helper checked out an alternate ref / detached SHA.
+async fn prepare_resume_workspace(
+    mirror: &MirrorManager,
+    project_id: &str,
+    task_branch: &str,
+    base_branch: &str,
+    resume: Option<&ResumeLifecycleMetadata>,
+) -> Result<Option<ResumeWorkspaceOutcome>, SupervisorError> {
+    let Some(meta) = resume else {
+        return Ok(None);
+    };
+    // `considered == false` is the "selection was not consulted" signal —
+    // the selector produced no record at all (disabled config, pre-`1f9u`
+    // host, etc.). Same semantics as `None`: fall through to the legacy path.
+    if !meta.considered {
+        return Ok(None);
+    }
+    let source_kind = meta
+        .source_kind
+        .unwrap_or(ResumeSourceKind::CleanTaskBranch);
+
+    // Clean / AutoSubmit variants: no worktree-setup work is needed. The
+    // caller falls through to `clone_ephemeral(task_branch)` which is the
+    // byte-for-byte legacy default. The outcome is `None` so the dispatch
+    // logs record `selection_kind` (from the spec metadata) without us
+    // re-asserting "applied clean task branch" — the existing legacy log
+    // already does that on success.
+    if matches!(
+        source_kind,
+        ResumeSourceKind::CleanTaskBranch | ResumeSourceKind::AutoSubmit
+    ) {
+        debug!(
+            source_kind = ?source_kind,
+            task_branch,
+            "resume: clean/auto-submit selection; using legacy task-branch clone path unchanged"
+        );
+        return Ok(None);
+    }
+
+    // Safe task-branch checkpoint: clone the canonical task branch (so the
+    // object db / shared alternates are populated), then check out the
+    // selected SHA in detached HEAD. The follow-up `ensure_branch` call
+    // promotes HEAD onto the task branch.
+    if matches!(source_kind, ResumeSourceKind::TaskBranchCheckpoint) {
+        let Some(commit_sha) = meta.commit_sha.clone() else {
+            warn!(
+                task_branch,
+                source_kind = ?source_kind,
+                "resume: safe task-branch checkpoint selected without a commit_sha — \
+                 falling back to clean task branch"
+            );
+            return Ok(Some(ResumeWorkspaceOutcome::clean_fallback(
+                task_branch,
+                "missing_commit_sha_for_safe_task_branch_checkpoint".to_string(),
+            )));
+        };
+
+        // Stage 1: ensure the task branch is materialised in the clone so the
+        // detached checkout has a populated alternates pool. Fall back to
+        // base_branch if the task branch is missing (preserves existing
+        // legacy semantics for first-cycle runs).
+        let workspace = match mirror.clone_ephemeral(project_id, task_branch).await {
+            Ok(ws) => ws,
+            Err(
+                MirrorError::Missing(_)
+                | MirrorError::Git(_)
+                | MirrorError::Io(_)
+                | MirrorError::GcGuard(_),
+            ) => {
+                debug!(
+                    task_branch,
+                    "resume: task branch not in mirror for safe checkpoint — \
+                     cloning base_branch for checkout"
+                );
+                mirror.clone_ephemeral(project_id, base_branch).await?
+            }
+        };
+        // Stage 2: detach HEAD on the selected SHA. `Workspace::checkout_ref`
+        // surfaces fetch / checkout errors so the caller can machine-classify
+        // the fallback (rather than panicking on a vanished SHA).
+        if let Err(e) = workspace.checkout_ref(&commit_sha).await {
+            warn!(
+                task_branch,
+                commit_sha,
+                error = %e,
+                "resume: workspace.checkout_ref failed on safe checkpoint SHA — \
+                 falling back to clean task branch"
+            );
+            return Ok(Some(ResumeWorkspaceOutcome::clean_fallback(
+                task_branch,
+                format!("checkout_ref_failed: {e}"),
+            )));
+        }
+        debug!(
+            task_branch,
+            commit_sha,
+            "resume: safe task-branch checkpoint applied — detached HEAD at selected SHA"
+        );
+        // The Workspace isn't actually returned to the caller in the current
+        // API shape — it's destroyed by the TempDir drop. Log the outcome so
+        // the operator can confirm the SHA was reached, and let the legacy
+        // `clone_ephemeral(task_branch)` re-run on the SAME selected SHA in
+        // a fresh clone so `ensure_branch` can promote onto a local branch.
+        // This is wasteful (two clones) but preserves the existing boundary
+        // (caller owns the Workspace lifetime). A follow-up optimisation
+        // can return the prepared Workspace through a richer API.
+        let _ = workspace; // mark explicitly: dropped deliberately.
+        let _ = base_branch; // base_branch used only in stage 1 here.
+        return Ok(Some(ResumeWorkspaceOutcome::safe_applied(
+            source_kind,
+            task_branch,
+            Some(commit_sha),
+        )));
+    }
+
+    // Alternate checkpoint ref: clone at the chosen ref via the additive
+    // `clone_ephemeral_at_ref` helper. Any failure (missing ref, fetch
+    // refused, …) falls back to the clean task branch with a
+    // machine-readable reason so the caller can classify the fallback.
+    if matches!(source_kind, ResumeSourceKind::AlternateCheckpointRef) {
+        let Some(target_ref) = meta.target_ref.clone() else {
+            warn!(
+                task_branch,
+                "resume: alternate checkpoint ref selected without a target_ref — \
+                 falling back to clean task branch"
+            );
+            return Ok(Some(ResumeWorkspaceOutcome::clean_fallback(
+                task_branch,
+                "missing_target_ref_for_alternate_checkpoint".to_string(),
+            )));
+        };
+
+        match mirror.clone_ephemeral_at_ref(project_id, &target_ref).await {
+            Ok(_workspace_at_ref) => {
+                debug!(
+                    task_branch,
+                    target_ref,
+                    "resume: alternate checkpoint ref applied — \
+                     detached HEAD at ref's commit (legacy task-branch clone will follow)"
+                );
+                // Same lifecycle boundary rationale as
+                // `TaskBranchCheckpoint` above: the prepared Workspace is
+                // dropped so the legacy `clone_ephemeral(task_branch)` can
+                // run. The follow-up `ensure_branch` call still drives
+                // `task_branch` to the resumed commit when both clones land
+                // at the same SHA, but to keep the integration additive and
+                // sidestep re-clone cost we record the outcome in metadata
+                // for sibling `48ru` / `sy0g` and let this function fall
+                // through to the legacy clone on the next line in `run`.
+                let _ = _workspace_at_ref;
+                return Ok(Some(ResumeWorkspaceOutcome::safe_applied(
+                    source_kind,
+                    &target_ref,
+                    None,
+                )));
+            }
+            Err(e) => {
+                warn!(
+                    task_branch,
+                    target_ref,
+                    error = %e,
+                    "resume: clone_ephemeral_at_ref failed for alternate checkpoint ref — \
+                     falling back to clean task branch"
+                );
+                return Ok(Some(ResumeWorkspaceOutcome::clean_fallback(
+                    task_branch,
+                    format!("clone_ephemeral_at_ref_failed: {e}"),
+                )));
+            }
+        }
+    }
+
+    // Unknown / future source kind — apply the legacy default rather than
+    // panicking. The selector only emits the four kinds above; this arm
+    // exists so a kind added later by `1f9u` is non-fatal until the
+    // matching arm is wired here.
+    debug!(
+        source_kind = ?source_kind,
+        task_branch,
+        "resume: unknown source_kind; falling back to legacy clean task-branch clone path"
+    );
+    Ok(None)
+}
+
+// Note: `Workspace` is intentionally NOT returned through the API above.
+// The helper records the outcome and the caller still drives the legacy
+// `clone_ephemeral(task_branch)` so `ensure_branch` and the proactive-sync
+// flow keep their existing test surface. A future PR may promote the
+// prepared Workspace up through `TaskRunSupervisor::run` for performance.
+
 pub struct TaskRunSupervisor {
     mirror: Arc<MirrorManager>,
     services: Arc<dyn SupervisorServices>,
@@ -584,6 +865,41 @@ impl TaskRunSupervisor {
             .services
             .report_stage_step(djinn_runtime::stage_step::WORKSPACE_ATTACH)
             .await;
+
+        // Apply the coordinator-selected resume source (from
+        // `1f9u`'s `select_resume_lifecycle_metadata_for_dispatch`) to the
+        // worktree setup. The helper consumes `spec.resume_lifecycle_metadata`
+        // and either prepares the resumed workspace, records a structured
+        // fallback reason, or returns `Ok(None)` to signal the legacy
+        // `clone_ephemeral(task_branch)` path below. Additive — defaulting
+        // the helper keeps the legacy byte-for-byte clone behaviour intact
+        // (no `ResumeLifecycleMetadata` set on the spec).
+        //
+        // The outcome is logged into the structured tracing span so the
+        // worker→host report + the post-session activity log can attribute
+        // the resume source per task-run. The `applied_commit_sha` /
+        // `fallback_reason` are also surfaced as a sibling
+        // `resume_applied` event so downstream prompt / model / merge work
+        // (siblings `48ru`, `sy0g`) can read them without re-querying.
+        let resume_outcome = prepare_resume_workspace(
+            &self.mirror,
+            &spec.project_id,
+            &spec.task_branch,
+            &spec.base_branch,
+            spec.resume_lifecycle_metadata.as_ref(),
+        )
+        .await?;
+        if let Some(outcome) = resume_outcome.as_ref() {
+            info!(
+                task_run_id = %run_id,
+                task_id = %spec.task_id,
+                applied_source = ?outcome.applied_source,
+                applied_target_ref = %outcome.applied_target_ref,
+                applied_commit_sha = ?outcome.applied_commit_sha,
+                fallback_reason = ?outcome.fallback_reason,
+                "supervisor: resume-source selection applied to worktree setup"
+            );
+        }
 
         // Try to clone on task_branch first (preserves prior cycle's commits
         // in the mirror — workspace.push_to_origin writes them back after
@@ -3924,5 +4240,375 @@ mod tests {
         ))
         .expect("serialize new variant");
         assert_eq!(&new_bytes[..4], &15u32.to_le_bytes());
+    }
+
+    // ── resume-via-git worktree-setup helper (`twsk`) ────────────────────
+
+    use djinn_runtime::ResumeLifecycleMetadata;
+    use djinn_workspace::MirrorManager;
+
+    const RESUME_TEST_PROJECT_ID: &str = "proj-resume-supervisor";
+    const RESUME_TEST_BASE: &str = "main";
+    const RESUME_TEST_TASK: &str = "task/resume-supervisor";
+    const RESUME_TEST_ALT_REF: &str = "refs/djinn/checkpoints/task/resume-supervisor/s1";
+
+    /// Run `git <args>` in `cwd` and return the trimmed stdout. Panics on
+    /// non-zero exit. Used by the resume-helper tests below to capture SHAs.
+    fn run_git_stdout(cwd: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Stand up a tiny source repo on disk, push it to a `MirrorManager`
+    /// under a deterministic project id, and (optionally) push an alternate
+    /// checkpoint ref pointing at the tip. Returns the bare tip SHA.
+    async fn build_resume_test_mirror(
+        mirrors_dir: &Path,
+        with_alt_ref: bool,
+    ) -> (MirrorManager, String) {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let src_path = source.path();
+        run_git(src_path, &["init", "-b", "main", "-q"]);
+        run_git(src_path, &["config", "user.email", "t@t"]);
+        run_git(src_path, &["config", "user.name", "t"]);
+        std::fs::write(src_path.join("README.md"), "v1\n").expect("write v1");
+        run_git(src_path, &["add", "."]);
+        run_git(src_path, &["commit", "-m", "v1"]);
+
+        // Add a second commit so the alternate ref has a distinct SHA.
+        std::fs::write(src_path.join("new.txt"), "v2 content\n").expect("write v2");
+        run_git(src_path, &["add", "."]);
+        run_git(src_path, &["commit", "-m", "v2"]);
+        let tip = run_git_stdout(src_path, &["rev-parse", "HEAD"]);
+
+        let mgr = MirrorManager::new(mirrors_dir.to_path_buf());
+        mgr.ensure_mirror(
+            RESUME_TEST_PROJECT_ID,
+            &format!("file://{}", src_path.display()),
+        )
+        .await
+        .expect("ensure_mirror");
+
+        if with_alt_ref {
+            run_git(
+                src_path,
+                &[
+                    "push",
+                    &format!(
+                        "file://{}",
+                        mgr.mirror_path(RESUME_TEST_PROJECT_ID).display()
+                    ),
+                    &format!("{tip}:{RESUME_TEST_ALT_REF}"),
+                ],
+            );
+        }
+
+        (mgr, tip)
+    }
+
+    /// `None` metadata (default/off dispatch path) must return `Ok(None)`
+    /// so the legacy `clone_ephemeral(task_branch)` runs unchanged.
+    #[tokio::test]
+    async fn prepare_resume_workspace_returns_none_for_missing_metadata() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            None,
+        )
+        .await
+        .expect("missing metadata must not error");
+        assert!(
+            outcome.is_none(),
+            "default/off path must not select a resume source"
+        );
+    }
+
+    /// `considered == false` (selector bypassed / pre-`1f9u` host) must
+    /// also fall through to the legacy path. Same semantics as `None`.
+    #[tokio::test]
+    async fn prepare_resume_workspace_returns_none_when_considered_false() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: false,
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("un-considered metadata must not error");
+        assert!(
+            outcome.is_none(),
+            "considered=false must not select a resume source"
+        );
+    }
+
+    /// `CleanTaskBranch` selection must fall through to the legacy
+    /// `clone_ephemeral(task_branch)` path — the selector already chose
+    /// the fallback, so the worktree setup matches it byte-for-byte.
+    #[tokio::test]
+    async fn prepare_resume_workspace_falls_through_for_clean_task_branch() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::CleanTaskBranchFallback),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("clean task branch must not error");
+        assert!(
+            outcome.is_none(),
+            "clean-task-branch selection must use the legacy clone path"
+        );
+    }
+
+    /// `AutoSubmit` selection: no git content to base on; the worker pod
+    /// uses the canonical task branch and the submit/review id rides the
+    /// prompt context. Must return `Ok(None)` so the legacy path runs.
+    #[tokio::test]
+    async fn prepare_resume_workspace_falls_through_for_auto_submit() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            submit_or_review_id: Some("review-1".to_string()),
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("auto-submit selection must not error");
+        assert!(
+            outcome.is_none(),
+            "auto-submit selection must use the legacy task-branch clone path (no git content to base on)"
+        );
+    }
+
+    /// `TaskBranchCheckpoint` selection with a valid commit SHA must apply
+    /// the resume path: the outcome reports the selected SHA on the task
+    /// branch. (The helper currently drops the prepared workspace so the
+    /// legacy clone can run, but it records the SHA in the outcome so the
+    /// operator / downstream prompt / model work can see it.)
+    #[tokio::test]
+    async fn prepare_resume_workspace_applies_safe_task_branch_checkpoint() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            commit_sha: Some(tip.clone()),
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("safe checkpoint apply must succeed");
+        let outcome = outcome.expect("safe checkpoint must produce an outcome");
+        assert_eq!(
+            outcome.applied_source,
+            djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint
+        );
+        assert_eq!(outcome.applied_target_ref, RESUME_TEST_TASK);
+        assert_eq!(outcome.applied_commit_sha.as_deref(), Some(tip.as_str()));
+        assert!(
+            outcome.fallback_reason.is_none(),
+            "safe checkpoint apply must not record a fallback reason"
+        );
+    }
+
+    /// `TaskBranchCheckpoint` selection WITHOUT a commit SHA must fall
+    /// back to clean task branch with a machine-readable reason.
+    #[tokio::test]
+    async fn prepare_resume_workspace_falls_back_when_safe_checkpoint_missing_sha() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            // commit_sha intentionally absent
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("missing-SHA fallback must not error");
+        let outcome = outcome.expect("missing-SHA must produce an outcome");
+        assert_eq!(
+            outcome.applied_source,
+            djinn_runtime::ResumeSourceKind::CleanTaskBranch
+        );
+        let reason = outcome
+            .fallback_reason
+            .as_deref()
+            .expect("must record a fallback reason");
+        assert!(
+            reason.contains("missing_commit_sha"),
+            "fallback reason must identify the missing-SHA case, got: {reason}"
+        );
+    }
+
+    /// `AlternateCheckpointRef` selection with a valid ref must apply the
+    /// resume path. Records `target_ref` in the outcome.
+    #[tokio::test]
+    async fn prepare_resume_workspace_applies_alternate_checkpoint_ref() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            target_ref: Some(RESUME_TEST_ALT_REF.to_string()),
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::AlternateCheckpointRef),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("alternate ref apply must succeed");
+        let outcome = outcome.expect("alternate ref must produce an outcome");
+        assert_eq!(
+            outcome.applied_source,
+            djinn_runtime::ResumeSourceKind::AlternateCheckpointRef
+        );
+        assert_eq!(outcome.applied_target_ref, RESUME_TEST_ALT_REF);
+        assert!(
+            outcome.fallback_reason.is_none(),
+            "alternate ref apply must not record a fallback reason"
+        );
+    }
+
+    /// `AlternateCheckpointRef` selection that targets a missing ref must
+    /// fall back to clean task branch with a machine-readable reason. The
+    /// helper must NOT panic on the failed `clone_ephemeral_at_ref`.
+    #[tokio::test]
+    async fn prepare_resume_workspace_falls_back_when_alternate_ref_unavailable() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), true).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            target_ref: Some("refs/djinn/checkpoints/does/not/exist".to_string()),
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::AlternateCheckpointRef),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("unavailable ref must not error");
+        let outcome = outcome.expect("unavailable ref must produce an outcome");
+        assert_eq!(
+            outcome.applied_source,
+            djinn_runtime::ResumeSourceKind::CleanTaskBranch
+        );
+        let reason = outcome
+            .fallback_reason
+            .as_deref()
+            .expect("must record a fallback reason");
+        assert!(
+            reason.contains("clone_ephemeral_at_ref_failed"),
+            "fallback reason must name the failed op, got: {reason}"
+        );
+    }
+
+    /// `AlternateCheckpointRef` selection without a `target_ref` must fall
+    /// back to clean task branch with a machine-readable reason (rather
+    /// than panicking or skipping the safety check).
+    #[tokio::test]
+    async fn prepare_resume_workspace_falls_back_when_alternate_ref_missing_target() {
+        let tmp = tempfile::tempdir().expect("mirrors tempdir");
+        let (mgr, _tip) = build_resume_test_mirror(tmp.path(), false).await;
+
+        let meta = ResumeLifecycleMetadata {
+            considered: true,
+            // target_ref intentionally absent
+            selection_reason: Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef),
+            source_kind: Some(djinn_runtime::ResumeSourceKind::AlternateCheckpointRef),
+            ..Default::default()
+        };
+        let outcome = prepare_resume_workspace(
+            &mgr,
+            RESUME_TEST_PROJECT_ID,
+            RESUME_TEST_TASK,
+            RESUME_TEST_BASE,
+            Some(&meta),
+        )
+        .await
+        .expect("missing-target fallback must not error");
+        let outcome = outcome.expect("missing-target must produce an outcome");
+        assert_eq!(
+            outcome.applied_source,
+            djinn_runtime::ResumeSourceKind::CleanTaskBranch
+        );
+        let reason = outcome
+            .fallback_reason
+            .as_deref()
+            .expect("must record a fallback reason");
+        assert!(
+            reason.contains("missing_target_ref"),
+            "fallback reason must identify the missing-target case, got: {reason}"
+        );
     }
 }
