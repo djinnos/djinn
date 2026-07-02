@@ -1,38 +1,11 @@
 // djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
-//! Default slot runner: routes dispatch through a
-//! [`djinn_runtime::SessionRuntime`] chosen at startup by
-//! [`crate::runtime_bridge::runtime_kind`].
-//!
-//! This is the Phase 2 K8s PR 4 pt2 cutover.  Previously (Phase 1 /
-//! PR 4 pt1) this function constructed `Arc<dyn SupervisorServices>` and
-//! called `TaskRunSupervisor::new(...).run(spec)` directly in-process.  That
-//! path is now relegated to [`djinn_runtime::TestRuntime`] wrapping a
-//! [`crate::runtime_bridge::SupervisorTaskRunner`] — which is the path
-//! `DJINN_RUNTIME=test` selects and the path the integration tests exercise.
-//! The production default (`DJINN_RUNTIME` unset / `"kubernetes"`) constructs
-//! a [`djinn_k8s::KubernetesRuntime`] and drives
-//! `prepare → await_report → teardown`.
-//!
-//! The runner receives the same arguments as the legacy runner
-//! (`task_id`, `project_path`, `model_id`, `app_state`, `kill`, `pause`) so
-//! it drops into the existing `SlotHandle::spawn` seam unchanged.  It
-//! translates those into a [`TaskRunSpec`] and drives the runtime; the
-//! returned [`djinn_runtime::TaskRunReport`] is collapsed to
-//! `anyhow::Result<()>` for the slot actor's `JoinHandle`.
-//!
-//! `pause` is accepted for signature parity but the supervisor-driven flow
-//! owns the whole run and does not release the slot between stages — there
-//! is no external pause/resume handoff, so we just drop the token.  `kill`
-//! is threaded into [`crate::supervisor::SupervisorServices::cancel`] (for
-//! the Test path) and used to drive [`SessionRuntime::cancel`] (for the K8s
-//! path).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use djinn_core::models::Task;
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
@@ -184,378 +157,45 @@ pub(super) async fn dispatch_task_runtime(
     _pause: CancellationToken,
     resume_lifecycle_metadata: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    // ── Load the task ─────────────────────────────────────────────────────
+    // ── Preflight: load task → resolve dispatch context / branches / flow / trigger ──
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let task = match task_repo.get(&task_id).await {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            anyhow::bail!("supervisor dispatch: task {task_id} not found");
-        }
-        Err(e) => {
-            anyhow::bail!("supervisor dispatch: failed to load task {task_id}: {e}");
-        }
-    };
-
-    // ── Resolve dispatch context (conflict / review-response) ─────────────
-    let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
-    let has_conflict = conflict_ctx.is_some();
-    let has_review_response =
-        matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
-
-    // ── Resolve branches from project config ──────────────────────────────
-    let base_branch = default_target_branch(&task.project_id, &app_state).await;
-    let task_branch = task_branch_name(&task.short_id);
-
-    // ── Pick the supervisor flow ──────────────────────────────────────────
-    let base_flow = crate::roles::flow_for_task_dispatch(&task, has_conflict, has_review_response);
-
-    // ── Stage-aware resume: skip the worker redo when its output is durable ──
-    //
-    // A task that lands back at `needs_task_review` routes to `ReviewResponse`
-    // (worker → reviewer). But the ONLY way a task reaches that status is the
-    // worker having already submitted (`submit_task_review`), so re-running the
-    // worker redoes identical work — the failure mode behind a reviewer-stage
-    // pod kill (Job deadline) redispatching as a fresh ~55-min worker run.
-    //
-    // When the worker's commits are durable on the mirror task_branch (it
-    // exists and carries commits beyond its merge-base with base — the sibling
-    // eager-push makes this hold after the worker stage), upgrade to the
-    // reviewer-only `ReviewResume` flow so the redispatch reviews the existing
-    // diff instead of redoing the work. Base having moved on (another task's
-    // PR merged mid-cycle) does NOT demote to a worker redo: requiring
-    // fast-forwardability here livelocked review-stage tasks on a busy board,
-    // because base moved during nearly every cycle (the t9wi/32bk wedge,
-    // 2026-06-11). This is driven by what DURABLY happened (branch present),
-    // not by an outcome emitted after cancellation — so a cancelled reviewer
-    // run never tricks us into skipping real work (cf. the kw7s cancel-gate
-    // precedent).
-    //
-    // The guard is conservative: a missing/empty task_branch (worker never
-    // pushed, first cycle) keeps `ReviewResponse` and the full worker redo.
-    // Provider-failure and genuine reviewer-rejection paths are unaffected —
-    // a rejection moves the task to `open` (→ NewTask worker flow), never to
-    // `needs_task_review`, so it never reaches this branch.
-    let worker_output_durable = matches!(base_flow, SupervisorFlow::ReviewResponse)
-        && match app_state.mirror.as_ref() {
-            Some(mirror) => {
-                // This runs in the dispatch path. The durability probe is a few
-                // git subprocesses against the mirror (read-only, no lock), but a
-                // wedged git op (a locked / huge mirror) would otherwise stall the
-                // dispatch pass — and with multiple ReviewResponse candidates per
-                // pass that latency is sequential. Bound it: a timeout (or any
-                // probe failure) conservatively yields `false`, i.e. keep the full
-                // worker redo rather than risk skipping it on a stale read.
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    mirror.branch_ahead_of_base(&task.project_id, &task_branch, &base_branch),
-                )
-                .await
-                {
-                    Ok(durable) => durable,
-                    Err(_) => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            branch = %task_branch,
-                            "supervisor dispatch: branch_ahead_of_base durability probe timed out \
-                             (>10s); keeping full worker redo (ReviewResponse)"
-                        );
-                        false
-                    }
-                }
-            }
-            None => false,
-        };
-    let flow = resume_flow(base_flow, worker_output_durable);
+    let task = load_task_or_bail(&task_id, &task_repo).await?;
+    let ctx = DispatchContext::resolve(&task, &app_state).await;
+    let flow = resolve_effective_flow(&ctx, &app_state).await;
     let loop_guard_intervention_role = flow
         .role_sequence()
         .first()
         .map(|role| role.as_str())
         .unwrap_or("worker");
+    let _trigger = trigger_for_flow(&flow, ctx.has_conflict);
     if matches!(flow, SupervisorFlow::ReviewResume) {
         tracing::info!(
             task_id = %task.short_id,
-            branch = %task_branch,
+            branch = %ctx.task_branch,
             "supervisor dispatch: worker output durable on task_branch; \
              resuming at reviewer stage (skipping worker redo)"
         );
     }
 
-    // ── Map flow → trigger ────────────────────────────────────────────────
-    let trigger = if has_conflict {
-        TaskRunTrigger::ConflictRetry
-    } else if matches!(
-        flow,
-        SupervisorFlow::ReviewResponse | SupervisorFlow::ReviewResume
-    ) {
-        TaskRunTrigger::ReviewResponse
-    } else {
-        TaskRunTrigger::NewTask
-    };
-
-    // ── Resolve per-role model ids ────────────────────────────────────────
-    let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
-    for role in flow.role_sequence() {
-        let resolved = resolve_role_model_preference(&task.project_id, role.as_str(), &app_state)
-            .await
-            .unwrap_or_else(|| model_id.clone());
-        model_id_per_role.insert(*role, resolved);
-    }
-
-    // ── Build the spec ────────────────────────────────────────────────────
-    //
-    // Mint the canonical task-run id HERE, once, and thread it through the
-    // spec. The runtime (`prepare`) derives its K8s resource name + registry
-    // key from it, and the in-pod `TaskRunSupervisor` writes the `task_runs`
-    // row + every session under it. One id end-to-end means the terminal
-    // report's id matches the persisted sessions, which is what post-session
-    // extraction keys off.
-    // ── Resolve read-only multi-repo sources from the task's epic ─────────
-    //
-    // The epic may declare other registered projects whose code the worker
-    // is allowed to READ (writes stay pinned to `task.project_id`). Thread
-    // the set into the spec so the worker materializes each read-only
-    // alongside the primary workspace and the prompt advertises them.
-    // Non-fatal: an error just yields no read sources (feature degrades to
-    // plain single-repo).
-    let read_source_project_ids =
-        djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
-            .read_sources_for_task(task.epic_id.as_deref())
-            .await
-            .unwrap_or_default();
-
-    // ── Private-dependency credentials for the worker Pod (best-effort) ───
-    //
-    // The project's GitHub owner + a short-lived installation token so the
-    // agent's build/test commands in the Pod can fetch the org's PRIVATE
-    // transitive deps (Go modules, cargo/pnpm git deps) — wired into the Job
-    // env as `GOPRIVATE=github.com/<owner>/*` + a git `url.insteadOf` rewrite.
-    // Derived from the project row + its installation; NO hardcoded org.
-    // Non-fatal: a missing owner/installation just disables the rewrite (public
-    // deps still resolve), so dispatch never fails on this.
-    let pd_project_repo =
-        djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let github_owner = pd_project_repo
-        .get_github_coords(&task.project_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|(owner, _repo)| owner);
-    let github_install_token = match pd_project_repo.get_installation_id(&task.project_id).await {
-        Ok(Some(installation_id)) => {
-            djinn_provider::github_app::installations::get_installation_token(installation_id)
-                .await
-                .map(|t| t.token)
-                .ok()
-        }
-        _ => None,
-    };
-
-    // ── Resolve the task's creator ────────────────────────────────────────
-    //
-    // Used for two things below: (1) per-user provider credential scoping via
-    // the `SESSION_USER_ID` task-local (migration 28) — a task uses ITS
-    // CREATOR's credential, falling back to the org-shared one when the column
-    // is NULL (background / pre-multiuser tasks); and (2) the commit-author
-    // identity. The `Task` model doesn't surface this column, so read it through
-    // the djinn-db repository layer. A lookup error or missing column is
-    // non-fatal: we just resolve org-shared / fall back to the bot identity,
-    // preserving historical behaviour.
-    let created_by_user_id: Option<String> =
-        task_repo.created_by_user_id(&task.id).await.ok().flatten();
-
-    // ── Resolve the commit-author identity (Vercel-friendly attribution) ──
-    //
-    // Commits the supervisor creates on the task branch are authored as the
-    // task's CREATOR, not an anonymous bot. GitHub's per-user no-reply email
-    // `<github_id>+<github_login>@users.noreply.github.com` links the commit
-    // to that account, so it shows under the human's name AND Vercel's
-    // deployment-author check (which rejects commits whose author email
-    // matches no GitHub account) authorizes the build. The PR is still OPENED
-    // by the App (`djinn-bot[bot]`), so the creator can review/approve their
-    // own commits. A NULL creator (legacy system tasks) — or a user row we
-    // can't read — leaves these None; the supervisor then falls back to the
-    // bot identity (those PRs don't clear Vercel's author check anyway).
-    let (commit_author_name, commit_author_email) = match created_by_user_id.as_deref() {
-        Some(uid) => match djinn_db::UserRepository::new(app_state.db.clone())
-            .get_by_id(uid)
-            .await
-        {
-            Ok(Some(user)) => (
-                Some(
-                    user.github_name
-                        .clone()
-                        .unwrap_or_else(|| user.github_login.clone()),
-                ),
-                Some(format!(
-                    "{}+{}@users.noreply.github.com",
-                    user.github_id, user.github_login
-                )),
-            ),
-            _ => (None, None),
-        },
-        None => (None, None),
-    };
-
-    let task_run_id = uuid::Uuid::now_v7().to_string();
-    // The slot pipeline hands us a JSON-encoded `ResumeLifecycleMetadata`
-    // blob (see `djinn_runtime::spec::ResumeLifecycleMetadata`). Decode it
-    // into the typed mirror so it lands on the spec as
-    // `Option<ResumeLifecycleMetadata>` rather than as a generic
-    // `serde_json::Value`. A `None` input or a corrupt blob yields
-    // `None` and is logged as a warning — the spec keeps the legacy
-    // default-off path (no resume metadata) so dispatch semantics stay
-    // unchanged.
-    let resume_lifecycle_metadata: Option<ResumeLifecycleMetadata> = match resume_lifecycle_metadata
-    {
-        Some(value) => match serde_json::from_value::<ResumeLifecycleMetadata>(value) {
-            Ok(parsed) => Some(parsed),
-            Err(err) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    error = %err,
-                    "dispatch_task_runtime: failed to decode resume_lifecycle_metadata blob; \
-                     proceeding without resume metadata"
-                );
-                None
-            }
-        },
-        None => None,
-    };
-    let spec = TaskRunSpec {
-        task_run_id,
-        task_id: task.id.clone(),
-        project_id: task.project_id.clone(),
-        trigger,
-        base_branch,
-        task_branch,
-        flow,
-        model_id_per_role,
-        read_source_project_ids,
-        github_owner,
-        github_install_token,
-        commit_author_name,
-        commit_author_email,
+    // ── Resolve spec inputs → construct spec → announce dispatch ─────────────
+    let spec_inputs = TaskRunSpecInputs::resolve(
+        &task,
+        &flow,
+        &ctx,
+        &app_state,
+        &model_id,
         resume_lifecycle_metadata,
-    };
+    )
+    .await;
+    let creator_scope = spec_inputs.created_by_user_id.clone();
+    let spec = build_task_run_spec(spec_inputs);
+    announce_dispatch(&app_state, &spec, &model_id);
 
-    // ── Announce dispatch live (pre-session UI tracking) ──────────────────
-    //
-    // Emit `session.dispatched` the instant the run is dispatched — before the
-    // pod even boots — so the UI shows the task as "starting" immediately,
-    // instead of the old derived "setting up" pseudo-status. The in-pod
-    // supervisor creates the `task_runs` row as `starting` shortly after; this
-    // event is the live nudge (F5 refetch resolves the same state from
-    // `task_show`/`task_list`, which surface the `starting` run). The first
-    // reply-loop `session.started` upgrades it to `running`.
-    {
-        let agent_type = spec
-            .flow
-            .role_sequence()
-            .first()
-            .map(|role| role.as_str())
-            .unwrap_or("worker");
-        app_state
-            .event_bus
-            .send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
-                &spec.project_id,
-                &spec.task_id,
-                &model_id,
-                agent_type,
-            ));
-    }
-
-    // ── Resolve per-role provider credentials (Phase 7a) ──────────────────
-    //
-    // The host pulls every role's credential from the vault (or OAuth token
-    // store) and ships them into the worker Pod via the per-task-run K8s
-    // Secret. Fast-fail on resolution errors so the operator sees a clean
-    // dispatch-time failure in session logs instead of a Pod that crash-loops
-    // because the model client can't authenticate.
-    //
-    // The whole resolution loop runs under `SESSION_USER_ID = task creator` so
-    // every `load_provider_credential` → `get_decrypted` (and the codex/copilot
-    // OAuth token loads) resolves that user's private credential first.
-    let mut credentials = ResolvedCredentials::default();
-    let resolve_creds = async {
-        for role in spec.flow.role_sequence() {
-            let model_id = spec
-                .model_id_per_role
-                .get(role)
-                .cloned()
-                .unwrap_or_else(|| model_id.clone());
-            let (provider_id, model_name) = parse_model_id(&model_id).map_err(|e| {
-                anyhow::anyhow!(
-                    "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
-                )
-            })?;
-            let cred = load_provider_credential(&provider_id, &app_state)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
-                    )
-                })?;
-            // OAuth configs (codex/copilot) hardcode a provider-default model;
-            // stamp the resolved per-role model so the worker — which uses this
-            // snapshot directly and never runs the live `cfg.model_id =
-            // resolved.model_name` override — requests the user's configured
-            // model instead of e.g. `gpt-5.1-codex`.
-            credentials.insert(*role, cred.with_model_id(&model_name).to_serializable());
-        }
-        Ok::<(), anyhow::Error>(())
-    };
-    // Keep a copy for the post-run breaker scope below: `.scope(..)` consumes
-    // `created_by_user_id`, but `record_success` must key on the same owner.
-    let creator_scope = created_by_user_id.clone();
-    djinn_core::auth_context::SESSION_USER_ID
-        .scope(created_by_user_id, resolve_creds)
-        .await?;
-
-    // ── Resolve the runtime ───────────────────────────────────────────────
-    let mirror = match app_state.mirror.as_ref() {
-        Some(m) => m.clone(),
-        None => {
-            anyhow::bail!(
-                "supervisor dispatch: AgentContext has no MirrorManager configured — \
-                 cannot run supervisor-driven task-run for task {}",
-                task.short_id
-            );
-        }
-    };
+    // ── Resolve credentials → construct runtime ───────────────────────────
+    let credentials =
+        resolve_credentials(&spec, &app_state, &model_id, creator_scope.clone()).await?;
+    let runtime = build_runtime(&app_state, &task, &kill).await?;
     let runtime_kind = runtime_kind();
-
-    let runtime: Arc<dyn SessionRuntime> = match runtime_kind {
-        RuntimeKind::Kubernetes => {
-            let config = djinn_k8s::KubernetesConfig::from_env();
-            let registry = match app_state.rpc_registry.as_ref() {
-                Some(reg) => reg.clone(),
-                None => {
-                    anyhow::bail!(
-                        "supervisor dispatch: AgentContext has no ConnectionRegistry \
-                         — the djinn-server boot path must plumb `rpc_registry` into \
-                         `AppState::agent_context()` before the Kubernetes runtime can \
-                         be constructed"
-                    );
-                }
-            };
-            match djinn_k8s::KubernetesRuntime::with_db(config, registry, app_state.db.clone())
-                .await
-            {
-                Ok(rt) => Arc::new(rt),
-                Err(e) => {
-                    anyhow::bail!(
-                        "supervisor dispatch: failed to construct KubernetesRuntime \
-                         (is a kubeconfig available?): {e}"
-                    );
-                }
-            }
-        }
-        RuntimeKind::Test => {
-            let services = services_for_agent_context(app_state.clone(), kill.clone());
-            let runner = SupervisorTaskRunner::new(mirror.clone(), services);
-            Arc::new(TestRuntime::new(runner))
-        }
-    };
 
     // ── Drive prepare → (await report) → teardown ─────────────────────────
     let handle = runtime
@@ -1147,6 +787,459 @@ pub(super) async fn dispatch_task_runtime(
             Err(anyhow::anyhow!("runtime.teardown failed: {e}"))
         }
     }
+}
+
+/// Context captured during the preflight phase of `dispatch_task_runtime`.
+///
+/// Holds the task row, the conflict/review context, the resolved branches, and
+/// the base flow selected by the planner-style `flow_for_task_dispatch` helper.
+/// Keeping these values together makes the "effective flow" decision a pure
+/// function over the context plus an optional durability probe.
+struct DispatchContext<'a> {
+    task: &'a Task,
+    has_conflict: bool,
+    base_branch: String,
+    task_branch: String,
+    base_flow: SupervisorFlow,
+}
+
+impl<'a> DispatchContext<'a> {
+    /// Resolve the dispatch context for a task.
+    ///
+    /// Loads the conflict/review context, resolves the target and task branches,
+    /// and selects the base supervisor flow. The durability probe itself is kept
+    /// separate (see `resolve_effective_flow`) so that this struct stays cheap to
+    /// construct and testable without a mirror.
+    async fn resolve(task: &'a Task, app_state: &'a AgentContext) -> Self {
+        let conflict_ctx = conflict_context_for_dispatch(&task.id, app_state).await;
+        let has_conflict = conflict_ctx.is_some();
+        let has_review_response =
+            matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
+        let base_branch = default_target_branch(&task.project_id, app_state).await;
+        let task_branch = task_branch_name(&task.short_id);
+        let base_flow =
+            crate::roles::flow_for_task_dispatch(task, has_conflict, has_review_response);
+
+        Self {
+            task,
+            has_conflict,
+            base_branch,
+            task_branch,
+            base_flow,
+        }
+    }
+}
+
+/// Probe whether a `ReviewResponse` task's worker output is durable on the mirror.
+///
+/// Only `ReviewResponse` can be upgraded to `ReviewResume`; for every other flow
+/// the mirror is irrelevant and we return `false` immediately. When the probe
+/// applies, the mirror must report that the task branch exists and carries commits
+/// beyond the merge-base with `base_branch`.
+///
+/// The probe is bounded by a 10-second timeout and is conservative on any failure
+/// (missing mirror, timeout, error) so that a stale read never skips real worker
+/// work. Logs match the original `dispatch_task_runtime` warning shape.
+async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentContext) -> bool {
+    if !matches!(ctx.base_flow, SupervisorFlow::ReviewResponse) {
+        return false;
+    }
+    let Some(mirror) = app_state.mirror.as_ref() else {
+        return false;
+    };
+    // This runs in the dispatch path. The durability probe is a few
+    // git subprocesses against the mirror (read-only, no lock), but a
+    // wedged git op (a locked / huge mirror) would otherwise stall the
+    // dispatch pass — and with multiple ReviewResponse candidates per
+    // pass that latency is sequential. Bound it: a timeout (or any
+    // probe failure) conservatively yields `false`, i.e. keep the full
+    // worker redo rather than risk skipping it on a stale read.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mirror.branch_ahead_of_base(&ctx.task.project_id, &ctx.task_branch, &ctx.base_branch),
+    )
+    .await
+    {
+        Ok(durable) => durable,
+        Err(_) => {
+            tracing::warn!(
+                task_id = %ctx.task.short_id,
+                branch = %ctx.task_branch,
+                "supervisor dispatch: branch_ahead_of_base durability probe timed out \
+                 (>10s); keeping full worker redo (ReviewResponse)"
+            );
+            false
+        }
+    }
+}
+
+/// Resolve the effective supervisor flow, applying the ReviewResume durability
+/// upgrade when appropriate.
+async fn resolve_effective_flow(
+    ctx: &DispatchContext<'_>,
+    app_state: &AgentContext,
+) -> SupervisorFlow {
+    let durable = worker_output_durable(ctx, app_state).await;
+    resume_flow(ctx.base_flow, durable)
+}
+
+/// Map the resolved flow and conflict context to a task-run trigger.
+fn trigger_for_flow(flow: &SupervisorFlow, has_conflict: bool) -> TaskRunTrigger {
+    if has_conflict {
+        TaskRunTrigger::ConflictRetry
+    } else if matches!(
+        flow,
+        SupervisorFlow::ReviewResponse | SupervisorFlow::ReviewResume
+    ) {
+        TaskRunTrigger::ReviewResponse
+    } else {
+        TaskRunTrigger::NewTask
+    }
+}
+
+/// Load a task by id or return a typed error for dispatch-time setup failures.
+async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow::Result<Task> {
+    match task_repo.get(task_id).await {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => {
+            anyhow::bail!("supervisor dispatch: task {task_id} not found")
+        }
+        Err(e) => {
+            anyhow::bail!("supervisor dispatch: failed to load task {task_id}: {e}")
+        }
+    }
+}
+
+/// Inputs to [`TaskRunSpec`] construction resolved from the task row, dispatch
+/// context, and surrounding repositories.
+///
+/// Keeping the resolved inputs together makes the construction of the spec a
+/// pure, synchronous operation and keeps the top-level dispatch flow compact.
+struct TaskRunSpecInputs {
+    task_run_id: String,
+    task_id: String,
+    project_id: String,
+    trigger: TaskRunTrigger,
+    base_branch: String,
+    task_branch: String,
+    flow: SupervisorFlow,
+    model_id_per_role: HashMap<RoleKind, String>,
+    read_source_project_ids: Vec<String>,
+    github_owner: Option<String>,
+    github_install_token: Option<String>,
+    commit_author_name: Option<String>,
+    commit_author_email: Option<String>,
+    resume_lifecycle_metadata: Option<ResumeLifecycleMetadata>,
+    created_by_user_id: Option<String>,
+}
+
+impl TaskRunSpecInputs {
+    /// Resolve the inputs required to build a `TaskRunSpec`.
+    async fn resolve(
+        task: &Task,
+        flow: &SupervisorFlow,
+        ctx: &DispatchContext<'_>,
+        app_state: &AgentContext,
+        model_id: &str,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
+    ) -> Self {
+        // Per-role model map: each role resolves its own preferred model,
+        // falling back to the dispatch-level model id when no preference is set.
+        let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
+        for role in flow.role_sequence() {
+            let resolved =
+                resolve_role_model_preference(&task.project_id, role.as_str(), app_state)
+                    .await
+                    .unwrap_or_else(|| model_id.to_string());
+            model_id_per_role.insert(*role, resolved);
+        }
+
+        // Read-only multi-repo sources from the task's epic. Non-fatal: an error
+        // just yields no read sources (feature degrades to plain single-repo).
+        let read_source_project_ids =
+            djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
+                .read_sources_for_task(task.epic_id.as_deref())
+                .await
+                .unwrap_or_default();
+
+        // Private-dependency credentials for the worker Pod (best-effort).
+        let pd_project_repo =
+            djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        let github_owner = pd_project_repo
+            .get_github_coords(&task.project_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|(owner, _repo)| owner);
+        let github_install_token = match pd_project_repo.get_installation_id(&task.project_id).await
+        {
+            Ok(Some(installation_id)) => {
+                djinn_provider::github_app::installations::get_installation_token(installation_id)
+                    .await
+                    .map(|t| t.token)
+                    .ok()
+            }
+            _ => None,
+        };
+
+        // Resolve the task's creator (used for credential scoping and commit
+        // author identity). The `Task` model doesn't surface this column, so read
+        // it through the repository layer. A lookup error is non-fatal: we just
+        // resolve org-shared / fall back to the bot identity.
+        let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+        let created_by_user_id: Option<String> =
+            task_repo.created_by_user_id(&task.id).await.ok().flatten();
+
+        // Resolve the commit-author identity (Vercel-friendly attribution).
+        let (commit_author_name, commit_author_email) =
+            resolve_commit_author(app_state, created_by_user_id.as_deref()).await;
+
+        // The slot pipeline hands us a JSON-encoded `ResumeLifecycleMetadata`
+        // blob. Decode it into the typed mirror so it lands on the spec as
+        // `Option<ResumeLifecycleMetadata>` rather than as a generic
+        // `serde_json::Value`. A `None` input or a corrupt blob yields `None`
+        // and is logged as a warning.
+        let resume_lifecycle_metadata =
+            decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
+
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+
+        Self {
+            task_run_id,
+            task_id: task.id.clone(),
+            project_id: task.project_id.clone(),
+            trigger: trigger_for_flow(flow, ctx.has_conflict),
+            base_branch: ctx.base_branch.clone(),
+            task_branch: ctx.task_branch.clone(),
+            flow: *flow,
+            model_id_per_role,
+            read_source_project_ids,
+            github_owner,
+            github_install_token,
+            commit_author_name,
+            commit_author_email,
+            resume_lifecycle_metadata,
+            created_by_user_id,
+        }
+    }
+}
+
+/// Build a [`TaskRunSpec`] from resolved inputs.
+fn build_task_run_spec(inputs: TaskRunSpecInputs) -> TaskRunSpec {
+    TaskRunSpec {
+        task_run_id: inputs.task_run_id,
+        task_id: inputs.task_id,
+        project_id: inputs.project_id,
+        trigger: inputs.trigger,
+        base_branch: inputs.base_branch,
+        task_branch: inputs.task_branch,
+        flow: inputs.flow,
+        model_id_per_role: inputs.model_id_per_role,
+        read_source_project_ids: inputs.read_source_project_ids,
+        github_owner: inputs.github_owner,
+        github_install_token: inputs.github_install_token,
+        commit_author_name: inputs.commit_author_name,
+        commit_author_email: inputs.commit_author_email,
+        resume_lifecycle_metadata: inputs.resume_lifecycle_metadata,
+    }
+}
+
+/// Resolve the commit-author identity for the task branch.
+///
+/// Commits the supervisor creates on the task branch are authored as the
+/// task's CREATOR, not an anonymous bot. GitHub's per-user no-reply email
+/// `<github_id>+<github_login>@users.noreply.github.com` links the commit
+/// to that account, so it shows under the human's name AND Vercel's
+/// deployment-author check (which rejects commits whose author email
+/// matches no GitHub account) authorizes the build. The PR is still OPENED
+/// by the App (`djinn-bot[bot]`), so the creator can review/approve their
+/// own commits. A NULL creator (legacy system tasks) — or a user row we
+/// can't read — leaves these None; the supervisor then falls back to the
+/// bot identity (those PRs don't clear Vercel's author check anyway).
+async fn resolve_commit_author(
+    app_state: &AgentContext,
+    created_by_user_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    match created_by_user_id {
+        Some(uid) => match djinn_db::UserRepository::new(app_state.db.clone())
+            .get_by_id(uid)
+            .await
+        {
+            Ok(Some(user)) => (
+                Some(
+                    user.github_name
+                        .clone()
+                        .unwrap_or_else(|| user.github_login.clone()),
+                ),
+                Some(format!(
+                    "{}+{}@users.noreply.github.com",
+                    user.github_id, user.github_login
+                )),
+            ),
+            _ => (None, None),
+        },
+        None => (None, None),
+    }
+}
+
+/// Decode the JSON-encoded `ResumeLifecycleMetadata` blob into the typed mirror.
+///
+/// A `None` input or a corrupt blob yields `None` and is logged as a warning
+/// — the spec keeps the legacy default-off path (no resume metadata) so dispatch
+/// semantics stay unchanged.
+fn decode_resume_lifecycle_metadata(
+    value: Option<serde_json::Value>,
+    task_id: &str,
+) -> Option<ResumeLifecycleMetadata> {
+    match value {
+        Some(value) => match serde_json::from_value::<ResumeLifecycleMetadata>(value) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %err,
+                    "dispatch_task_runtime: failed to decode resume_lifecycle_metadata blob; \
+                     proceeding without resume metadata"
+                );
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+/// Emit `session.dispatched` the instant the run is dispatched — before the
+/// pod even boots — so the UI shows the task as "starting" immediately,
+/// instead of the old derived "setting up" pseudo-status. The in-pod
+/// supervisor creates the `task_runs` row as `starting` shortly after; this
+/// event is the live nudge (F5 refetch resolves the same state from
+/// `task_show`/`task_list`, which surface the `starting` run). The first
+/// reply-loop `session.started` upgrades it to `running`.
+fn announce_dispatch(app_state: &AgentContext, spec: &TaskRunSpec, model_id: &str) {
+    let agent_type = spec
+        .flow
+        .role_sequence()
+        .first()
+        .map(|role| role.as_str())
+        .unwrap_or("worker");
+    app_state
+        .event_bus
+        .send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
+            &spec.project_id,
+            &spec.task_id,
+            model_id,
+            agent_type,
+        ));
+}
+
+/// Resolve per-role provider credentials under `SESSION_USER_ID = task creator`.
+///
+/// The host pulls every role's credential from the vault (or OAuth token store)
+/// and returns them for shipping into the worker Pod. Fast-fail on resolution
+/// errors so the operator sees a clean dispatch-time failure in session logs
+/// instead of a Pod that crash-loops because the model client can't authenticate.
+///
+/// The whole resolution loop runs under `SESSION_USER_ID = task creator` so
+/// every `load_provider_credential` → `get_decrypted` (and the codex/copilot
+/// OAuth token loads) resolves that user's private credential first.
+async fn resolve_credentials(
+    spec: &TaskRunSpec,
+    app_state: &AgentContext,
+    dispatch_model_id: &str,
+    created_by_user_id: Option<String>,
+) -> anyhow::Result<ResolvedCredentials> {
+    let mut credentials = ResolvedCredentials::default();
+    let resolve_creds = async {
+        for role in spec.flow.role_sequence() {
+            let model_id = spec
+                .model_id_per_role
+                .get(role)
+                .cloned()
+                .unwrap_or_else(|| dispatch_model_id.to_string());
+            let (provider_id, model_name) = parse_model_id(&model_id).map_err(|e| {
+                anyhow::anyhow!(
+                    "supervisor dispatch: cannot parse model id `{model_id}` for role {role:?}: {e}"
+                )
+            })?;
+            let cred = load_provider_credential(&provider_id, app_state)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
+                    )
+                })?;
+            // OAuth configs (codex/copilot) hardcode a provider-default model;
+            // stamp the resolved per-role model so the worker — which uses this
+            // snapshot directly and never runs the live `cfg.model_id =
+            // resolved.model_name` override — requests the user's configured
+            // model instead of e.g. `gpt-5.1-codex`.
+            credentials.insert(*role, cred.with_model_id(&model_name).to_serializable());
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    djinn_core::auth_context::SESSION_USER_ID
+        .scope(created_by_user_id, resolve_creds)
+        .await?;
+    Ok(credentials)
+}
+
+/// Construct the [`SessionRuntime`] for this dispatch.
+///
+/// - On [`RuntimeKind::Kubernetes`]: builds a [`djinn_k8s::KubernetesRuntime`]
+///   using the ambient `ConnectionRegistry` and DB. Fast-fails with the same
+///   missing-mirror / missing-rpc-registry errors as the original inline path.
+/// - On [`RuntimeKind::Test`]: builds a [`TestRuntime`] wrapping a
+///   [`SupervisorTaskRunner`] with the host's mirror and services.
+async fn build_runtime(
+    app_state: &AgentContext,
+    task: &Task,
+    kill: &CancellationToken,
+) -> anyhow::Result<Arc<dyn SessionRuntime>> {
+    let mirror = match app_state.mirror.as_ref() {
+        Some(m) => m.clone(),
+        None => {
+            anyhow::bail!(
+                "supervisor dispatch: AgentContext has no MirrorManager configured — \
+                 cannot run supervisor-driven task-run for {}",
+                task.short_id
+            );
+        }
+    };
+
+    let runtime: Arc<dyn SessionRuntime> = match runtime_kind() {
+        RuntimeKind::Kubernetes => {
+            let config = djinn_k8s::KubernetesConfig::from_env();
+            let registry = match app_state.rpc_registry.as_ref() {
+                Some(reg) => reg.clone(),
+                None => {
+                    anyhow::bail!(
+                        "supervisor dispatch: AgentContext has no ConnectionRegistry \
+                         — the djinn-server boot path must plumb `rpc_registry` into \
+                         `AppState::agent_context()` before the Kubernetes runtime can \
+                         be constructed"
+                    );
+                }
+            };
+            match djinn_k8s::KubernetesRuntime::with_db(config, registry, app_state.db.clone())
+                .await
+            {
+                Ok(rt) => Arc::new(rt),
+                Err(e) => {
+                    anyhow::bail!(
+                        "supervisor dispatch: failed to construct KubernetesRuntime \
+                         (is a kubeconfig available?): {e}"
+                    );
+                }
+            }
+        }
+        RuntimeKind::Test => {
+            let services = services_for_agent_context(app_state.clone(), kill.clone());
+            let runner = SupervisorTaskRunner::new(mirror.clone(), services);
+            Arc::new(TestRuntime::new(runner))
+        }
+    };
+
+    Ok(runtime)
 }
 
 /// Stage-aware-resume decision seam: given the flow the coordinator routed to
