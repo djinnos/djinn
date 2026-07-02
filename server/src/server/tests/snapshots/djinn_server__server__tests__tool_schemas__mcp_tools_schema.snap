@@ -12486,6 +12486,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12554,6 +12599,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -12816,6 +12872,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -12884,6 +12985,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -13677,6 +13789,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -13745,6 +13902,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -14111,6 +14279,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14179,6 +14392,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -14273,6 +14497,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -14341,6 +14610,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -14477,6 +14757,51 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
+        },
         "ProposalModel": {
           "properties": {
             "acceptance_criteria": {
@@ -14537,6 +14862,17 @@ expression: signatures
                 "string",
                 "null"
               ]
+            },
+            "list_summary": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProposalListSummary"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
             },
             "needs_evidence_claim": {
               "description": "When parked for needs-evidence: the named feasibility claim.",
@@ -16403,6 +16739,51 @@ expression: signatures
           ],
           "type": "object"
         },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
+        },
         "ProposalMemoryRefModel": {
           "description": "A memory note linked to a proposal via its graduated epics/tasks.",
           "properties": {
@@ -16493,6 +16874,17 @@ expression: signatures
                 "string",
                 "null"
               ]
+            },
+            "list_summary": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProposalListSummary"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
             },
             "needs_evidence_claim": {
               "description": "When parked for needs-evidence: the named feasibility claim.",
@@ -16914,6 +17306,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -16982,6 +17419,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -17081,6 +17529,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17149,6 +17642,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
@@ -17411,6 +17915,51 @@ expression: signatures
             "criterion"
           ],
           "type": "object"
+        },
+        "ProposalListSummary": {
+          "description": "Compact tribunal/readiness state for a single proposal row on the list.\n\nEvery field is a cheap, batched approximation of the richer per-proposal\ngate/refinement status surfaced by `proposal_show` — enough to drive the\nlist-row chips (tribunal round / awaiting-review / evidence, and a gate\npass/fail dot with a \"why blocked\" tooltip) without the several-queries-per-\nrow those full builders cost.",
+          "properties": {
+            "awaiting_review": {
+              "description": "Refinement converged and is parked awaiting human review (the human is\nthe bottleneck — the most important state to surface).",
+              "type": "boolean"
+            },
+            "current_round": {
+              "description": "Highest debate round reached (`0` when there is no debate trail yet).",
+              "format": "int32",
+              "type": "integer"
+            },
+            "dor_ready": {
+              "description": "Deterministic Definition-of-Ready passes.",
+              "type": "boolean"
+            },
+            "gate_ready": {
+              "description": "Composed-gate approximation passes: `dor_ready` AND the latest judge\nverdict is not needs-work AND there are no unresolved blocking objections\nAND the proposal is not parked on evidence. (Override lifecycle handling\nis intentionally omitted here; the full check lives in `proposal_show`.)",
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "description": "Parked on an open needs-evidence spike.",
+              "type": "boolean"
+            },
+            "refinement_active": {
+              "description": "A refinement (tribunal) run is active — a round is in flight.",
+              "type": "boolean"
+            },
+            "unresolved_blocking_count": {
+              "description": "Count of unresolved blocking (non-verdict) debate objections.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "refinement_active",
+            "awaiting_review",
+            "current_round",
+            "needs_evidence",
+            "dor_ready",
+            "gate_ready",
+            "unresolved_blocking_count"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17479,6 +18028,17 @@ expression: signatures
             "string",
             "null"
           ]
+        },
+        "list_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProposalListSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded)."
         },
         "mdx": {
           "description": "Portable proposal.mdx representation (populated by `proposal_export`).",
