@@ -244,6 +244,27 @@ impl CoordinatorActor {
                 "Failed to persist refinement_awaiting_review lifecycle metadata"
             );
         }
+
+        // Surface converged-awaiting-review proposals in the standard status
+        // grouping: a `draft` proposal that the tribunal parks for human review
+        // advances to `in_review`. Idempotent and status-scoped (draft-only);
+        // any other status is left untouched.
+        match proposal_repo.advance_draft_to_in_review(proposal_id).await {
+            Ok(true) => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    "Tribunal converged — advanced draft proposal to in_review"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to advance draft proposal to in_review on awaiting-review park"
+                );
+            }
+        }
     }
 
     /// Process a judge session outcome: read the verdict from the debate
