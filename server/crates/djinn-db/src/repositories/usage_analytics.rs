@@ -47,6 +47,11 @@ pub struct ModelEffectivenessRow {
     /// (sessions with `cost_basis = 'projected'`).
     /// `None` when no projected-basis sessions exist for this model.
     pub projected_usd: Option<f64>,
+    /// Combined list-price cost in USD: actual API spend plus projected
+    /// subscription-equivalent cost. This is the apples-to-apples axis for
+    /// comparing models regardless of whether they billed via API key or a
+    /// flat-rate plan. `None` when the model had no priced sessions at all.
+    pub list_price_usd: Option<f64>,
     /// Count of sessions excluded from both dollar figures
     /// (`cost_basis = 'unpriced'` or `cost_usd IS NULL`).
     pub unpriced_session_count: i64,
@@ -64,6 +69,9 @@ pub struct ModelEffectivenessRow {
     /// Actual cost per completed task. `None` when no completed tasks or
     /// no actual-basis sessions.
     pub actual_cost_per_completed_task: Option<f64>,
+    /// Combined list-price cost per completed task. `None` when no completed
+    /// tasks or no priced sessions.
+    pub list_price_cost_per_completed_task: Option<f64>,
     /// Average total tokens (in + out) per completed task.
     pub tokens_per_task: Option<f64>,
 }
@@ -90,6 +98,9 @@ pub struct ProjectModelMatrixRow {
     /// (sessions with `cost_basis = 'projected'`).
     /// `None` when no projected-basis sessions exist in this cell.
     pub projected_usd: Option<f64>,
+    /// Combined list-price cost in USD (actual + projected). `None` when the
+    /// cell had no priced sessions.
+    pub list_price_usd: Option<f64>,
     /// Count of sessions excluded from both dollar figures.
     pub unpriced_session_count: i64,
     pub tokens_in: i64,
@@ -223,6 +234,11 @@ pub struct UsageTotals {
     /// over sessions whose `cost_basis = 'projected'`. `None` when no
     /// matching session had a projected basis.
     pub projected_usd: Option<f64>,
+    /// Combined list-price cost in USD (actual + projected). Both components
+    /// are catalog-list-rate figures in the same units, so this is the
+    /// apples-to-apples total cost axis. `None` when no matching session had a
+    /// priced basis.
+    pub list_price_usd: Option<f64>,
     /// Number of matching sessions excluded from both dollar figures
     /// (`cost_basis = 'unpriced'` or `cost_usd IS NULL`).
     pub unpriced_session_count: i64,
@@ -254,6 +270,9 @@ pub struct SeriesDetailRow {
     /// Projected subscription-equivalent cost for this bucket
     /// (`cost_basis = 'projected'`). `None` when no projected-basis sessions.
     pub projected_usd: Option<f64>,
+    /// Combined list-price cost for this bucket (actual + projected). `None`
+    /// when no priced sessions exist in the bucket.
+    pub list_price_usd: Option<f64>,
     /// Count of unpriced sessions in this bucket.
     pub unpriced_session_count: i64,
 }
@@ -272,6 +291,9 @@ pub struct EntityBreakdownRow {
     /// Projected subscription-equivalent cost for this entity
     /// (`cost_basis = 'projected'`). `None` when no projected-basis sessions.
     pub projected_usd: Option<f64>,
+    /// Combined list-price cost for this entity (actual + projected). `None`
+    /// when no priced sessions exist for the entity.
+    pub list_price_usd: Option<f64>,
     /// Count of unpriced sessions for this entity.
     pub unpriced_session_count: i64,
     pub tokens_in: i64,
@@ -386,6 +408,8 @@ impl UsageAnalyticsRepository {
                 COALESCE(SUM(s.cache_write_tokens)::bigint, 0) AS cache_write_tokens, \
                 SUM(s.cost_usd) FILTER (WHERE s.cost_basis = 'actual')    AS actual_spend_usd, \
                 SUM(s.cost_usd) FILTER (WHERE s.cost_basis = 'projected') AS projected_usd, \
+                SUM(s.cost_usd) FILTER (WHERE s.cost_basis IN ('actual', 'projected')) \
+                                                                          AS list_price_usd, \
                 COUNT(*) FILTER (WHERE s.cost_basis = 'unpriced' \
                                   OR s.cost_usd IS NULL)       AS unpriced_session_count \
              FROM sessions s \
@@ -404,6 +428,7 @@ impl UsageAnalyticsRepository {
             cache_write_tokens: row.get("cache_write_tokens"),
             actual_spend_usd: row.get("actual_spend_usd"),
             projected_usd: row.get("projected_usd"),
+            list_price_usd: row.get("list_price_usd"),
             unpriced_session_count: row.get("unpriced_session_count"),
         })
     }
@@ -437,6 +462,8 @@ impl UsageAnalyticsRepository {
                 COUNT(DISTINCT s.task_id)                      AS task_count, \
                 SUM(s.cost_usd) FILTER (WHERE s.cost_basis = 'actual')    AS actual_spend_usd, \
                 SUM(s.cost_usd) FILTER (WHERE s.cost_basis = 'projected') AS projected_usd, \
+                SUM(s.cost_usd) FILTER (WHERE s.cost_basis IN ('actual', 'projected')) \
+                                                                          AS list_price_usd, \
                 COUNT(*) FILTER (WHERE s.cost_basis = 'unpriced' \
                                   OR s.cost_usd IS NULL)       AS unpriced_session_count \
              FROM sessions s \
@@ -466,6 +493,7 @@ impl UsageAnalyticsRepository {
                 task_count: r.get("task_count"),
                 actual_spend_usd: r.get("actual_spend_usd"),
                 projected_usd: r.get("projected_usd"),
+                list_price_usd: r.get("list_price_usd"),
                 unpriced_session_count: r.get("unpriced_session_count"),
             })
             .collect())
@@ -505,6 +533,8 @@ impl UsageAnalyticsRepository {
                     MAX(entity_name) AS entity_name, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'actual') AS actual_spend_usd, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'projected') AS projected_usd, \
+                    SUM(cost_usd) FILTER (WHERE cost_basis IN ('actual', 'projected')) \
+                                                                      AS list_price_usd, \
                     COUNT(*) FILTER (WHERE cost_basis = 'unpriced' \
                                       OR cost_usd IS NULL) AS unpriced_session_count, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
@@ -532,6 +562,7 @@ impl UsageAnalyticsRepository {
                  sess.entity_name  AS entity_name, \
                  sess.actual_spend_usd AS actual_spend_usd, \
                  sess.projected_usd AS projected_usd, \
+                 sess.list_price_usd AS list_price_usd, \
                  sess.unpriced_session_count AS unpriced_session_count, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
@@ -557,6 +588,7 @@ impl UsageAnalyticsRepository {
                 name: r.get("entity_name"),
                 actual_spend_usd: r.get("actual_spend_usd"),
                 projected_usd: r.get("projected_usd"),
+                list_price_usd: r.get("list_price_usd"),
                 unpriced_session_count: r.get("unpriced_session_count"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
@@ -653,6 +685,8 @@ impl UsageAnalyticsRepository {
                     COUNT(*) AS sessions, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'actual') AS actual_spend_usd, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'projected') AS projected_usd, \
+                    SUM(cost_usd) FILTER (WHERE cost_basis IN ('actual', 'projected')) \
+                                                                      AS list_price_usd, \
                     COUNT(*) FILTER (WHERE cost_basis = 'unpriced' \
                                       OR cost_usd IS NULL) AS unpriced_session_count, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
@@ -680,6 +714,7 @@ impl UsageAnalyticsRepository {
                  sa.sessions                     AS sessions, \
                  sa.actual_spend_usd             AS actual_spend_usd, \
                  sa.projected_usd                AS projected_usd, \
+                 sa.list_price_usd               AS list_price_usd, \
                  sa.unpriced_session_count       AS unpriced_session_count, \
                  sa.tokens_in                    AS tokens_in, \
                  sa.tokens_out                   AS tokens_out, \
@@ -703,6 +738,7 @@ impl UsageAnalyticsRepository {
                 let sessions: i64 = r.get("sessions");
                 let actual_spend_usd: Option<f64> = r.get("actual_spend_usd");
                 let projected_usd: Option<f64> = r.get("projected_usd");
+                let list_price_usd: Option<f64> = r.get("list_price_usd");
                 let unpriced_session_count: i64 = r.get("unpriced_session_count");
                 let tokens_in: i64 = r.get("tokens_in");
                 let tokens_out: i64 = r.get("tokens_out");
@@ -710,6 +746,11 @@ impl UsageAnalyticsRepository {
 
                 // Actual cost per completed task uses only actual spend.
                 let actual_cost_per_completed_task = match (actual_spend_usd, completed) {
+                    (Some(cost), c) if c > 0 => Some(cost / c as f64),
+                    _ => None,
+                };
+                // Combined list-price cost per completed task (actual + projected).
+                let list_price_cost_per_completed_task = match (list_price_usd, completed) {
                     (Some(cost), c) if c > 0 => Some(cost / c as f64),
                     _ => None,
                 };
@@ -724,6 +765,7 @@ impl UsageAnalyticsRepository {
                     sessions,
                     actual_spend_usd,
                     projected_usd,
+                    list_price_usd,
                     unpriced_session_count,
                     tokens_in,
                     tokens_out,
@@ -732,6 +774,7 @@ impl UsageAnalyticsRepository {
                     success_rate: r.get("success_rate"),
                     avg_reopens: r.get("avg_reopens"),
                     actual_cost_per_completed_task,
+                    list_price_cost_per_completed_task,
                     tokens_per_task,
                 }
             })
@@ -769,6 +812,8 @@ impl UsageAnalyticsRepository {
                     COUNT(*) AS sessions, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'actual') AS actual_spend_usd, \
                     SUM(cost_usd) FILTER (WHERE cost_basis = 'projected') AS projected_usd, \
+                    SUM(cost_usd) FILTER (WHERE cost_basis IN ('actual', 'projected')) \
+                                                                      AS list_price_usd, \
                     COUNT(*) FILTER (WHERE cost_basis = 'unpriced' \
                                       OR cost_usd IS NULL) AS unpriced_session_count, \
                     COALESCE(SUM(tokens_in)::bigint, 0)  AS tokens_in, \
@@ -799,6 +844,7 @@ impl UsageAnalyticsRepository {
                  sess.sessions     AS sessions, \
                  sess.actual_spend_usd AS actual_spend_usd, \
                  sess.projected_usd AS projected_usd, \
+                 sess.list_price_usd AS list_price_usd, \
                  sess.unpriced_session_count AS unpriced_session_count, \
                  sess.tokens_in    AS tokens_in, \
                  sess.tokens_out   AS tokens_out, \
@@ -826,6 +872,7 @@ impl UsageAnalyticsRepository {
                 sessions: r.get("sessions"),
                 actual_spend_usd: r.get("actual_spend_usd"),
                 projected_usd: r.get("projected_usd"),
+                list_price_usd: r.get("list_price_usd"),
                 unpriced_session_count: r.get("unpriced_session_count"),
                 tokens_in: r.get("tokens_in"),
                 tokens_out: r.get("tokens_out"),
@@ -920,6 +967,7 @@ mod tests {
         assert_eq!(totals.session_count, 0);
         assert!(totals.actual_spend_usd.is_none());
         assert!(totals.projected_usd.is_none());
+        assert!(totals.list_price_usd.is_none());
         assert_eq!(totals.unpriced_session_count, 0);
     }
 
@@ -962,6 +1010,7 @@ mod tests {
             sessions: 5,
             actual_spend_usd: Some(0.78),
             projected_usd: Some(0.45),
+            list_price_usd: Some(1.23),
             unpriced_session_count: 0,
             tokens_in: 100,
             tokens_out: 50,
@@ -970,6 +1019,7 @@ mod tests {
             success_rate: Some(0.67),
             avg_reopens: Some(0.5),
             actual_cost_per_completed_task: Some(0.26),
+            list_price_cost_per_completed_task: Some(0.41),
             tokens_per_task: Some(50.0),
         };
         let row2 = row.clone();

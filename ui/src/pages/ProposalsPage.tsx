@@ -599,15 +599,15 @@ function ProposalDetailView({
           )}
         </div>
 
-        <ProposalHistory detail={detail} />
-
-        <Separator />
-
-        <ProposalSignoffs detail={detail} onChanged={onChanged} />
-
+        {/* Tribunal: refinement kickoff / status ribbon, and — once converged —
+            the review card (verdict / spec diff / debate trail tabs plus the
+            human accept / another-round / reject actions). */}
         <ProposalRefinement
           proposalId={proposal.id}
           status={detail.refinement}
+          gateStatus={detail.gate_status}
+          debateTrail={detail.debate_trail}
+          revisions={detail.revisions}
           canStart={
             (proposal.status === "draft" || proposal.status === "in_review") &&
             !detail.refinement?.active
@@ -615,23 +615,32 @@ function ProposalDetailView({
           onChanged={onChanged}
         />
 
-        {/* Readiness panel: DoR status, tribunal metrics, blocked explanations,
-            and needs-evidence spike parking. */}
+        {/* Readiness gate: per-condition checklist (DoR, judge verdict,
+            unresolved blocking debate entries, evidence spike) rendered
+            straight from gate_status — no client-side recomputation. */}
         <ReadinessPanel
           proposalId={proposal.id}
           gateStatus={detail.gate_status}
           refinement={detail.refinement}
+          debateTrail={detail.debate_trail}
           onChanged={onChanged}
         />
+
+        <Separator />
+
+        <ProposalSignoffs detail={detail} onChanged={onChanged} />
 
         <ProposalKickoff detail={detail} onChanged={onChanged} />
 
         <Separator />
 
+        <ProposalHistory detail={detail} />
+
+        <Separator />
+
         {/* Human feedback thread. The tribunal debate trail (objections /
-            rebuttals / verdicts) is intentionally NOT rendered here — the
-            judge's verdict in the refinement panel above is the human-facing
-            summary; the raw trail is audit data available via the API. */}
+            rebuttals / verdicts) now lives in the Tribunal review card above;
+            this thread is for human discussion only. */}
         <FeedbackThread
           proposal={proposal}
           feedback={feedback}

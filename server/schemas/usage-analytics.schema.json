@@ -176,6 +176,14 @@
               ],
               "format": "double"
             },
+            "list_price_usd": {
+              "description": "Combined list-price cost (actual + projected) contributed by this KPI\ncard's aggregate. Present only on the \"Total cost (list-price)\" card.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "unpriced_count": {
               "description": "Unpriced session count contributed by this KPI card's aggregate.\nPresent only on the \"Sessions\" card.",
               "type": [
@@ -224,6 +232,14 @@
             },
             "projected_usd": {
               "description": "Projected subscription-equivalent cost; `null` when no projected sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "list_price_usd": {
+              "description": "Combined list-price cost (actual + projected); `null` when no priced\nsessions exist in this bucket.",
               "type": [
                 "number",
                 "null"
@@ -337,6 +353,14 @@
               ],
               "format": "double"
             },
+            "list_price_usd": {
+              "description": "Combined list-price cost (actual + projected). `None` when no priced\nsessions exist for this entity.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "unpriced_session_count": {
               "type": "integer",
               "format": "int64"
@@ -374,6 +398,14 @@
             },
             "actual_cost_per_task": {
               "description": "Actual API spend per task. `None` when no actual-basis sessions.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "list_price_cost_per_task": {
+              "description": "Combined list-price cost per task (actual + projected). `None` when no\npriced sessions or no tasks.",
               "type": [
                 "number",
                 "null"
@@ -438,6 +470,14 @@
               ],
               "format": "double"
             },
+            "list_price_cost_per_task": {
+              "description": "Combined list-price cost per completed task (actual + projected). This\nis the primary, apples-to-apples \"Cost / task\" figure in the UI.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "actual_spend_usd": {
               "description": "Actual API spend total.",
               "type": [
@@ -448,6 +488,14 @@
             },
             "projected_usd": {
               "description": "Projected subscription-equivalent cost total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "list_price_usd": {
+              "description": "Combined list-price cost total (actual + projected).",
               "type": [
                 "number",
                 "null"
@@ -519,6 +567,14 @@
               ],
               "format": "double"
             },
+            "list_price_cost_per_task": {
+              "description": "Combined list-price cost per task (actual + projected). This is the\nprimary, apples-to-apples \"Cost / task\" figure in the UI.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
             "success_rate": {
               "type": [
                 "number",
@@ -543,6 +599,14 @@
             },
             "projected_usd": {
               "description": "Projected subscription-equivalent cost total.",
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "double"
+            },
+            "list_price_usd": {
+              "description": "Combined list-price cost total (actual + projected).",
               "type": [
                 "number",
                 "null"

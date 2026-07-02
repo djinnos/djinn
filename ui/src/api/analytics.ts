@@ -94,12 +94,15 @@ export type UsageTimeSeriesPoint = Omit<
   | "project_name"
   | "agent_type"
   | "unpriced_session_count"
+  | "list_price_usd"
 > & {
   tokens_cached?: number;
   model?: string;
   project_id?: string;
   project_name?: string;
   agent_type?: string;
+  /** Combined list-price cost (actual + projected) for this bucket. */
+  list_price_usd?: number | null;
   /** Legacy blended cost field. */
   cost?: number | null;
   /** Legacy alias — prefer unpriced_session_count. */
@@ -131,13 +134,22 @@ export interface UsageModelSplit {
 
 export type UsageBreakdownRow = Omit<
   BreakdownRowDto,
-  "success_rate" | "avg_reopens" | "tokens_cached" | "unpriced_session_count"
+  | "success_rate"
+  | "avg_reopens"
+  | "tokens_cached"
+  | "unpriced_session_count"
+  | "list_price_usd"
+  | "list_price_cost_per_task"
 > & {
   success_rate: number | null;
   avg_reopens: number | null;
   tokens_cached?: number;
   /** Legacy alias — prefer unpriced_session_count. */
   unpriced_count?: number;
+  /** Combined list-price cost total (actual + projected). */
+  list_price_usd?: number | null;
+  /** Combined list-price cost per task (actual + projected). */
+  list_price_cost_per_task?: number | null;
   /** Legacy blended cost. */
   cost?: number | null;
   /** Legacy cost per task (generated has actual_cost_per_task). */
@@ -161,6 +173,8 @@ export type UsageModelEffectiveness = Omit<
   | "completed_task_count"
   | "unpriced_session_count"
   | "actual_cost_per_task"
+  | "list_price_cost_per_task"
+  | "list_price_usd"
 > & {
   success_rate: number | null;
   avg_reopens: number | null;
@@ -176,6 +190,13 @@ export type UsageModelEffectiveness = Omit<
   /** Legacy reopen count. */
   reopen_count?: number;
   actual_cost_per_task?: number | null;
+  /** Combined list-price cost total (actual + projected). */
+  list_price_usd?: number | null;
+  /**
+   * Combined list-price cost per completed task (actual + projected) — the
+   * primary "Cost / task" metric.
+   */
+  list_price_cost_per_task?: number | null;
 };
 
 export type UsageProjectModelCell = Omit<
@@ -185,6 +206,8 @@ export type UsageProjectModelCell = Omit<
   | "tokens_cached"
   | "unpriced_session_count"
   | "actual_cost_per_task"
+  | "list_price_cost_per_task"
+  | "list_price_usd"
 > & {
   success_rate: number | null;
   avg_reopens: number | null;
@@ -196,6 +219,13 @@ export type UsageProjectModelCell = Omit<
   /** Legacy cost per task (generated has actual_cost_per_task). */
   cost_per_task?: number | null;
   actual_cost_per_task?: number | null;
+  /** Combined list-price cost total (actual + projected). */
+  list_price_usd?: number | null;
+  /**
+   * Combined list-price cost per task (actual + projected) — the primary
+   * "Cost / task" matrix metric.
+   */
+  list_price_cost_per_task?: number | null;
 };
 
 export type UsageAnalyticsResponse = Omit<
