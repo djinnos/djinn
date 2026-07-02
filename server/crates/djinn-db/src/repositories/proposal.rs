@@ -1520,26 +1520,21 @@ impl ProposalRepository {
     /// debate-entry reference returned by `current_evidence_findings_for_linked_spike`.
     pub async fn record_evidence_received_with_findings(
         &self,
-        proposal_id: &str,
-        spike_task_id: &str,
         judge_task_id: &str,
-        round: i32,
-        against_revision_seq: i32,
-        findings_debate_entry_id: &str,
-        findings_metadata_json: &str,
+        findings: &CurrentEvidenceFindings,
     ) -> Result<serde_json::Value> {
         let meta = EvidenceLifecycleMetadata::received_with_findings(
-            proposal_id,
-            spike_task_id,
+            &findings.proposal_id,
+            &findings.spike_task_id,
             judge_task_id,
-            round,
-            against_revision_seq,
-            Some(findings_debate_entry_id),
-            Some(findings_metadata_json),
+            findings.round,
+            findings.against_revision_seq,
+            Some(&findings.debate_entry_id),
+            Some(&findings.findings_metadata_json),
         );
         let value = meta.to_event_metadata();
         self.record_refinement_lifecycle(
-            proposal_id,
+            &findings.proposal_id,
             evidence_lifecycle_kind::EVIDENCE_RECEIVED,
             Some(&value),
         )
@@ -2355,16 +2350,8 @@ impl ProposalRepository {
                 .current_evidence_findings_for_linked_spike(proposal_id, spike_task_id)
                 .await?
             {
-                self.record_evidence_received_with_findings(
-                    proposal_id,
-                    spike_task_id,
-                    &judge_task_id,
-                    findings.round,
-                    findings.against_revision_seq,
-                    &findings.debate_entry_id,
-                    &findings.findings_metadata_json,
-                )
-                .await?;
+                self.record_evidence_received_with_findings(&judge_task_id, &findings)
+                    .await?;
                 return Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived);
             }
 
