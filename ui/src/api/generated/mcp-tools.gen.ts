@@ -7020,6 +7020,11 @@ export type ProposalRefinementDemandRoundInput = ProposalRefinementDemandRoundIn
 export namespace ProposalRefinementDemandRoundOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
+   * 
+   * This is the inner phase within a `NeedsEvidenceStatus` and describes
+   * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
+   * the top-level refinement status discriminator that includes Active,
+   * PausedOrFrozen, and Terminal.
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
 
@@ -7059,6 +7064,14 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    * How many consecutive adversary dry rounds have been observed.
    */
   dry_rounds: number
+  /**
+   * Top-level evidence lifecycle state derived from durable proposal
+   * fields, lifecycle events, and linked-spike task status. Lets
+   * downstream consumers distinguish Active, AwaitingEvidence,
+   * EvidenceFailed, PausedOrFrozen, and Terminal without inspecting
+   * individual sub-fields.
+   */
+  evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
@@ -7204,6 +7217,11 @@ export type ProposalRefinementStartInput = ProposalRefinementStartInputSchema.Pr
 export namespace ProposalRefinementStartOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
+   * 
+   * This is the inner phase within a `NeedsEvidenceStatus` and describes
+   * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
+   * the top-level refinement status discriminator that includes Active,
+   * PausedOrFrozen, and Terminal.
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
 
@@ -7239,6 +7257,14 @@ export namespace ProposalRefinementStartOutputSchema {
    * How many consecutive adversary dry rounds have been observed.
    */
   dry_rounds: number
+  /**
+   * Top-level evidence lifecycle state derived from durable proposal
+   * fields, lifecycle events, and linked-spike task status. Lets
+   * downstream consumers distinguish Active, AwaitingEvidence,
+   * EvidenceFailed, PausedOrFrozen, and Terminal without inspecting
+   * individual sub-fields.
+   */
+  evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
@@ -7344,6 +7370,11 @@ export type ProposalRefinementStatusInput = ProposalRefinementStatusInputSchema.
 export namespace ProposalRefinementStatusOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
+   * 
+   * This is the inner phase within a `NeedsEvidenceStatus` and describes
+   * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
+   * the top-level refinement status discriminator that includes Active,
+   * PausedOrFrozen, and Terminal.
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
 
@@ -7376,6 +7407,14 @@ export namespace ProposalRefinementStatusOutputSchema {
    * How many consecutive adversary dry rounds have been observed.
    */
   dry_rounds: number
+  /**
+   * Top-level evidence lifecycle state derived from durable proposal
+   * fields, lifecycle events, and linked-spike task status. Lets
+   * downstream consumers distinguish Active, AwaitingEvidence,
+   * EvidenceFailed, PausedOrFrozen, and Terminal without inspecting
+   * individual sub-fields.
+   */
+  evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
@@ -7526,6 +7565,11 @@ export type ProposalShowInput = ProposalShowInputSchema.ProposalShowInput;
 export namespace ProposalShowOutputSchema {
   /**
    * Evidence lifecycle phase for a needs-evidence parking.
+   * 
+   * This is the inner phase within a `NeedsEvidenceStatus` and describes
+   * only the evidence-spike lifecycle. See [`EvidenceLifecycleState`] for
+   * the top-level refinement status discriminator that includes Active,
+   * PausedOrFrozen, and Terminal.
    */
   export type EvidenceLifecyclePhase = ("awaiting_evidence" | "evidence_received" | "evidence_failed")
   export type AcceptanceCriterionItem = (string | AcceptanceCriterionStatus)
@@ -7888,6 +7932,14 @@ export namespace ProposalShowOutputSchema {
    * How many consecutive adversary dry rounds have been observed.
    */
   dry_rounds: number
+  /**
+   * Top-level evidence lifecycle state derived from durable proposal
+   * fields, lifecycle events, and linked-spike task status. Lets
+   * downstream consumers distinguish Active, AwaitingEvidence,
+   * EvidenceFailed, PausedOrFrozen, and Terminal without inspecting
+   * individual sub-fields.
+   */
+  evidence_lifecycle_state: ("active" | "awaiting_evidence" | "evidence_received" | "evidence_failed" | "paused_or_frozen" | "terminal")
   /**
    * The judge's summary shown alongside the accept/reject review.
    * `None` unless `awaiting_review` is true.
