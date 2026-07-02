@@ -838,3 +838,103 @@ Commands run from `server/`.
 **No code-context or reviewer-diff tests were deleted or weakened.** All eight
 behavioral tests live canonically in `djinn-slot/src/helpers/tests.rs` and ran
 (8 of 8 non-DB tests passed; DB-dependent tests fail on environment only).
+
+---
+
+## Task qicv — Consolidate slot feedback helper duplicate
+
+> Task: `019f1eb6-cb88-7480-9ffe-b5854f5cf76f` — Consolidate slot feedback helper duplicate
+> Generated: 2026-07-02
+> Blocked-by: Task b7pe (code-context and reviewer-diff consolidation, above)
+
+### 1. Scope
+
+This task targets the near-identical feedback helper pair in `djinn-agent` and
+`djinn-slot`. Per the abi6 sweep, these files were behavior-equivalent copies
+differing only in `AgentContext` vs `SlotContext` parameter types:
+
+| File | Agent lines (pre-qicv) | Slot lines (pre-qicv) |
+|---|---|---|
+| `helpers/feedback.rs` | 535 | 534 |
+| `helpers/mod.rs` | 100 | 84 |
+
+### 2. What was delegated
+
+**Agent-side `feedback.rs` (535 lines → 53 lines).** The full implementation
+was replaced with a thin adapter layer:
+
+- **10 context-free functions** re-exported directly from `djinn_slot::helpers`
+  via `pub(crate) use`: `recent_feedback`, `extract_worker_context`,
+  `format_command_details`, `runtime_fs_diagnostics`, `runtime_env_diagnostics`,
+  `budget_combined_sections`, `raw_ci_feedback_in_cycle`, `parse_conflict_metadata`,
+  `COMBINED_BRIEF_TOTAL_CHARS`, `COMBINED_BRIEF_SECTION_FLOOR_CHARS`.
+
+- **5 async adapter wrappers** converting `&AgentContext` to `SlotContext` via
+  `agent_to_slot_context()` then delegating to canonical `djinn_slot::helpers`:
+  `pr_review_feedback_context`, `load_task`, `default_target_branch`,
+  `conflict_context_for_dispatch`, `initial_user_message_for_task`.
+
+**Agent-side `mod.rs` (100 lines → 82 lines).** Removed duplicate
+`MAX_VERIFICATION_CHARS`/`MAX_PR_COMMENT_CHARS` constants (now only in
+`djinn_slot`), removed `log_snippet` test-only re-export (agent test module is
+a documentation stub since b7pe), removed unused imports
+(`ActivityQuery`, `ProjectRepository`, `TaskRepository`,
+`PR_REVIEW_FEEDBACK_EVENT`, `Path`/`PathBuf`), and updated feedback re-exports
+to source from the new thin adapter `feedback.rs` module.
+
+**Slot-side visibility changes.** 14 functions and 2 constants in
+`djinn_slot::helpers::feedback` were changed from `pub(crate)` to `pub` so the
+agent crate can re-export them. The re-export in `djinn_slot::helpers::mod.rs`
+was similarly changed from `pub(crate)` to `pub`. No logic changes — only
+visibility annotations.
+
+### 3. Before/after line counts
+
+| File | Before qicv | After qicv | Delta |
+|---|---|---|---|
+| Agent `helpers/feedback.rs` | 535 | 53 | **−482** |
+| Agent `helpers/mod.rs` | 100 | 82 | **−18** |
+| **Agent helpers subtotal** | **635** | **135** | **−500** |
+| Slot `helpers/feedback.rs` | 534 | 523 | **−11** (fmt/visibility) |
+| Slot `helpers/mod.rs` | 84 | 84 | 0 |
+
+**Net agent-side reduction: 500 lines.** Slot-side changes were visibility-only
+(16 insertions, 27 deletions in `feedback.rs`, 1 line in `mod.rs`).
+
+### 4. Remaining host-only exceptions
+
+The five thin adapter functions retained in agent `helpers/feedback.rs` (33
+lines total) are necessary host-only glue. Each converts `&AgentContext` to
+`SlotContext` via `agent_to_slot_context()` then delegates to the canonical
+`djinn_slot::helpers` implementation:
+
+1. `pr_review_feedback_context` — facade export; currently only called via
+   `initial_user_message_for_task`.
+2. `load_task` — called from `lifecycle/teardown.rs` and `direct_services.rs`.
+3. `default_target_branch` — called from `supervisor_impl/pr.rs` and
+   `supervisor_runner.rs`.
+4. `conflict_context_for_dispatch` — called from `supervisor_impl/stage.rs` and
+   `supervisor_runner.rs`.
+5. `initial_user_message_for_task` — called from `roles/worker.rs`.
+
+All callers are host-only files that depend on `AgentContext` fields. They cannot
+use `djinn_slot::helpers::*` directly without a broader lifecycle migration (out
+of scope per task description non-goals).
+
+The ten context-free helpers are re-exported with zero adapter overhead —
+`pub(crate) use djinn_slot::helpers::{...}`.
+
+### 5. Validation outcomes
+
+Commands run from `server/`.
+
+| Command | Outcome |
+|---|---|
+| `cargo fmt --check -p djinn-agent -p djinn-slot` | ✅ Passed; no formatter errors. |
+| `cargo test -p djinn-agent --all-features --lib helpers` | ✅ 9 passed, 0 failed. Agent helper facade compiles and all provider-resolution tests pass. |
+| `cargo test -p djinn-slot --all-features --lib helpers` | 12 passed, 11 failed. All 11 failures are `Sqlx(Io(ConnectionRefused))` — environment-only (no Postgres). Non-DB helper tests pass. |
+
+**No feedback tests were deleted or weakened.** All behavioral tests live
+canonically in `djinn-slot/src/helpers/tests.rs`. The `log_snippet` test utility
+was removed from the agent-side since the agent test module is a documentation
+stub (b7pe cutover) and `log_snippet` was unused in agent tests.
