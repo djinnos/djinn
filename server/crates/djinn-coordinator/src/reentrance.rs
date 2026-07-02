@@ -79,12 +79,28 @@ pub(super) async fn should_auto_dispatch_planner(db: &Database, event: DispatchE
         return false;
     }
 
-    // 2b. Epic-blocker gate (EpicCreated only). A proposal-decomposition
-    // planner can sequence the epics it creates via epic-level `blocked_by`;
-    // suppress wave-1 until every blocking epic closes. The close path
-    // (`EpicRepository::emit_unblocked_epics`) re-emits `epic.updated` for the
-    // dependents, which re-drives this check once the blockers are gone.
-    if let DispatchEvent::EpicCreated { .. } = event {
+    // 2b. Epic-blocker gate (ALL dispatch paths). A parked epic must never
+    // receive a planning task while a blocking epic is still open — whether
+    // the trigger is wave-1 (`EpicCreated`), next-wave batch completion, a
+    // post-planner recheck, or the periodic stale-sweep (all `TaskClosed`).
+    //
+    // Two sources feed this gate:
+    //   • A proposal-decomposition planner sequencing the epics it creates via
+    //     epic-level `blocked_by`.
+    //   • A grooming planner that concluded "blocked on epic X, no tasks
+    //     created" and durably recorded the edge through `submit_grooming`
+    //     (`blocked_on`) — see `finalize_handlers::handle_submit_grooming`.
+    //     Before this gate applied on `TaskClosed` and before the planner
+    //     recorded the edge, a blocked epic re-derived "blocked" via a fresh
+    //     LLM session every 15-min sweep (epic `mygq`, 2026-07-01 — dozens of
+    //     no-op planner generations overnight, each appending a near-identical
+    //     stale-sweep entry to the roadmap note).
+    //
+    // The close path (`EpicRepository::emit_unblocked_epics`) re-emits
+    // `epic.updated` for the dependents, which re-drives this check once the
+    // blockers are gone; the periodic sweep is a DB-truth backstop so a missed
+    // event cannot strand a parked epic forever.
+    {
         let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
         match epic_repo.has_unresolved_blockers(epic_id).await {
             Ok(true) => {
@@ -543,6 +559,53 @@ mod tests {
             )
             .await,
             "P2 must dispatch after P1 closes"
+        );
+    }
+
+    /// Regression (epic `mygq`, 2026-07-01): the blocker gate must also apply
+    /// on the `TaskClosed` dispatch path (next-wave batch completion,
+    /// post-planner recheck, and the periodic stale-sweep all fire as
+    /// `TaskClosed`). Previously the gate was `EpicCreated`-only, so a parked
+    /// epic re-derived "blocked" via a fresh LLM session every 15-min sweep.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unresolved_epic_blocker_skips_task_closed_dispatch() {
+        let db = test_helpers::create_test_db();
+        let project = test_helpers::create_test_project(&db).await;
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+
+        let blocker = make_epic(&db, &project.id).await;
+        let parked = make_epic(&db, &project.id).await;
+        epic_repo
+            .add_blocker(&parked.id, &blocker.id)
+            .await
+            .unwrap();
+
+        // The stale-sweep / next-wave path fires as `TaskClosed`. While the
+        // blocker is open, it must NOT dispatch a planning task.
+        assert!(
+            !should_auto_dispatch_planner(
+                &db,
+                DispatchEvent::TaskClosed {
+                    epic_id: &parked.id,
+                    close_reason: None,
+                },
+            )
+            .await,
+            "TaskClosed dispatch must be suppressed while an epic blocker is open"
+        );
+
+        // Closing the blocker unblocks the parked epic on the same path.
+        epic_repo.close(&blocker.id).await.unwrap();
+        assert!(
+            should_auto_dispatch_planner(
+                &db,
+                DispatchEvent::TaskClosed {
+                    epic_id: &parked.id,
+                    close_reason: None,
+                },
+            )
+            .await,
+            "closing the blocker must allow the TaskClosed dispatch path"
         );
     }
 }
