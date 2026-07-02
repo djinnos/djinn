@@ -11,7 +11,8 @@ use super::*;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
-use djinn_db::{EpicRepository, ProposalRepository, TerminalLinkedEvidenceSpikeOutcome};
+use djinn_db::repositories::proposal::TerminalLinkedEvidenceSpikeOutcome;
+use djinn_db::{EpicRepository, ProposalRepository};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -905,9 +906,10 @@ mod tests {
     use super::*;
     use crate::test_helpers;
     use djinn_core::models::{EvidenceFindings, NeedsEvidenceClaim};
+    use djinn_db::repositories::proposal::evidence_lifecycle_kind;
     use djinn_db::{
         EpicRepository, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalRepository,
-        TaskRepository, evidence_lifecycle_kind,
+        TaskRepository,
     };
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
@@ -2459,6 +2461,59 @@ mod tests {
             )
             .await,
             0
+        );
+        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task.id.as_str())
+        );
+        assert!(still_linked.needs_evidence_claim.is_some());
+        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_created_event_for_closed_linked_spike_records_evidence_received() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Event Created Success").await;
+        let findings = sample_evidence_findings("event-created success");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        proposal_repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "evidence_findings",
+                body: "valid event-created findings",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task.id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+        let closed = task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor
+            .handle_event(DjinnEventEnvelope::task_created(&closed, false))
+            .await;
+
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            )
+            .await,
+            1,
+            "closed task_created events should follow the same linked-spike evidence path"
         );
         let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
         assert_eq!(
