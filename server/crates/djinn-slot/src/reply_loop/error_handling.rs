@@ -14,6 +14,37 @@ pub use djinn_provider::error_classify::{is_context_length_error, is_orphaned_to
 
 /// Maximum retries for empty assistant turns before treating as a hard failure.
 pub const MAX_EMPTY_TURN_RETRIES: u32 = 2;
+
+/// Number of consecutive **zero-progress** provider turns *at session start*
+/// after which the run is terminated so the host model circuit-breaker is fed
+/// early — before the coordinator's 30-minute stall kill would otherwise be the
+/// only failure signal (each such stall costs a full worker slot for ~30 min).
+///
+/// "Zero-progress" means a turn that produced no usable assistant output AND no
+/// token usage — the provider accepted the dispatch and did no real work (the
+/// `xiaomi-token-plan-sgp/mimo-v2.5-pro` incident: accept a priority task, emit
+/// nothing, burn the slot). It is deliberately conservative:
+/// - It only counts turns *before the session's first productive turn*. A single
+///   empty turn mid-session (after the model has already done real work) does NOT
+///   count — models recover, and a mid-run blip must not fail a working session.
+/// - Reasoning-only turns (usage > 0, no visible output) are NOT zero-progress:
+///   they carry their own nudge path ([`reasoning_only_nudge_message`]).
+///
+/// Two such turns is enough to distinguish "structurally broken for this
+/// dispatch" from a one-off empty first turn.
+pub const EMPTY_START_TURNS_BEFORE_BREAKER: u32 = 2;
+
+/// Whether a run of consecutive zero-progress turns *at session start* should
+/// terminate the run to feed the breaker early. `saw_productive_turn` gates the
+/// whole thing: once the session has made any real progress, this never trips —
+/// a lone empty turn mid-session is handled by the ordinary empty-turn retry
+/// path, not by failing the session over.
+pub fn empty_start_streak_feeds_breaker(
+    consecutive_empty_start_turns: u32,
+    saw_productive_turn: bool,
+) -> bool {
+    !saw_productive_turn && consecutive_empty_start_turns >= EMPTY_START_TURNS_BEFORE_BREAKER
+}
 /// Maximum consecutive text-only turns before treating as a session failure.
 /// Each text-only turn without a finalize tool call triggers a nudge message.
 pub const MAX_NUDGE_ATTEMPTS: u32 = 3;
@@ -169,6 +200,39 @@ mod tests {
         assert_eq!(empty_turn_backoff(3), std::time::Duration::from_secs(27));
         assert_eq!(empty_turn_backoff(0), std::time::Duration::from_secs(3));
         assert_eq!(empty_turn_backoff(10), std::time::Duration::from_secs(27));
+    }
+
+    #[test]
+    fn empty_start_streak_feeds_breaker_only_before_first_progress() {
+        // An empty-first-turns session (no productive turn yet) trips at the
+        // threshold, so the breaker is fed without waiting for the 30-min stall.
+        assert!(!empty_start_streak_feeds_breaker(0, false));
+        assert!(!empty_start_streak_feeds_breaker(
+            EMPTY_START_TURNS_BEFORE_BREAKER - 1,
+            false
+        ));
+        assert!(empty_start_streak_feeds_breaker(
+            EMPTY_START_TURNS_BEFORE_BREAKER,
+            false
+        ));
+        assert!(empty_start_streak_feeds_breaker(
+            EMPTY_START_TURNS_BEFORE_BREAKER + 5,
+            false
+        ));
+    }
+
+    #[test]
+    fn empty_start_streak_never_trips_after_a_productive_turn() {
+        // A single empty turn mid-session (after real progress) must NOT fail the
+        // session over — even a large empty streak is ignored once the model has
+        // produced something. Models recover; a working session must not be
+        // killed by a lone mid-run empty turn.
+        assert!(!empty_start_streak_feeds_breaker(1, true));
+        assert!(!empty_start_streak_feeds_breaker(
+            EMPTY_START_TURNS_BEFORE_BREAKER,
+            true
+        ));
+        assert!(!empty_start_streak_feeds_breaker(100, true));
     }
 
     #[test]

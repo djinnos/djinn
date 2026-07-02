@@ -18,11 +18,12 @@ use super::budget::{
     SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
 };
 use super::error_handling::{
-    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_turn_backoff,
-    empty_turn_is_reasoning_only, is_context_length_error, is_orphaned_tool_call_error,
-    next_nudge_message, reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
-    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
-    tool_choice_for_turn, wind_down_message,
+    BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
+    empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
+    is_orphaned_tool_call_error, next_nudge_message, reasoning_only_nudge_message,
+    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
+    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
+    wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -394,6 +395,13 @@ pub async fn run_reply_loop(
         let mut compaction_attempts: u32 = 0;
         let mut empty_turn_retries: u32 = 0;
         let mut consecutive_nudge_count: u32 = 0;
+        // Early breaker-feed guard: count zero-progress turns *before* the
+        // session's first productive turn so a model that accepts a dispatch and
+        // produces nothing fails over quickly instead of only after the
+        // coordinator's 30-minute stall kill. `saw_productive_turn` disarms it
+        // once real work happens, so a lone mid-session empty turn never trips.
+        let mut empty_start_turns: u32 = 0;
+        let mut saw_productive_turn = false;
 
         let mut tool_failure_guard_state = LoopGuardState::default();
         let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
@@ -756,6 +764,32 @@ pub async fn run_reply_loop(
                     conversation.push(nudge);
                     continue;
                 }
+                // Session-start early breaker-feed guard: this turn produced no
+                // usable output and (being past the reasoning-only branch) no
+                // token usage — a zero-progress turn. While the session has not
+                // yet made real progress, count it; a short run of these means
+                // the provider accepted the dispatch and is doing nothing, so
+                // fail over NOW (feeding the host breaker via the typed terminal
+                // error) instead of waiting for the coordinator's 30-min stall.
+                if !saw_productive_turn && turn_tokens_out == 0 {
+                    empty_start_turns += 1;
+                    if empty_start_streak_feeds_breaker(empty_start_turns, saw_productive_turn) {
+                        let diag = runtime_fs_diagnostics(project_path, worktree_path);
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session_id,
+                            empty_start_turns,
+                            "ReplyLoop: consecutive zero-progress turns at session start — \
+                             failing over to feed the model breaker early (no stall wait)"
+                        );
+                        return Err(empty_turn_terminal_error(
+                            "zero-progress-start",
+                            empty_start_turns,
+                            model_id,
+                            diag,
+                        ));
+                    }
+                }
                 if let Some(next_retry) =
                     should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
                 {
@@ -779,6 +813,10 @@ pub async fn run_reply_loop(
                 ));
             }
             empty_turn_retries = 0;
+            // The session has produced a real turn — disarm the session-start
+            // zero-progress guard for the rest of the run so a later isolated
+            // empty turn can't fail a working session over.
+            saw_productive_turn = true;
 
             let assistant_msg = Message {
                 role: Role::Assistant,

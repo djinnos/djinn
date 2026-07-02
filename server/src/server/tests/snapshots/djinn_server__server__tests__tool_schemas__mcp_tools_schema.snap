@@ -9507,8 +9507,13 @@ expression: signatures
               ]
             },
             "disable_ttl_trips": {
+              "description": "Current escalating-cooldown tier (how many trips since the last success).\nEach tier triples the auto-disable cooldown (5s → 15s → … → 4h cap).",
               "format": "int64",
               "type": "integer"
+            },
+            "hard_disabled": {
+              "description": "Hard-disabled by the trip-rate ceiling: held unavailable with no\nauto-expiry until a human re-enables it via `model_health(action=enable)`.\nWhen true, `cooldown_seconds_remaining` is null (there is no auto-expiry).",
+              "type": "boolean"
             },
             "model_id": {
               "type": "string"
@@ -9527,6 +9532,11 @@ expression: signatures
             "total_successes": {
               "format": "int64",
               "type": "integer"
+            },
+            "trips_in_window": {
+              "description": "Number of breaker trips inside the rolling trip-rate window (6h). When it\nreaches the ceiling (8) the bucket hard-disables.",
+              "format": "int64",
+              "type": "integer"
             }
           },
           "required": [
@@ -9535,7 +9545,9 @@ expression: signatures
             "consecutive_failures",
             "total_failures",
             "total_successes",
-            "disable_ttl_trips"
+            "disable_ttl_trips",
+            "hard_disabled",
+            "trips_in_window"
           ],
           "type": "object"
         }

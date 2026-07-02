@@ -4414,7 +4414,17 @@ export namespace ModelHealthOutputSchema {
   auto_disabled: boolean
   consecutive_failures: number
   cooldown_seconds_remaining?: number
+  /**
+   * Current escalating-cooldown tier (how many trips since the last success).
+   * Each tier triples the auto-disable cooldown (5s → 15s → … → 4h cap).
+   */
   disable_ttl_trips: number
+  /**
+   * Hard-disabled by the trip-rate ceiling: held unavailable with no
+   * auto-expiry until a human re-enables it via `model_health(action=enable)`.
+   * When true, `cooldown_seconds_remaining` is null (there is no auto-expiry).
+   */
+  hard_disabled: boolean
   model_id: string
   /**
    * Owning user the breaker bucket is scoped to; `null` = shared/system
@@ -4424,6 +4434,11 @@ export namespace ModelHealthOutputSchema {
   scope?: string
   total_failures: number
   total_successes: number
+  /**
+   * Number of breaker trips inside the rolling trip-rate window (6h). When it
+   * reaches the ceiling (8) the bucket hard-disables.
+   */
+  trips_in_window: number
   [k: string]: any
   }
 
