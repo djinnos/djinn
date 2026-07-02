@@ -11,7 +11,7 @@ use super::*;
 use djinn_core::clock::{Clock, SystemClock};
 use djinn_core::models::IssueType;
 use djinn_core::models::task::{PRIORITY_CRITICAL, PROPOSAL_REVIEW_TITLE_PREFIX};
-use djinn_db::{EpicRepository, ProposalRepository};
+use djinn_db::{EpicRepository, ProposalRepository, TerminalLinkedEvidenceSpikeOutcome};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -178,6 +178,105 @@ impl CoordinatorActor {
                     "CoordinatorActor: auto-dispatch suppressed by reentrance guard"
                 );
             }
+        }
+    }
+
+    /// Persist evidence-spike terminal lifecycle when a closed task is still
+    /// linked from a proposal as its current evidence spike.
+    ///
+    /// This is intentionally narrow: it only observes the live task event path,
+    /// delegates classification/idempotency to the repository primitive, and
+    /// does not clear the evidence link or resume tribunal work.
+    pub(super) async fn persist_terminal_linked_spike_evidence_from_closed_task(
+        &self,
+        task: &djinn_core::models::Task,
+    ) {
+        if task.status != "closed" {
+            tracing::debug!(
+                task_id = %task.id,
+                status = %task.status,
+                outcome = "NotTerminal",
+                "CoordinatorActor: linked evidence spike lifecycle skipped for non-terminal task"
+            );
+            return;
+        }
+
+        let repo = ProposalRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let proposal = match repo.find_by_linked_spike(&task.id).await {
+            Ok(Some(proposal)) => proposal,
+            Ok(None) => {
+                tracing::debug!(
+                    task_id = %task.id,
+                    task_short_id = %task.short_id,
+                    outcome = "NotLinked",
+                    "CoordinatorActor: closed task is not a linked evidence spike"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    task_short_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to look up proposal linked to evidence spike"
+                );
+                return;
+            }
+        };
+
+        match repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &proposal.id,
+                &task.id,
+                &task.status,
+                task.close_reason.as_deref(),
+            )
+            .await
+        {
+            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => tracing::info!(
+                proposal_id = %proposal.id,
+                spike_task_id = %task.id,
+                outcome = "EvidenceReceived",
+                "CoordinatorActor: recorded linked evidence spike receipt"
+            ),
+            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => tracing::info!(
+                proposal_id = %proposal.id,
+                spike_task_id = %task.id,
+                reason = %reason,
+                outcome = "EvidenceFailed",
+                "CoordinatorActor: recorded linked evidence spike failure"
+            ),
+            Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { event_kind }) => {
+                tracing::debug!(
+                    proposal_id = %proposal.id,
+                    spike_task_id = %task.id,
+                    event_kind = %event_kind,
+                    outcome = "AlreadyRecorded",
+                    "CoordinatorActor: linked evidence spike terminal lifecycle already recorded"
+                );
+            }
+            Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked) => tracing::debug!(
+                proposal_id = %proposal.id,
+                spike_task_id = %task.id,
+                outcome = "NotLinked",
+                "CoordinatorActor: linked evidence spike lifecycle skipped; proposal no longer linked"
+            ),
+            Ok(TerminalLinkedEvidenceSpikeOutcome::NotTerminal) => tracing::debug!(
+                proposal_id = %proposal.id,
+                spike_task_id = %task.id,
+                status = %task.status,
+                outcome = "NotTerminal",
+                "CoordinatorActor: linked evidence spike lifecycle skipped; task is not terminal"
+            ),
+            Err(e) => tracing::warn!(
+                proposal_id = %proposal.id,
+                spike_task_id = %task.id,
+                error = %e,
+                "CoordinatorActor: failed to persist linked evidence spike terminal lifecycle"
+            ),
         }
     }
 
@@ -805,7 +904,11 @@ impl CoordinatorActor {
 mod tests {
     use super::*;
     use crate::test_helpers;
-    use djinn_db::{EpicRepository, TaskRepository};
+    use djinn_core::models::{EvidenceFindings, NeedsEvidenceClaim};
+    use djinn_db::{
+        EpicRepository, ProposalCreateInput, ProposalDebateTrailCreateInput, ProposalRepository,
+        TaskRepository, evidence_lifecycle_kind,
+    };
     use tokio::sync::broadcast;
     use tokio_util::sync::CancellationToken;
 
@@ -969,6 +1072,93 @@ mod tests {
             .filter(|t| {
                 matches!(t.issue_type.as_str(), "planning" | "decomposition")
                     && t.status != "closed"
+            })
+            .count()
+    }
+
+    fn sample_needs_evidence_claim() -> NeedsEvidenceClaim {
+        NeedsEvidenceClaim {
+            question: "Does the evidence spike support the refinement?".to_owned(),
+            target_subsystem: "coordinator event path".to_owned(),
+            spec_unknown_anchor: "linked spike terminal event".to_owned(),
+            insufficient_in_session_research: "requires event-driven fixture".to_owned(),
+            expected_findings: "structured evidence_findings".to_owned(),
+            created_by_task_id: "judge-task-evt".to_owned(),
+            round: 2,
+            against_revision_seq: 1,
+        }
+    }
+
+    fn sample_evidence_findings(answer: &str) -> EvidenceFindings {
+        EvidenceFindings {
+            answer: answer.to_owned(),
+            evidence: vec!["coordinator fixture observed terminal task event".to_owned()],
+            code_paths_inspected: vec!["server/crates/djinn-coordinator/src/rules.rs".to_owned()],
+            confidence: 0.9,
+            residual_risks: vec!["fixture-only evidence".to_owned()],
+            recommendation_for_advocate: "incorporate the event evidence".to_owned(),
+        }
+    }
+
+    async fn setup_linked_evidence_spike_fixture(
+        db: &Database,
+        tx: &broadcast::Sender<DjinnEventEnvelope>,
+        title: &str,
+    ) -> (
+        ProposalRepository,
+        TaskRepository,
+        djinn_core::models::Proposal,
+        djinn_core::models::Task,
+        NeedsEvidenceClaim,
+    ) {
+        let event_bus = crate::events::event_bus_for(tx);
+        let proposal_repo = ProposalRepository::new(db.clone(), event_bus.clone());
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let project = test_helpers::create_test_project(db).await;
+        let epic = make_epic(db, &project.id, tx).await;
+        let proposal = proposal_repo
+            .create(ProposalCreateInput {
+                title,
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        let spike_task = create_task(db, &epic.id, &project.id, title, "spike", tx).await;
+        let claim = sample_needs_evidence_claim();
+        let proposal = proposal_repo
+            .set_structured_needs_evidence_spike(&proposal.id, &spike_task.id, &claim)
+            .await
+            .unwrap();
+        (proposal_repo, task_repo, proposal, spike_task, claim)
+    }
+
+    async fn count_evidence_lifecycle_events(
+        repo: &ProposalRepository,
+        proposal_id: &str,
+        kind: &str,
+    ) -> usize {
+        repo.revisions(proposal_id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|rev| rev.event_kind == kind)
+            .count()
+    }
+
+    async fn tribunal_task_count(task_repo: &TaskRepository, project_id: &str) -> usize {
+        task_repo
+            .list_by_project(project_id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.agent_type.as_deref(),
+                    Some("advocate" | "adversary" | "judge")
+                )
             })
             .count()
     }
@@ -2213,5 +2403,170 @@ mod tests {
             0,
             "building proposal without revision drift must not dispatch reconcile"
         );
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_closed_event_records_linked_evidence_received_once() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Event Success").await;
+        let findings = sample_evidence_findings("event-driven success");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        proposal_repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "evidence_findings",
+                body: "valid event findings",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task.id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+        let closed = task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor
+            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
+            .await;
+        actor
+            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
+            .await;
+
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            )
+            .await,
+            1,
+            "duplicate closed-task events must remain idempotent"
+        );
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_FAILED,
+            )
+            .await,
+            0
+        );
+        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task.id.as_str())
+        );
+        assert!(still_linked.needs_evidence_claim.is_some());
+        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_closed_event_records_failed_for_failed_spike_and_blocks() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, _claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Event Failed").await;
+        let failed = task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("failed"))
+            .await
+            .unwrap();
+
+        let mut actor = make_coordinator_actor(&db, &tx);
+        actor
+            .handle_event(DjinnEventEnvelope::task_updated(&failed, false))
+            .await;
+
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_FAILED,
+            )
+            .await,
+            1
+        );
+        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task.id.as_str())
+        );
+        assert!(still_linked.needs_evidence_claim.is_some());
+        assert_eq!(tribunal_task_count(&task_repo, &failed.project_id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_closed_event_records_failed_without_findings_or_with_malformed_findings() {
+        for (title, metadata) in [
+            ("Event No Findings", None),
+            (
+                "Event Malformed Findings",
+                Some(serde_json::json!({
+                    "answer":"",
+                    "evidence":[],
+                    "code_paths_inspected":[],
+                    "confidence":0.7,
+                    "residual_risks":[],
+                    "recommendation_for_advocate":""
+                })),
+            ),
+        ] {
+            let db = test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let (proposal_repo, task_repo, proposal, spike_task, claim) =
+                setup_linked_evidence_spike_fixture(&db, &tx, title).await;
+            if let Some(metadata) = metadata.as_ref() {
+                proposal_repo
+                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                        proposal_id: &proposal.id,
+                        kind: "evidence_findings",
+                        body: "malformed event findings",
+                        blocking: false,
+                        agent_role: "spike",
+                        author_kind: "agent",
+                        author_model: None,
+                        source_task_id: Some(&spike_task.id),
+                        against_revision_seq: claim.against_revision_seq,
+                        round: claim.round,
+                        body_metadata: Some(metadata),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let closed = task_repo
+                .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+                .await
+                .unwrap();
+
+            let mut actor = make_coordinator_actor(&db, &tx);
+            actor
+                .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
+                .await;
+
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_FAILED,
+                )
+                .await,
+                1,
+                "completed linked spike without valid findings must fail"
+            );
+            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+            assert_eq!(
+                still_linked.linked_spike_task_id.as_deref(),
+                Some(spike_task.id.as_str())
+            );
+            assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
+        }
     }
 }
