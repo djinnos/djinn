@@ -172,6 +172,7 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
         _ctx: djinn_slot::host::SlotContext,
         _kill: tokio_util::sync::CancellationToken,
         _pause: tokio_util::sync::CancellationToken,
+        _resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
         Box::pin(async { Ok(()) })
     }

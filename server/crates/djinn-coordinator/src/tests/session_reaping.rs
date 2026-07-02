@@ -445,7 +445,13 @@ async fn stall_timeout_tears_down_taskrun_job_through_slot_pool_kill_path() {
         },
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async move {
                         kill.cancelled().await;
                         Ok(())
@@ -1415,7 +1421,13 @@ async fn budget_ceiling_kill_routes_loop_guard_without_tripping_breaker() {
         },
         Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async move {
                         kill.cancelled().await;
                         Ok(())
@@ -2211,7 +2223,13 @@ async fn stall_kill_still_fires_without_db_progress() {
         },
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async move {
                         kill.cancelled().await;
                         Ok(())
@@ -2324,7 +2342,13 @@ async fn dispatch_stalled_worker_session(
         },
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async move {
                         kill.cancelled().await;
                         Ok(())

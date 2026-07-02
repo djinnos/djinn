@@ -440,6 +440,7 @@ async fn worker_observes_host_initiated_cancel() {
         github_install_token: None,
         commit_author_name: None,
         commit_author_email: None,
+        resume_lifecycle_metadata: None,
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);

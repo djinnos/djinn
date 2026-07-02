@@ -1709,9 +1709,33 @@ impl CoordinatorActor {
                     .await;
             }
 
-            let _resume_metadata = self
+            // Coordinator-side resume-via-git selection: when resume is
+            // enabled and the selector produced a metadata struct, serialize
+            // it and route the dispatch through `dispatch_with_resume_metadata`
+            // so the selection lands on `TaskRunSpec::resume_lifecycle_metadata`
+            // (read by downstream prompt/model/merge work in siblings `48ru`/
+            // `twsk`/`sy0g`). When resume is disabled OR the selector
+            // returned `None`, fall back to the legacy `dispatch` call so
+            // existing default/off dispatch behavior is byte-for-byte
+            // preserved.
+            let resume_metadata = self
                 .select_resume_lifecycle_metadata_for_dispatch(&task)
                 .await;
+            let resume_metadata_json = resume_metadata
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: failed to serialize ResumeLifecycleMetadata for re-dispatch; \
+                         proceeding without resume metadata"
+                    );
+                    e
+                })
+                .ok()
+                .flatten();
 
             let task_id = task.id.clone();
             let project_path_owned = project_path.clone();
@@ -1727,7 +1751,21 @@ impl CoordinatorActor {
                         let tid = task_id.clone();
                         let pp = project_path_owned.clone();
                         let mid = model_id.to_owned();
-                        async move { pool.dispatch(&tid, &pp, &mid).await }
+                        let resume = resume_metadata_json.clone();
+                        async move {
+                            match resume {
+                                Some(metadata) => {
+                                    pool.dispatch_with_resume_metadata(
+                                        &tid,
+                                        &pp,
+                                        &mid,
+                                        Some(metadata),
+                                    )
+                                    .await
+                                }
+                                None => pool.dispatch(&tid, &pp, &mid).await,
+                            }
+                        }
                     },
                 )
                 .await;
@@ -2059,7 +2097,13 @@ mod inflight_ledger_tests {
                     let started_tx = started_tx.clone();
                     let releases = releases.clone();
                     let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                        move |task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                        move |task_id,
+                              _project_path,
+                              _model_id,
+                              _app_state,
+                              kill,
+                              _pause,
+                              _resume_lifecycle_metadata| {
                             let started_tx = started_tx.clone();
                             let releases = releases.clone();
                             Box::pin(async move {

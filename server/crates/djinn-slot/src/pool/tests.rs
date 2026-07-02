@@ -245,7 +245,13 @@ fn test_slot_factory(
     Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
         let signal_tx = signal_tx.clone();
         let runner: super::super::actor::TestLifecycleRunner = Arc::new(
-            move |task_id, _project_path, _model_id, _app_state, kill, pause| {
+            move |task_id,
+                  _project_path,
+                  _model_id,
+                  _app_state,
+                  kill,
+                  pause,
+                  _resume_lifecycle_metadata| {
                 let signal_tx = signal_tx.clone();
                 Box::pin(async move {
                     let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));
@@ -278,7 +284,13 @@ fn blocking_cancel_slot_factory(
         let signal_tx = signal_tx.clone();
         let release_after_cancel = release_after_cancel.clone();
         let runner: super::super::actor::TestLifecycleRunner = Arc::new(
-            move |task_id, _project_path, _model_id, _app_state, kill, pause| {
+            move |task_id,
+                  _project_path,
+                  _model_id,
+                  _app_state,
+                  kill,
+                  pause,
+                  _resume_lifecycle_metadata| {
                 let signal_tx = signal_tx.clone();
                 let release_after_cancel = release_after_cancel.clone();
                 Box::pin(async move {

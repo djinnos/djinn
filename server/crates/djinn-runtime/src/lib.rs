@@ -34,7 +34,8 @@ pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
 pub use session_runtime::{RuntimeError, SessionRuntime};
 pub use spec::{
-    LoopGuardKind, LoopGuardTrip, ProviderFailureClass, RoleKind, SupervisorFlow, TaskRunOutcome,
+    LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
+    ResumeSelectionReason, ResumeSourceKind, RoleKind, SupervisorFlow, TaskRunOutcome,
     TaskRunReport, TaskRunSpec, role_sequence,
 };
 pub use stream::{BiStream, StreamEvent, StreamFrame};

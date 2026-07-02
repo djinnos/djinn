@@ -405,7 +405,13 @@ async fn global_pause_does_not_reap_or_kill_active_worker_sessions() {
         },
         std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
             let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
-                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
                     Box::pin(async move {
                         // Block until the slot's kill signal fires — the slot
                         // stays busy and the pool's `task_to_slot` mapping

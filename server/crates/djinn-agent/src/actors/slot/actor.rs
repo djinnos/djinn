@@ -24,6 +24,7 @@ pub type TestLifecycleRunner = Arc<
             AgentContext,
             CancellationToken,
             CancellationToken,
+            Option<serde_json::Value>,
         ) -> LifecycleFuture
         + Send
         + Sync,
@@ -67,7 +68,13 @@ impl SlotHandle {
         let slot_ctx = super::host_callbacks::agent_to_dispatch_slot_context(&app_state);
         let agent_state = app_state.clone();
         let canonical_runner: djinn_slot::TestLifecycleRunner = Arc::new(
-            move |task_id, project_path, model_id, _slot_ctx, kill, pause| {
+            move |task_id,
+                  project_path,
+                  model_id,
+                  _slot_ctx,
+                  kill,
+                  pause,
+                  resume_lifecycle_metadata| {
                 runner(
                     task_id,
                     project_path,
@@ -75,6 +82,7 @@ impl SlotHandle {
                     agent_state.clone(),
                     kill,
                     pause,
+                    resume_lifecycle_metadata,
                 )
             },
         );

@@ -122,6 +122,18 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
     ///
     /// The host provides this because it depends on many djinn-agent modules
     /// that have not yet been extracted.
+    ///
+    /// The final `resume_lifecycle_metadata` argument is the additive
+    /// resume-via-git lifecycle metadata selected at re-dispatch time. It
+    /// rides the slot pipeline into the host's `dispatch_task_runtime`, which
+    /// puts it on `TaskRunSpec::resume_lifecycle_metadata`. `None` means
+    /// resume selection was not consulted (default/off path) and the host
+    /// must preserve the legacy `None` on the spec.
+    // The trait method is intentionally additive and the 8-arg signature
+    // mirrors the existing 7-arg form plus the optional resume metadata
+    // blob. Sibling tasks in the resume-via-git epic (twsk) tighten the
+    // shape once the integration consumes it.
+    #[allow(clippy::too_many_arguments)]
     fn run_task_dispatch<'a>(
         &'a self,
         task_id: String,
@@ -130,6 +142,7 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         ctx: SlotContext,
         kill: tokio_util::sync::CancellationToken,
         pause: tokio_util::sync::CancellationToken,
+        resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
 
     /// Touch activity for stall detection (best-effort RPC to host's
