@@ -677,6 +677,12 @@ impl CoordinatorActor {
         // empty and there is no race with a freshly-started refinement.
         self.recover_interrupted_refinements().await;
 
+        // Recover any linked evidence spikes that reached a terminal task
+        // state while the coordinator was down, so missed closed-task events are
+        // persisted durably. Delegates classification/idempotency to the
+        // repository primitive and does not clear links or resume tribunal work.
+        self.recover_terminal_linked_spike_evidence().await;
+
         loop {
             tokio::select! {
                 biased;
