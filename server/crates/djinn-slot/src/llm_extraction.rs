@@ -1948,10 +1948,25 @@ mod tests {
         }
     }
 
+    async fn seed_credential_scope_users(db: djinn_db::Database) -> (String, String) {
+        let users = djinn_db::UserRepository::new(db);
+        let creator = users
+            .upsert_from_github(710_001, "credential-scope-creator", None, None)
+            .await
+            .expect("seed creator user");
+        let other = users
+            .upsert_from_github(710_002, "credential-scope-other", None, None)
+            .await
+            .expect("seed other user");
+
+        (creator.id, other.id)
+    }
+
     #[tokio::test]
     async fn creator_scoped_llm_extraction_fails_closed_with_only_other_user_private_credential() {
         let db = create_test_db();
         db.ensure_initialized().await.expect("initialize test db");
+        let (creator_user_id, other_user_id) = seed_credential_scope_users(db.clone()).await;
         djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
             .set(
                 "settings.raw",
@@ -1967,7 +1982,7 @@ mod tests {
             "anthropic",
             "ANTHROPIC_API_KEY",
             "other-user-private-key",
-            Some("user_b"),
+            Some(&other_user_id),
         )
         .await
         .expect("seed other user's private credential");
@@ -1977,7 +1992,7 @@ mod tests {
             &ctx,
             "session-creator-absent",
             "task-creator-absent",
-            Some("user_a".to_string()),
+            Some(creator_user_id),
             "anthropic/claude-3-5-haiku-latest",
         )
         .await;
@@ -2009,6 +2024,7 @@ mod tests {
     async fn creator_scoped_llm_extraction_uses_org_shared_fallback_not_other_user_private() {
         let db = create_test_db();
         db.ensure_initialized().await.expect("initialize test db");
+        let (creator_user_id, other_user_id) = seed_credential_scope_users(db.clone()).await;
         djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
             .set(
                 "settings.raw",
@@ -2025,7 +2041,7 @@ mod tests {
                 "anthropic",
                 "ANTHROPIC_API_KEY",
                 "other-user-private-key",
-                Some("user_b"),
+                Some(&other_user_id),
             )
             .await
             .expect("seed other user's private credential");
@@ -2039,7 +2055,7 @@ mod tests {
             &ctx,
             "session-org-fallback",
             "task-org-fallback",
-            Some("user_a".to_string()),
+            Some(creator_user_id.clone()),
             "anthropic/claude-3-5-haiku-latest",
         )
         .await;
@@ -2066,7 +2082,7 @@ mod tests {
         );
         assert_eq!(
             config.telemetry.and_then(|telemetry| telemetry.user_id),
-            Some("user_a".to_string()),
+            Some(creator_user_id),
             "provider telemetry remains attributed to the extraction creator"
         );
     }
