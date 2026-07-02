@@ -1,5 +1,9 @@
 mod admission;
 mod outcome;
+/// Pure resume-source selector; not wired into the dispatch path yet (see task
+/// 9tun). The public API is consumed by tests today and will be integrated by a
+/// later task, so dead_code is expected until then.
+#[allow(dead_code)]
 pub(crate) mod resume_source;
 mod retry;
 pub(crate) mod session_recovery;
