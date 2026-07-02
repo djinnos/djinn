@@ -5,7 +5,10 @@ use djinn_git::GitError;
 use djinn_provider::github_api::GitHubApiClient;
 use djinn_provider::github_app::app_id as github_app_id;
 use djinn_provider::github_app::installations::get_installation_token;
-use djinn_workspace::{GitIdentity, MergeOutcome, MirrorManager};
+use djinn_workspace::{
+    GitIdentity, MergeOutcome, MergeSafetyDecision, MirrorManager, evaluate_merge_head,
+    is_checkpoint_ref, is_protected_ref,
+};
 
 /// Build the HTTPS push URL for a GitHub repo authenticated by a GitHub App
 /// **installation** access token.
@@ -122,6 +125,29 @@ pub(crate) async fn interrupt_paused_worker_session(task_id: &str, app_state: &C
 /// explicitly here — it would mean 2-3 extra GraphQL round-trips per
 /// close for no behavioral change in the happy path.
 ///
+/// ## Safety guards (sibling task `sy0g`)
+/// The cleanup is gated by [`djinn_workspace::is_checkpoint_ref`] and
+/// [`djinn_workspace::is_protected_ref`] so it can never delete a ref the
+/// merge / resume paths still need:
+/// - **Alternate checkpoint refs** (`refs/djinn/checkpoints/...`) created
+///   by sibling task `8yjx` (capture-before-exit) are NEVER deleted here
+///   — they are preservation / resume sources the resume-via-git selector
+///   (sibling `3ln4`) may still need to consult on a subsequent
+///   re-dispatch. Deleting them would silently turn a recoverable
+///   checkpoint into a clean-task-branch fallback.
+/// - **Protected refs** (`main`, `master`, `HEAD`, …) are NEVER deleted.
+///   The canonical task branch ref never matches a protected entry, but
+///   a future refactor that composes refs from project_id (e.g. an
+///   accidental `main` slug in a config) must not silently erase the
+///   integration target.
+///
+/// After the local-mirror delete we additionally enumerate any alternate
+/// checkpoint refs sitting in the mirror under
+/// `refs/djinn/checkpoints/...` and emit a structured `info!` line per
+/// batch. We do NOT delete those refs — the resume selector still needs
+/// them — but the inventory gives operators a paper trail and lets the
+/// activity-log writer correlate them with the closing task.
+///
 /// Idempotent and non-fatal: any failure is logged and swallowed so the
 /// close transition is never blocked on cleanup.  When a branch is already
 /// gone from either side, GitHub returns 422 (treated as success by
@@ -147,6 +173,29 @@ pub async fn cleanup_task_branches_post_close(
         return;
     };
     let task_branch = format!("task/{}", task.short_id);
+    let task_ref_full = format!("refs/heads/{task_branch}");
+
+    // Defense-in-depth: refuse to act on anything that isn't the
+    // canonical task branch. The local-mirror path below hard-codes
+    // `refs/heads/{task_branch}`, but if a future refactor threads a
+    // different ref name through, this guard catches it before we
+    // accidentally delete a protected or checkpoint ref.
+    if is_checkpoint_ref(&task_ref_full) {
+        tracing::error!(
+            task_id = %task.short_id,
+            ref_name = %task_ref_full,
+            "post-close cleanup: refusing to delete a checkpoint preservation ref as if it were a task branch"
+        );
+        return;
+    }
+    if is_protected_ref(&task_ref_full) || is_protected_ref(&task_branch) {
+        tracing::error!(
+            task_id = %task.short_id,
+            ref_name = %task_ref_full,
+            "post-close cleanup: refusing to delete a protected ref"
+        );
+        return;
+    }
 
     // ── Local mirror ────────────────────────────────────────────────────
     if let Some(mirror) = mirror {
@@ -179,6 +228,14 @@ pub async fn cleanup_task_branches_post_close(
                 }
             }
         }
+
+        // Structured inventory of any alternate checkpoint refs the
+        // mirror still carries for this task. We deliberately do NOT
+        // delete these — the resume-via-git selector still needs them
+        // on a subsequent re-dispatch — but the inventory gives
+        // operators a paper trail and lets the activity-log writer
+        // correlate them with the closing task row.
+        emit_checkpoint_ref_inventory(&mirror_path, &task.short_id).await;
     }
 
     // ── GitHub remote ──────────────────────────────────────────────────
@@ -219,6 +276,82 @@ pub async fn cleanup_task_branches_post_close(
             );
         }
     }
+}
+
+/// Enumerate every alternate checkpoint ref currently present in
+/// `mirror_path` and emit a structured `info!` log line for the batch.
+///
+/// Does NOT delete the refs — the resume-via-git selector
+/// (`djinn_coordinator::dispatch::resume_source`) still needs them on
+/// a subsequent re-dispatch — but gives operators a paper trail of
+/// what checkpoint preservation state is sitting in the mirror, so a
+/// manual operator scrub can clear them deliberately when the task is
+/// fully closed.
+///
+/// `task_short_id` is included so the log line can be correlated with
+/// the task row without a separate DB lookup.
+///
+/// Best-effort: any failure (missing mirror, git error) is logged at
+/// `warn!` and swallowed. The caller must NEVER block a task close on
+/// this enumeration.
+async fn emit_checkpoint_ref_inventory(mirror_path: &std::path::Path, task_short_id: &str) {
+    if !mirror_path.exists() {
+        return;
+    }
+    // `git for-each-ref refs/djinn/checkpoints/` is the canonical way to
+    // enumerate alternate checkpoint refs on a bare mirror. The mirror
+    // may carry refs from prior tasks too; we deliberately don't filter
+    // by task_id here (no naming convention enforces it) so the
+    // inventory gives a complete picture of the preservation namespace.
+    let output = djinn_git::run_git_command(
+        mirror_path.to_path_buf(),
+        vec![
+            "for-each-ref".into(),
+            "--format=%(refname)".into(),
+            djinn_workspace::CHECKPOINT_REF_PREFIX.into(),
+        ],
+    )
+    .await;
+    match output {
+        Ok(out) => {
+            let refs: Vec<String> = out
+                .stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+            if refs.is_empty() {
+                return;
+            }
+            tracing::info!(
+                task_id = %task_short_id,
+                checkpoint_ref_count = refs.len(),
+                checkpoint_refs = ?refs,
+                "post-close cleanup: preserved alternate checkpoint refs in mirror (resume-via-git must not delete)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_short_id,
+                error = %e,
+                "post-close cleanup: failed to enumerate alternate checkpoint refs (non-fatal)"
+            );
+        }
+    }
+}
+
+/// Final-merge head evaluator: convenience wrapper of
+/// [`djinn_workspace::evaluate_merge_head`] that pre-fills the task id from
+/// a [`djinn_core::models::Task`]. Used by the merge-side guards (PR
+/// poller, supervisor's PR-open step) so callers don't have to thread
+/// `task.short_id` through every call site.
+pub fn evaluate_final_merge_head(
+    task: &djinn_core::models::Task,
+    ref_name: &str,
+    sha: Option<&str>,
+) -> MergeSafetyDecision {
+    evaluate_merge_head(&task.short_id, ref_name, sha)
 }
 
 #[allow(dead_code)]
@@ -611,5 +744,181 @@ mod tests {
     fn parse_empty_owner_or_repo_returns_none() {
         assert!(parse_github_owner_repo("git@github.com:/widgets.git").is_none());
         assert!(parse_github_owner_repo("git@github.com:acme/").is_none());
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Sibling task `sy0g`: merge / branch safety guards
+    // ────────────────────────────────────────────────────────────────────────
+    //
+    // The post-close branch cleanup must NEVER delete a checkpoint
+    // preservation ref or a protected integration ref. We exercise the
+    // pure guard path (no live DB / GitHub) by re-using the
+    // `djinn_workspace::is_*_ref` helpers the coordinator's
+    // `cleanup_task_branches_post_close` consults, and asserting the
+    // classification the cleanup path observes for the ref shapes it
+    // actually constructs (`refs/heads/task/<short_id>`,
+    // `refs/heads/main`, `refs/djinn/checkpoints/...`).
+    //
+    // A positive end-to-end test of `cleanup_task_branches_post_close`
+    // would require a full DB + MirrorManager harness; that lives in
+    // `djinn-workspace/tests/merge_safety_e2e.rs` (the cross-cutting
+    // tests below cover the pure seam).
+
+    use djinn_workspace::{
+        CHECKPOINT_REF_PREFIX, PROTECTED_REFS, RefRole, classify_ref, is_checkpoint_ref,
+        is_protected_ref,
+    };
+
+    #[test]
+    fn cleanup_target_task_branch_ref_is_classified_as_task_branch() {
+        // The cleanup constructs `refs/heads/task/<short_id>` — the
+        // canonical task branch — and the guard must classify it as the
+        // only role that is safe to delete.
+        let task_branch = "refs/heads/task/abc12";
+        assert_eq!(classify_ref(task_branch), RefRole::TaskBranch);
+        assert!(!is_checkpoint_ref(task_branch));
+        assert!(!is_protected_ref(task_branch));
+    }
+
+    #[test]
+    fn cleanup_guard_skips_alternate_checkpoint_refs() {
+        // If a future refactor mistakenly threaded a checkpoint ref
+        // through the cleanup target (e.g. by selecting the wrong
+        // field from the lifecycle metadata), the guard must catch it
+        // and refuse to delete.
+        let checkpoint_ref = format!("{CHECKPOINT_REF_PREFIX}task-abc/session-1");
+        assert!(is_checkpoint_ref(&checkpoint_ref));
+        assert_eq!(classify_ref(&checkpoint_ref), RefRole::CheckpointRef);
+        assert!(
+            !RefRole::CheckpointRef.is_safe_to_cleanup(),
+            "checkpoint refs must be unsafe for the automated cleanup path to delete"
+        );
+    }
+
+    #[test]
+    fn cleanup_guard_skips_protected_refs() {
+        // Belt-and-braces: even if a project_id accidentally slugifies
+        // to `main`, the guard refuses to delete it.
+        for protected_short in PROTECTED_REFS {
+            let full_ref = format!("refs/heads/{protected_short}");
+            assert!(
+                is_protected_ref(&full_ref),
+                "guard must classify {full_ref:?} as protected so cleanup refuses it"
+            );
+            assert!(
+                !RefRole::Protected.is_safe_to_cleanup(),
+                "protected refs must be unsafe for the automated cleanup path"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_guard_does_not_misclassify_checkpoint_namespace_as_protected() {
+        // Adding `djinn` (or any similar) to PROTECTED_REFS in the
+        // future must NOT silently re-classify the checkpoint namespace
+        // as protected — that would silently break resume-via-git
+        // because the resume selector's checkpoint refs would suddenly
+        // be untouchable. Pin the invariant.
+        let checkpoint_ref = format!("{CHECKPOINT_REF_PREFIX}task-1/session-1");
+        assert_eq!(
+            classify_ref(&checkpoint_ref),
+            RefRole::CheckpointRef,
+            "checkpoint ref must classify as CheckpointRef even when PROTECTED_REFS changes"
+        );
+        assert!(!is_protected_ref(&checkpoint_ref));
+    }
+
+    #[test]
+    fn final_merge_head_eligibility_only_for_task_branch_and_other() {
+        // The merge path must accept only TaskBranch / Other refs as
+        // the source of the final squash merge. Checkpoint and
+        // Protected must be rejected.
+        assert!(RefRole::TaskBranch.is_eligible_final_merge_source());
+        assert!(RefRole::Other.is_eligible_final_merge_source());
+        assert!(!RefRole::CheckpointRef.is_eligible_final_merge_source());
+        assert!(!RefRole::Protected.is_eligible_final_merge_source());
+    }
+
+    #[test]
+    fn evaluate_final_merge_head_wrapper_passes_task_short_id() {
+        // The wrapper must thread the task's short_id into the
+        // rejection payload so callers can emit structured events
+        // tagged with the task identifier. We can't easily intercept
+        // the `tracing::warn!` call from a unit test, but we CAN assert
+        // the decision shape (which carries the ref name and SHA the
+        // structured event would log).
+        let task = minimal_task("abc12");
+
+        // Task branch with SHA is eligible.
+        let decision = evaluate_final_merge_head(&task, "refs/heads/task/abc12", Some("deadbeef"));
+        assert_eq!(decision, MergeSafetyDecision::Eligible);
+
+        // Checkpoint ref with SHA is rejected.
+        let decision = evaluate_final_merge_head(
+            &task,
+            "refs/djinn/checkpoints/task-abc/session-1",
+            Some("deadbeef"),
+        );
+        assert!(matches!(
+            decision,
+            MergeSafetyDecision::CheckpointRef { ref ref_name, sha: Some(s) }
+                if ref_name == "refs/djinn/checkpoints/task-abc/session-1" && s == "deadbeef"
+        ));
+
+        // Protected ref is rejected regardless of SHA presence.
+        let decision = evaluate_final_merge_head(&task, "main", Some("deadbeef"));
+        assert!(matches!(decision, MergeSafetyDecision::ProtectedRef { .. }));
+
+        // Missing SHA on a task branch yields MissingSha so the merge
+        // path can degrade to a no-op rather than guess.
+        let decision = evaluate_final_merge_head(&task, "refs/heads/task/abc12", None);
+        assert!(matches!(decision, MergeSafetyDecision::MissingSha { .. }));
+    }
+
+    /// Minimal task stub for `evaluate_final_merge_head` tests. The
+    /// function only reads `task.short_id`, so the rest can be left
+    /// at `String::new()` / default values. `Task` has no `Default`
+    /// impl, so we construct it field-by-field.
+    fn minimal_task(short_id: &str) -> djinn_core::models::Task {
+        djinn_core::models::Task {
+            id: "task-uuid".to_string(),
+            project_id: String::new(),
+            short_id: short_id.to_string(),
+            epic_id: None,
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".to_string(),
+            status: "open".to_string(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".to_string(),
+            acceptance_criteria: "[]".to_string(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".to_string(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".to_string(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".to_string(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        }
     }
 }
