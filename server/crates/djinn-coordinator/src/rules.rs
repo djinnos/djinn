@@ -2558,25 +2558,50 @@ mod tests {
         assert_eq!(tribunal_task_count(&task_repo, &failed.project_id).await, 0);
     }
 
+    // ── Startup recovery for terminal linked evidence spikes ─────────────────
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn task_closed_event_records_failed_without_findings() {
-        // Malformed-findings classification is covered by the repository primitive
-        // tests from furi; this coordinator seam test verifies only the "no valid
-        // findings" path through the event delegation.
+    async fn recover_terminal_linked_spike_evidence_records_received_once_with_findings() {
         let db = test_helpers::create_test_db();
         let (tx, _rx) = broadcast::channel(256);
-        let (proposal_repo, task_repo, proposal, spike_task, _claim) =
-            setup_linked_evidence_spike_fixture(&db, &tx, "Event No Findings").await;
-        let closed = task_repo
+        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Success").await;
+        let findings = sample_evidence_findings("recovery success");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        proposal_repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "evidence_findings",
+                body: "valid recovery findings",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task.id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+        task_repo
             .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
             .await
             .unwrap();
 
-        let mut actor = make_coordinator_actor(&db, &tx);
-        actor
-            .handle_event(DjinnEventEnvelope::task_updated(&closed, false))
-            .await;
+        let actor = make_coordinator_actor(&db, &tx);
+        actor.recover_terminal_linked_spike_evidence().await;
 
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            )
+            .await,
+            1,
+            "recovery must record exactly one refinement_evidence_received row"
+        );
         assert_eq!(
             count_evidence_lifecycle_events(
                 &proposal_repo,
@@ -2584,14 +2609,242 @@ mod tests {
                 evidence_lifecycle_kind::EVIDENCE_FAILED,
             )
             .await,
-            1,
-            "completed linked spike without valid findings must fail"
+            0
         );
         let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
         assert_eq!(
             still_linked.linked_spike_task_id.as_deref(),
             Some(spike_task.id.as_str())
         );
-        assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
+        assert!(still_linked.needs_evidence_claim.is_some());
+        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_terminal_linked_spike_evidence_records_failed_for_terminal_failures() {
+        for close_reason in ["failed", "cancelled", "force_closed"] {
+            let db = test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let (proposal_repo, task_repo, proposal, spike_task, _claim) =
+                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Failure").await;
+            let status = if close_reason == "cancelled" {
+                "cancelled"
+            } else {
+                "closed"
+            };
+            task_repo
+                .set_status_with_reason(&spike_task.id, status, Some(close_reason))
+                .await
+                .unwrap();
+
+            let actor = make_coordinator_actor(&db, &tx);
+            actor.recover_terminal_linked_spike_evidence().await;
+
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_FAILED,
+                )
+                .await,
+                1,
+                "recovery must record one failure for {close_reason}"
+            );
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+                )
+                .await,
+                0
+            );
+            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+            assert_eq!(
+                still_linked.linked_spike_task_id.as_deref(),
+                Some(spike_task.id.as_str()),
+                "proposal must remain linked/blocked after failure"
+            );
+            assert!(still_linked.needs_evidence_claim.is_some());
+            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_terminal_linked_spike_evidence_records_failed_for_missing_or_malformed_findings()
+     {
+        for label in ["missing", "malformed"] {
+            let db = test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let (proposal_repo, task_repo, proposal, spike_task, claim) =
+                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery No Findings").await;
+            if label == "malformed" {
+                // `add_debate_trail_entry` validates evidence findings, so a
+                // malformed row can only exist as legacy data — write a valid
+                // entry, then corrupt it underneath the repository API.
+                let findings = sample_evidence_findings("recovery malformed");
+                let findings_value = serde_json::to_value(&findings).unwrap();
+                let entry = proposal_repo
+                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                        proposal_id: &proposal.id,
+                        kind: "evidence_findings",
+                        body: "malformed recovery findings",
+                        blocking: false,
+                        agent_role: "spike",
+                        author_kind: "agent",
+                        author_model: None,
+                        source_task_id: Some(&spike_task.id),
+                        against_revision_seq: claim.against_revision_seq,
+                        round: claim.round,
+                        body_metadata: Some(&findings_value),
+                    })
+                    .await
+                    .unwrap();
+                let malformed = serde_json::json!({
+                    "answer": "",
+                    "evidence": [],
+                    "code_paths_inspected": [],
+                    "confidence": 0.7,
+                    "residual_risks": [],
+                    "recommendation_for_advocate": ""
+                });
+                djinn_db::test_support::override_debate_trail_body_metadata(
+                    &db, &entry.id, &malformed,
+                )
+                .await;
+            }
+            task_repo
+                .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+                .await
+                .unwrap();
+
+            let actor = make_coordinator_actor(&db, &tx);
+            actor.recover_terminal_linked_spike_evidence().await;
+
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_FAILED,
+                )
+                .await,
+                1,
+                "recovery must record one failure for {label} findings"
+            );
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+                )
+                .await,
+                0
+            );
+            let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+            assert_eq!(
+                still_linked.linked_spike_task_id.as_deref(),
+                Some(spike_task.id.as_str())
+            );
+            assert!(still_linked.needs_evidence_claim.is_some());
+            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_terminal_linked_spike_evidence_no_op_for_open_or_running_spikes() {
+        for (status, label) in [("open", "open"), ("in_progress", "running")] {
+            let db = test_helpers::create_test_db();
+            let (tx, _rx) = broadcast::channel(256);
+            let (proposal_repo, task_repo, proposal, spike_task, _claim) =
+                setup_linked_evidence_spike_fixture(&db, &tx, "Recovery No-op").await;
+            if status == "in_progress" {
+                task_repo
+                    .set_status_with_reason(&spike_task.id, status, None)
+                    .await
+                    .unwrap();
+            }
+            // "open" is the default status already set by the fixture.
+
+            let actor = make_coordinator_actor(&db, &tx);
+            actor.recover_terminal_linked_spike_evidence().await;
+
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+                )
+                .await,
+                0,
+                "{label} spikes must not produce receipt rows"
+            );
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &proposal_repo,
+                    &proposal.id,
+                    evidence_lifecycle_kind::EVIDENCE_FAILED,
+                )
+                .await,
+                0,
+                "{label} spikes must not produce failure rows"
+            );
+            assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recover_terminal_linked_spike_evidence_is_idempotent() {
+        let db = test_helpers::create_test_db();
+        let (tx, _rx) = broadcast::channel(256);
+        let (proposal_repo, task_repo, proposal, spike_task, claim) =
+            setup_linked_evidence_spike_fixture(&db, &tx, "Recovery Idempotent").await;
+        let findings = sample_evidence_findings("recovery idempotent");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        proposal_repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "evidence_findings",
+                body: "valid idempotent findings",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task.id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+        task_repo
+            .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
+            .await
+            .unwrap();
+
+        let actor = make_coordinator_actor(&db, &tx);
+        actor.recover_terminal_linked_spike_evidence().await;
+        actor.recover_terminal_linked_spike_evidence().await;
+
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            )
+            .await,
+            1,
+            "second recovery pass must not duplicate the receipt row"
+        );
+        assert_eq!(
+            count_evidence_lifecycle_events(
+                &proposal_repo,
+                &proposal.id,
+                evidence_lifecycle_kind::EVIDENCE_FAILED,
+            )
+            .await,
+            0,
+            "second recovery pass must not introduce a failure row"
+        );
+        assert_eq!(tribunal_task_count(&task_repo, &proposal.id).await, 0);
     }
 }
