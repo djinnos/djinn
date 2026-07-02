@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot,\n                    s.cost_basis\n             FROM sessions s\n             INNER JOIN tasks t ON t.id = s.task_id\n             WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1\n             ORDER BY s.started_at DESC",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis,\n                billing_source\n             FROM sessions WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -107,6 +107,11 @@
         "ordinal": 20,
         "name": "cost_basis",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "billing_source",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -135,8 +140,9 @@
       true,
       true,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "315822e2601a29ae61fc79268f8a63211589fcd170416807d472628690ad1d35"
+  "hash": "4806e5ba444fb06f11a5b43000ebb8bd172fb98f8098df3d00b23891643ff101"
 }
