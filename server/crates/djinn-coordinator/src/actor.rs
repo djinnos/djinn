@@ -216,6 +216,24 @@ pub(super) struct CoordinatorActor {
     /// dead predecessor's entry — see `enforce_session_stall_timeout`.
     // Restart-safe-to-lose: records already-issued stall kills; repeated kill attempts on the next sweep are harmless terminal-state no-ops.
     pub(super) stall_killed: HashSet<String>,
+    /// Restart-safe-to-lose: per-session watermark of DB-visible progress
+    /// (`tokens_in + tokens_out + cache_read + cache_write` from the session
+    /// row) observed on the previous stall sweep. The stall backstop compares
+    /// the live row against this watermark: if the counters advanced, the
+    /// session is demonstrably making progress even though the in-memory
+    /// activity tracker is silent (a remote worker whose `touch_activity`
+    /// bridge drifted), so it is spared the idle kill and the watermark is
+    /// bumped. Keyed by session id; pruned alongside `stall_killed` when the
+    /// session leaves `list_active()`.
+    pub(super) stall_progress_watermark: HashMap<String, u64>,
+    /// Restart-safe-to-lose: consecutive stall-cancelled sessions per TASK id
+    /// with no durable task-status progress between them. A task stall-killed
+    /// on two back-to-back sessions without advancing its status is caught in a
+    /// redispatch loop the reopen-count escalation never observes (the loop
+    /// never passes through `open`), so on the second strike we route it to
+    /// Planner intervention instead of blindly redispatching a third time.
+    /// Reset when the task's status advances or it leaves execution.
+    pub(super) stall_cancel_streak: HashMap<String, StallCancelStreak>,
     /// Timestamp of the last completed idle-time consolidation sweep (ADR-048 §3A).
     pub(super) last_idle_consolidation: Option<StdInstant>,
     /// Cancellation token for an in-flight idle consolidation sweep.
@@ -430,6 +448,8 @@ impl CoordinatorActor {
             conversations_resolved: HashMap::new(),
             handled_dequeues: HashMap::new(),
             stall_killed: HashSet::new(),
+            stall_progress_watermark: HashMap::new(),
+            stall_cancel_streak: HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,

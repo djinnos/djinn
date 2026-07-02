@@ -26,7 +26,12 @@ fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
     let kpi_defs = value["$defs"]["UsageKpiDto"]["properties"]
         .as_object()
         .unwrap();
-    for field in ["actual_spend_usd", "projected_usd", "unpriced_count"] {
+    for field in [
+        "actual_spend_usd",
+        "projected_usd",
+        "list_price_usd",
+        "unpriced_count",
+    ] {
         assert!(
             kpi_defs.contains_key(field),
             "schema missing UsageKpiDto field {field}"
@@ -40,6 +45,7 @@ fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
     for field in [
         "actual_spend_usd",
         "projected_usd",
+        "list_price_usd",
         "unpriced_session_count",
     ] {
         assert!(
@@ -55,6 +61,7 @@ fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
     for field in [
         "actual_spend_usd",
         "projected_usd",
+        "list_price_usd",
         "unpriced_session_count",
     ] {
         assert!(
@@ -70,6 +77,7 @@ fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
     for field in [
         "actual_spend_usd",
         "projected_usd",
+        "list_price_usd",
         "unpriced_session_count",
     ] {
         assert!(
@@ -85,6 +93,7 @@ fn usage_response_json_schema_roundtrips_and_covers_split_fields() {
     for field in [
         "actual_spend_usd",
         "projected_usd",
+        "list_price_usd",
         "unpriced_session_count",
     ] {
         assert!(
@@ -109,6 +118,14 @@ fn usage_response_json_schema_can_be_written_to_file() {
     assert!(
         json.contains("projected_usd"),
         "schema JSON should contain projected_usd"
+    );
+    assert!(
+        json.contains("list_price_usd"),
+        "schema JSON should contain list_price_usd"
+    );
+    assert!(
+        json.contains("list_price_cost_per_task"),
+        "schema JSON should contain list_price_cost_per_task"
     );
     assert!(
         json.contains("unpriced_session_count"),

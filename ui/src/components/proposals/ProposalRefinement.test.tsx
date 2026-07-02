@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, userEvent } from "@/test/test-utils";
-import type { ProposalRefinementStatus } from "@/api/types";
+import type {
+  ProposalDebateTrailRow,
+  ProposalRefinementStatus,
+} from "@/api/types";
+import type { ProposalHistoryEntry } from "@/lib/proposalQueries";
 import { ProposalRefinement } from "./ProposalRefinement";
 import { callMcpTool } from "@/api/mcpClient";
 import { showToast } from "@/lib/toast";
@@ -44,7 +48,7 @@ describe("ProposalRefinement", () => {
     expect(screen.getByText("Start refinement")).toBeInTheDocument();
   });
 
-  it("renders active in-progress status panel", () => {
+  it("renders active in-progress status panel with ribbon and metrics", () => {
     const status: ProposalRefinementStatus = {
       active: true,
       current_round: 3,
@@ -61,7 +65,9 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
+    expect(screen.getByText("Tribunal")).toBeInTheDocument();
     expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText("Tribunal running — round 3")).toBeInTheDocument();
     expect(screen.getByText("Refinement in progress")).toBeInTheDocument();
     expect(screen.getAllByText("Entries").length).toBeGreaterThan(0);
     expect(screen.getByText("7")).toBeInTheDocument();
@@ -71,7 +77,41 @@ describe("ProposalRefinement", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders stopped status panel with stop reason", () => {
+  it("renders a Blocked gate chip alongside the ribbon", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      stop_reason: null,
+      awaiting_review: false,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        gateStatus={{
+          ready: false,
+          dor_ready: true,
+          dor_failures: [],
+          judge_verdict_body: null,
+          judge_verdict_id: null,
+          judge_needs_work: false,
+          adversary_dry_count: 0,
+          unresolved_blocking_count: 1,
+          unresolved_blocking_ids: ["e-1"],
+          needs_evidence: null,
+          human_override_active: false,
+          blocked_explanations: [],
+        }}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+  });
+
+  it("renders stopped status panel with stop reason ribbon", () => {
     const status: ProposalRefinementStatus = {
       active: false,
       current_round: 5,
@@ -92,8 +132,6 @@ describe("ProposalRefinement", () => {
   });
 
   it("offers a restart button for an interrupted refinement", () => {
-    // A stopped refinement must offer a way forward — otherwise an
-    // interrupted run (e.g. one lost across a deploy) is a dead end in the UI.
     const status: ProposalRefinementStatus = {
       active: false,
       current_round: 1,
@@ -133,9 +171,7 @@ describe("ProposalRefinement", () => {
     expect(
       screen.getByText(/best-effort cross-model diversity/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/falls back to the same model/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/falls back to the same model/)).toBeInTheDocument();
   });
 
   it("explains the autonomous review flow in the kickoff affordance", () => {
@@ -155,17 +191,16 @@ describe("ProposalRefinement", () => {
   // ── All stop reasons ─────────────────────────────────────────────────────
 
   it("renders round_cap stop reason label", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 5,
-      dry_rounds: 0,
-      total_entries: 15,
-      stop_reason: "round_cap",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: false,
+          current_round: 5,
+          dry_rounds: 0,
+          total_entries: 15,
+          stop_reason: "round_cap",
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -175,17 +210,16 @@ describe("ProposalRefinement", () => {
   });
 
   it("renders spawn_cap stop reason label", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 3,
-      dry_rounds: 0,
-      total_entries: 8,
-      stop_reason: "spawn_cap",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: false,
+          current_round: 3,
+          dry_rounds: 0,
+          total_entries: 8,
+          stop_reason: "spawn_cap",
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -195,17 +229,16 @@ describe("ProposalRefinement", () => {
   });
 
   it("renders repeated_objection stop reason label", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 4,
-      dry_rounds: 0,
-      total_entries: 10,
-      stop_reason: "repeated_objection",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: false,
+          current_round: 4,
+          dry_rounds: 0,
+          total_entries: 10,
+          stop_reason: "repeated_objection",
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -215,17 +248,16 @@ describe("ProposalRefinement", () => {
   });
 
   it("renders agent_failure stop reason label", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 2,
-      dry_rounds: 0,
-      total_entries: 3,
-      stop_reason: "agent_failure",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: false,
+          current_round: 2,
+          dry_rounds: 0,
+          total_entries: 3,
+          stop_reason: "agent_failure",
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -235,17 +267,16 @@ describe("ProposalRefinement", () => {
   });
 
   it("renders unknown stop reason as-is", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 1,
-      dry_rounds: 0,
-      total_entries: 1,
-      stop_reason: "some_future_reason",
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: false,
+          current_round: 1,
+          dry_rounds: 0,
+          total_entries: 1,
+          stop_reason: "some_future_reason",
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -300,18 +331,14 @@ describe("ProposalRefinement", () => {
 
     await user.click(screen.getByText("Start refinement"));
 
-    expect(showToast.error).toHaveBeenCalledWith(
-      "Failed to start refinement",
-      { description: "proposal not found" },
-    );
+    expect(showToast.error).toHaveBeenCalledWith("Failed to start refinement", {
+      description: "proposal not found",
+    });
     expect(onChanged).not.toHaveBeenCalled();
   });
 
   // ── Autonomous review flow (awaiting_review) ─────────────────────────────
 
-  // Shared factory for the converged/awaiting-review state so the three-choice
-  // panel tests don't repeat the same status object on every test. Override
-  // individual fields per test when needed.
   function reviewStatus(
     overrides: Partial<ProposalRefinementStatus> = {},
   ): ProposalRefinementStatus {
@@ -327,7 +354,44 @@ describe("ProposalRefinement", () => {
     };
   }
 
-  it("renders the three-choice review panel with distinct accessible action labels", () => {
+  function specRevision(seq: number, body: string): ProposalHistoryEntry {
+    return {
+      id: `rev-${seq}`,
+      seq,
+      title: "Spec",
+      body,
+      body_format: "markdown",
+      acceptance_criteria: [],
+      event_kind: "spec_revision",
+      created_at: "2026-06-01T00:00:00Z",
+      edited_by_user_id: "user-1",
+    } as ProposalHistoryEntry;
+  }
+
+  function verdictRow(): ProposalDebateTrailRow {
+    return {
+      id: "v-1",
+      proposal_id: proposalId,
+      kind: "verdict",
+      body: "Verdict: approve — the spec is ready.",
+      blocking: false,
+      agent_role: "judge",
+      author_kind: "agent",
+      author_user_id: null,
+      author_model: "gpt",
+      source_task_id: null,
+      against_revision_seq: 4,
+      round: 4,
+      resolved_at: null,
+      resolved_by_user_id: null,
+      reopened_at: null,
+      reopened_by_user_id: null,
+      created_at: "2026-06-01T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+    };
+  }
+
+  it("renders the converged review card with a ribbon, tabs and three actions", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -336,15 +400,24 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
+    expect(screen.getByText("Awaiting review")).toBeInTheDocument();
     expect(
-      screen.getByText("Tribunal converged — review the result"),
+      screen.getByText("Converged after 4 rounds — awaiting your review"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Review the result")).toBeInTheDocument();
+
+    // Tabs.
+    expect(screen.getByRole("tab", { name: "Verdict" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Spec diff/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Debate trail" }),
+    ).toBeInTheDocument();
+
+    // Verdict tab (default) shows the judge summary.
     expect(
       screen.getByText("The spec was tightened and ambiguities resolved."),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/the diff from your original is in the revision history/),
-    ).toBeInTheDocument();
+
     // Three unambiguous human choices with distinct accessible names.
     expect(
       screen.getByRole("button", { name: "Accept refined spec" }),
@@ -355,22 +428,17 @@ describe("ProposalRefinement", () => {
     expect(
       screen.getByRole("button", { name: "Reject and revert" }),
     ).toBeInTheDocument();
-    // The consequences of each choice are surfaced to the reviewer.
-    expect(
-      screen.getByText(/Accept keeps the refined spec/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Accept keeps the refined spec/)).toBeInTheDocument();
     expect(
       screen.getByText(/Reject reverts to your original spec/),
     ).toBeInTheDocument();
-    // The feedback-to-another-round action is disabled until feedback is
-    // entered — verified together with the panel layout to avoid a separate
-    // render with duplicate setup.
+    // The feedback-to-another-round action is disabled until feedback exists.
     expect(
       screen.getByRole("button", { name: /Send feedback for another round/ }),
     ).toBeDisabled();
   });
 
-  it("renders judge_summary markdown semantically", () => {
+  it("renders judge_summary markdown semantically in the verdict tab", () => {
     const { container } = render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -384,10 +452,38 @@ describe("ProposalRefinement", () => {
     );
 
     expect(screen.getByText("Approved").tagName).toBe("STRONG");
-    expect(screen.getByRole("list")).toBeInTheDocument();
     expect(screen.getByText("Tightened scope").tagName).toBe("LI");
     expect(screen.getByText("Resolved ambiguity").tagName).toBe("LI");
     expect(container.querySelector(".prose")).toBeInTheDocument();
+  });
+
+  it("prefers the gate judge verdict body over the summary in the verdict tab", () => {
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus({ judge_summary: "fallback summary" })}
+        gateStatus={{
+          ready: true,
+          dor_ready: true,
+          dor_failures: [],
+          judge_verdict_body: "Authoritative judge reasoning from the gate.",
+          judge_verdict_id: "v-1",
+          judge_needs_work: false,
+          adversary_dry_count: 0,
+          unresolved_blocking_count: 0,
+          unresolved_blocking_ids: [],
+          needs_evidence: null,
+          human_override_active: false,
+          blocked_explanations: [],
+        }}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Authoritative judge reasoning from the gate."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("fallback summary")).not.toBeInTheDocument();
   });
 
   it("falls back to a default summary when judge_summary is blank", () => {
@@ -400,6 +496,31 @@ describe("ProposalRefinement", () => {
       />,
     );
     expect(screen.getByText("The tribunal converged.")).toBeInTheDocument();
+  });
+
+  it("shows the spec diff and debate trail on their tabs", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus({ snapshot_revision_seq: 1 })}
+        revisions={[
+          specRevision(1, "Original spec."),
+          specRevision(2, "Original spec.\nAdded a concrete rollout plan."),
+        ]}
+        debateTrail={[verdictRow()]}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /Spec diff/ }));
+    expect(
+      screen.getByText("Added a concrete rollout plan."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Debate trail" }));
+    expect(screen.getByText("Round 4")).toBeInTheDocument();
   });
 
   it("calls proposal_refinement_resolve with accept on Accept click", async () => {
@@ -416,9 +537,7 @@ describe("ProposalRefinement", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Accept refined spec" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Accept refined spec" }));
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
       proposal_id: proposalId,
@@ -443,9 +562,7 @@ describe("ProposalRefinement", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Reject and revert" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Reject and revert" }));
 
     expect(callMcpTool).toHaveBeenCalledWith("proposal_refinement_resolve", {
       proposal_id: proposalId,
@@ -533,10 +650,7 @@ describe("ProposalRefinement", () => {
       />,
     );
 
-    await user.type(
-      screen.getByLabelText(/Feedback/),
-      "Another round please.",
-    );
+    await user.type(screen.getByLabelText(/Feedback/), "Another round please.");
     await user.click(
       screen.getByRole("button", { name: /Send feedback for another round/ }),
     );
@@ -548,7 +662,7 @@ describe("ProposalRefinement", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
-  it("does not render the review panel while in progress", () => {
+  it("does not render the review card while in progress", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
@@ -562,26 +676,23 @@ describe("ProposalRefinement", () => {
         onChanged={vi.fn()}
       />,
     );
-    expect(
-      screen.queryByText("Tribunal converged — review the result"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Review the result")).not.toBeInTheDocument();
     expect(screen.getByText("Refinement in progress")).toBeInTheDocument();
   });
 
   // ── Status panel does not show dry rounds when zero ──────────────────────
 
   it("hides dry rounds count when zero", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 1,
-      dry_rounds: 0,
-      total_entries: 2,
-      stop_reason: null,
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: true,
+          current_round: 1,
+          dry_rounds: 0,
+          total_entries: 2,
+          stop_reason: null,
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
@@ -592,74 +703,41 @@ describe("ProposalRefinement", () => {
   // ── canStart gating ──────────────────────────────────────────────────────
 
   it("does not render kickoff when canStart is false and status is active", () => {
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 1,
-      dry_rounds: null as unknown as number,
-      total_entries: 0,
-      stop_reason: null,
-    };
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: true,
+          current_round: 1,
+          dry_rounds: null as unknown as number,
+          total_entries: 0,
+          stop_reason: null,
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
     );
-    // Should show the status panel, not the kickoff button.
     expect(screen.getByText("Active")).toBeInTheDocument();
     expect(screen.queryByText("Start refinement")).not.toBeInTheDocument();
   });
 
-  // ── Tribunal debate-trail visibility (integration with DebateTrail) ──────
-
-  it("status panel and debate trail are independent components", () => {
-    // Verify that the refinement status panel renders independently of
-    // the debate trail — they are separate UI surfaces that share data
-    // from the same proposal_show response.
-    const status: ProposalRefinementStatus = {
-      active: true,
-      current_round: 3,
-      dry_rounds: 1,
-      total_entries: 7,
-      stop_reason: null,
-    };
+  it("does not render debate-trail entries in the in-progress panel", () => {
     render(
       <ProposalRefinement
         proposalId={proposalId}
-        status={status}
+        status={{
+          active: true,
+          current_round: 3,
+          dry_rounds: 1,
+          total_entries: 7,
+          stop_reason: null,
+        }}
         canStart={false}
         onChanged={vi.fn()}
       />,
     );
-    // The refinement panel shows its own data (entries, dry rounds).
     expect(screen.getAllByText("Entries").length).toBeGreaterThan(0);
-    expect(screen.getByText("7")).toBeInTheDocument();
-    // The refinement panel does NOT render debate trail entries itself.
-    // Debate trail is rendered by the separate <DebateTrail> component.
+    // The debate trail is only surfaced in the converged review card's tab.
     expect(screen.queryByText("Debate trail")).not.toBeInTheDocument();
-    expect(screen.queryByText("objection")).not.toBeInTheDocument();
-    expect(screen.queryByText("verdict")).not.toBeInTheDocument();
-  });
-
-  it("renders demand round explanation in stopped status", () => {
-    const status: ProposalRefinementStatus = {
-      active: false,
-      current_round: 3,
-      dry_rounds: 1,
-      total_entries: 8,
-      stop_reason: "adversary_dry",
-    };
-    render(
-      <ProposalRefinement
-        proposalId={proposalId}
-        status={status}
-        canStart={false}
-        onChanged={vi.fn()}
-      />,
-    );
-    expect(screen.getByText("Stopped")).toBeInTheDocument();
-    expect(screen.getByText(/Adversary exhausted/)).toBeInTheDocument();
   });
 });

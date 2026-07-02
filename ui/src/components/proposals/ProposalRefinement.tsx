@@ -1,5 +1,10 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { HugeiconsIcon } from "@hugeicons/react";
+import {
+  CancelCircleIcon,
+  CheckmarkCircle02Icon,
+} from "@hugeicons/core-free-icons";
 import { callMcpTool } from "@/api/mcpClient";
 import { usersQueryOptions } from "@/api/queryOptions";
 import { userDisplayName, type OrgUser } from "@/api/users";
@@ -15,9 +20,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { showToast } from "@/lib/toast";
-import type { ProposalRefinementStatus } from "@/api/types";
+import type {
+  ProposalDebateTrailRow,
+  ProposalGateStatus,
+  ProposalRefinementStatus,
+} from "@/api/types";
+import type { ProposalHistoryEntry } from "@/lib/proposalQueries";
 import { BlockMarkdown } from "./blocks/BlockShell";
+import { DiffView } from "./DiffView";
+import { ProposalDebateTrail } from "./ProposalDebateTrail";
+import { refinementDiffBodies } from "./refinementDiff";
 
 /**
  * Human-readable label for the stop reason.
@@ -44,9 +58,11 @@ function judgeSummaryText(summary: string | null | undefined): string {
 }
 
 /**
- * Proposal refinement kickoff and status component.
- *
- * Shows a "Start refinement" button when refinement hasn't been started.
+ * Unified Tribunal section: refinement kickoff, a status ribbon reconciling the
+ * tribunal state with the readiness gate, and — once the autonomous tribunal
+ * converges — a single review card with the verdict, the spec diff, and the
+ * round-by-round debate trail behind tabs, plus the human accept / another-round
+ * / reject actions.
  *
  * Refinement runs as an autonomous tribunal (Adversary → Advocate → Judge,
  * looping). The human is no longer a per-revision approver: when the tribunal
@@ -56,11 +72,17 @@ function judgeSummaryText(summary: string | null | undefined): string {
 export function ProposalRefinement({
   proposalId,
   status,
+  gateStatus,
+  debateTrail = [],
+  revisions = [],
   canStart,
   onChanged,
 }: {
   proposalId: string;
   status: ProposalRefinementStatus | null;
+  gateStatus?: ProposalGateStatus | null;
+  debateTrail?: ProposalDebateTrailRow[];
+  revisions?: ProposalHistoryEntry[];
   canStart: boolean;
   onChanged: () => void;
 }) {
@@ -87,6 +109,11 @@ export function ProposalRefinement({
   // Required to demand another tribunal round (sent as the request reason).
   const [feedback, setFeedback] = useState<string>("");
   const feedbackBlank = !feedback.trim();
+
+  const diff = useMemo(
+    () => refinementDiffBodies(revisions, status?.snapshot_revision_seq),
+    [revisions, status?.snapshot_revision_seq],
+  );
 
   const handleResolve = useCallback(
     async (decision: "accept" | "reject") => {
@@ -164,11 +191,22 @@ export function ProposalRefinement({
 
   // Active or stopped refinement status panel.
   if (status && (status.active || status.stop_reason)) {
+    const round = status.current_round ?? undefined;
+    const headSeq = diff?.headSeq;
+
+    // Status ribbon: one line reconciling the tribunal state.
+    const ribbon =
+      status.active && status.awaiting_review
+        ? `Converged${round ? ` after ${round} ${round === 1 ? "round" : "rounds"}` : ""} — awaiting your review`
+        : status.active
+          ? `Tribunal running${round ? ` — round ${round}` : ""}`
+          : `Stopped — ${stopReasonLabel(status.stop_reason ?? "")}`;
+
     return (
-      <div className="space-y-2 rounded-md border p-3">
+      <div className="space-y-3 rounded-md border p-3">
         <div className="flex items-center justify-between">
           <Label className="text-xs uppercase text-muted-foreground">
-            Refinement
+            Tribunal
           </Label>
           <div className="flex items-center gap-2">
             {status.active && status.awaiting_review ? (
@@ -184,26 +222,33 @@ export function ProposalRefinement({
                 Stopped
               </Badge>
             )}
+            {gateStatus &&
+              (gateStatus.ready ? (
+                <Badge variant="default" className="gap-1 text-xs">
+                  <HugeiconsIcon icon={CheckmarkCircle02Icon} size={12} />
+                  Ready
+                </Badge>
+              ) : (
+                <Badge variant="destructive" className="gap-1 text-xs">
+                  <HugeiconsIcon icon={CancelCircleIcon} size={12} />
+                  Blocked
+                </Badge>
+              ))}
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-3 text-sm">
-          {status.current_round != null && (
-            <span className="text-muted-foreground">
-              Round{" "}
-              <span className="font-mono font-medium text-foreground">
-                {status.current_round}
-              </span>
-            </span>
-          )}
-          <span className="text-muted-foreground">
+        {/* Status ribbon */}
+        <p className="text-sm font-medium text-foreground">{ribbon}</p>
+
+        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+          <span>
             Entries{" "}
             <span className="font-mono font-medium text-foreground">
               {status.total_entries}
             </span>
           </span>
           {status.dry_rounds > 0 && (
-            <span className="text-muted-foreground">
+            <span>
               Dry rounds{" "}
               <span className="font-mono font-medium text-foreground">
                 {status.dry_rounds}
@@ -212,15 +257,7 @@ export function ProposalRefinement({
           )}
         </div>
 
-        {status.stop_reason && (
-          <p className="text-xs text-muted-foreground">
-            Stopped: {stopReasonLabel(status.stop_reason)}
-          </p>
-        )}
-
-        {/* Stopped — let the user run a fresh tribunal from here. Without this
-            a stopped/interrupted refinement is a dead end (e.g. a run lost
-            across a deploy leaves nothing actionable in the UI). */}
+        {/* Stopped — let the user run a fresh tribunal from here. */}
         {!status.active && (
           <div className="space-y-1 border-t pt-2">
             <Button size="sm" disabled={busy} onClick={handleStart}>
@@ -233,19 +270,60 @@ export function ProposalRefinement({
           </div>
         )}
 
-        {/* Converged — single human review of the full refined result. */}
+        {/* Converged — single human review of the full refined result, with the
+            verdict, the spec diff, and the debate trail behind tabs. */}
         {status.active && status.awaiting_review && (
           <div className="space-y-3 rounded-md border border-primary/40 bg-primary/5 p-3">
-            <Label className="text-sm font-medium">
-              Tribunal converged — review the result
-            </Label>
-            <div className="rounded-md bg-muted/40 p-2 text-sm text-foreground">
-              <BlockMarkdown>{judgeSummaryText(status.judge_summary)}</BlockMarkdown>
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <Label className="text-sm font-medium">Review the result</Label>
+              <span className="text-xs text-muted-foreground">
+                {round ? `round ${round}` : null}
+                {round && headSeq != null ? " · " : null}
+                {headSeq != null ? `revision ${headSeq}` : null}
+              </span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              The full refined spec is shown in the proposal above; the diff from
-              your original is in the revision history.
-            </p>
+
+            <Tabs defaultValue="verdict" className="gap-3">
+              <TabsList className="w-fit">
+                <TabsTrigger value="verdict">Verdict</TabsTrigger>
+                <TabsTrigger value="diff">
+                  Spec diff
+                  {diff?.fromSeq != null && diff.headSeq != null
+                    ? ` rev ${diff.fromSeq} → ${diff.headSeq}`
+                    : ""}
+                </TabsTrigger>
+                <TabsTrigger value="trail">Debate trail</TabsTrigger>
+              </TabsList>
+
+              {/* Verdict — the judge's reasoning markdown, rendered ONCE on the
+                  whole page (the readiness checklist only references it). */}
+              <TabsContent value="verdict">
+                <div className="rounded-md bg-muted/40 p-2 text-sm text-foreground">
+                  <BlockMarkdown>
+                    {judgeSummaryText(
+                      gateStatus?.judge_verdict_body || status.judge_summary,
+                    )}
+                  </BlockMarkdown>
+                </div>
+              </TabsContent>
+
+              {/* Spec diff — pre-refinement snapshot → converged head. */}
+              <TabsContent value="diff">
+                {diff ? (
+                  <DiffView before={diff.before} after={diff.after} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No spec diff available.
+                  </p>
+                )}
+              </TabsContent>
+
+              {/* Debate trail — round-by-round objections/rebuttals/verdicts. */}
+              <TabsContent value="trail">
+                <ProposalDebateTrail trail={debateTrail} />
+              </TabsContent>
+            </Tabs>
+
             <div className="space-y-1">
               <Label
                 htmlFor="refinement-feedback"
@@ -308,14 +386,6 @@ export function ProposalRefinement({
             <Label className="text-xs uppercase text-muted-foreground">
               Refinement in progress
             </Label>
-            {status.current_round != null && (
-              <p className="text-xs text-muted-foreground">
-                Round{" "}
-                <span className="font-mono font-medium text-foreground">
-                  {status.current_round}
-                </span>
-              </p>
-            )}
             <p className="text-xs text-muted-foreground">
               Adversary → Advocate → Judge running autonomously; you'll review the
               result when it converges.

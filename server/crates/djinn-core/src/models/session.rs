@@ -131,6 +131,15 @@ pub struct SessionRecord {
     /// Added in migration 83.
     #[serde(default = "default_cost_basis")]
     pub cost_basis: String,
+    /// Kind of credential that backed the session, for plan-vs-API-key usage
+    /// analytics: `plan_oauth` (a personal subscription-plan OAuth credential —
+    /// $0 real per-token spend), `api_key` (a metered or coding-plan API key),
+    /// or `NULL` (not recorded: legacy rows, interactive `chat`, and
+    /// post-session extraction helpers that carry no dispatch-time credential
+    /// signal). Written at creation from the resolved credential kind; no
+    /// credential foreign key is introduced. Added in migration 88.
+    #[serde(default)]
+    pub billing_source: Option<String>,
 }
 
 fn default_cost_basis() -> String {
@@ -164,6 +173,7 @@ mod tests {
             cache_read_price_per_million_snapshot: None,
             cache_write_price_per_million_snapshot: None,
             cost_basis: "unpriced".to_owned(),
+            billing_source: None,
         }
     }
 
@@ -217,5 +227,6 @@ mod tests {
         assert!(decoded.cache_read_price_per_million_snapshot.is_none());
         assert!(decoded.cache_write_price_per_million_snapshot.is_none());
         assert_eq!(decoded.cost_basis, "unpriced");
+        assert!(decoded.billing_source.is_none());
     }
 }

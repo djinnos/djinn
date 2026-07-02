@@ -48,7 +48,7 @@ pub async fn process_finalize_payload_with_outcome(
             true
         }
         "submit_grooming" => {
-            handle_submit_grooming(payload, app_state).await;
+            handle_submit_grooming(payload, task_id, app_state).await;
             true
         }
         other => {
@@ -362,11 +362,17 @@ async fn handle_submit_decision(
     }
 }
 
-/// Log per-task planning activity entries.
+/// Log per-task planning activity entries and durably record any blocker the
+/// planner declared.
 ///
-/// The planner is project-scoped, so `task_id` is a synthetic project identifier.
-/// Each `tasks_reviewed` entry references a real task by its own `task_id` field.
-async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &SlotContext) {
+/// `finalize_task_id` is the planning task the session ran on; its epic owns
+/// any `blocked_on` edges. Each `tasks_reviewed` entry references a real task
+/// by its own `task_id` field.
+async fn handle_submit_grooming(
+    payload: &serde_json::Value,
+    finalize_task_id: &str,
+    app_state: &SlotContext,
+) {
     let grooming = match serde_json::from_value::<SubmitGrooming>(payload.clone()) {
         Ok(g) => g,
         Err(e) => {
@@ -401,6 +407,99 @@ async fn handle_submit_grooming(payload: &serde_json::Value, app_state: &SlotCon
                 error = %e,
                 "finalize_handlers: failed to log planning_entry activity"
             );
+        }
+    }
+
+    // Durably record a planner's "blocked on epic X" conclusion as an epic
+    // blocker edge, so the coordinator parks this epic's planning until X
+    // closes rather than re-deriving "blocked" via a fresh LLM session on every
+    // stale-sweep (epic `mygq`, 2026-07-01). Idempotent: `add_blocker` no-ops
+    // on a duplicate edge and rejects self-loops / cycles.
+    if !grooming.blocked_on.is_empty() {
+        record_declared_epic_blockers(finalize_task_id, &grooming.blocked_on, app_state).await;
+    }
+}
+
+/// Resolve the planning task's epic and wire each declared blocker as an
+/// epic-blocker edge. Best-effort: unresolvable refs are logged and skipped;
+/// a lookup/DB error never crashes the finalize path.
+async fn record_declared_epic_blockers(
+    finalize_task_id: &str,
+    blocked_on: &[String],
+    app_state: &SlotContext,
+) {
+    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    let task = match task_repo.get(finalize_task_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::warn!(
+                task_id = %finalize_task_id,
+                "finalize_handlers: submit_grooming blocked_on — planning task not found"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %finalize_task_id,
+                error = %e,
+                "finalize_handlers: submit_grooming blocked_on — failed to load planning task"
+            );
+            return;
+        }
+    };
+    let Some(epic_id) = task.epic_id.as_deref() else {
+        tracing::warn!(
+            task_id = %finalize_task_id,
+            "finalize_handlers: submit_grooming blocked_on — planning task has no epic; ignoring"
+        );
+        return;
+    };
+
+    let epic_repo =
+        djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    for blocker_ref in blocked_on {
+        let blocker_ref = blocker_ref.trim();
+        if blocker_ref.is_empty() {
+            continue;
+        }
+        let blocking = match epic_repo
+            .resolve_in_project(&task.project_id, blocker_ref)
+            .await
+        {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                tracing::warn!(
+                    epic_id,
+                    blocker_ref,
+                    "finalize_handlers: submit_grooming blocked_on — no epic matches ref in \
+                     project; skipping (reference the blocking EPIC, not a task)"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    epic_id,
+                    blocker_ref,
+                    error = %e,
+                    "finalize_handlers: submit_grooming blocked_on — epic resolve failed"
+                );
+                continue;
+            }
+        };
+        match epic_repo.add_blocker(epic_id, &blocking.id).await {
+            Ok(()) => tracing::info!(
+                epic_id,
+                blocking_epic_id = %blocking.id,
+                blocking_short_id = %blocking.short_id,
+                "finalize_handlers: parked epic on planner-declared blocker"
+            ),
+            Err(e) => tracing::warn!(
+                epic_id,
+                blocking_epic_id = %blocking.id,
+                error = %e,
+                "finalize_handlers: submit_grooming blocked_on — add_blocker failed \
+                 (self-loop or cycle?)"
+            ),
         }
     }
 }
@@ -782,6 +881,89 @@ mod tests {
         assert!(e2.is_some(), "expected planning_entry for task2");
         let b2: serde_json::Value = serde_json::from_str(&e2.unwrap().payload).unwrap();
         assert_eq!(b2["action"], "skipped");
+    }
+
+    /// A planner concluding "blocked on epic X, no tasks created" must durably
+    /// record the epic-blocker edge, so the coordinator parks this epic instead
+    /// of re-planning every stale-sweep (epic `mygq`, 2026-07-01).
+    #[tokio::test]
+    async fn submit_grooming_blocked_on_records_epic_blocker_durably() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let parked = test_helpers::create_test_epic(&db, &project.id).await;
+        let blocker = test_helpers::create_test_epic(&db, &project.id).await;
+        // The planning session runs on a real planning task under the parked epic.
+        let planning_task = test_helpers::create_test_task(&db, &project.id, &parked.id).await;
+
+        let epic_repo = djinn_db::EpicRepository::new(db.clone(), ctx.event_bus.clone());
+        assert!(
+            !epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
+            "precondition: parked epic starts with no blockers"
+        );
+
+        // Declare the blocker by short_id and create no tasks.
+        let payload = Some(serde_json::json!({
+            "tasks_reviewed": [],
+            "summary": "blocked on foundation epic; no work created",
+            "decision": "escalate",
+            "blocked_on": [blocker.short_id],
+        }));
+        process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+
+        // The durable edge must exist and the gate must see an open blocker.
+        assert!(
+            epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
+            "blocked_on must durably record an epic-blocker edge"
+        );
+        let blockers = epic_repo.list_blockers(&parked.id).await.unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].epic_id, blocker.id);
+
+        // Idempotent: re-declaring the same blocker must not error or duplicate.
+        process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+        let blockers_again = epic_repo.list_blockers(&parked.id).await.unwrap();
+        assert_eq!(
+            blockers_again.len(),
+            1,
+            "re-declaring the same blocker must be idempotent"
+        );
+
+        // Closing the blocker clears the gate (event-driven wake path).
+        epic_repo.close(&blocker.id).await.unwrap();
+        assert!(
+            !epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
+            "closing the blocker must clear the park gate"
+        );
+    }
+
+    /// An unresolvable `blocked_on` ref (e.g. a task short_id, not an epic) must
+    /// be skipped without crashing and without recording a bogus edge.
+    #[tokio::test]
+    async fn submit_grooming_blocked_on_unresolvable_ref_is_skipped() {
+        let db = test_helpers::create_test_db();
+        let ctx = test_helpers::agent_context_from_db(
+            db.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let project = test_helpers::create_test_project(&db).await;
+        let parked = test_helpers::create_test_epic(&db, &project.id).await;
+        let planning_task = test_helpers::create_test_task(&db, &project.id, &parked.id).await;
+
+        let payload = Some(serde_json::json!({
+            "tasks_reviewed": [],
+            "blocked_on": ["does-not-exist"],
+        }));
+        process_finalize_payload(&payload, "submit_grooming", &planning_task.id, &ctx).await;
+
+        let epic_repo = djinn_db::EpicRepository::new(db.clone(), ctx.event_bus.clone());
+        assert!(
+            !epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
+            "unresolvable blocked_on ref must not record a blocker"
+        );
     }
 
     #[tokio::test]

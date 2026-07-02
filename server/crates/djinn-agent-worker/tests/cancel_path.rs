@@ -258,6 +258,7 @@ async fn start_fake_server(
                                 cache_read_price_per_million_snapshot: None,
                                 cache_write_price_per_million_snapshot: None,
                                 cost_basis: "unpriced".into(),
+                                billing_source: None,
                             }))
                         }
                         ServiceRpcRequest::UpdateSessionStatus { .. } => {

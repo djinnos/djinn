@@ -16,12 +16,15 @@ function makeModel(
     success_rate: 0.9,
     avg_reopens: 0.2,
     cost_per_task: 1.5,
+    actual_cost_per_task: 1.0,
+    list_price_cost_per_task: 1.5,
     total_cost: 15.0,
     total_tokens: 20000,
     tokens_in: 12000,
     tokens_out: 8000,
     actual_spend_usd: 10.0,
     projected_usd: 5.0,
+    list_price_usd: 15.0,
     unpriced_count: 1,
     session_count: 12,
     ...overrides,
@@ -117,5 +120,20 @@ describe("UsageModelsTab — split cost column labels", () => {
     expect(
       screen.getByText(/Actual API spend and projected subscription-equivalent/),
     ).toBeInTheDocument();
+  });
+
+  it("renders the combined list-price cost-per-task in the Cost / task column (not em dash)", () => {
+    render(
+      <UsageModelsTab
+        data={makeResponse([
+          makeModel({ list_price_cost_per_task: 2.75 }),
+        ])}
+      />,
+    );
+
+    // Regression: the column previously read a never-populated `cost_per_task`
+    // field and always showed "—". It must now read list_price_cost_per_task.
+    expect(screen.getByText("Cost / task")).toBeInTheDocument();
+    expect(screen.getByText("$2.75")).toBeInTheDocument();
   });
 });

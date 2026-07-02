@@ -2,7 +2,7 @@
 // `epic_ops.rs`: thin serializable views over the `djinn-core` models with
 // JSON-array fields expanded to `Vec<String>`.
 
-use crate::tools::epic_ops::AcceptanceCriterionItem;
+use crate::tools::epic_ops::{AcceptanceCriterionItem, parse_acceptance_criteria_array};
 use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
 };
@@ -127,6 +127,41 @@ pub struct ProposalModel {
     /// When parked for needs-evidence: the named feasibility claim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_evidence_claim: Option<String>,
+    /// Compact tribunal/readiness summary — populated only on `proposal_list`
+    /// (batched across the page) for non-terminal proposals, so list rows can
+    /// render tribunal/gate chips without opening each proposal. `None` on show
+    /// paths and for terminal proposals (done/rejected/archived/superseded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_summary: Option<ProposalListSummary>,
+}
+
+/// Compact tribunal/readiness state for a single proposal row on the list.
+///
+/// Every field is a cheap, batched approximation of the richer per-proposal
+/// gate/refinement status surfaced by `proposal_show` — enough to drive the
+/// list-row chips (tribunal round / awaiting-review / evidence, and a gate
+/// pass/fail dot with a "why blocked" tooltip) without the several-queries-per-
+/// row those full builders cost.
+#[derive(Serialize, Deserialize, Clone, Default, schemars::JsonSchema)]
+pub struct ProposalListSummary {
+    /// A refinement (tribunal) run is active — a round is in flight.
+    pub refinement_active: bool,
+    /// Refinement converged and is parked awaiting human review (the human is
+    /// the bottleneck — the most important state to surface).
+    pub awaiting_review: bool,
+    /// Highest debate round reached (`0` when there is no debate trail yet).
+    pub current_round: i32,
+    /// Parked on an open needs-evidence spike.
+    pub needs_evidence: bool,
+    /// Deterministic Definition-of-Ready passes.
+    pub dor_ready: bool,
+    /// Composed-gate approximation passes: `dor_ready` AND the latest judge
+    /// verdict is not needs-work AND there are no unresolved blocking objections
+    /// AND the proposal is not parked on evidence. (Override lifecycle handling
+    /// is intentionally omitted here; the full check lives in `proposal_show`.)
+    pub gate_ready: bool,
+    /// Count of unresolved blocking (non-verdict) debate objections.
+    pub unresolved_blocking_count: i64,
 }
 
 /// An epic this proposal graduated into.
@@ -174,7 +209,14 @@ impl ProposalModel {
             unresolved_feedback_count,
             linked_spike_task_id: p.linked_spike_task_id.clone(),
             needs_evidence_claim: p.needs_evidence_claim.clone(),
+            list_summary: None,
         }
+    }
+
+    /// Attach the batched tribunal/readiness summary (list path only).
+    pub fn with_list_summary(mut self, summary: ProposalListSummary) -> Self {
+        self.list_summary = Some(summary);
+        self
     }
 }
 
@@ -745,17 +787,7 @@ pub struct GateFailureModel {
 /// accepting both plain strings and `{criterion, met}` objects (same
 /// tolerance as the task layer).
 fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
-    let parsed = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    parsed
-        .into_iter()
-        .map(|item| {
-            serde_json::from_value::<AcceptanceCriterionItem>(item.clone())
-                .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
-        })
-        .collect()
+    parse_acceptance_criteria_array(raw)
 }
 
 // ── Human authority control responses ──────────────────────────────────────

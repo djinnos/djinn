@@ -73,6 +73,11 @@ impl CoordinatorActor {
         let active_session_ids: HashSet<String> = active.iter().map(|s| s.id.clone()).collect();
         self.stall_killed
             .retain(|id| active_session_ids.contains(id));
+        // Prune the DB-progress watermarks the same way — a session that has
+        // left `list_active()` will never be evaluated again, so its watermark
+        // is dead weight (and a redispatched successor gets a fresh session id).
+        self.stall_progress_watermark
+            .retain(|id, _| active_session_ids.contains(id));
 
         /// First-call short-circuit: a session that has never shown a sign of
         /// life (the host's `ActivityTracker` has no entry — see
@@ -408,7 +413,49 @@ impl CoordinatorActor {
                 }
             }
 
+            // ── DB-truth liveness backstop ──────────────────────────────────
+            // The idle measurement above comes from the in-memory
+            // `ActivityTracker`, which for a remote worker pod is fed only by
+            // the worker's `touch_activity` RPC bridge. When that bridge drifts
+            // (or breaks) the host tracker goes silent even though the pod is
+            // busy — the exact failure that stall-killed 88 productive sessions
+            // overnight. Before killing, consult a signal the drift cannot
+            // touch: the session ROW's own token counters, persisted mid-flight
+            // by `flush_session_tokens_rpc`. Compare the live total against the
+            // watermark from the previous sweep; if it advanced, the worker is
+            // demonstrably producing output, so spare it and roll the watermark
+            // forward. A genuinely dead session's counters are frozen — its
+            // watermark never advances and it is still killed at threshold. This
+            // mirrors the tool-run-heartbeat precedent that stopped false reaps
+            // of long clippy runs (~v0.4.7).
+            let db_progress = session.tokens_in.max(0) as u64
+                + session.tokens_out.max(0) as u64
+                + session.cache_read_tokens.max(0) as u64
+                + session.cache_write_tokens.max(0) as u64;
+            let prev_watermark = self
+                .stall_progress_watermark
+                .insert(session.id.clone(), db_progress);
+
             if idle <= applied_threshold {
+                continue;
+            }
+
+            // Over the idle threshold, but if the session row shows token
+            // progress since the last sweep the in-memory idle clock is lying —
+            // never cancel a session for "idle" while there is independent DB
+            // evidence of progress.
+            if let Some(prev) = prev_watermark
+                && db_progress > prev
+            {
+                tracing::info!(
+                    task_id = %task_id,
+                    session_id = %session.id,
+                    idle_seconds = idle,
+                    threshold_secs = applied_threshold,
+                    db_progress,
+                    prev_watermark = prev,
+                    "CoordinatorActor: stall backstop spared session — DB token progress advanced despite silent activity tracker"
+                );
                 continue;
             }
 
@@ -485,12 +532,12 @@ impl CoordinatorActor {
             // (most acutely the per-account ChatGPT Codex backend), so a global
             // trip would disable the model for everyone on one user's bad luck.
             let task_repo = self.task_repo();
-            let scope = task_repo
-                .get(task_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|t| t.created_by_user_id);
+            let task_row = task_repo.get(task_id).await.ok().flatten();
+            let scope = task_row.as_ref().and_then(|t| t.created_by_user_id.clone());
+            let current_status = task_row
+                .as_ref()
+                .map(|t| t.status.clone())
+                .unwrap_or_default();
 
             // Feed the model circuit-breaker so dispatch fails over to the next
             // model in the creator's ordered list on redispatch. A first-call
@@ -542,6 +589,65 @@ impl CoordinatorActor {
                 scope = ?scope,
                 "CoordinatorActor: killed stalled session"
             );
+
+            // ── Second-strike stall escalation ──────────────────────────────
+            // Record this stall cancel against the task. Two CONSECUTIVE stall
+            // cancels with no durable task-status progress between them means the
+            // task is looping without converging — a loop the reopen-count
+            // escalation (triggers A/B) never observes, because a stall kill
+            // releases the task straight back into execution without passing
+            // through `open` (reopen_count stays flat). On the second strike,
+            // route it to the Planner instead of letting dispatch send a third
+            // doomed session (the overnight incident stall-killed one task 14
+            // times behind a single slot).
+            let strike_count = {
+                let streak = self
+                    .stall_cancel_streak
+                    .entry(task_id.to_owned())
+                    .and_modify(|s| {
+                        if s.last_status == current_status {
+                            s.count += 1;
+                        } else {
+                            // Durable status progress between strikes — reset.
+                            s.count = 1;
+                            s.last_status = current_status.clone();
+                        }
+                    })
+                    .or_insert_with(|| StallCancelStreak {
+                        count: 1,
+                        last_status: current_status.clone(),
+                    });
+                streak.count
+            };
+
+            if strike_count >= STALL_CANCEL_ESCALATION_THRESHOLD {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session.id,
+                    strike_count,
+                    status = %current_status,
+                    "CoordinatorActor: consecutive stall cancels without status progress — routing to Planner intervention instead of redispatch"
+                );
+                let intervention_reason = format!(
+                    "Task stall-cancelled on {strike_count} consecutive sessions with no durable \
+                     status progress between them (status `{current_status}`). A stall kill \
+                     releases the task straight back into execution without passing through \
+                     `open`, so the reopen-based escalation never saw this loop — each redispatch \
+                     just stalls again and holds the dispatch slot. Decide how to unstick it: \
+                     DECOMPOSE into focused subtasks, RESCOPE/clarify the acceptance criteria and \
+                     re-dispatch, or CLOSE if the durable work on the task branch is already \
+                     sufficient or the task is moot/duplicate."
+                );
+                // Clear the streak so a post-intervention run starts fresh (and a
+                // re-armed intervention is not double-counted).
+                self.stall_cancel_streak.remove(task_id);
+                self.route_loop_guard_planner_intervention(
+                    task_id,
+                    "coordinator",
+                    &intervention_reason,
+                )
+                .await;
+            }
         }
     }
 
