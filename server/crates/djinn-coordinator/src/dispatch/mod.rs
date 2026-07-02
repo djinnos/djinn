@@ -1,5 +1,9 @@
 mod admission;
 mod outcome;
+/// Pure resume-source selector; not wired into the dispatch path yet (see task
+/// 9tun). The API is exported for the follow-up dispatch integration task.
+#[allow(dead_code)]
+pub mod resume_source;
 mod retry;
 pub(crate) mod session_recovery;
 mod task_dispatch;
