@@ -502,6 +502,19 @@ pub struct CurrentEvidenceFindings {
     pub findings: EvidenceFindings,
 }
 
+/// Read-only recovery candidate for proposals still parked on a linked
+/// needs-evidence spike. The coordinator restart path uses this persisted view
+/// to decide whether each linked spike is still open or has reached a terminal
+/// task outcome; lifecycle classification and mutation remain owned by
+/// [`ProposalRepository::persist_terminal_linked_spike_evidence_lifecycle`].
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct LinkedEvidenceSpikeRecoveryCandidate {
+    pub proposal_id: String,
+    pub linked_spike_task_id: String,
+    pub linked_spike_task_status: String,
+    pub linked_spike_task_close_reason: Option<String>,
+}
+
 /// Result of classifying and persisting a terminal linked evidence spike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalLinkedEvidenceSpikeOutcome {
@@ -2243,6 +2256,32 @@ impl ProposalRepository {
             spike_task_id
         )
         .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// List proposals that are still parked on a linked needs-evidence spike,
+    /// along with the current persisted task status/close_reason for that
+    /// linked spike.
+    ///
+    /// This is a read-only substrate for coordinator recovery. It deliberately
+    /// performs no evidence-findings validation and writes no lifecycle rows;
+    /// callers that identify a terminal linked spike must hand the returned
+    /// fields to `persist_terminal_linked_spike_evidence_lifecycle`.
+    pub async fn list_linked_evidence_spike_recovery_candidates(
+        &self,
+    ) -> Result<Vec<LinkedEvidenceSpikeRecoveryCandidate>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as::<_, LinkedEvidenceSpikeRecoveryCandidate>(
+            r#"SELECT p.id AS proposal_id,
+                      p.linked_spike_task_id AS linked_spike_task_id,
+                      t.status AS linked_spike_task_status,
+                      t.close_reason AS linked_spike_task_close_reason
+               FROM proposals p
+               JOIN tasks t ON t.id = p.linked_spike_task_id
+               WHERE p.linked_spike_task_id IS NOT NULL
+               ORDER BY p.created_at, p.id"#,
+        )
+        .fetch_all(self.db.pool())
         .await?)
     }
 
@@ -4349,6 +4388,21 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    async fn set_task_status(
+        db: &Database,
+        task_id: &str,
+        status: &str,
+        close_reason: Option<&str>,
+    ) {
+        sqlx::query("UPDATE tasks SET status = $1, close_reason = $2 WHERE id = $3")
+            .bind(status)
+            .bind(close_reason)
+            .bind(task_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
     }
 
     async fn set_epic_memory_refs(db: &Database, epic_id: &str, refs: Vec<String>) {
@@ -6866,6 +6920,193 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn linked_evidence_spike_recovery_candidates_return_open_and_terminal_task_data() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = insert_project(&db, &format!("svc-redrive-{}", uuid::Uuid::now_v7())).await;
+        let epic = insert_epic(&db, &project, "rd01").await;
+
+        let unlinked = repo
+            .create(create_input("Unlinked recovery candidate"))
+            .await
+            .unwrap();
+
+        let open = repo
+            .create(create_input("Open recovery candidate"))
+            .await
+            .unwrap();
+        let open_task = insert_task(&db, &project, &epic, "rd-open").await;
+        repo.set_structured_needs_evidence_spike(
+            &open.id,
+            &open_task,
+            &sample_needs_evidence_claim(1, 1),
+        )
+        .await
+        .unwrap();
+
+        let running = repo
+            .create(create_input("Running recovery candidate"))
+            .await
+            .unwrap();
+        let running_task = insert_task(&db, &project, &epic, "rd-run").await;
+        set_task_status(&db, &running_task, "in_progress", None).await;
+        repo.set_structured_needs_evidence_spike(
+            &running.id,
+            &running_task,
+            &sample_needs_evidence_claim(1, 1),
+        )
+        .await
+        .unwrap();
+
+        let completed = repo
+            .create(create_input("Completed recovery candidate"))
+            .await
+            .unwrap();
+        let completed_task = insert_task(&db, &project, &epic, "rd-done").await;
+        set_task_status(&db, &completed_task, "closed", Some("completed")).await;
+        repo.set_structured_needs_evidence_spike(
+            &completed.id,
+            &completed_task,
+            &sample_needs_evidence_claim(1, 1),
+        )
+        .await
+        .unwrap();
+
+        let candidates = repo
+            .list_linked_evidence_spike_recovery_candidates()
+            .await
+            .unwrap();
+
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.proposal_id == unlinked.id),
+            "proposals without linked spikes must be excluded"
+        );
+        let open_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.proposal_id == open.id)
+            .expect("open linked spike candidate must be returned");
+        assert_eq!(open_candidate.linked_spike_task_id, open_task);
+        assert_eq!(open_candidate.linked_spike_task_status, "open");
+        assert_eq!(open_candidate.linked_spike_task_close_reason, None);
+
+        let running_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.proposal_id == running.id)
+            .expect("running linked spike candidate must be returned");
+        assert_eq!(running_candidate.linked_spike_task_id, running_task);
+        assert_eq!(running_candidate.linked_spike_task_status, "in_progress");
+        assert_eq!(running_candidate.linked_spike_task_close_reason, None);
+
+        let completed_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.proposal_id == completed.id)
+            .expect("completed linked spike candidate must be returned");
+        assert_eq!(completed_candidate.linked_spike_task_id, completed_task);
+        assert_eq!(completed_candidate.linked_spike_task_status, "closed");
+        assert_eq!(
+            completed_candidate
+                .linked_spike_task_close_reason
+                .as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn linked_evidence_spike_recovery_candidates_return_failed_cancelled_and_force_closed_stably()
+     {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project = insert_project(
+            &db,
+            &format!("svc-redrive-terminal-{}", uuid::Uuid::now_v7()),
+        )
+        .await;
+        let epic = insert_epic(&db, &project, "rt01").await;
+
+        let mut expected = Vec::new();
+        for (title, short_id, status, close_reason) in [
+            (
+                "Failed recovery candidate",
+                "rt-fail",
+                "failed",
+                Some("failed"),
+            ),
+            (
+                "Force closed recovery candidate",
+                "rt-force",
+                "closed",
+                Some("force_closed"),
+            ),
+            (
+                "Cancelled recovery candidate",
+                "rt-cancel",
+                "cancelled",
+                Some("cancelled"),
+            ),
+        ] {
+            let proposal = repo.create(create_input(title)).await.unwrap();
+            let task_id = insert_task(&db, &project, &epic, short_id).await;
+            set_task_status(&db, &task_id, status, close_reason).await;
+            repo.set_structured_needs_evidence_spike(
+                &proposal.id,
+                &task_id,
+                &sample_needs_evidence_claim(1, 1),
+            )
+            .await
+            .unwrap();
+            expected.push((
+                proposal.id,
+                task_id,
+                status.to_owned(),
+                close_reason.map(str::to_owned),
+            ));
+        }
+
+        let before_proposal_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposals")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let before_task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let first = repo
+            .list_linked_evidence_spike_recovery_candidates()
+            .await
+            .unwrap();
+        let second = repo
+            .list_linked_evidence_spike_recovery_candidates()
+            .await
+            .unwrap();
+        assert_eq!(
+            first, second,
+            "candidate lookup must be stable and read-only"
+        );
+        let after_proposal_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM proposals")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let after_task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(before_proposal_count, after_proposal_count);
+        assert_eq!(before_task_count, after_task_count);
+
+        for (proposal_id, task_id, status, close_reason) in expected {
+            let candidate = first
+                .iter()
+                .find(|candidate| candidate.proposal_id == proposal_id)
+                .expect("terminal-ish linked spike candidate must be returned");
+            assert_eq!(candidate.linked_spike_task_id, task_id);
+            assert_eq!(candidate.linked_spike_task_status, status);
+            assert_eq!(candidate.linked_spike_task_close_reason, close_reason);
+        }
     }
 
     fn count_evidence_lifecycle_events(revisions: &[ProposalRevision], kind: &str) -> usize {
