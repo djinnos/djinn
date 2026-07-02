@@ -764,7 +764,116 @@ impl Conversation {
 
         (instructions, input_items)
     }
+
+    // ─── Dangling tool-call sanitization ─────────────────────────────────────
+
+    /// Return a view of this conversation with a synthesized tool result for
+    /// every assistant `ToolUse` whose `tool_use_id` has no matching
+    /// `ToolResult` anywhere in the history.
+    ///
+    /// Strict OpenAI-compatible and Anthropic APIs reject a request whose
+    /// assistant `tool_calls` / `tool_use` message is not answered by a tool
+    /// message for every `tool_call_id` (HTTP 400 `invalid_request_error`). A
+    /// session cancelled or killed *between* emitting the assistant tool-call
+    /// message and persisting the corresponding tool results leaves such
+    /// dangling ids at the tail of the stored transcript. Replaying that history
+    /// verbatim on resume/redispatch 400s the whole request, so the session
+    /// fails instantly on every retry and the task wedges in dispatch backoff.
+    ///
+    /// Synthesizing a placeholder result — rather than dropping the assistant
+    /// turn — preserves the model's context of what it was doing while
+    /// satisfying the tool-call/tool-result pairing invariant. Because this
+    /// operates on the provider-agnostic [`Conversation`], a single pass repairs
+    /// every wire format (OpenAI chat, OpenAI Responses, Anthropic, Google);
+    /// the downstream serializers just see a well-formed history.
+    ///
+    /// The repaired history is a transient view used only for request
+    /// serialization: this borrows the receiver unchanged when the transcript is
+    /// already well-formed, and never mutates stored history.
+    pub fn with_synthesized_tool_results(&self) -> std::borrow::Cow<'_, Conversation> {
+        use std::collections::HashSet;
+
+        // Every tool_use_id that already has a result somewhere in the history.
+        let mut answered: HashSet<&str> = HashSet::new();
+        for msg in &self.messages {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    answered.insert(tool_use_id.as_str());
+                }
+            }
+        }
+
+        let is_dangling = |block: &ContentBlock| matches!(block, ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()));
+        let has_dangling = self
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.content.iter().any(is_dangling));
+        if !has_dangling {
+            return std::borrow::Cow::Borrowed(self);
+        }
+
+        let mut repaired: Vec<Message> = Vec::with_capacity(self.messages.len() + 1);
+        let mut i = 0;
+        while i < self.messages.len() {
+            let msg = &self.messages[i];
+            repaired.push(msg.clone());
+
+            if msg.role == Role::Assistant {
+                let synth_blocks: Vec<ContentBlock> = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()) => {
+                            Some(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: vec![ContentBlock::text(INTERRUPTED_TOOL_RESULT)],
+                                is_error: true,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                if !synth_blocks.is_empty() {
+                    // Merge the synthesized results into the immediately
+                    // following user message when one exists (a partial-result
+                    // turn, or a resume nudge). This preserves Anthropic's
+                    // strict user/assistant alternation — two consecutive user
+                    // messages would themselves be rejected. Tool results lead
+                    // the user turn, as Anthropic requires. Otherwise insert a
+                    // fresh user turn carrying only the synthesized results.
+                    match self.messages.get(i + 1) {
+                        Some(next) if next.role == Role::User => {
+                            let mut merged = next.clone();
+                            let mut content = synth_blocks;
+                            content.extend(merged.content);
+                            merged.content = content;
+                            repaired.push(merged);
+                            i += 2;
+                            continue;
+                        }
+                        _ => {
+                            repaired.push(Message {
+                                role: Role::User,
+                                content: synth_blocks,
+                                metadata: None,
+                            });
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        std::borrow::Cow::Owned(Conversation { messages: repaired })
+    }
 }
+
+/// Placeholder content synthesized for a tool call whose result was never
+/// persisted because the session was cancelled/killed mid-tool-execution.
+/// See [`Conversation::with_synthesized_tool_results`].
+const INTERRUPTED_TOOL_RESULT: &str = "[tool execution interrupted before completion — the \
+     session was cancelled; re-run the tool if the result is still needed]";
 
 // ─── Anthropic content-block helpers ─────────────────────────────────────────
 
@@ -1568,5 +1677,218 @@ Second rule."
         let mut c = Conversation::new();
         c.push(Message::user("This is a test message."));
         assert!(c.token_estimate() > 0);
+    }
+
+    // ── Dangling tool-call sanitization ───────────────────────────────────────
+
+    fn assistant_tool_use(id: &str, name: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: json!({}),
+            }],
+            metadata: None,
+        }
+    }
+
+    fn user_tool_result(id: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: vec![ContentBlock::text("ok")],
+                is_error: false,
+            }],
+            metadata: None,
+        }
+    }
+
+    /// Collect `(tool_use_id, is_synthesized)` for every `ToolResult` block.
+    fn tool_results(c: &Conversation) -> Vec<(String, bool)> {
+        c.messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
+                    let synth = content
+                        .iter()
+                        .filter_map(|c| c.as_text())
+                        .any(|t| t.contains("tool execution interrupted"));
+                    Some((tool_use_id.clone(), synth))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sanitize_dangling_tail_synthesizes_result() {
+        // Transcript ending in an unanswered tool call (session killed mid-tool).
+        let convo = Conversation {
+            messages: vec![
+                Message::user("do it"),
+                assistant_tool_use("read:37", "read"),
+            ],
+        };
+
+        let repaired = convo.with_synthesized_tool_results();
+        assert!(matches!(repaired, std::borrow::Cow::Owned(_)));
+
+        // A synthesized result now answers the dangling id...
+        let results = tool_results(&repaired);
+        assert_eq!(results, vec![("read:37".to_string(), true)]);
+
+        // ...carried by a user turn immediately after the assistant tool call,
+        // so the pairing invariant holds for every wire format.
+        let msgs = &repaired.messages;
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(msgs[2].role, Role::User);
+        assert!(matches!(
+            msgs[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
+
+        // The OpenAI chat serialization is now well-formed: the tool_calls
+        // message is followed by a tool message for its id.
+        let openai = repaired.to_openai_messages();
+        let tool_msg = openai
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("a tool message answers the call");
+        assert_eq!(tool_msg["tool_call_id"], "read:37");
+    }
+
+    #[test]
+    fn sanitize_leaves_well_formed_history_untouched() {
+        let convo = Conversation {
+            messages: vec![
+                Message::user("do it"),
+                assistant_tool_use("call_1", "read"),
+                user_tool_result("call_1"),
+                Message::assistant("done"),
+            ],
+        };
+
+        let repaired = convo.with_synthesized_tool_results();
+        // Borrowed (no allocation) — nothing to repair.
+        assert!(matches!(repaired, std::borrow::Cow::Borrowed(_)));
+        // No synthesized results were added.
+        assert!(tool_results(&repaired).iter().all(|(_, synth)| !synth));
+    }
+
+    #[test]
+    fn sanitize_multiple_dangling_ids_in_one_message() {
+        let convo = Conversation {
+            messages: vec![
+                Message::user("do them"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::text("running two tools"),
+                        ContentBlock::ToolUse {
+                            id: "code_search:24".into(),
+                            name: "code_search".into(),
+                            input: json!({}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "read:37".into(),
+                            name: "read".into(),
+                            input: json!({}),
+                        },
+                    ],
+                    metadata: None,
+                },
+            ],
+        };
+
+        let repaired = convo.with_synthesized_tool_results();
+        let mut results = tool_results(&repaired);
+        results.sort();
+        assert_eq!(
+            results,
+            vec![
+                ("code_search:24".to_string(), true),
+                ("read:37".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_partial_results_only_fills_missing() {
+        // Assistant issued two calls; only one result was persisted before the
+        // kill. The following user turn already carries the answered result.
+        let convo = Conversation {
+            messages: vec![
+                Message::user("do them"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "answered".into(),
+                            name: "read".into(),
+                            input: json!({}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "dangling".into(),
+                            name: "code_search".into(),
+                            input: json!({}),
+                        },
+                    ],
+                    metadata: None,
+                },
+                user_tool_result("answered"),
+            ],
+        };
+
+        let repaired = convo.with_synthesized_tool_results();
+        let mut results = tool_results(&repaired);
+        results.sort();
+        assert_eq!(
+            results,
+            vec![
+                ("answered".to_string(), false),
+                ("dangling".to_string(), true),
+            ]
+        );
+        // Merged into the existing user turn — no extra message inserted, so
+        // Anthropic's user/assistant alternation is preserved.
+        assert_eq!(repaired.messages.len(), 3);
+        assert_eq!(repaired.messages[2].role, Role::User);
+    }
+
+    #[test]
+    fn sanitize_merges_into_following_user_turn_for_anthropic() {
+        // Dangling call followed by a resume nudge (plain user text). The synth
+        // result must fold into that same user turn, not create a second
+        // consecutive user message (which Anthropic rejects).
+        let convo = Conversation {
+            messages: vec![
+                assistant_tool_use("read:37", "read"),
+                Message::user("Continue with the task."),
+            ],
+        };
+
+        let repaired = convo.with_synthesized_tool_results();
+        assert_eq!(repaired.messages.len(), 2);
+        assert_eq!(repaired.messages[0].role, Role::Assistant);
+        assert_eq!(repaired.messages[1].role, Role::User);
+        // Tool result leads the user turn (Anthropic requirement), text follows.
+        assert!(matches!(
+            repaired.messages[1].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
+
+        // Anthropic serialization: exactly one user message, tool_result first.
+        let (_system, msgs) = repaired.to_anthropic_messages();
+        let user_turns: Vec<_> = msgs.iter().filter(|m| m["role"] == "user").collect();
+        assert_eq!(user_turns.len(), 1);
+        assert_eq!(user_turns[0]["content"][0]["type"], "tool_result");
     }
 }

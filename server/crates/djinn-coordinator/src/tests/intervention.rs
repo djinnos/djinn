@@ -2075,3 +2075,167 @@ async fn normal_blocker_release_via_transition_fires_unblocked_event() {
         "source must be ready after the normal blocker is closed via transition(Close)"
     );
 }
+
+// ── Trigger D: provider-error failure-streak escalation ───────────────────────
+
+/// The escalation thresholds form one family: the stall-cancel second strike
+/// (2) and the provider-error failure strike (3) are distinct, and the failure
+/// threshold sits one rung higher so the cooldown ladder absorbs a transient
+/// provider blip at streaks 1-2 before the Planner is involved.
+#[test]
+fn failure_and_stall_escalation_thresholds_are_distinct() {
+    assert_eq!(
+        STALL_CANCEL_ESCALATION_THRESHOLD, 2,
+        "stall-cancel second-strike threshold is unchanged (PR #1429)"
+    );
+    assert_eq!(
+        FAILURE_ESCALATION_THRESHOLD, 3,
+        "provider-error failure escalation fires on the third consecutive strike"
+    );
+    assert!(
+        FAILURE_ESCALATION_THRESHOLD > STALL_CANCEL_ESCALATION_THRESHOLD,
+        "failure streak escalates one rung later than the stall streak"
+    );
+}
+
+/// Three consecutive provider-error FAILED sessions without durable status
+/// progress route the task to a Planner intervention (the second-strike PARK
+/// path here, since the task is already at MAX_PLANNER_INTERVENTIONS) instead
+/// of another backoff+redispatch cycle. The first two strikes only advance the
+/// streak; the third escalates and clears the task's backoff state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn third_provider_failure_without_progress_routes_to_planner() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // Seed stale backoff state to prove the escalation clears it.
+    actor
+        .dispatch_failure_streak
+        .insert(task.id.clone(), MAX_DISPATCH_FAILURES - 1);
+    actor.dispatch_cooldowns.insert(
+        task.id.clone(),
+        StdInstant::now() + std::time::Duration::from_secs(300),
+    );
+
+    // Strike 1 and 2: below threshold, no routing, streak advances.
+    for expected_count in 1..FAILURE_ESCALATION_THRESHOLD {
+        let routed = actor
+            .maybe_escalate_provider_failure_streak(&task, "worker")
+            .await;
+        assert!(
+            !routed,
+            "strike {expected_count} is below FAILURE_ESCALATION_THRESHOLD and must not escalate"
+        );
+        assert_eq!(
+            actor.provider_failure_streak.get(&task.id).map(|s| s.count),
+            Some(expected_count),
+            "streak advances by one per consecutive failure"
+        );
+    }
+
+    // Strike 3: escalates.
+    let routed = actor
+        .maybe_escalate_provider_failure_streak(&task, "worker")
+        .await;
+    assert!(
+        routed,
+        "the third consecutive provider-error failure routes to a Planner intervention"
+    );
+
+    // The task is HELD (parked open + blocked on a human-review remediation),
+    // the second-strike behavior of the shared loop-guard machinery.
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        parked.status, "open",
+        "escalated task is parked, not redispatched"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "escalation blocks the task on a single human-review remediation"
+    );
+
+    // Escalation clears the streak and the stale backoff state.
+    assert!(
+        !actor.provider_failure_streak.contains_key(&task.id),
+        "the streak is cleared on escalation so a post-intervention run starts fresh"
+    );
+    assert!(
+        !actor.dispatch_failure_streak.contains_key(&task.id),
+        "escalation clears the terminal dispatch-failure streak"
+    );
+    assert!(
+        !actor.dispatch_cooldowns.contains_key(&task.id),
+        "escalation clears the dispatch cooldown"
+    );
+}
+
+/// Durable task-status progress between strikes resets the failure streak, so a
+/// task that keeps advancing never escalates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_progress_resets_provider_failure_streak() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Two consecutive failures at the same status → streak reaches 2.
+    for _ in 0..2 {
+        assert!(
+            !actor
+                .maybe_escalate_provider_failure_streak(&task, "worker")
+                .await
+        );
+    }
+    assert_eq!(
+        actor.provider_failure_streak.get(&task.id).map(|s| s.count),
+        Some(2),
+        "two same-status failures accumulate a streak of two"
+    );
+
+    // The task then makes durable progress (status advances). The next failure
+    // observes a different status and resets the streak to one — no escalation.
+    let mut progressed = task.clone();
+    progressed.status = "in_progress".to_string();
+    let routed = actor
+        .maybe_escalate_provider_failure_streak(&progressed, "worker")
+        .await;
+    assert!(!routed, "a failure after status progress must not escalate");
+    assert_eq!(
+        actor.provider_failure_streak.get(&task.id).map(|s| s.count),
+        Some(1),
+        "durable status progress between strikes resets the streak to one"
+    );
+}
+
+/// A successful settlement (`clear_planned_dispatch_completion`) drops the
+/// provider-error failure streak so a recovered task starts fresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planned_completion_clears_provider_failure_streak() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    assert!(
+        !actor
+            .maybe_escalate_provider_failure_streak(&task, "worker")
+            .await
+    );
+    assert!(actor.provider_failure_streak.contains_key(&task.id));
+
+    actor
+        .clear_planned_dispatch_completion(&task.id, "test_planned_completion_clear")
+        .await;
+    assert!(
+        !actor.provider_failure_streak.contains_key(&task.id),
+        "a planned completion clears the provider-error failure streak"
+    );
+}

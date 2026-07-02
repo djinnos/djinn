@@ -490,6 +490,7 @@ impl CoordinatorActor {
         // continuation dispatch so they cannot advance Trigger-B or terminal
         // close accounting during recovery/refactor paths.
         self.dispatch_failure_streak.remove(task_id);
+        self.provider_failure_streak.remove(task_id);
         self.dispatch_cooldowns.remove(task_id);
         self.last_dispatched.remove(task_id);
         self.inflight_dispatches.remove(task_id);
@@ -1185,6 +1186,38 @@ impl CoordinatorActor {
                         // fails over; only the terminal-close counter is spared.
                         let throttle = provider_failure.is_some_and(|f| f.throttle);
 
+                        // Second-strike Planner escalation for provider-error
+                        // FAILED sessions. A genuine (non-throttle) typed
+                        // provider failure that recurs for the same task is the
+                        // poisoned-transcript-400 / dead-credential / persistent
+                        // server-fault class: redispatch reproduces it
+                        // identically, so riding the backoff ladder toward the
+                        // streak-10 terminal close just burns attempts with
+                        // nobody deciding what to do. The cycling gate (trigger
+                        // B) below excludes provider faults by design, and the
+                        // stall-cancel escalation only covers coordinator stall
+                        // kills — so without this the failure has no Planner
+                        // path. Count consecutive such failures (reset when the
+                        // task's status advances, mirroring the stall streak)
+                        // and hand the task to the Planner on the
+                        // FAILURE_ESCALATION_THRESHOLD-th strike instead of
+                        // another doomed redispatch.
+                        if provider_failure.is_some()
+                            && !throttle
+                            && self
+                                .maybe_escalate_provider_failure_streak(&task, role)
+                                .await
+                        {
+                            // Bump the local cap to reflect the planner session
+                            // the intervention just dispatched (same as trigger
+                            // B and the stuck-task path).
+                            self.bump_local_cap_for_last_planner_admission(
+                                &mut running_by_user_model,
+                            )
+                            .await;
+                            continue;
+                        }
+
                         // Trigger B: the task keeps reappearing for the SAME
                         // role with no typed provider failure to blame — its
                         // runs complete but the task never converges (the
@@ -1206,6 +1239,7 @@ impl CoordinatorActor {
                             .await
                         {
                             self.dispatch_failure_streak.remove(&task.id);
+                            self.provider_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
                             self.clear_durable_dispatch_backoff_state(
                                 &task.id,
@@ -1236,6 +1270,7 @@ impl CoordinatorActor {
                             )
                             .await;
                             self.dispatch_failure_streak.remove(&task.id);
+                            self.provider_failure_streak.remove(&task.id);
                             self.dispatch_cooldowns.remove(&task.id);
                             self.inflight_dispatches.remove(&task.id);
                             self.clear_durable_dispatch_backoff_state(
@@ -1309,6 +1344,7 @@ impl CoordinatorActor {
                     }
                     Some(ReappearingDispatch::RoleTransition) | None => {
                         self.dispatch_failure_streak.remove(&task.id);
+                        self.provider_failure_streak.remove(&task.id);
                         self.dispatch_cooldowns.remove(&task.id);
                         self.clear_durable_dispatch_backoff_state(
                             &task.id,
@@ -2025,6 +2061,7 @@ mod inflight_ledger_tests {
             stall_killed: HashSet::new(),
             stall_progress_watermark: HashMap::new(),
             stall_cancel_streak: HashMap::new(),
+            provider_failure_streak: HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
