@@ -1,8 +1,16 @@
 // Create/read/import/export/list CRUD tools for the global Proposals layer.
+//
+// This submodule owns the read/list/create/import/export surface plus the
+// cohesive list-summary shaping used by `proposal_list`. The composed-gate
+// helpers (`evaluate_composed_gate`, `build_gate_status`), the small response
+// constructors (`err_single`), and the shared model helpers
+// (`graduated_epic_models`, `parse_ac_items`, `proposal_not_found_error`,
+// `target_models`) stay in the parent `mod.rs` as `pub(super)` and are
+// re-used here via `super::`.
 
 use std::borrow::Cow;
 
-use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool};
+use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -17,19 +25,22 @@ use crate::tools::proposal_blocks::{
 };
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalListSummary, ProposalModel, ProposalShowResponse,
-    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel,
+    ProposalSignoffModel, ProposalSingleResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
-use crate::tools::proposal_tools::{
-    err_show, err_single, graduated_epic_models, ToSnakeCase,
-};
 use crate::tools::validation::{
     validate_ac_count, validate_design, validate_limit, validate_mdx_body, validate_offset,
     validate_proposal_create_status, validate_sort, validate_title,
 };
 use djinn_db::{ProjectRepository, ProposalListQuery, ProposalListSummaryRow, ProposalRepository};
 
-use crate::tools::proposal_tools::mdx::{parse_proposal_mdx, split_proposal_mdx_frontmatter};
+use super::mdx::{parse_proposal_mdx, split_proposal_mdx_frontmatter};
+
+// Re-import shared helpers kept in `mod.rs` as `pub(super)`.
+use super::{
+    build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
+    graduated_epic_models, parse_ac_items, proposal_not_found_error, target_models,
+};
 
 // ── List response (NamedListResponse boilerplate, mirrors EpicListResponse) ──
 
@@ -76,31 +87,56 @@ impl schemars::JsonSchema for ProposalListResponse {
     }
 }
 
-pub(crate) fn proposal_not_found_error(id: &str) -> String {
-    format!("proposal not found: {id}")
+// ── List-summary helpers (used only by `proposal_list`) ──────────────────────
+
+/// Whether a proposal status is non-terminal (still moving through scoping /
+/// review). Only these get a batched list summary — terminal proposals never
+/// show tribunal/gate chips. Mirrors the statuses the composed gate cares about
+/// (`draft` and `in_review`).
+fn proposal_status_is_non_terminal(status: &str) -> bool {
+    matches!(status, "draft" | "in_review")
 }
 
-/// List a proposal's targets and resolve each project id to an `owner/repo`
-/// slug + name for display chips.
-pub(crate) async fn target_models(
-    proposal_repo: &ProposalRepository,
-    project_repo: &ProjectRepository,
-    proposal_id: &str,
-) -> Result<Vec<ProposalTargetModel>, String> {
-    let targets = proposal_repo
-        .targets(proposal_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(targets.len());
-    for t in &targets {
-        let mut m = ProposalTargetModel::from(t);
-        if let Ok(Some(p)) = project_repo.get(&t.project_id).await {
-            m.project_path = Some(format!("{}/{}", p.github_owner, p.github_repo));
-            m.project_name = Some(p.name);
-        }
-        out.push(m);
+/// Heuristic for a needs-work judge verdict — kept identical to the one in
+/// `build_gate_status` so the list and the detail gate agree.
+fn judge_verdict_is_needs_work(verdict_body: &str) -> bool {
+    let lower = verdict_body.to_lowercase();
+    lower.contains("needs-work") || lower.contains("needs_work") || lower.contains("needs work")
+}
+
+/// Compose the list-row tribunal/readiness summary from a proposal row plus its
+/// batched raw facts. Deterministic and query-free (all data is already loaded):
+/// runs the in-memory DoR evaluator and approximates the composed gate.
+fn build_list_summary(
+    proposal: &djinn_core::models::proposal::Proposal,
+    raw: &ProposalListSummaryRow,
+) -> ProposalListSummary {
+    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
+    let dor_ready =
+        evaluate_proposal_readiness(&proposal.body, &ac_items, raw.target_count as usize).ready;
+
+    let needs_evidence = proposal.linked_spike_task_id.is_some();
+    let judge_needs_work = raw
+        .latest_judge_verdict_body
+        .as_deref()
+        .map(judge_verdict_is_needs_work)
+        .unwrap_or(false);
+
+    // Composed-gate approximation (no override lifecycle handling — see
+    // `ProposalListSummary::gate_ready` docs; the authoritative check with
+    // human-override suppression lives in `build_gate_status`).
+    let gate_ready =
+        dor_ready && !judge_needs_work && raw.unresolved_blocking_count == 0 && !needs_evidence;
+
+    ProposalListSummary {
+        refinement_active: raw.refinement_active,
+        awaiting_review: raw.awaiting_review,
+        current_round: raw.current_round,
+        needs_evidence,
+        dor_ready,
+        gate_ready,
+        unresolved_blocking_count: raw.unresolved_blocking_count,
     }
-    Ok(out)
 }
 
 // ── Param structs ────────────────────────────────────────────────────────────
@@ -155,427 +191,9 @@ pub struct ProposalListParams {
     pub offset: Option<i64>,
 }
 
-// ── Readiness gate helpers ──────────────────────────────────────────────────
+// ── Tool router: create / import / export / show / list ──────────────────────
 
-/// Parse a stored acceptance-criteria JSON string into `AcceptanceCriterionItem`
-/// values for the readiness evaluator.  Returns an empty vec when the JSON is
-/// missing, empty, or unparseable.
-pub(crate) fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
-    serde_json::from_str::<Vec<AcceptanceCriterionItem>>(ac_json).unwrap_or_default()
-}
-
-/// Whether a proposal status is non-terminal (still moving through scoping /
-/// review). Only these get a batched list summary — terminal proposals never
-/// show tribunal/gate chips. Mirrors the statuses the composed gate cares about
-/// (`draft` and `in_review`).
-pub(crate) fn proposal_status_is_non_terminal(status: &str) -> bool {
-    matches!(status, "draft" | "in_review")
-}
-
-/// Heuristic for a needs-work judge verdict — kept identical to the one in
-/// `build_gate_status` so the list and the detail gate agree.
-pub(crate) fn judge_verdict_is_needs_work(verdict_body: &str) -> bool {
-    let lower = verdict_body.to_lowercase();
-    lower.contains("needs-work") || lower.contains("needs_work") || lower.contains("needs work")
-}
-
-/// Compose the list-row tribunal/readiness summary from a proposal row plus its
-/// batched raw facts. Deterministic and query-free (all data is already loaded):
-/// runs the in-memory DoR evaluator and approximates the composed gate.
-pub(crate) fn build_list_summary(
-    proposal: &djinn_core::models::proposal::Proposal,
-    raw: &ProposalListSummaryRow,
-) -> ProposalListSummary {
-    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
-    let dor_ready =
-        evaluate_proposal_readiness(&proposal.body, &ac_items, raw.target_count as usize).ready;
-
-    let needs_evidence = proposal.linked_spike_task_id.is_some();
-    let judge_needs_work = raw
-        .latest_judge_verdict_body
-        .as_deref()
-        .map(judge_verdict_is_needs_work)
-        .unwrap_or(false);
-
-    // Composed-gate approximation (no override lifecycle handling — see
-    // `ProposalListSummary::gate_ready` docs; the authoritative check with
-    // human-override suppression lives in `build_gate_status`).
-    let gate_ready =
-        dor_ready && !judge_needs_work && raw.unresolved_blocking_count == 0 && !needs_evidence;
-
-    ProposalListSummary {
-        refinement_active: raw.refinement_active,
-        awaiting_review: raw.awaiting_review,
-        current_round: raw.current_round,
-        needs_evidence,
-        dor_ready,
-        gate_ready,
-        unresolved_blocking_count: raw.unresolved_blocking_count,
-    }
-}
-
-/// Convert a `ProposalReadinessResult` into a user-facing error string,
-/// prepending a short preamble so callers can return it directly as a tool
-/// error.
-pub(crate) fn format_readiness_error(
-    result: &crate::tools::proposal_readiness::ProposalReadinessResult,
-) -> Option<String> {
-    result
-        .to_error_string()
-        .map(|details| format!("proposal not ready for review: {details}"))
-}
-
-// ── Composed gate: DoR + tribunal (task cuzf) ─────────────────────────────
-
-/// Result of the composed tribunal gate check.
-struct ComposedGateResult {
-    failures: Vec<String>,
-}
-
-impl ComposedGateResult {
-    fn to_error_string(&self) -> Option<String> {
-        if self.failures.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "proposal not ready for review: {}",
-            self.failures.join("; ")
-        ))
-    }
-}
-
-async fn current_explicit_verdict_override(
-    repo: &ProposalRepository,
-    proposal: &djinn_core::models::proposal::Proposal,
-) -> bool {
-    match repo.latest_verdict_override(&proposal.id).await {
-        Ok(Some((override_on_seq, _))) => override_on_seq == proposal.latest_revision_seq,
-        _ => false,
-    }
-}
-
-fn revision_metadata_is_human_accept(event_metadata: Option<&str>) -> bool {
-    let Some(event_metadata) = event_metadata else {
-        return false;
-    };
-    let Ok(meta) = serde_json::from_str::<serde_json::Value>(event_metadata) else {
-        return false;
-    };
-
-    meta.get("reason_tag")
-        .or_else(|| meta.get("stop_reason"))
-        .and_then(|v| v.as_str())
-        == Some("human_accepted")
-}
-
-async fn current_human_accept_authority(
-    repo: &ProposalRepository,
-    proposal: &djinn_core::models::proposal::Proposal,
-) -> bool {
-    match repo.revisions(&proposal.id).await {
-        Ok(revisions) => revisions
-            .iter()
-            .rev()
-            .find(|revision| {
-                revision.event_kind == "refinement_stop"
-                    && revision.seq == proposal.latest_revision_seq
-            })
-            .is_some_and(|revision| {
-                revision_metadata_is_human_accept(revision.event_metadata.as_deref())
-            }),
-        Err(_) => false,
-    }
-}
-
-async fn current_human_gate_authority(
-    repo: &ProposalRepository,
-    proposal: &djinn_core::models::proposal::Proposal,
-) -> bool {
-    current_explicit_verdict_override(repo, proposal).await
-        || current_human_accept_authority(repo, proposal).await
-}
-
-/// Run the composed gate: deterministic DoR check + tribunal conditions.
-///
-/// Returns `ComposedGateResult` with all failures collected. Callers
-/// (proposal_create, proposal_update, proposal_signoff, proposal_graduate)
-/// convert failures into tool error responses.
-pub(crate) async fn evaluate_composed_gate(
-    repo: &ProposalRepository,
-    proposal: &djinn_core::models::proposal::Proposal,
-    body: &str,
-    ac_json: &str,
-    target_count: usize,
-) -> ComposedGateResult {
-    let mut failures: Vec<String> = Vec::new();
-
-    // 1. Deterministic DoR check (existing evaluator, reused not duplicated).
-    let ac_items = parse_ac_items(ac_json);
-    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
-    let readiness_error = format_readiness_error(&readiness);
-
-    // Consult current human authority before deciding whether deterministic
-    // readiness failures block. A current explicit override or human acceptance
-    // is scoped to the latest revision only; stale lifecycle rows do not apply.
-    let human_authority_is_current = current_human_gate_authority(repo, proposal).await;
-    if let Some(err) = readiness_error
-        && !human_authority_is_current
-    {
-        failures.push(err);
-        // Preserve the historical no-authority DoR blocking behavior: DoR-only
-        // failures stop the gate before tribunal diagnostics are appended.
-        return ComposedGateResult { failures };
-    }
-
-    // 2. Tribunal conditions.
-    let proposal_id = &proposal.id;
-
-    // 2a. Check for a current explicit human override first — it gates whether
-    // judge-verdict blocking entries and needs-work verdicts are enforced.
-    let override_is_current = current_explicit_verdict_override(repo, proposal).await;
-
-    // 2b. Unresolved blocking debate-trail entries.
-    // Judge verdict rows are excluded at the query level — verdicts gate solely
-    // through the latest-verdict channel below (2c), so they must not also count
-    // as unresolved blocking rows (a stale reject verdict superseded by a later
-    // approve verdict has nothing that resolves it, and would block forever).
-    match repo
-        .list_unresolved_blocking_debate_entries(proposal_id)
-        .await
-    {
-        Ok(entries) => {
-            if !entries.is_empty() {
-                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
-                failures.push(format!(
-                    "unresolved blocking debate entries: {}",
-                    ids.join(", ")
-                ));
-            }
-        }
-        Err(e) => {
-            failures.push(format!("failed to check debate trail: {e}"));
-        }
-    }
-
-    // 2c. Latest judge verdict.
-    match repo.latest_judge_verdict(proposal_id).await {
-        Ok(Some(verdict)) => {
-            let verdict_lower = verdict.body.to_lowercase();
-            // A "needs-work" verdict blocks unless overridden.
-            if (verdict_lower.contains("needs-work")
-                || verdict_lower.contains("needs_work")
-                || verdict_lower.contains("needs work"))
-                && !override_is_current
-            {
-                failures.push(format!(
-                    "judge returned needs-work (verdict {}); no current human override",
-                    verdict.id
-                ));
-            }
-        }
-        Err(e) => {
-            failures.push(format!("failed to check judge verdict: {e}"));
-        }
-        _ => {}
-    }
-
-    // 2d. Needs-evidence spike parking.
-    match repo.has_open_needs_evidence_spike(proposal_id).await {
-        Ok(true) => {
-            let claim = proposal
-                .needs_evidence_claim
-                .as_deref()
-                .unwrap_or("unspecified");
-            let spike_id = proposal
-                .linked_spike_task_id
-                .as_deref()
-                .unwrap_or("unknown");
-            failures.push(format!(
-                "proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
-            ));
-        }
-        Err(e) => {
-            failures.push(format!("failed to check needs-evidence spike: {e}"));
-        }
-        _ => {}
-    }
-
-    ComposedGateResult { failures }
-}
-
-/// Build a structured [`ProposalGateStatusModel`] for `proposal_show`.
-///
-/// Collects DoR failures, tribunal conditions, and human-readable explanations
-/// so the UI can render readiness without recomputing it client-side.
-pub(crate) async fn build_gate_status(
-    repo: &ProposalRepository,
-    proposal: &djinn_core::models::proposal::Proposal,
-    body: &str,
-    ac_json: &str,
-    target_count: usize,
-) -> crate::tools::proposal_ops::ProposalGateStatusModel {
-    use crate::tools::proposal_ops::{GateFailureModel, ProposalGateStatusModel};
-
-    // 1. Deterministic DoR
-    let ac_items = parse_ac_items(ac_json);
-    let readiness = evaluate_proposal_readiness(body, &ac_items, target_count);
-    let dor_failures: Vec<GateFailureModel> = readiness
-        .failures
-        .iter()
-        .map(|f| {
-            let message = match &f.detail {
-                crate::tools::proposal_readiness::ReadinessFailureDetail::MissingSection {
-                    check_name,
-                } => format!("Missing required coverage: {check_name}"),
-                crate::tools::proposal_readiness::ReadinessFailureDetail::Generic { message } => {
-                    message.clone()
-                }
-            };
-            GateFailureModel {
-                check: format!("{:?}", f.check).to_snake_case(),
-                message,
-            }
-        })
-        .collect();
-    let dor_ready = readiness.ready;
-
-    // 2. Tribunal conditions
-    let proposal_id = &proposal.id;
-    let mut blocked_explanations: Vec<String> = Vec::new();
-
-    // 2a. Human authority checks. Current human gate authority (either an
-    // explicit verdict override or a human-accepted refinement stop on the
-    // latest revision) suppresses deterministic DoR false-positive blocks for
-    // proposal_show, while only an explicit current verdict override suppresses
-    // judge verdict blocking semantics below.
-    let human_authority_is_current = current_human_gate_authority(repo, proposal).await;
-    let override_is_current = current_explicit_verdict_override(repo, proposal).await;
-
-    // Add DoR failures to explanations only when they are actually blocking.
-    // Keep `dor_failures` populated either way so clients can show diagnostics.
-    if !dor_ready && !human_authority_is_current {
-        for f in &dor_failures {
-            blocked_explanations.push(f.message.clone());
-        }
-    }
-
-    // 2b. Unresolved blocking debate entries. Judge verdict rows are excluded at
-    // the query level — verdicts gate solely through the latest-verdict channel
-    // below (2c), never as unresolved blocking rows.
-    let (unresolved_blocking_ids, unresolved_count) = match repo
-        .list_unresolved_blocking_debate_entries(proposal_id)
-        .await
-    {
-        Ok(entries) => {
-            if !entries.is_empty() {
-                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
-                blocked_explanations.push(format!(
-                    "Unresolved blocking debate entries: {}",
-                    ids.join(", ")
-                ));
-                let count = ids.len() as i32;
-                (ids, count)
-            } else {
-                (vec![], 0)
-            }
-        }
-        Err(e) => {
-            blocked_explanations.push(format!("Failed to check debate trail: {e}"));
-            (vec![], 0)
-        }
-    };
-
-    // 2c. Latest judge verdict
-    let (judge_verdict_body, judge_verdict_id, judge_needs_work) =
-        match repo.latest_judge_verdict(proposal_id).await {
-            Ok(Some(verdict)) => {
-                let verdict_lower = verdict.body.to_lowercase();
-                let needs_work = (verdict_lower.contains("needs-work")
-                    || verdict_lower.contains("needs_work")
-                    || verdict_lower.contains("needs work"))
-                    && !override_is_current;
-                if needs_work {
-                    blocked_explanations.push(format!(
-                        "Judge returned needs-work (verdict {}); no current human override",
-                        verdict.id
-                    ));
-                }
-                (
-                    Some(verdict.body.clone()),
-                    Some(verdict.id.clone()),
-                    needs_work,
-                )
-            }
-            Err(e) => {
-                blocked_explanations.push(format!("Failed to check judge verdict: {e}"));
-                (None, None, false)
-            }
-            _ => (None, None, false),
-        };
-
-    // 2d. Needs-evidence spike parking
-    let needs_evidence = match repo.has_open_needs_evidence_spike(proposal_id).await {
-        Ok(true) => {
-            let claim = proposal
-                .needs_evidence_claim
-                .as_deref()
-                .unwrap_or("unspecified");
-            let spike_id = proposal
-                .linked_spike_task_id
-                .as_deref()
-                .unwrap_or("unknown");
-            blocked_explanations.push(format!(
-                "Proposal parked on needs-evidence spike {spike_id} (claim: {claim})"
-            ));
-            Some(crate::tools::proposal_ops::NeedsEvidenceStatus {
-                claim: claim.to_string(),
-                spike_task_id: spike_id.to_string(),
-                spike_short_id: spike_id.to_string(),
-                spike_status: "open".to_string(),
-                question: None,
-                target_subsystem: None,
-                spec_unknown_anchor: None,
-                round: None,
-                against_revision_seq: None,
-                created_by_task_id: None,
-                evidence_phase: None,
-                failure_reason: None,
-            })
-        }
-        Err(e) => {
-            blocked_explanations.push(format!("Failed to check needs-evidence spike: {e}"));
-            None
-        }
-        _ => None,
-    };
-
-    // Adversary dry count from refinement status (non-critical)
-    let adversary_dry_count =
-        match crate::tools::refinement_tools::build_refinement_status(repo, proposal_id).await {
-            Ok(status) => status.dry_rounds,
-            _ => 0,
-        };
-
-    let ready = blocked_explanations.is_empty();
-
-    ProposalGateStatusModel {
-        ready,
-        dor_ready,
-        dor_failures,
-        judge_verdict_body,
-        judge_verdict_id,
-        judge_needs_work,
-        adversary_dry_count,
-        unresolved_blocking_count: unresolved_count,
-        unresolved_blocking_ids,
-        needs_evidence,
-        human_override_active: human_authority_is_current,
-        blocked_explanations,
-    }
-}
-
-// ── Tool router continuation ─────────────────────────────────────────────────
-
+#[tool_router(router = proposal_create_tool_router, vis = "pub(super)")]
 impl DjinnMcpServer {
     /// Create a global proposal.
     #[tool(
@@ -926,7 +544,8 @@ impl DjinnMcpServer {
                 .collect(),
             Err(e) => return Json(err_show(e.to_string())),
         };
-        let epic_repo = EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+        let epic_repo =
+            djinn_db::EpicRepository::new(self.state.db().clone(), self.state.event_bus());
         let epics = match graduated_epic_models(
             &repo,
             &epic_repo,
@@ -1064,6 +683,8 @@ impl DjinnMcpServer {
         ))
     }
 }
+
+// ── Tests: list-summary tribunal/gate behavior ───────────────────────────────
 
 #[cfg(test)]
 mod list_summary_tests {
