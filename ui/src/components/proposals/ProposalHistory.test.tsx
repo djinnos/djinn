@@ -298,6 +298,64 @@ describe("ProposalHistory", () => {
     expect(screen.getByText("Status changed")).toBeInTheDocument();
   });
 
+  it("renders an acceptance-criteria amendment revision with reason and operations", () => {
+    render(
+      <ProposalHistory
+        detail={detail([
+          revision(1, { body: "Base body" }),
+          revision(2, {
+            body: "Base body",
+            created_at: "2026-06-02T00:00:00Z",
+            event_metadata: JSON.stringify({
+              kind: "ac_amendment",
+              reason: "criterion 2 cannot be verified by agents",
+              amendments: [
+                {
+                  operation: "rewrite",
+                  index: 0,
+                  old_criterion: "old criterion text",
+                  new_criterion: "rewritten criterion text",
+                },
+                {
+                  operation: "drop",
+                  index: 1,
+                  old_criterion: { criterion: "drop me", met: false },
+                  new_criterion: { dropped: true },
+                },
+                {
+                  operation: "waive",
+                  index: 6,
+                  old_criterion: "waive me",
+                  new_criterion: { criterion: "waive me", waived: true },
+                },
+              ],
+            }),
+          }),
+        ])}
+      />,
+    );
+
+    // Distinct badge and a machine-free collapsed summary (no raw JSON).
+    expect(screen.getByText("AC amendment")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "criterion 1 rewritten, criterion 2 dropped, criterion 7 waived",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/ac_amendment/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /rev 2/ }));
+
+    expect(
+      screen.getByText("criterion 2 cannot be verified by agents"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Criterion 1 rewritten")).toBeInTheDocument();
+    expect(screen.getByText("old criterion text")).toBeInTheDocument();
+    expect(screen.getByText("rewritten criterion text")).toBeInTheDocument();
+    expect(screen.getByText("Criterion 2 dropped")).toBeInTheDocument();
+    expect(screen.getByText("Criterion 7 waived")).toBeInTheDocument();
+  });
+
   it("collapses a tribunal refinement run into a single entry", () => {
     render(
       <ProposalHistory
