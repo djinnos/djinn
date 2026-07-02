@@ -1,6 +1,8 @@
 use super::actor::CoordinatorActor;
 use djinn_db::ProposalRepository;
-use djinn_db::repositories::proposal::{evidence_spike_task_is_terminal, TerminalLinkedEvidenceSpikeOutcome};
+use djinn_db::repositories::proposal::{
+    TerminalLinkedEvidenceSpikeOutcome, evidence_spike_task_is_terminal,
+};
 
 impl CoordinatorActor {
     /// Startup recovery pass for terminal linked evidence spikes that may have

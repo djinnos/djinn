@@ -2558,7 +2558,6 @@ mod tests {
         assert_eq!(tribunal_task_count(&task_repo, &failed.project_id).await, 0);
     }
 
-
     // ── Startup recovery for terminal linked evidence spikes ─────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2672,22 +2671,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recover_terminal_linked_spike_evidence_records_failed_for_missing_or_malformed_findings() {
+    async fn recover_terminal_linked_spike_evidence_records_failed_for_missing_or_malformed_findings()
+     {
         for label in ["missing", "malformed"] {
             let db = test_helpers::create_test_db();
             let (tx, _rx) = broadcast::channel(256);
             let (proposal_repo, task_repo, proposal, spike_task, claim) =
                 setup_linked_evidence_spike_fixture(&db, &tx, "Recovery No Findings").await;
             if label == "malformed" {
-                let malformed = serde_json::json!({
-                    "answer": "",
-                    "evidence": [],
-                    "code_paths_inspected": [],
-                    "confidence": 0.7,
-                    "residual_risks": [],
-                    "recommendation_for_advocate": ""
-                });
-                proposal_repo
+                // `add_debate_trail_entry` validates evidence findings, so a
+                // malformed row can only exist as legacy data — write a valid
+                // entry, then corrupt it underneath the repository API.
+                let findings = sample_evidence_findings("recovery malformed");
+                let findings_value = serde_json::to_value(&findings).unwrap();
+                let entry = proposal_repo
                     .add_debate_trail_entry(ProposalDebateTrailCreateInput {
                         proposal_id: &proposal.id,
                         kind: "evidence_findings",
@@ -2699,10 +2696,22 @@ mod tests {
                         source_task_id: Some(&spike_task.id),
                         against_revision_seq: claim.against_revision_seq,
                         round: claim.round,
-                        body_metadata: Some(&malformed),
+                        body_metadata: Some(&findings_value),
                     })
                     .await
                     .unwrap();
+                let malformed = serde_json::json!({
+                    "answer": "",
+                    "evidence": [],
+                    "code_paths_inspected": [],
+                    "confidence": 0.7,
+                    "residual_risks": [],
+                    "recommendation_for_advocate": ""
+                });
+                djinn_db::test_support::override_debate_trail_body_metadata(
+                    &db, &entry.id, &malformed,
+                )
+                .await;
             }
             task_repo
                 .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
