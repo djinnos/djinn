@@ -259,6 +259,23 @@ impl Workspace {
             .map(|_| ())
     }
 
+    /// Move HEAD to `ref_selector` in detached mode WITHOUT advancing any
+    /// branch ref. Used by the resume-via-git worktree-setup path to land the
+    /// workspace on a chosen checkpoint SHA / alternate checkpoint ref while
+    /// preserving the supervisor's subsequent `ensure_branch(task_branch)`
+    /// step (which creates / refreshes the task branch from current HEAD on
+    /// top of the resumed commit).
+    ///
+    /// `ref_selector` may be a fully-qualified ref (`refs/...`), a short ref
+    /// name, or a full commit SHA — git's normal resolution applies. Errors
+    /// (unknown ref, missing object) surface as [`EphemeralWorkspaceError::Git`]
+    /// so the caller can fall back to the legacy task-branch path.
+    pub async fn checkout_ref(&self, ref_selector: &str) -> Result<(), EphemeralWorkspaceError> {
+        self.run_git(&["checkout", "--detach", ref_selector], &[])
+            .await
+            .map(|_| ())
+    }
+
     /// Rewrite every tracked file's mtime to the commit time of the last commit
     /// that touched it — the `git restore-mtime` technique.
     ///
