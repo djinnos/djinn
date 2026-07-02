@@ -126,6 +126,11 @@ pub fn tool_submit_grooming() -> RmcpTool {
                     "type": "string",
                     "enum": ["execute", "close", "escalate"],
                     "description": "Outcome decision: 'execute' = wave was created or board work continues (coordinator dispatches the new tasks); 'close' = epic is complete and the planning task should close (set `reason` in summary); 'escalate' = board state needs human attention. Optional — defaults to 'execute' when omitted."
+                },
+                "blocked_on": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Epics (UUID or short_id) that block this epic. If you conclude the epic cannot proceed until another epic closes and you therefore created NO worker tasks, list the blocking epic(s) here (use decision='escalate'). This durably parks this epic's planning until every listed epic closes — the coordinator wakes it automatically then. Reference the blocking EPIC, not a task (if a task blocks you, reference the epic that owns it). Do NOT re-run planning to restate a known block: declare it here once."
                 }
             }
         }),
