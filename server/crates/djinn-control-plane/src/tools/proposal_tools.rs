@@ -839,21 +839,17 @@ async fn evaluate_composed_gate(
     let override_is_current = current_explicit_verdict_override(repo, proposal).await;
 
     // 2b. Unresolved blocking debate-trail entries.
-    // When a current override exists, judge verdict entries are excluded —
-    // the override explicitly supersedes the judge's needs-work verdict.
+    // Judge verdict rows are excluded at the query level — verdicts gate solely
+    // through the latest-verdict channel below (2c), so they must not also count
+    // as unresolved blocking rows (a stale reject verdict superseded by a later
+    // approve verdict has nothing that resolves it, and would block forever).
     match repo
         .list_unresolved_blocking_debate_entries(proposal_id)
         .await
     {
         Ok(entries) => {
-            let remaining: Vec<_> = entries
-                .iter()
-                .filter(|e| {
-                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
-                })
-                .collect();
-            if !remaining.is_empty() {
-                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+            if !entries.is_empty() {
+                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
                 failures.push(format!(
                     "unresolved blocking debate entries: {}",
                     ids.join(", ")
@@ -967,25 +963,22 @@ async fn build_gate_status(
         }
     }
 
-    // 2b. Unresolved blocking debate entries
+    // 2b. Unresolved blocking debate entries. Judge verdict rows are excluded at
+    // the query level — verdicts gate solely through the latest-verdict channel
+    // below (2c), never as unresolved blocking rows.
     let (unresolved_blocking_ids, unresolved_count) = match repo
         .list_unresolved_blocking_debate_entries(proposal_id)
         .await
     {
         Ok(entries) => {
-            let remaining: Vec<_> = entries
-                .iter()
-                .filter(|e| {
-                    !(override_is_current && e.kind == "verdict" && e.agent_role == "judge")
-                })
-                .collect();
-            if !remaining.is_empty() {
-                let ids: Vec<String> = remaining.iter().map(|e| e.id.clone()).collect();
+            if !entries.is_empty() {
+                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
                 blocked_explanations.push(format!(
                     "Unresolved blocking debate entries: {}",
                     ids.join(", ")
                 ));
-                (ids, remaining.len() as i32)
+                let count = ids.len() as i32;
+                (ids, count)
             } else {
                 (vec![], 0)
             }
@@ -5562,6 +5555,142 @@ What happens if D fails?
         // Proposal should still be draft — no sign-off recorded.
         let stored = repo.get(&proposal.id).await.unwrap().unwrap();
         assert_eq!(stored.status, "draft");
+    }
+
+    /// Regression (gate-verdict-supersession): stale reject verdicts from
+    /// earlier tribunal rounds must never count as unresolved blocking rows.
+    /// Once a later approve verdict supersedes them, the gate is ready — the
+    /// reject verdicts have nothing that resolves them and would otherwise
+    /// block the proposal forever ("blocking rows: N" with "Judge verdict:
+    /// Ready").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn superseded_reject_verdicts_do_not_block_gate() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal =
+            create_ready_proposal(&repo, &project_repo, &user_id, "Superseded Verdicts").await;
+
+        // Three rounds of blocking reject verdicts (the judge's own REJECTs).
+        for (round, body) in [
+            (1, "needs-work: round 1"),
+            (2, "needs-work: round 2"),
+            (3, "needs-work: round 3"),
+        ] {
+            repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &proposal.id,
+                kind: "verdict",
+                body,
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("test-judge"),
+                source_task_id: None,
+                against_revision_seq: proposal.latest_revision_seq,
+                round,
+                body_metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Latest verdict is an approve — it supersedes the rejects.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "Ready",
+            blocking: false,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 4,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let gate = show_gate_status(&server, &user_id, &proposal.id).await;
+        assert_eq!(
+            gate.get("unresolved_blocking_count")
+                .and_then(|v| v.as_i64()),
+            Some(0),
+            "superseded reject verdicts must not count as unresolved blocking: {gate:?}"
+        );
+        assert_eq!(
+            gate.get("judge_needs_work").and_then(|v| v.as_bool()),
+            Some(false),
+            "latest verdict is approve, so judge_needs_work is false: {gate:?}"
+        );
+        assert_eq!(
+            gate.get("ready").and_then(|v| v.as_bool()),
+            Some(true),
+            "gate should be ready once the latest verdict approves: {gate:?}"
+        );
+    }
+
+    /// The latest-verdict channel still gates: when the newest verdict is a
+    /// reject, `judge_needs_work` is true and the gate is not ready — even
+    /// though verdict rows no longer count as unresolved blocking entries.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_reject_verdict_still_blocks_via_needs_work_channel() {
+        let (server, db, user_id) = setup_test_server_and_user().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+
+        let proposal = create_ready_proposal(&repo, &project_repo, &user_id, "Latest Reject").await;
+
+        // An earlier approve, then a later reject — latest wins.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "Ready",
+            blocking: false,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 1,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &proposal.id,
+            kind: "verdict",
+            body: "needs-work: regression found",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: proposal.latest_revision_seq,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let gate = show_gate_status(&server, &user_id, &proposal.id).await;
+        assert_eq!(
+            gate.get("unresolved_blocking_count")
+                .and_then(|v| v.as_i64()),
+            Some(0),
+            "verdict rows never count as unresolved blocking: {gate:?}"
+        );
+        assert_eq!(
+            gate.get("judge_needs_work").and_then(|v| v.as_bool()),
+            Some(true),
+            "latest verdict is a reject — judge_needs_work must be true: {gate:?}"
+        );
+        assert_eq!(
+            gate.get("ready").and_then(|v| v.as_bool()),
+            Some(false),
+            "gate must not be ready with a latest reject verdict: {gate:?}"
+        );
     }
 
     /// A needs-evidence spike blocks graduation with a deterministic

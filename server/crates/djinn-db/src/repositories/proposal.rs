@@ -2574,6 +2574,50 @@ impl ProposalRepository {
         Ok(())
     }
 
+    /// Advance a `draft` proposal to `in_review` when the tribunal converges
+    /// and parks it awaiting human review. Idempotent and status-scoped: only
+    /// `draft → in_review` transitions; any other status is left untouched.
+    ///
+    /// Emits a `status_change` revision event (matching the sign-off-driven
+    /// promotion path) so the transition appears in revision history, and
+    /// publishes a `proposal_updated` event. Returns `true` when a transition
+    /// occurred.
+    pub async fn advance_draft_to_in_review(&self, proposal_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let Some(proposal) = self.get(proposal_id).await? else {
+            return Ok(false);
+        };
+        if proposal.status != "draft" {
+            return Ok(false);
+        }
+        sqlx::query(
+            r#"UPDATE proposals SET status = 'in_review',
+                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+             WHERE id = $1 AND status = 'draft'"#,
+        )
+        .bind(proposal_id)
+        .execute(self.db.pool())
+        .await?;
+        let acceptance_criteria: serde_json::Value =
+            serde_json::from_str(&proposal.acceptance_criteria).unwrap_or(serde_json::json!([]));
+        self.insert_status_event(ProposalStatusEvent {
+            proposal_id,
+            seq: proposal.latest_revision_seq,
+            title: &proposal.title,
+            body: &proposal.body,
+            body_format: &proposal.body_format,
+            acceptance_criteria: &acceptance_criteria,
+            edited_by: None,
+            status_from: "draft",
+            status_to: "in_review",
+        })
+        .await?;
+        let updated = self.get_required(proposal_id).await?;
+        self.events
+            .send(DjinnEventEnvelope::proposal_updated(&updated));
+        Ok(true)
+    }
+
     pub async fn set_done(&self, proposal_id: &str) -> Result<Proposal> {
         self.db.ensure_initialized().await?;
         let proposal = self.get_required(proposal_id).await?;
@@ -3028,6 +3072,12 @@ impl ProposalRepository {
     /// An entry is "unresolved" when `resolved_at IS NULL` OR
     /// (`resolved_at IS NOT NULL AND reopened_at IS NOT NULL`).
     /// Only `blocking = true` entries are returned.
+    ///
+    /// Judge `kind = 'verdict'` rows are excluded: verdicts gate through their
+    /// own channel (`latest_judge_verdict` → `judge_needs_work`), where a later
+    /// approve verdict supersedes an earlier reject. Nothing ever resolves the
+    /// stale reject-verdict rows, so counting them here double-counts a signal
+    /// that can never be cleared (see gate-verdict-supersession fix).
     pub async fn list_unresolved_blocking_debate_entries(
         &self,
         proposal_id: &str,
@@ -3044,6 +3094,7 @@ impl ProposalRepository {
              FROM proposal_debate_trail
              WHERE proposal_id = $1
                AND blocking = true
+               AND kind <> 'verdict'
                AND (resolved_at IS NULL
                     OR (resolved_at IS NOT NULL AND reopened_at IS NOT NULL))
              ORDER BY round, created_at"#,
@@ -5063,6 +5114,142 @@ mod tests {
             events
                 .iter()
                 .all(|e| e.entity_type == "proposal_debate_trail")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn judge_verdicts_never_count_as_unresolved_blocking() {
+        // Regression (gate-verdict-supersession): a judge's blocking reject
+        // verdict is never "resolved" — nothing clears it when a later approve
+        // verdict supersedes it. Counting verdict rows as unresolved blocking
+        // double-counts a signal that already gates through `latest_judge_verdict`
+        // and would block the gate forever. Verdict rows must be excluded from
+        // the unresolved-blocking set regardless of resolution/reopen state.
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo
+            .create(create_input("Verdict supersession"))
+            .await
+            .unwrap();
+
+        for (round, body) in [
+            (1, "needs-work: unclear on X"),
+            (2, "needs-work: still unclear"),
+            (3, "needs-work: one more round"),
+        ] {
+            repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "verdict",
+                body,
+                blocking: true,
+                agent_role: "judge",
+                author_kind: "agent",
+                author_model: Some("test-judge"),
+                source_task_id: None,
+                against_revision_seq: 1,
+                round,
+                body_metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Even with three blocking reject verdicts and no resolution, the
+        // unresolved-blocking set excludes verdict rows entirely.
+        let unresolved = repo
+            .list_unresolved_blocking_debate_entries(&p.id)
+            .await
+            .unwrap();
+        assert!(
+            unresolved.is_empty(),
+            "judge verdict rows must not appear in unresolved-blocking set: {unresolved:?}"
+        );
+
+        // A later approve verdict is the latest verdict, superseding the rejects.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &p.id,
+            kind: "verdict",
+            body: "Ready",
+            blocking: false,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("test-judge"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 4,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let latest = repo.latest_judge_verdict(&p.id).await.unwrap().unwrap();
+        assert_eq!(latest.body, "Ready");
+
+        // A non-verdict blocking objection still counts (verdict exclusion is
+        // narrow to `kind = 'verdict'`).
+        let objection = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "objection",
+                body: "Missing error handling",
+                blocking: true,
+                agent_role: "adversary",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: None,
+                against_revision_seq: 1,
+                round: 4,
+                body_metadata: None,
+            })
+            .await
+            .unwrap();
+        let unresolved = repo
+            .list_unresolved_blocking_debate_entries(&p.id)
+            .await
+            .unwrap();
+        assert_eq!(unresolved.len(), 1, "objection must still count");
+        assert_eq!(unresolved[0].id, objection.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_draft_to_in_review_is_idempotent_and_status_scoped() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let p = repo.create(create_input("Park draft")).await.unwrap();
+        assert_eq!(p.status, "draft");
+
+        // First call transitions draft → in_review and records a status_change.
+        let changed = repo.advance_draft_to_in_review(&p.id).await.unwrap();
+        assert!(changed, "draft should advance to in_review");
+        let after = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(after.status, "in_review");
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        let status_event = revisions
+            .iter()
+            .find(|r| r.event_kind == "status_change")
+            .expect("a status_change revision event should be recorded");
+        assert_eq!(status_event.status_from.as_deref(), Some("draft"));
+        assert_eq!(status_event.status_to.as_deref(), Some("in_review"));
+
+        // Second call is a no-op (idempotent): no transition, no extra event.
+        let changed_again = repo.advance_draft_to_in_review(&p.id).await.unwrap();
+        assert!(!changed_again, "already in_review — no transition");
+        let status_events = repo
+            .revisions(&p.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.event_kind == "status_change")
+            .count();
+        assert_eq!(status_events, 1, "no duplicate status_change event");
+
+        // A non-draft proposal is left untouched (status-scoped).
+        let other = repo.create(create_input("Approved already")).await.unwrap();
+        repo.set_status(&other.id, "approved").await.unwrap();
+        let changed_other = repo.advance_draft_to_in_review(&other.id).await.unwrap();
+        assert!(!changed_other, "approved proposal must not be touched");
+        assert_eq!(
+            repo.get(&other.id).await.unwrap().unwrap().status,
+            "approved"
         );
     }
 
