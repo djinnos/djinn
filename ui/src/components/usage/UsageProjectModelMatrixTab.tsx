@@ -23,12 +23,12 @@ import {
 } from "./usageFormatters";
 
 export type MatrixMetricKey =
-  | "cost_per_task"
+  | "list_price_cost_per_task"
   | "success_rate"
   | "avg_reopens"
-  | "total_cost"
   | "actual_spend_usd"
   | "projected_usd"
+  | "list_price_usd"
   | "total_tokens";
 
 interface MatrixMetricSpec {
@@ -42,12 +42,22 @@ interface MatrixMetricSpec {
 
 const MATRIX_METRICS: MatrixMetricSpec[] = [
   {
-    key: "cost_per_task",
-    label: "Cost / task",
+    // Combined list-price cost per task (actual + projected) — the
+    // apples-to-apples default across API-key and flat-rate-plan models.
+    key: "list_price_cost_per_task",
+    label: "Cost / task (list-price)",
     description:
-      "Priced spend divided by credited worker tasks. Unpriced pairs render as —.",
+      "Combined list-price cost (actual + projected) divided by credited worker tasks. Unpriced pairs render as —.",
     format: formatCurrency,
     emptyLabel: "No priced cost/task",
+  },
+  {
+    key: "list_price_usd",
+    label: "Total cost (list-price)",
+    description:
+      "Combined list-price cost (actual + projected) for the project/model pair.",
+    format: formatCurrency,
+    emptyLabel: "No priced cost",
   },
   {
     key: "actual_spend_usd",
@@ -82,14 +92,6 @@ const MATRIX_METRICS: MatrixMetricSpec[] = [
     lowerIsDarker: true,
   },
   {
-    key: "total_cost",
-    label: "Legacy total cost",
-    description:
-      "Combined cost field (legacy). For split view use Actual API spend or Projected subscription-equivalent cost.",
-    format: formatCurrency,
-    emptyLabel: "No priced spend",
-  },
-  {
     key: "total_tokens",
     label: "Tokens",
     description:
@@ -115,8 +117,9 @@ export function UsageProjectModelMatrixTab({
 }: {
   data: UsageAnalyticsResponse;
 }) {
-  const [metricKey, setMetricKey] =
-    useState<MatrixMetricKey>("actual_spend_usd");
+  const [metricKey, setMetricKey] = useState<MatrixMetricKey>(
+    "list_price_cost_per_task",
+  );
   const metric = getMatrixMetric(metricKey);
   const matrix = useMemo(
     () => buildProjectModelMatrix(data.project_model_matrix),

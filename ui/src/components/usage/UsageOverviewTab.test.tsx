@@ -131,20 +131,38 @@ describe("UsageOverviewTab — split cost labels", () => {
     expect(unpricedCard).toHaveTextContent("Excluded from both cost figures");
   });
 
-  it("renders the chart section with separate actual and projected labels", () => {
+  it("leads with the combined list-price cost as the primary KPI card", () => {
+    render(
+      <UsageOverviewTab
+        data={makeResponse({
+          kpis: [makeKpi({ actual_spend_usd: 30, projected_usd: 12.5 })],
+        })}
+      />,
+    );
+
+    const primary = screen.getByTestId("usage-split-kpi-list-price");
+    expect(primary).toHaveTextContent("Total cost (list-price)");
+    // Combined = actual (30) + projected (12.5) = 42.5.
+    expect(primary).toHaveTextContent("$42.50");
+    // Caption surfaces the real API spend subset.
+    expect(primary).toHaveTextContent("$30.00 real API spend");
+  });
+
+  it("renders the combined cost-over-time chart section with a view toggle", () => {
     render(<UsageOverviewTab data={makeResponse({ kpis: [makeKpi()] })} />);
 
     expect(screen.getByText("Cost over time")).toBeInTheDocument();
     // "Actual API spend" and "Projected subscription-equivalent cost" appear in
-    // multiple DOM locations (KPI cards, chart section, disclosure), so assert
-    // at least one match exists via getAllByText.
+    // multiple DOM locations (KPI cards, disclosure), so assert at least one
+    // match exists via getAllByText.
     expect(screen.getAllByText("Actual API spend").length).toBeGreaterThanOrEqual(1);
     expect(
       screen.getAllByText("Projected subscription-equivalent cost").length,
     ).toBeGreaterThanOrEqual(1);
+    // The chart now leads with the combined list-price view.
     expect(
       screen.getByText(
-        "Actual API spend and projected subscription-equivalent cost shown separately. Unpriced sessions are excluded from both figures.",
+        "Combined list-price cost (actual API spend plus projected subscription-equivalent cost) over time. Switch the view to isolate actual or projected cost. Unpriced sessions are excluded from all figures.",
       ),
     ).toBeInTheDocument();
   });
