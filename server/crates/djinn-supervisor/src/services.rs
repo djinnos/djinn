@@ -21,7 +21,7 @@ pub mod server;
 pub mod wire;
 
 pub use wire::{
-    CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
+    BillingSource, CostBasisHint, SerializableCreateSessionParams, SerializableCreateTaskRunParams,
     SerializableDjinnEvent,
 };
 

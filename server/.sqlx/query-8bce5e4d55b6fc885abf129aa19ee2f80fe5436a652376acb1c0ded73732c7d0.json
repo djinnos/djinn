@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis\n             FROM sessions\n             WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC",
+  "query": "SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,\n                status AS \"status!\", tokens_in, tokens_out,\n                cache_read_tokens, cache_write_tokens, task_run_id, title,\n                parked_reason AS \"parked_reason?\",\n                cost_usd, input_price_per_million_snapshot,\n                output_price_per_million_snapshot,\n                cache_read_price_per_million_snapshot,\n                cache_write_price_per_million_snapshot,\n                cost_basis,\n                billing_source\n             FROM sessions\n             WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -107,11 +107,15 @@
         "ordinal": 20,
         "name": "cost_basis",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "billing_source",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Text"
       ]
     },
@@ -136,8 +140,9 @@
       true,
       true,
       true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "0c0e5b3311849e27041edb14f7cea3a42ac341e468f12a50b25db96b7f401789"
+  "hash": "8bce5e4d55b6fc885abf129aa19ee2f80fe5436a652376acb1c0ded73732c7d0"
 }

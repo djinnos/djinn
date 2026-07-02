@@ -15,6 +15,16 @@
 //! `drift_guard_builtin_subscription_ids_covered` fails — surfacing the drift
 //! to the reviewer at test time.
 //!
+//! Scope note (migration 89 / task t41r PART A): the sibling backfill migration
+//! `89_reclassify_plan_backed_openai_sessions.sql` reclassifies plain
+//! `openai/<non-codex>` sessions to `projected` when they were PLAN-backed. That
+//! decision is gated on install-wide CREDENTIAL state (a ChatGPT/Codex plan OAuth
+//! credential present, no OpenAI API key), NOT on the `model_id` string — so it is
+//! deliberately OUTSIDE this model-id drift guard. The forward runtime seam
+//! (`stage.rs::derive_billing_signal`) and its unit tests own that path; the
+//! `openai/gpt-5.5 → false` case below still holds here because model_id alone
+//! must never imply a plan.
+//!
 //! Migration-adjacent documentation:
 //! `djinn-db/docs/84-cost-basis-predicate-drift-guard.md`.
 

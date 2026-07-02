@@ -198,6 +198,41 @@ pub struct SerializableCreateSessionParams {
     /// `classify_provider(provider_id)`.
     #[serde(default)]
     pub cost_basis_hint: Option<CostBasisHint>,
+    /// Kind of credential backing the session, derived from the resolved
+    /// credential at model-resolution time. Persisted to `sessions.billing_source`
+    /// by the host so plan-vs-API-key usage is queryable after the fact. `None`
+    /// for callers with no dispatch-time credential signal (the column stays
+    /// `NULL`).
+    #[serde(default)]
+    pub billing_source: Option<BillingSource>,
+}
+
+/// Kind of credential backing a session, for `sessions.billing_source`.
+///
+/// Distinct from [`CostBasisHint`]: the hint decides how to interpret
+/// `cost_usd` (projected vs actual), while this records the concrete credential
+/// kind so the OAuth-plan case — which is invisible in the `model_id` string
+/// (e.g. `openai/gpt-5.5` backed by a ChatGPT/Codex plan) — is auditable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingSource {
+    /// A personal subscription-plan OAuth credential (ChatGPT/Codex plan,
+    /// GitHub Copilot). Real per-token API spend is $0.
+    PlanOauth,
+    /// An API key — metered pay-as-you-go, or a coding-plan API key (whose plan
+    /// nature is already captured by `cost_basis = 'projected'`).
+    ApiKey,
+}
+
+impl BillingSource {
+    /// Database text representation for `sessions.billing_source` (matches the
+    /// migration 88 CHECK constraint).
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::PlanOauth => "plan_oauth",
+            Self::ApiKey => "api_key",
+        }
+    }
 }
 
 /// Billing classification hint derived from the resolved credential and
@@ -965,6 +1000,7 @@ mod tests {
             metadata_json: None,
             task_run_id: Some("run-1".into()),
             cost_basis_hint: None,
+            billing_source: None,
         };
         let f = Frame {
             correlation_id: 31,
@@ -1007,6 +1043,7 @@ mod tests {
             cache_read_price_per_million_snapshot: None,
             cache_write_price_per_million_snapshot: None,
             cost_basis: "unpriced".into(),
+            billing_source: None,
         };
         let resp = ServiceRpcResponse::CreateSession(Ok(session.clone()));
         let f = Frame {

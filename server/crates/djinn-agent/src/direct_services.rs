@@ -203,18 +203,32 @@ impl SupervisorServices for DirectServices {
             pricing.as_ref(),
             catalog_model.as_ref().map(|m| m.provider_id.as_str()),
         );
-        repo.create(CreateSessionParams {
-            project_id: params.project_id.as_str(),
-            task_id: params.task_id.as_deref(),
-            model: params.model.as_str(),
-            agent_type: params.agent_type.as_str(),
-            metadata_json: params.metadata_json.as_deref(),
-            task_run_id: params.task_run_id.as_deref(),
-            pricing: pricing.as_ref(),
-            cost_basis: Some(cost_basis),
-        })
-        .await
-        .map_err(|e| e.to_string())
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: params.project_id.as_str(),
+                task_id: params.task_id.as_deref(),
+                model: params.model.as_str(),
+                agent_type: params.agent_type.as_str(),
+                metadata_json: params.metadata_json.as_deref(),
+                task_run_id: params.task_run_id.as_deref(),
+                pricing: pricing.as_ref(),
+                cost_basis: Some(cost_basis),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        // Persist the credential kind (`plan_oauth` / `api_key`) derived from the
+        // resolved credential at model-resolution time, so plan-vs-API-key usage
+        // is queryable after the fact. A dedicated post-insert write rather than
+        // a `CreateSessionParams` field: only this dispatch host path carries the
+        // signal, and the ~90 other `create()` call sites legitimately leave the
+        // column `NULL`.
+        match params.billing_source {
+            Some(source) => repo
+                .set_billing_source(&created.id, source.as_db_str())
+                .await
+                .map_err(|e| e.to_string()),
+            None => Ok(created),
+        }
     }
 
     async fn publish_session_message(
