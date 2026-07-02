@@ -488,6 +488,14 @@ fn intern_envelope(wire: SerializableDjinnEvent) -> Result<DjinnEventEnvelope, (
         // RPC boundary and epics only broke down on the 15-min stale sweep.
         ("epic", "created") => ("epic", "created"),
         ("epic", "updated") => ("epic", "updated"),
+        // Proposal events emitted by worker-pod agents must reach the host so
+        // live proposal-detail UI stays fresh.  Only the exact pairs listed
+        // here are allowlisted; debate-trail events remain unregistered and
+        // continue to produce the unknown-pair drift signal.
+        ("proposal", "created") => ("proposal", "created"),
+        ("proposal", "updated") => ("proposal", "updated"),
+        ("proposal", "deleted") => ("proposal", "deleted"),
+        ("proposal_feedback", "created") => ("proposal_feedback", "created"),
         _ => return Err((entity_type, action)),
     };
     // `payload` crosses the wire as an opaque JSON string — bincode can't
@@ -712,5 +720,103 @@ mod tests {
         };
         let err = intern_envelope(wire).expect_err("unknown pair must error");
         assert_eq!(err, ("unknown_entity".into(), "weird_action".into()));
+    }
+
+    // ── Proposal / proposal_feedback allowlist tests ────────────────────
+
+    #[test]
+    fn intern_envelope_forwards_proposal_created() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal".into(),
+            action: "created".into(),
+            payload: serde_json::json!({"id": "p1", "title": "Add feature"}).to_string(),
+            id: Some("p1".into()),
+            project_id: Some("proj1".into()),
+        };
+        let env = intern_envelope(wire).expect("proposal.created must be allowlisted");
+        assert_eq!(env.entity_type, "proposal");
+        assert_eq!(env.action, "created");
+        assert_eq!(env.payload["title"], "Add feature");
+        assert_eq!(env.id, Some("p1".into()));
+        assert_eq!(env.project_id, Some("proj1".into()));
+    }
+
+    #[test]
+    fn intern_envelope_forwards_proposal_updated() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal".into(),
+            action: "updated".into(),
+            payload: serde_json::json!({"id": "p1", "status": "review"}).to_string(),
+            id: Some("p1".into()),
+            project_id: Some("proj1".into()),
+        };
+        let env = intern_envelope(wire).expect("proposal.updated must be allowlisted");
+        assert_eq!(env.entity_type, "proposal");
+        assert_eq!(env.action, "updated");
+        assert_eq!(env.payload["status"], "review");
+        assert_eq!(env.id, Some("p1".into()));
+        assert_eq!(env.project_id, Some("proj1".into()));
+    }
+
+    #[test]
+    fn intern_envelope_forwards_proposal_deleted() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal".into(),
+            action: "deleted".into(),
+            payload: serde_json::json!({"id": "p1"}).to_string(),
+            id: Some("p1".into()),
+            project_id: Some("proj1".into()),
+        };
+        let env = intern_envelope(wire).expect("proposal.deleted must be allowlisted");
+        assert_eq!(env.entity_type, "proposal");
+        assert_eq!(env.action, "deleted");
+        assert_eq!(env.id, Some("p1".into()));
+        assert_eq!(env.project_id, Some("proj1".into()));
+    }
+
+    #[test]
+    fn intern_envelope_forwards_proposal_feedback_created() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal_feedback".into(),
+            action: "created".into(),
+            payload: serde_json::json!({"id": "f1", "proposal_id": "p1", "body": "LGTM"})
+                .to_string(),
+            id: Some("f1".into()),
+            project_id: Some("proj1".into()),
+        };
+        let env = intern_envelope(wire).expect("proposal_feedback.created must be allowlisted");
+        assert_eq!(env.entity_type, "proposal_feedback");
+        assert_eq!(env.action, "created");
+        assert_eq!(env.payload["body"], "LGTM");
+        assert_eq!(env.id, Some("f1".into()));
+        assert_eq!(env.project_id, Some("proj1".into()));
+    }
+
+    #[test]
+    fn intern_envelope_rejects_proposal_debate_trail_created() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal_debate_trail".into(),
+            action: "created".into(),
+            payload: serde_json::Value::Null.to_string(),
+            id: None,
+            project_id: None,
+        };
+        let err = intern_envelope(wire)
+            .expect_err("proposal_debate_trail.created must not be registered");
+        assert_eq!(err, ("proposal_debate_trail".into(), "created".into()));
+    }
+
+    #[test]
+    fn intern_envelope_rejects_proposal_debate_trail_updated() {
+        let wire = SerializableDjinnEvent {
+            entity_type: "proposal_debate_trail".into(),
+            action: "updated".into(),
+            payload: serde_json::Value::Null.to_string(),
+            id: None,
+            project_id: None,
+        };
+        let err = intern_envelope(wire)
+            .expect_err("proposal_debate_trail.updated must not be registered");
+        assert_eq!(err, ("proposal_debate_trail".into(), "updated".into()));
     }
 }

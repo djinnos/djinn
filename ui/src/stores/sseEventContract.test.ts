@@ -30,6 +30,18 @@ describe("sseEventContract", () => {
       kind: "dispatch",
       eventType: "proposal_feedback_created",
     });
+    expect(resolveServerSSEEventName("proposal.created")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_created",
+    });
+    expect(resolveServerSSEEventName("proposal.updated")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_updated",
+    });
+    expect(resolveServerSSEEventName("proposal.deleted")).toEqual({
+      kind: "dispatch",
+      eventType: "proposal_deleted",
+    });
     expect(resolveServerSSEEventName("session.completed")).toEqual({
       kind: "dispatch",
       eventType: "session_ended",
