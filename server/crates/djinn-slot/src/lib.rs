@@ -110,7 +110,14 @@ pub use session_extraction::{
 // hfhw cutover: expose `run_supervisor_dispatch` so the host (djinn-agent)
 // can call through the djinn-slot pathway from `actor.rs`.
 
-pub use supervisor_runner::run_supervisor_dispatch;
+	pub use supervisor_runner::run_supervisor_dispatch;
+
+// ─── Dispatch orchestrator ─────────────────────────────────────────────────
+// Canonical dispatch lifecycle orchestrator extracted from djinn-agent.
+// Host-specific operations are abstracted through `TaskDispatchContext`.
+
+pub mod dispatch_orchestrator;
+pub mod dispatch_utils;
 
 // ─── Reply loop re-export ──────────────────────────────────────────────────
 // The canonical reply loop implementation now lives in djinn-slot.
