@@ -1071,7 +1071,6 @@ pub(super) async fn dispatch_task_runtime(
 struct DispatchContext<'a> {
     task: &'a Task,
     has_conflict: bool,
-    has_review_response: bool,
     base_branch: String,
     task_branch: String,
     base_flow: SupervisorFlow,
@@ -1097,7 +1096,6 @@ impl<'a> DispatchContext<'a> {
         Self {
             task,
             has_conflict,
-            has_review_response,
             base_branch,
             task_branch,
             base_flow,
