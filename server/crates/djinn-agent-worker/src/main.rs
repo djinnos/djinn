@@ -1835,6 +1835,10 @@ fn build_worker_agent_context(
     let event_bus = EventBus::spawning(move |envelope: DjinnEventEnvelope| {
         let rpc = rpc_for_bus.clone();
         async move {
+            if !worker_bridge_should_serialize_event(&envelope.entity_type, &envelope.action) {
+                return;
+            }
+
             let wire = SerializableDjinnEvent::from_envelope(&envelope);
             if let Err(e) = rpc.emit_djinn_event(wire).await {
                 tracing::warn!(
@@ -1875,6 +1879,20 @@ fn build_worker_agent_context(
         default_project_id: Some(project_id),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
     }
+}
+
+fn worker_bridge_should_serialize_event(entity_type: &str, action: &str) -> bool {
+    !worker_bridge_ignores_pair(entity_type, action)
+}
+
+fn worker_bridge_ignores_pair(entity_type: &str, action: &str) -> bool {
+    matches!(
+        (entity_type, action),
+        ("session_message", "inserted")
+            | ("note", "created")
+            | ("note", "updated")
+            | ("note", "contradiction_candidates")
+    )
 }
 
 /// Drive the `warm-graph <project_id>` subcommand end-to-end.
@@ -2173,6 +2191,46 @@ mod tests {
     use tracing::dispatcher::Dispatch;
 
     static CARGO_INSTRUMENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn worker_bridge_exact_ignored_pairs_skip_serialization() {
+        for (entity_type, action) in [
+            ("session_message", "inserted"),
+            ("note", "created"),
+            ("note", "updated"),
+            ("note", "contradiction_candidates"),
+        ] {
+            assert!(
+                worker_bridge_ignores_pair(entity_type, action),
+                "expected {entity_type}.{action} to be ignored"
+            );
+            assert!(
+                !worker_bridge_should_serialize_event(entity_type, action),
+                "expected {entity_type}.{action} to be skipped before bridge serialization"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_bridge_nearby_unlisted_pairs_continue_to_host() {
+        for (entity_type, action) in [
+            ("note", "deleted"),
+            ("note", "missing_summary"),
+            ("proposal", "updated"),
+            ("proposal_feedback", "created"),
+            ("proposal_debate_trail", "created"),
+            ("session", "message"),
+        ] {
+            assert!(
+                !worker_bridge_ignores_pair(entity_type, action),
+                "expected {entity_type}.{action} not to be ignored"
+            );
+            assert!(
+                worker_bridge_should_serialize_event(entity_type, action),
+                "expected {entity_type}.{action} to continue toward bridge serialization"
+            );
+        }
+    }
 
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
