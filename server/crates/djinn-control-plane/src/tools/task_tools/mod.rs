@@ -264,6 +264,36 @@ impl DjinnMcpServer {
                     }
                     None => None,
                 };
+                // Pre-session surfacing: when no reply-loop session exists yet
+                // but the run is dispatched and setting up (`task_run` status
+                // `starting`), surface that live state so the UI renders a real
+                // "starting" status instead of deriving a "setting up"
+                // pseudo-status from the absent session. Model/agent are not yet
+                // known at this stage, so they are left blank; the UI keys off
+                // `status == "starting"`.
+                let active_session = match active_session {
+                    Some(s) => Some(s),
+                    None => match task_run_repo.latest_starting_for_task(&t.id).await {
+                        Ok(Some(run)) => Some(SessionRecordResponse {
+                            id: run.id,
+                            project_id: Some(run.project_id),
+                            task_id: run.task_id,
+                            model_id: String::new(),
+                            agent_type: String::new(),
+                            started_at: run.started_at,
+                            ended_at: None,
+                            status: djinn_core::models::TaskRunStatus::Starting
+                                .as_str()
+                                .to_string(),
+                            tokens_in: 0,
+                            tokens_out: 0,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                            workspace_path: run.workspace_path,
+                        }),
+                        _ => None,
+                    },
+                };
                 Json(ErrorOr::Ok(TaskShowResponse {
                     task: task_to_response(&t),
                     session_count,
@@ -373,17 +403,44 @@ impl DjinnMcpServer {
                     .await
                     .unwrap_or_default();
 
+                // Pre-session surfacing (batch): tasks dispatched but not yet at
+                // their first reply-loop session hold a `starting` task_run and
+                // have no active session — surface that live state so the UI
+                // renders "starting" rather than deriving "setting up".
+                let task_run_repo = djinn_db::repositories::task_run::TaskRunRepository::new(
+                    self.state.db().clone(),
+                );
+                let mut starting_by_task = task_run_repo
+                    .latest_starting_by_tasks(&task_ids)
+                    .await
+                    .unwrap_or_default();
+
                 let tasks = result
                     .tasks
                     .iter()
                     .map(|t| {
-                        let active = session_by_task.remove(&t.id).map(|s| ActiveSessionSummary {
-                            session_id: s.id,
-                            agent_type: s.agent_type,
-                            model_id: s.model_id,
-                            started_at: s.started_at,
-                            status: s.status,
-                        });
+                        let active = match session_by_task.remove(&t.id) {
+                            Some(s) => Some(ActiveSessionSummary {
+                                session_id: s.id,
+                                agent_type: s.agent_type,
+                                model_id: s.model_id,
+                                started_at: s.started_at,
+                                status: s.status,
+                            }),
+                            None => {
+                                starting_by_task
+                                    .remove(&t.id)
+                                    .map(|run| ActiveSessionSummary {
+                                        session_id: run.id,
+                                        agent_type: String::new(),
+                                        model_id: String::new(),
+                                        started_at: run.started_at,
+                                        status: djinn_core::models::TaskRunStatus::Starting
+                                            .as_str()
+                                            .to_string(),
+                                    })
+                            }
+                        };
                         let count = session_counts.get(&t.id).copied().unwrap_or(0);
                         task_to_list_item(t, active, count)
                     })

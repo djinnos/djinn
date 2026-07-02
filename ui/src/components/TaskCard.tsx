@@ -96,18 +96,29 @@ function hasHumanReviewHold(task: Task): boolean {
   return task.labels?.includes(HUMAN_REVIEW_HOLD_LABEL) ?? false;
 }
 
-function getStatusBadge(status: string, hasSession: boolean, allAcMet: boolean): { label: string; className: string } | null {
-  if ((status === "needs_task_review" || status === "in_task_review") && !hasSession && allAcMet) {
+// The pre-first-turn tracking state a dispatched run reports (via
+// `active_session.status`) until its first reply-loop session upgrades it to
+// `running`. Matches the backend `TaskRunStatus::Starting` wire string.
+const STARTING_SESSION_STATUS = "starting";
+
+function getStatusBadge(
+  status: string,
+  sessionStatus: string | undefined,
+  allAcMet: boolean,
+): { label: string; className: string } | null {
+  if ((status === "needs_task_review" || status === "in_task_review") && !sessionStatus && allAcMet) {
     return { label: "merging", className: "text-green-400 animate-pulse" };
   }
-  if (status === "in_progress" && !hasSession) {
-    return { label: "setting up", className: "text-blue-400 animate-pulse" };
+  // Real dispatched-but-pre-session state, surfaced from the tracked run —
+  // NOT a "setting up" pseudo-status inferred from a missing session.
+  if (status === "in_progress" && sessionStatus === STARTING_SESSION_STATUS) {
+    return { label: "starting", className: "text-blue-400 animate-pulse" };
   }
   return null;
 }
 
-function StatusBadge({ status, hasSession, allAcMet }: { status: string; hasSession: boolean; allAcMet: boolean }) {
-  const badge = getStatusBadge(status, hasSession, allAcMet);
+function StatusBadge({ status, sessionStatus, allAcMet }: { status: string; sessionStatus: string | undefined; allAcMet: boolean }) {
+  const badge = getStatusBadge(status, sessionStatus, allAcMet);
   if (!badge) return null;
   return (
     <span className={cn("text-[10px] font-medium", badge.className)}>
@@ -238,7 +249,11 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
   const acMet = ac.filter((c: { met?: boolean }) => c.met).length;
   const cardTint = getCardTint(task);
   const needsReview = hasHumanReviewHold(task);
-  const isSettingUp = task.status === "in_progress" && !task.active_session;
+  // Dispatched but not yet at its first reply-loop turn: the tracked run
+  // reports `starting` via `active_session.status`. Suppress duration/model/
+  // avatar until the session is really running (model/agent are unknown while
+  // starting).
+  const isStarting = task.active_session?.status === STARTING_SESSION_STATUS;
 
   return (
     <Card
@@ -324,7 +339,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           {/* Status badge for in-flight */}
           {isInFlight && (
             <span className="inline-flex items-center gap-1" data-testid="taskcard-status-badge">
-              <StatusBadge status={task.status} hasSession={!!task.active_session} allAcMet={acTotal > 0 && acMet === acTotal} />
+              <StatusBadge status={task.status} sessionStatus={task.active_session?.status} allAcMet={acTotal > 0 && acMet === acTotal} />
             </span>
           )}
 
@@ -340,10 +355,10 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
           )}
 
           {/* Duration & model for in-flight / done (hidden during setup — shown in tooltip) */}
-          {shouldShowDuration && !isSettingUp && (
+          {shouldShowDuration && !isStarting && (
             <span className="text-[10px]">{formatCompactDuration(totalTrackedSeconds)}</span>
           )}
-          {task.active_session?.model_id && !isSettingUp && (
+          {task.active_session?.model_id && !isStarting && (
             <span className="min-w-0 shrink truncate text-[10px]" title={task.active_session.model_id}>
               {task.active_session.model_id}
             </span>
@@ -377,7 +392,7 @@ export function TaskCard({ task, moving = false, onClick }: TaskCardProps) {
         )}
 
         {/* Agent avatar – shown when task has an active session (hidden during setup) */}
-        {task.active_session && !isSettingUp && (
+        {task.active_session && !isStarting && (
           <img
             src={agentAvatar(task.active_session.agent_type)}
             alt={task.active_session.agent_type ?? "agent"}

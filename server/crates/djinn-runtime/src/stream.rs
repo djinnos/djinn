@@ -38,9 +38,39 @@ pub enum StreamEvent {
     },
     /// One stage finished — advances the supervisor's role sequence.
     StageOutcome { role: RoleKind, outcome_tag: String },
+    /// Coarse stage-init progress marker emitted while the run is setting up,
+    /// BEFORE the first reply-loop session exists. Lets the host name the
+    /// in-pod step a hung run is stuck on (workspace attach, cargo seed,
+    /// context build, ...) and detect when the first turn is reached (the
+    /// [`STAGE_STEP_FIRST_TURN`] marker). Diagnostic-only: dropped by the
+    /// normal report drain.
+    StageStep { step: String },
     /// Terminal: the whole task-run finished.  Always the last frame.
     Report(TaskRunReport),
 }
+
+/// Stage-init step markers emitted as [`StreamEvent::StageStep`] /
+/// [`crate::WorkerEvent::StageStep`] so the host can name the step a
+/// pre-session hang is stuck on. The values are stable wire strings shared by
+/// the worker (emitter) and the host (pre-session liveness deadline).
+pub mod stage_step {
+    /// Attaching/cloning the ephemeral workspace from the mirror.
+    pub const WORKSPACE_ATTACH: &str = "workspace_attach";
+    /// Seeding the per-run private cargo target dir from the base snapshot.
+    pub const CARGO_SEED: &str = "cargo_seed";
+    /// Resolving model/credentials, MCP, skills, and assembling the prompt.
+    pub const CONTEXT_BUILD: &str = "context_build";
+    /// Creating the session row (immediately precedes the reply loop).
+    pub const SESSION_CREATE: &str = "session_create";
+    /// The reply loop has started — the first provider turn is reached. Seeing
+    /// this (or any reply-loop event, or a `sessions` row) disarms the
+    /// host-side pre-session liveness deadline.
+    pub const FIRST_TURN: &str = "reply_loop";
+}
+
+/// Marker step signalling the first reply-loop turn has been reached. Re-export
+/// of [`stage_step::FIRST_TURN`] for the host's deadline check.
+pub const STAGE_STEP_FIRST_TURN: &str = stage_step::FIRST_TURN;
 
 /// Requests flowing downstream from the coordinator to the worker.
 ///

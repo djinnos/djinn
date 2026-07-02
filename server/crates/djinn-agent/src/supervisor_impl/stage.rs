@@ -645,6 +645,12 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
+    // Coarse pre-session progress marker for the host-side liveness deadline:
+    // model/credential/MCP/skill resolution and prompt assembly happen here,
+    // before any session row exists.
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::CONTEXT_BUILD)
+        .await;
     let PromptContext { system_prompt, .. } = assemble_prompt_context(PromptContextInputs {
         task,
         runtime_role: runtime_role.as_ref(),
@@ -684,6 +690,9 @@ pub(crate) async fn execute_stage(
     });
     let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
     let billing_source = billing_signal.map(|(_, source)| source);
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::SESSION_CREATE)
+        .await;
     let session_record = services
         .create_session(
             djinn_supervisor::services::SerializableCreateSessionParams {
@@ -700,6 +709,13 @@ pub(crate) async fn execute_stage(
         .await
         .map_err(StageError::SessionCreate)?;
     let session_id = session_record.id.clone();
+    // The session row now exists — the first reply-loop turn is reached. This
+    // marker (and the `sessions` row itself) disarms the host-side pre-session
+    // liveness deadline; from here liveness is owned by the coordinator's
+    // session stall detector / zombie reaper.
+    let _ = services
+        .report_stage_step(djinn_runtime::stage_step::FIRST_TURN)
+        .await;
 
     // ── Build the LLM provider ───────────────────────────────────────────────
     // Soft fallback: a missing catalog entry surfaces as `Err`, which we map to

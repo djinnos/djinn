@@ -18,30 +18,61 @@ describe("TaskCard", () => {
         { criterion: "second", met: true },
       ],
       unresolved_blocker_count: 1,
+      active_session: {
+        session_id: "run-starting-1",
+        agent_type: "",
+        model_id: "",
+        started_at: new Date().toISOString(),
+        status: "starting",
+      },
     };
 
     render(<TaskCard task={task} />);
 
     expect(screen.getByText(task.title)).toBeInTheDocument();
     expect(screen.getByText(task.short_id)).toBeInTheDocument();
-    expect(screen.getByText("setting up")).toBeInTheDocument();
+    expect(screen.getByText("starting")).toBeInTheDocument();
     expect(screen.getByLabelText(`Priority P${task.priority}`)).toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
     expect(screen.getByText(/frontend/i)).toBeInTheDocument();
   });
 
-  it("renders setting up badge for in-progress tasks without an active session", () => {
+  it("renders the real 'starting' status (not a derived 'setting up') for a dispatched, pre-session run", () => {
     const task = {
       ...mockTaskA,
       id: "task-setup-step",
       short_id: "s1",
       status: "in_progress",
       title: "Setup task",
+      active_session: {
+        session_id: "run-starting-2",
+        agent_type: "",
+        model_id: "",
+        started_at: new Date().toISOString(),
+        status: "starting",
+      },
     };
 
     render(<TaskCard task={task} />);
 
-    expect(screen.getByText("setting up")).toBeInTheDocument();
+    expect(screen.getByText("starting")).toBeInTheDocument();
+    expect(screen.queryByText("setting up")).not.toBeInTheDocument();
+  });
+
+  it("never derives a 'setting up' pseudo-status from a missing session", () => {
+    const task = {
+      ...mockTaskA,
+      id: "task-no-session",
+      short_id: "s2",
+      status: "in_progress",
+      title: "In progress, no session yet",
+      active_session: undefined,
+    };
+
+    render(<TaskCard task={task} />);
+
+    expect(screen.queryByText("setting up")).not.toBeInTheDocument();
+    expect(screen.queryByText("starting")).not.toBeInTheDocument();
   });
 
   it("renders CI: passing badge when ci status is passing", () => {
