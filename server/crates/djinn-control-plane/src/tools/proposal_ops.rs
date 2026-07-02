@@ -2,7 +2,7 @@
 // `epic_ops.rs`: thin serializable views over the `djinn-core` models with
 // JSON-array fields expanded to `Vec<String>`.
 
-use crate::tools::epic_ops::AcceptanceCriterionItem;
+use crate::tools::epic_ops::{AcceptanceCriterionItem, parse_acceptance_criteria_array};
 use djinn_core::models::{
     Proposal, ProposalFeedback, ProposalRevision, ProposalSignoff, ProposalTarget,
 };
@@ -745,17 +745,7 @@ pub struct GateFailureModel {
 /// accepting both plain strings and `{criterion, met}` objects (same
 /// tolerance as the task layer).
 fn parse_acceptance_criteria(raw: &str) -> Vec<AcceptanceCriterionItem> {
-    let parsed = serde_json::from_str::<serde_json::Value>(raw)
-        .ok()
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    parsed
-        .into_iter()
-        .map(|item| {
-            serde_json::from_value::<AcceptanceCriterionItem>(item.clone())
-                .unwrap_or_else(|_| AcceptanceCriterionItem::Text(item.to_string()))
-        })
-        .collect()
+    parse_acceptance_criteria_array(raw)
 }
 
 // ── Human authority control responses ──────────────────────────────────────

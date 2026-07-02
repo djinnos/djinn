@@ -225,7 +225,16 @@ fn parse_string_array(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-fn parse_acceptance_criteria_array(raw: &str) -> Vec<AcceptanceCriterionItem> {
+/// Parse a JSON acceptance-criteria array string into typed items.
+///
+/// Tolerant of both plain-string ACs (`["do X", ...]`) and structured
+/// `{ "criterion": "...", "met": bool }` objects, falling back to a `Text`
+/// item for anything that does not deserialize cleanly. This is the canonical
+/// parser every read path (proposal_show, DoR readiness, epic breakdown) must
+/// use so structured ACs are never silently dropped — unlike
+/// `djinn_core::models::parse_json_array`, which deserializes to `Vec<String>`
+/// and therefore fails wholesale (returning an empty vec) on structured ACs.
+pub fn parse_acceptance_criteria_array(raw: &str) -> Vec<AcceptanceCriterionItem> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw)
         .ok()
         .and_then(|v| v.as_array().cloned())
