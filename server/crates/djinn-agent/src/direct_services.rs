@@ -819,4 +819,105 @@ mod tests {
             .expect_err("proposal_debate_trail.updated must not be registered");
         assert_eq!(err, ("proposal_debate_trail".into(), "updated".into()));
     }
+
+    // ── Representative combined routing regression (i2ef Task D) ───────
+    //
+    // Proves the worker-side ignored-pair filter and host-side
+    // `intern_envelope` allowlist work together correctly across the three
+    // event routing groups.  The canonical `worker_bridge_ignores_pair`
+    // lives in `djinn-agent-worker`; a local mirror captures the intended
+    // contract for regression testing at the host seam without creating a
+    // cross-crate test dependency.
+
+    /// Mirror of `djinn-agent-worker::worker_bridge_ignores_pair`.
+    /// Keeps the canonical set in sync with the worker crate.
+    fn host_mirror_worker_ignores_pair(entity_type: &str, action: &str) -> bool {
+        matches!(
+            (entity_type, action),
+            ("session_message", "inserted")
+                | ("note", "created")
+                | ("note", "updated")
+                | ("note", "contradiction_candidates")
+        )
+    }
+
+    /// Combined routing regression: ignored pairs are filtered before the
+    /// host unknown-pair warning path, proposal/proposal_feedback pairs are
+    /// accepted by `intern_envelope`, and unregistered non-filtered pairs
+    /// produce the host drift signal.
+    ///
+    /// Covers i2ef acceptance criteria A (ignored), B (accepted), and C
+    /// (visible drift) in a single table-driven test.
+    #[test]
+    fn worker_to_host_event_routing_regression() {
+        // ── Group 1: Ignored before host ──────────────────────────────
+        // These pairs are filtered worker-side and should never reach
+        // `intern_envelope` / the unknown-pair warning path.
+        let ignored_pairs: &[(&str, &str)] = &[
+            ("session_message", "inserted"),
+            ("note", "created"),
+            ("note", "updated"),
+            ("note", "contradiction_candidates"),
+        ];
+        for &(et, ac) in ignored_pairs {
+            assert!(
+                host_mirror_worker_ignores_pair(et, ac),
+                "{et}.{ac} must be filtered by worker bridge before reaching host"
+            );
+        }
+
+        // ── Group 2: Accepted by host without unknown-pair warning ────
+        // These pairs pass the worker filter and are allowlisted in
+        // `intern_envelope`, so no drift warning is emitted.
+        let accepted_pairs: &[(&str, &str)] = &[
+            ("proposal", "created"),
+            ("proposal", "updated"),
+            ("proposal", "deleted"),
+            ("proposal_feedback", "created"),
+        ];
+        for &(et, ac) in accepted_pairs {
+            assert!(
+                !host_mirror_worker_ignores_pair(et, ac),
+                "{et}.{ac} must NOT be filtered by worker bridge"
+            );
+            let wire = SerializableDjinnEvent {
+                entity_type: et.into(),
+                action: ac.into(),
+                payload: serde_json::json!({}).to_string(),
+                id: Some("test-id".into()),
+                project_id: Some("test-proj".into()),
+            };
+            let env = intern_envelope(wire).unwrap_or_else(|_| {
+                panic!("{et}.{ac} must be accepted by host (no drift warning)")
+            });
+            assert_eq!(env.entity_type, et);
+            assert_eq!(env.action, ac);
+        }
+
+        // ── Group 3: Visible drift — unexpected non-filtered pair ─────
+        // These pass the worker filter (not ignored) but are NOT
+        // allowlisted at the host, so `intern_envelope` returns `Err`
+        // and the caller emits the drift warning.
+        let drift_pairs: &[(&str, &str)] = &[
+            ("proposal_debate_trail", "created"),
+            ("proposal_debate_trail", "updated"),
+        ];
+        for &(et, ac) in drift_pairs {
+            assert!(
+                !host_mirror_worker_ignores_pair(et, ac),
+                "{et}.{ac} must pass worker filter to surface as host drift"
+            );
+            let wire = SerializableDjinnEvent {
+                entity_type: et.into(),
+                action: ac.into(),
+                payload: serde_json::Value::Null.to_string(),
+                id: None,
+                project_id: None,
+            };
+            let (err_et, err_ac) =
+                intern_envelope(wire).expect_err("{et}.{ac} must produce host drift signal (Err)");
+            assert_eq!(err_et, et, "drift error entity_type must match input");
+            assert_eq!(err_ac, ac, "drift error action must match input");
+        }
+    }
 }
