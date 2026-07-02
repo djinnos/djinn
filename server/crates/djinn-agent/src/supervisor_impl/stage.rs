@@ -73,7 +73,8 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_telemetry_meta, default_base_url, resolved_needs_base_url,
+    build_provider_from_resolved, build_telemetry_meta_with_attribution, default_base_url,
+    resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
@@ -767,7 +768,8 @@ pub(crate) async fn execute_stage(
     } else {
         let resolved = resolved
             .expect("resolved model credential must be populated when provider_override is absent");
-        let telemetry_meta = build_telemetry_meta(runtime_role_name, &task.id);
+        let telemetry_meta =
+            build_telemetry_meta_with_attribution(runtime_role_name, &task.id, None, None);
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own). Soft fallback to `default_base_url` on a missing
         // catalog entry / empty URL, matching the pre-Phase-6b behaviour.
