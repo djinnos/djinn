@@ -187,9 +187,9 @@ impl CoordinatorActor {
     ///
     /// This is intentionally narrow: it only observes the live task event path,
     /// delegates classification/idempotency to the repository primitive, and
-    /// does not clear the evidence link or resume tribunal work.
+    /// resumes the in-process tribunal only after a valid receipt is recorded.
     pub(super) async fn persist_terminal_linked_spike_evidence_from_closed_task(
-        &self,
+        &mut self,
         task: &djinn_core::models::Task,
     ) {
         if task.status != "closed" {
@@ -237,12 +237,16 @@ impl CoordinatorActor {
             )
             .await
         {
-            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => tracing::info!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                outcome = "EvidenceReceived",
-                "CoordinatorActor: recorded linked evidence spike receipt"
-            ),
+            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => {
+                tracing::info!(
+                    proposal_id = %proposal.id,
+                    spike_task_id = %task.id,
+                    outcome = "EvidenceReceived",
+                    "CoordinatorActor: recorded linked evidence spike receipt"
+                );
+                self.resume_refinement_after_evidence_received(&proposal.id, &task.id)
+                    .await;
+            }
             Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => tracing::info!(
                 proposal_id = %proposal.id,
                 spike_task_id = %task.id,

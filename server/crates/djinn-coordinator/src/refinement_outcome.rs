@@ -9,7 +9,7 @@ use djinn_control_plane::tools::epic_ops::{
     AcceptanceCriterionItem, parse_acceptance_criteria_array,
 };
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
-use djinn_core::models::TransitionAction;
+use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
 
 use super::refinement::{
@@ -20,6 +20,18 @@ use super::refinement::{
 
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
+
+fn format_debate_context_entry(entry: &ProposalDebateTrail) -> String {
+    format!(
+        "- round {}, revision {}, {} by {} (blocking={}): {}",
+        entry.round,
+        entry.against_revision_seq,
+        entry.kind,
+        entry.agent_role,
+        entry.blocking,
+        entry.body
+    )
+}
 
 impl CoordinatorActor {
     /// Process the outcome of a completed refinement session.
@@ -769,6 +781,15 @@ impl CoordinatorActor {
              Current DoR status: {readiness_context}"
         );
 
+        if agent_type.eq_ignore_ascii_case("advocate")
+            && let Some(evidence_context) = self
+                .build_advocate_evidence_findings_context(proposal.as_ref(), proposal_id)
+                .await
+        {
+            description.push_str("\n\n");
+            description.push_str(&evidence_context);
+        }
+
         // Inject current human reviewer feedback near the DoR status so the
         // tribunal agent sees the exact feedback string for this round. The
         // caller is responsible for ensuring the feedback belongs to the
@@ -834,6 +855,59 @@ impl CoordinatorActor {
                 None
             }
         }
+    }
+
+    async fn build_advocate_evidence_findings_context(
+        &self,
+        proposal: Option<&Proposal>,
+        proposal_id: &str,
+    ) -> Option<String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let entries = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to read debate trail for evidence findings context"
+                );
+                return None;
+            }
+        };
+
+        let findings = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "evidence_findings" && entry.agent_role == "spike")?;
+
+        let mut context = String::from(
+            "Evidence findings received for this Advocate round. Use these findings to respond to the current proposal and objections before Judge adjudication resumes.\n",
+        );
+        if let Some(proposal) = proposal {
+            context.push_str("\nCurrent proposal body:\n");
+            context.push_str(&proposal.body);
+            context.push('\n');
+        }
+
+        let current_debate = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind.as_str(), "objection" | "rebuttal"))
+            .map(format_debate_context_entry)
+            .collect::<Vec<_>>();
+        if !current_debate.is_empty() {
+            context.push_str("\nCurrent objections/rebuttals:\n");
+            context.push_str(&current_debate.join("\n"));
+            context.push('\n');
+        }
+
+        context.push_str("\nEvidence findings:\n");
+        context.push_str(&format_debate_context_entry(findings));
+        if let Some(metadata) = findings.body_metadata.as_deref().filter(|s| !s.is_empty()) {
+            context.push_str("\nStructured findings metadata:\n");
+            context.push_str(metadata);
+        }
+        Some(context)
     }
 
     /// Evaluate proposal readiness using the deterministic P1 DoR evaluator.
