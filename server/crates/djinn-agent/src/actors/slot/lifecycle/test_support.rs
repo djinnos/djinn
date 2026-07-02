@@ -94,6 +94,36 @@ pub(crate) async fn assemble_for_role(
         resolved_skills,
         app_state: &app_state,
         read_sources,
+        worker_resume_note: None,
+    })
+    .await
+}
+
+/// Variant of [`assemble_for_role`] that accepts a worker resume note,
+/// used by resume-context tests.
+pub(crate) async fn assemble_for_role_with_resume(
+    db: Database,
+    task: &Task,
+    role: &dyn AgentRole,
+    worker_resume_note: Option<&str>,
+) -> PromptContext {
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    assemble_prompt_context(PromptContextInputs {
+        task,
+        runtime_role: role,
+        role_for_epic_check: role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note,
     })
     .await
 }
@@ -150,7 +180,10 @@ pub(crate) fn task_with_ci(
 
 pub(crate) fn assert_contains_all(haystack: &str, needles: &[&str]) {
     for needle in needles {
-        assert!(haystack.contains(needle), "missing {needle:?} in {haystack}");
+        assert!(
+            haystack.contains(needle),
+            "missing {needle:?} in {haystack}"
+        );
     }
 }
 
@@ -161,7 +194,10 @@ pub(crate) fn assert_ordered(haystack: &str, needles: &[&str]) {
             .find(needle)
             .map(|pos| previous + pos)
             .unwrap_or_else(|| panic!("missing ordered marker {needle:?} in {haystack}"));
-        assert!(pos >= previous, "{needle:?} appeared out of order in {haystack}");
+        assert!(
+            pos >= previous,
+            "{needle:?} appeared out of order in {haystack}"
+        );
         previous = pos;
     }
 }

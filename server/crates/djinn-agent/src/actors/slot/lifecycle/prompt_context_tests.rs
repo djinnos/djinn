@@ -5,12 +5,12 @@ use djinn_core::models::ActivityEntry;
 use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
 use tokio_util::sync::CancellationToken;
 
-use crate::roles::LeadRole;
+use crate::roles::{LeadRole, WorkerRole};
 use crate::test_helpers::{agent_context_from_db, create_test_project};
 
 use super::test_support::{
-    assemble_for_role, assert_contains_all, assert_ordered, create_epic, create_project_epic_task,
-    create_task,
+    assemble_for_role, assemble_for_role_with_resume, assert_contains_all, assert_ordered,
+    create_epic, create_project_epic_task, create_task,
 };
 
 async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
@@ -89,7 +89,14 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
             .expect("link epic to proposal");
     }
 
-    let task = create_task(&db, &events, &subject_epic.id, "Decompose subject epic", None).await;
+    let task = create_task(
+        &db,
+        &events,
+        &subject_epic.id,
+        "Decompose subject epic",
+        None,
+    )
+    .await;
     let epic_context = lead_epic_context(db, &task).await;
 
     assert_contains_all(
@@ -114,7 +121,10 @@ async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
     let epic_context = lead_epic_context(db, &task).await;
 
     for section in ["### Blocking Epics", "### Proposal Sibling Epics"] {
-        assert!(!epic_context.contains(section), "unexpected section {section}");
+        assert!(
+            !epic_context.contains(section),
+            "unexpected section {section}"
+        );
     }
 }
 
@@ -158,13 +168,17 @@ async fn conflict_context_formats_files_and_preserves_prompt_fields() {
 async fn prompt_sections_append_in_canonical_order() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "Prompt section epic", "Prompt section task").await;
+    let task =
+        create_project_epic_task(&db, &events, "Prompt section epic", "Prompt section task").await;
     let role = LeadRole;
     let skills = vec![
         skill("alpha-skill", "First skill", "Alpha body.", true),
         skill("beta-skill", "Second skill", "Beta body.", false),
     ];
-    let sources = vec![source("repo-a", "Repository A"), source("repo-b", "Repository B")];
+    let sources = vec![
+        source("repo-a", "Repository A"),
+        source("repo-b", "Repository B"),
+    ];
 
     let ctx = assemble_for_role(
         db,
@@ -216,7 +230,12 @@ fn format_conflict_files_cases() {
     let result = format_conflict_files(Some(&ctx)).expect("should produce Some");
     assert_contains_all(
         &result,
-        &["- src/main.rs", "- Cargo.toml", "- tests/integration.rs", "\n"],
+        &[
+            "- src/main.rs",
+            "- Cargo.toml",
+            "- tests/integration.rs",
+            "\n",
+        ],
     );
 
     let empty = MergeConflictMetadata {
@@ -353,10 +372,15 @@ async fn load_epic_context_returns_context_when_epic_exists() {
 async fn load_knowledge_context_returns_none_when_no_notes() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
+    let task =
+        create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
 
-    assert!(load_knowledge_context(&task, None, &app_state).await.is_none());
+    assert!(
+        load_knowledge_context(&task, None, &app_state)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -489,4 +513,218 @@ fn activity(
         payload: payload.to_string(),
         created_at: format!("2025-01-01T0{hour}:00:00Z"),
     }
+}
+
+// ── Worker resume note tests (y8pv / 48ru) ─────────────────────────────────
+
+fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
+    djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        checkpoint_id: Some("ckpt-1".to_string()),
+        commit_sha: Some("abc123def456".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        submit_or_review_id: None,
+        prior_session_lineage: Some("session-prior-001".to_string()),
+        skipped: vec![],
+        previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+        last_durable_progress_summary: Some("Implemented core feature".to_string()),
+        verification_command: Some("cargo test -p djinn-agent".to_string()),
+    }
+}
+
+fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata {
+    djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        checkpoint_id: None,
+        commit_sha: None,
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        submit_or_review_id: Some("review-7".to_string()),
+        prior_session_lineage: Some("session-prior-002".to_string()),
+        skipped: vec![],
+        previous_model: None,
+        last_durable_progress_summary: None,
+        verification_command: None,
+    }
+}
+
+#[tokio::test]
+async fn worker_resume_note_injected_for_worker_role() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Resume epic", "Resume task").await;
+    let role = WorkerRole;
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some(), "worker role should receive resume note");
+
+    let ctx = assemble_for_role_with_resume(db, &task, &role, note.as_deref()).await;
+    assert!(ctx.worker_resume_note.is_some());
+    assert_contains_all(
+        ctx.worker_resume_note.as_deref().unwrap(),
+        &[
+            "Resuming from prior session",
+            "session-prior-001",
+            "abc123def456",
+            "claude-opus-4.7",
+            "no-progress checkpoint",
+            "Implemented core feature",
+            "cargo test -p djinn-agent",
+        ],
+    );
+    // The note should appear in the system prompt.
+    assert!(ctx.system_prompt.contains("## Resume Context"));
+    assert!(ctx.system_prompt.contains("Resuming from prior session"));
+}
+
+#[tokio::test]
+async fn worker_resume_note_included_for_auto_submit_source() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Auto-submit epic", "Auto-submit task").await;
+    let role = WorkerRole;
+    let metadata = resume_metadata_with_auto_submit();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some());
+
+    let note_text = note.unwrap();
+    assert_contains_all(
+        &note_text,
+        &["session-prior-002", "review-7", "auto-submit accepted"],
+    );
+    // Checkpoint SHA should NOT appear (it's an auto-submit source).
+    assert!(!note_text.contains("checkpoint"));
+}
+
+#[tokio::test]
+async fn worker_resume_note_absent_for_non_worker_roles() {
+    let metadata = resume_metadata_with_checkpoint();
+
+    // Lead role should NOT receive worker-resume instructions.
+    assert!(build_worker_resume_note("lead", Some(&metadata)).is_none());
+
+    // Reviewer role should NOT receive worker-resume instructions.
+    assert!(build_worker_resume_note("reviewer", Some(&metadata)).is_none());
+
+    // Planner role should NOT receive worker-resume instructions.
+    assert!(build_worker_resume_note("planner", Some(&metadata)).is_none());
+
+    // Architect role should NOT receive worker-resume instructions.
+    assert!(build_worker_resume_note("architect", Some(&metadata)).is_none());
+}
+
+#[tokio::test]
+async fn worker_resume_note_absent_when_not_considered() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: false,
+        ..resume_metadata_with_checkpoint()
+    };
+    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
+}
+
+#[tokio::test]
+async fn worker_resume_note_absent_when_no_identifying_fields() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        commit_sha: None,
+        submit_or_review_id: None,
+        prior_session_lineage: None,
+        ..Default::default()
+    };
+    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
+}
+
+#[test]
+fn worker_resume_note_absent_when_metadata_is_none() {
+    assert!(build_worker_resume_note("worker", None).is_none());
+}
+
+#[tokio::test]
+async fn non_worker_role_prompt_has_no_resume_section() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "No-resume epic", "No-resume task").await;
+    let role = LeadRole;
+    let metadata = resume_metadata_with_checkpoint();
+
+    // Even with metadata present, the lead role gets no resume note.
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_none());
+
+    let ctx = assemble_for_role_with_resume(db, &task, &role, None).await;
+    assert!(ctx.worker_resume_note.is_none());
+    assert!(!ctx.system_prompt.contains("## Resume Context"));
+}
+
+#[test]
+fn role_receives_worker_resume_check() {
+    assert!(role_receives_worker_resume("worker"));
+    assert!(!role_receives_worker_resume("lead"));
+    assert!(!role_receives_worker_resume("reviewer"));
+    assert!(!role_receives_worker_resume("planner"));
+    assert!(!role_receives_worker_resume("architect"));
+    assert!(!role_receives_worker_resume("advocate"));
+    assert!(!role_receives_worker_resume("adversary"));
+    assert!(!role_receives_worker_resume("judge"));
+}
+
+#[test]
+fn worker_resume_note_truncates_long_progress_summary() {
+    let long_summary = "x".repeat(200);
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        commit_sha: Some("sha1".to_string()),
+        prior_session_lineage: Some("s1".to_string()),
+        last_durable_progress_summary: Some(long_summary),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    // The truncated summary should end with … and be shorter than 200 chars.
+    assert!(note.contains('…'));
+    assert!(!note.contains(&"x".repeat(200)));
+}
+
+#[test]
+fn worker_resume_note_contains_all_required_fields_for_checkpoint() {
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "Resuming from prior session",
+            "session-prior-001",
+            "abc123def456",
+            "claude-opus-4.7",
+            "no-progress checkpoint",
+            "Implemented core feature",
+            "cargo test -p djinn-agent",
+        ],
+    );
+}
+
+#[test]
+fn worker_resume_note_contains_all_required_fields_for_auto_submit() {
+    let metadata = resume_metadata_with_auto_submit();
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &["session-prior-002", "review-7", "auto-submit accepted"],
+    );
+    // Should not mention checkpoint since this is an auto-submit source.
+    assert!(!note.contains("checkpoint"));
+}
+
+#[test]
+fn worker_resume_note_minimal_fields() {
+    // Only prior session is present — note should still be generated.
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        prior_session_lineage: Some("sess-1".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert!(note.contains("sess-1"));
 }

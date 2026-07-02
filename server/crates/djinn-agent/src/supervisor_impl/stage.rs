@@ -81,6 +81,7 @@ use crate::actors::slot::lifecycle::model_resolution::{
 };
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
+    build_worker_resume_note,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -645,6 +646,21 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
+    // y8pv / 48ru: build a one-line worker resume note from the coordinator-
+    // selected resume lifecycle metadata. Only injected for worker dispatch;
+    // non-worker roles receive no resume instructions.
+    let worker_resume_note = build_worker_resume_note(
+        runtime_role.config().name,
+        spec.resume_lifecycle_metadata.as_ref(),
+    );
+    if worker_resume_note.is_some() {
+        tracing::info!(
+            task_id = %task.short_id,
+            task_run_id = %task_run_id,
+            role = %runtime_role_name,
+            "Supervisor stage: injected worker resume note"
+        );
+    }
     // Coarse pre-session progress marker for the host-side liveness deadline:
     // model/credential/MCP/skill resolution and prompt assembly happen here,
     // before any session row exists.
@@ -665,6 +681,7 @@ pub(crate) async fn execute_stage(
         resolved_skills: &resolved_skills,
         app_state: agent_context,
         read_sources: &read_sources,
+        worker_resume_note: worker_resume_note.as_deref(),
     })
     .await;
 

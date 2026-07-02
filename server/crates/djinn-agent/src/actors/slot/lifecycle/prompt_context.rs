@@ -14,11 +14,11 @@
 //! strings themselves). This mirrors the byte-for-byte behaviour of the
 //! former inline block between lines ~671 and ~844 of `lifecycle.rs`.
 //!
-//! Worker-resume context is intentionally **not** handled here: the
-//! supervisor flow has no paused-session record to resume from. See the
-//! `## Deferred: worker-resume` block in
-//! [`crate::supervisor_impl::stage`] for the list of deleted helpers + the
-//! cross-crate plumbing a reintroduction would need.
+//! Worker-resume context (y8pv / 48ru) is injected via
+//! [`build_worker_resume_note`], which converts `ResumeLifecycleMetadata`
+//! into a concise one-line note. The note is only injected for worker
+//! dispatch where resume metadata is present; other roles see no resume
+//! instructions (see [`role_receives_worker_resume`]).
 
 use std::path::Path;
 
@@ -73,6 +73,10 @@ pub(crate) struct PromptContext {
     /// sa4x: promoted BLOCKING directive for red required CI. `None` when
     /// CI is not failing or no remediation baseline exists.
     pub ci_blocking_directive: Option<String>,
+    /// y8pv / 48ru: one-line resume note for worker dispatch after a
+    /// recoverable termination. `None` for non-worker roles or when no
+    /// resume metadata is present.
+    pub worker_resume_note: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
     /// Base prompt with role-level `system_prompt_extensions` + `learned_prompt`
@@ -152,6 +156,11 @@ pub(crate) struct PromptContextInputs<'a> {
     /// Read-only multi-repo: other registered projects the task's epic
     /// allows it to read. Materialized + resolved by the caller.
     pub read_sources: &'a [ReadSourceInfo],
+    /// y8pv / 48ru: one-line resume note for worker dispatch after a
+    /// recoverable termination. The caller builds this from
+    /// `TaskRunSpec::resume_lifecycle_metadata` when the role is a worker.
+    /// `None` for non-worker roles or when no resume metadata is present.
+    pub worker_resume_note: Option<&'a str>,
 }
 
 /// Format conflicting files from merge-conflict metadata as a `- <path>`
@@ -552,6 +561,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         resolved_skills,
         app_state,
         read_sources,
+        worker_resume_note,
     } = inputs;
 
     // ── Conflict metadata ────────────────────────────────────────────────
@@ -645,6 +655,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             code_graph_context: code_graph_context.clone(),
             reviewer_diff_context: reviewer_diff_context.clone(),
             ci_blocking_directive: ci_blocking_directive.clone(),
+            worker_resume_note: worker_resume_note.map(str::to_string),
         },
     );
     // ── Final prompt: extensions → skills → read sources (canonical order) ──
@@ -671,6 +682,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         code_graph_context,
         reviewer_diff_context,
         ci_blocking_directive,
+        worker_resume_note: worker_resume_note.map(str::to_string),
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,
@@ -785,6 +797,144 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ── Worker resume note (y8pv / 48ru) ──────────────────────────────────────
+
+/// Check whether a role name is eligible to receive worker-resume
+/// instructions. Only the `worker` role (the primary code-execution role)
+/// receives resume context. Specialist roles that override the worker's
+/// runtime config (e.g. `task.agent_type`) still have `config().name` set
+/// to `"worker"`, so this check covers them too.
+///
+/// Non-worker roles (lead, reviewer, planner, architect, tribunal roles)
+/// never receive misleading worker-resume instructions — they don't
+/// operate on the task worktree the same way and injecting resume context
+/// would confuse them.
+pub(crate) fn role_receives_worker_resume(role_name: &str) -> bool {
+    role_name == "worker"
+}
+
+/// Build a concise one-line worker resume note from resume lifecycle
+/// metadata. Returns `None` when:
+///   - the role is not a worker (see [`role_receives_worker_resume`]),
+///   - resume selection was not considered (`!metadata.considered`),
+///   - the selection fell back to a clean task branch with no prior
+///     checkpoint or submit/review id (nothing to resume from), or
+///   - no identifying fields are available (prior session, checkpoint SHA,
+///     or submit/review ID are all absent).
+///
+/// The note includes (when available):
+///   - prior session ID / lineage,
+///   - checkpoint SHA or submit/review ID,
+///   - previous model (from model-rotation metadata, if present),
+///   - termination reason (from the selection reason),
+///   - last durable-progress summary (from the extra map),
+///   - suggested verification command (from the extra map).
+pub(crate) fn build_worker_resume_note(
+    role_name: &str,
+    metadata: Option<&djinn_runtime::ResumeLifecycleMetadata>,
+) -> Option<String> {
+    if !role_receives_worker_resume(role_name) {
+        return None;
+    }
+
+    let metadata = metadata?;
+
+    if !metadata.considered {
+        return None;
+    }
+
+    // CleanTaskBranchFallback with no checkpoint SHA or submit/review id
+    // means there is nothing to resume from — the dispatch starts fresh.
+    // We check this after the considered flag so a clean fallback that
+    // still carries prior session lineage (for observability) can appear.
+    let has_checkpoint = metadata.commit_sha.is_some();
+    let has_submit_or_review = metadata
+        .submit_or_review_id
+        .as_ref()
+        .map_or(false, |id| !id.trim().is_empty());
+    let has_prior_session = metadata
+        .prior_session_lineage
+        .as_ref()
+        .map_or(false, |s| !s.trim().is_empty());
+
+    if !has_checkpoint && !has_submit_or_review && !has_prior_session {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(session) = &metadata.prior_session_lineage
+        && !session.trim().is_empty()
+    {
+        parts.push(format!("prior session `{session}`"));
+    }
+
+    // Checkpoint SHA or submit/review ID (whichever is present).
+    if let Some(sha) = &metadata.commit_sha
+        && !sha.trim().is_empty()
+    {
+        parts.push(format!("checkpoint `{sha}`"));
+    } else if let Some(id) = &metadata.submit_or_review_id
+        && !id.trim().is_empty()
+    {
+        parts.push(format!("submit/review `{id}`"));
+    }
+
+    if let Some(reason) = metadata.selection_reason {
+        parts.push(format!("terminated: {}", termination_label(reason)));
+    }
+
+    if let Some(prev_model) = &metadata.previous_model
+        && !prev_model.trim().is_empty()
+    {
+        parts.push(format!("prev model `{prev_model}`"));
+    }
+
+    if let Some(summary) = &metadata.last_durable_progress_summary
+        && !summary.trim().is_empty()
+    {
+        // Truncate long summaries to keep the note concise (one line).
+        let truncated = if summary.len() > 120 {
+            format!("{}…", &summary[..117])
+        } else {
+            summary.clone()
+        };
+        parts.push(format!("last progress: {truncated}"));
+    }
+
+    if let Some(cmd) = &metadata.verification_command
+        && !cmd.trim().is_empty()
+    {
+        parts.push(format!("verify: `{cmd}`"));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "**Resuming from prior session.** {}",
+        parts.join("; ")
+    ))
+}
+
+/// Map a [`ResumeSelectionReason`] to a human-readable termination label
+/// for the resume note.
+fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static str {
+    use djinn_runtime::ResumeSelectionReason as R;
+    match reason {
+        R::AutoSubmitAccepted => "auto-submit accepted",
+        R::LatestSafeCheckpoint => "no-progress checkpoint",
+        R::AlternateCheckpointRef => "alternate checkpoint ref",
+        R::CleanTaskBranchFallback => "clean fallback",
+        R::NewerTaskBranch => "newer task branch",
+        R::CheckpointMissing => "checkpoint missing",
+        R::CheckpointUnsafe => "checkpoint unsafe",
+        R::MergeConflict => "merge conflict",
+        R::Disabled => "resume disabled",
+    }
 }
 
 #[cfg(test)]
