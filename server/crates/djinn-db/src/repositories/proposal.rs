@@ -86,6 +86,32 @@ struct ProposalListRow {
     unresolved_feedback_count: i64,
 }
 
+/// Batched tribunal/readiness raw facts for one proposal on the list path.
+///
+/// Populated by [`ProposalRepository::list_summaries`], which runs one grouped
+/// (or window) query per fact across the whole listed page — so rendering the
+/// list's tribunal/gate chips costs a handful of queries total instead of the
+/// several-per-row that `build_gate_status` / `build_refinement_status` issue.
+/// Callers derive the deterministic DoR and composed-gate booleans upstream
+/// (they live in the control-plane readiness evaluator).
+#[derive(Debug, Default, Clone)]
+pub struct ProposalListSummaryRow {
+    /// Unresolved blocking, non-verdict debate objections outstanding.
+    pub unresolved_blocking_count: i64,
+    /// Body of the latest judge verdict, if any (for the needs-work heuristic
+    /// applied upstream — kept out of the DB layer so the heuristic stays
+    /// single-sourced with `build_gate_status`).
+    pub latest_judge_verdict_body: Option<String>,
+    /// Highest debate round reached (`0` when there is no debate trail yet).
+    pub current_round: i32,
+    /// A refinement (tribunal) run is active — started with no later stop.
+    pub refinement_active: bool,
+    /// Refinement converged and is parked awaiting human review.
+    pub awaiting_review: bool,
+    /// Number of target projects attached (feeds the DoR target-count check).
+    pub target_count: i64,
+}
+
 pub struct ProposalCreateInput<'a> {
     pub title: &'a str,
     pub body: &'a str,
@@ -3147,6 +3173,160 @@ impl ProposalRepository {
         .await?;
         Ok(count > 0)
     }
+
+    /// Batched tribunal/readiness raw facts for a page of proposals.
+    ///
+    /// One grouped/window query each for: unresolved blocking non-verdict debate
+    /// entries, latest judge verdict, highest debate round, refinement lifecycle
+    /// events, and target counts — keyed by proposal id. This deliberately does
+    /// NOT call the per-proposal `build_gate_status` / `build_refinement_status`
+    /// helpers (each of which issues several queries); it runs a fixed handful of
+    /// queries for the whole page so the proposals list can render tribunal/gate
+    /// chips cheaply. Callers derive `dor_ready` / `gate_ready` upstream.
+    ///
+    /// Proposals with no rows in a given table simply get the default (`0` /
+    /// `false` / `None`) for that fact. Every id in `ids` is present in the map.
+    pub async fn list_summaries(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, ProposalListSummaryRow>> {
+        self.db.ensure_initialized().await?;
+        let mut out: HashMap<String, ProposalListSummaryRow> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        for id in ids {
+            out.entry(id.clone()).or_default();
+        }
+
+        // 1. Unresolved blocking non-verdict debate objections per proposal.
+        //    Mirrors `list_unresolved_blocking_debate_entries` (blocking +
+        //    unresolved-or-reopened) but excludes judge verdicts
+        //    (`kind <> 'verdict'`) so the count reflects only outstanding
+        //    objections, not the verdict row itself.
+        let blocking_rows = sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT proposal_id, COUNT(*) AS n
+               FROM proposal_debate_trail
+               WHERE proposal_id = ANY($1)
+                 AND blocking = true
+                 AND kind <> 'verdict'
+                 AND (resolved_at IS NULL
+                      OR (resolved_at IS NOT NULL AND reopened_at IS NOT NULL))
+               GROUP BY proposal_id"#,
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        for (pid, n) in blocking_rows {
+            if let Some(row) = out.get_mut(&pid) {
+                row.unresolved_blocking_count = n;
+            }
+        }
+
+        // 2. Latest judge verdict body per proposal (window via DISTINCT ON).
+        let verdict_rows = sqlx::query_as::<_, (String, String)>(
+            r#"SELECT DISTINCT ON (proposal_id) proposal_id, body
+               FROM proposal_debate_trail
+               WHERE proposal_id = ANY($1)
+                 AND kind = 'verdict'
+                 AND agent_role = 'judge'
+               ORDER BY proposal_id, created_at DESC, id DESC"#,
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        for (pid, body) in verdict_rows {
+            if let Some(row) = out.get_mut(&pid) {
+                row.latest_judge_verdict_body = Some(body);
+            }
+        }
+
+        // 3. Highest debate round per proposal.
+        let round_rows = sqlx::query_as::<_, (String, Option<i32>)>(
+            r#"SELECT proposal_id, MAX(round) AS max_round
+               FROM proposal_debate_trail
+               WHERE proposal_id = ANY($1)
+               GROUP BY proposal_id"#,
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        for (pid, max_round) in round_rows {
+            if let Some(row) = out.get_mut(&pid) {
+                row.current_round = max_round.unwrap_or(0);
+            }
+        }
+
+        // 4. Refinement lifecycle events → active / awaiting_review. Mirrors the
+        //    created_at ordering logic in `build_refinement_status`: the latest
+        //    refinement_start defines the active run; a stop after it ends it; an
+        //    awaiting_review after the start (and after any stop) parks it.
+        let refine_rows = sqlx::query_as::<_, (String, String, String)>(
+            r#"SELECT proposal_id, event_kind, created_at
+               FROM proposal_revisions
+               WHERE proposal_id = ANY($1)
+                 AND event_kind IN
+                   ('refinement_start', 'refinement_stop', 'refinement_awaiting_review')
+               ORDER BY proposal_id, created_at, id"#,
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        // Rows ascend by created_at, so the last write per (proposal, kind) is
+        // the latest occurrence — matching `revisions().iter().rev().find(..)`.
+        let mut latest_start: HashMap<String, String> = HashMap::new();
+        let mut latest_stop: HashMap<String, String> = HashMap::new();
+        let mut latest_awaiting: HashMap<String, String> = HashMap::new();
+        for (pid, kind, created_at) in refine_rows {
+            match kind.as_str() {
+                "refinement_start" => {
+                    latest_start.insert(pid, created_at);
+                }
+                "refinement_stop" => {
+                    latest_stop.insert(pid, created_at);
+                }
+                "refinement_awaiting_review" => {
+                    latest_awaiting.insert(pid, created_at);
+                }
+                _ => {}
+            }
+        }
+        for (pid, row) in out.iter_mut() {
+            let Some(start) = latest_start.get(pid) else {
+                continue;
+            };
+            let stop = latest_stop.get(pid);
+            let awaiting = latest_awaiting.get(pid);
+            // Active when no stop landed after the latest start.
+            row.refinement_active = match stop {
+                Some(stop) => stop <= start,
+                None => true,
+            };
+            row.awaiting_review = match (awaiting, stop) {
+                (Some(aw), Some(stop)) => start <= aw && stop < aw,
+                (Some(aw), None) => start <= aw,
+                _ => false,
+            };
+        }
+
+        // 5. Target counts per proposal (feeds the DoR target-count check).
+        let target_rows = sqlx::query_as::<_, (String, i64)>(
+            r#"SELECT proposal_id, COUNT(*) AS n
+               FROM proposal_targets
+               WHERE proposal_id = ANY($1)
+               GROUP BY proposal_id"#,
+        )
+        .bind(ids)
+        .fetch_all(self.db.pool())
+        .await?;
+        for (pid, n) in target_rows {
+            if let Some(row) = out.get_mut(&pid) {
+                row.target_count = n;
+            }
+        }
+
+        Ok(out)
+    }
 }
 
 fn evidence_spike_task_is_terminal(status: &str) -> bool {
@@ -3530,6 +3710,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed.proposals[0].1, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_summaries_batches_tribunal_facts() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proj = insert_project(&db, "svc-sum").await;
+
+        // Messy proposal: active refinement, one blocking objection, a judge
+        // needs-work verdict, no target.
+        let messy = repo.create(create_input("Messy")).await.unwrap();
+        repo.record_refinement_lifecycle(&messy.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &messy.id,
+            kind: "objection",
+            body: "this scope is unbounded",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: Some("m"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+        // A judge verdict — must NOT count toward the blocking objection total
+        // (kind <> 'verdict'), but its body feeds the needs-work heuristic.
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &messy.id,
+            kind: "verdict",
+            body: "verdict: needs-work — tighten the scope",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("m"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        // Clean proposal: refinement converged and parked awaiting review, a
+        // non-needs-work verdict, a target attached, no blocking objections.
+        let clean = repo.create(create_input("Clean")).await.unwrap();
+        repo.add_target(&clean.id, &proj, "primary").await.unwrap();
+        repo.record_refinement_lifecycle(&clean.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(&clean.id, "refinement_awaiting_review", None)
+            .await
+            .unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &clean.id,
+            kind: "verdict",
+            body: "verdict: approve — ready to graduate",
+            blocking: false,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("m"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 3,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        let ids = vec![messy.id.clone(), clean.id.clone()];
+        let summaries = repo.list_summaries(&ids).await.unwrap();
+        assert_eq!(summaries.len(), 2, "every id present in the map");
+
+        let m = summaries.get(&messy.id).unwrap();
+        assert!(m.refinement_active, "messy has an active refinement run");
+        assert!(!m.awaiting_review);
+        assert_eq!(m.current_round, 2);
+        assert_eq!(
+            m.unresolved_blocking_count, 1,
+            "the verdict row must be excluded from the objection count"
+        );
+        assert!(m.target_count == 0);
+        assert!(
+            m.latest_judge_verdict_body
+                .as_deref()
+                .is_some_and(|b| b.contains("needs-work"))
+        );
+
+        let c = summaries.get(&clean.id).unwrap();
+        assert!(c.refinement_active, "no stop after start → still active");
+        assert!(c.awaiting_review, "awaiting_review after start parks it");
+        assert_eq!(c.current_round, 3);
+        assert_eq!(c.unresolved_blocking_count, 0);
+        assert_eq!(c.target_count, 1);
+        assert!(
+            c.latest_judge_verdict_body
+                .as_deref()
+                .is_some_and(|b| b.contains("approve"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_summaries_empty_ids_is_empty() {
+        let repo = ProposalRepository::new(test_db(), EventBus::noop());
+        let summaries = repo.list_summaries(&[]).await.unwrap();
+        assert!(summaries.is_empty());
     }
 
     fn update_input<'a>(

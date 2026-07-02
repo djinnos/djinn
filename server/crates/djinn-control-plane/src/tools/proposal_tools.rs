@@ -28,8 +28,9 @@ use crate::tools::proposal_blocks::{
 };
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse,
-    ProposalModel, ProposalReconcileObsoleteEpicResponse, ProposalShowResponse,
-    ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalListSummary, ProposalModel, ProposalReconcileObsoleteEpicResponse,
+    ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel,
+    ProposalTargetsResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -38,7 +39,8 @@ use crate::tools::validation::{
     validate_title,
 };
 use djinn_db::{
-    EpicRepository, ProjectRepository, ProposalListQuery, ProposalRepository, TaskRepository,
+    EpicRepository, ProjectRepository, ProposalListQuery, ProposalListSummaryRow,
+    ProposalRepository, TaskRepository,
 };
 
 // ── List response (NamedListResponse boilerplate, mirrors EpicListResponse) ──
@@ -716,6 +718,56 @@ pub struct ProposalStopBuildResponse {
 /// missing, empty, or unparseable.
 fn parse_ac_items(ac_json: &str) -> Vec<AcceptanceCriterionItem> {
     serde_json::from_str::<Vec<AcceptanceCriterionItem>>(ac_json).unwrap_or_default()
+}
+
+/// Whether a proposal status is non-terminal (still moving through scoping /
+/// review). Only these get a batched list summary — terminal proposals never
+/// show tribunal/gate chips. Mirrors the statuses the composed gate cares about
+/// (`draft` and `in_review`).
+fn proposal_status_is_non_terminal(status: &str) -> bool {
+    matches!(status, "draft" | "in_review")
+}
+
+/// Heuristic for a needs-work judge verdict — kept identical to the one in
+/// `build_gate_status` so the list and the detail gate agree.
+fn judge_verdict_is_needs_work(verdict_body: &str) -> bool {
+    let lower = verdict_body.to_lowercase();
+    lower.contains("needs-work") || lower.contains("needs_work") || lower.contains("needs work")
+}
+
+/// Compose the list-row tribunal/readiness summary from a proposal row plus its
+/// batched raw facts. Deterministic and query-free (all data is already loaded):
+/// runs the in-memory DoR evaluator and approximates the composed gate.
+fn build_list_summary(
+    proposal: &djinn_core::models::proposal::Proposal,
+    raw: &ProposalListSummaryRow,
+) -> ProposalListSummary {
+    let ac_items = parse_ac_items(&proposal.acceptance_criteria);
+    let dor_ready =
+        evaluate_proposal_readiness(&proposal.body, &ac_items, raw.target_count as usize).ready;
+
+    let needs_evidence = proposal.linked_spike_task_id.is_some();
+    let judge_needs_work = raw
+        .latest_judge_verdict_body
+        .as_deref()
+        .map(judge_verdict_is_needs_work)
+        .unwrap_or(false);
+
+    // Composed-gate approximation (no override lifecycle handling — see
+    // `ProposalListSummary::gate_ready` docs; the authoritative check with
+    // human-override suppression lives in `build_gate_status`).
+    let gate_ready =
+        dor_ready && !judge_needs_work && raw.unresolved_blocking_count == 0 && !needs_evidence;
+
+    ProposalListSummary {
+        refinement_active: raw.refinement_active,
+        awaiting_review: raw.awaiting_review,
+        current_round: raw.current_round,
+        needs_evidence,
+        dor_ready,
+        gate_ready,
+        unresolved_blocking_count: raw.unresolved_blocking_count,
+    }
 }
 
 /// Convert a `ProposalReadinessResult` into a user-facing error string,
@@ -1548,19 +1600,47 @@ impl DjinnMcpServer {
             limit,
             offset,
         };
-        match repo.list_filtered(query).await {
-            Ok(result) => Json(list_response::success::<ProposalListResponse>(
-                result
-                    .proposals
-                    .iter()
-                    .map(|(p, count)| ProposalModel::from_with_count(p, *count))
-                    .collect(),
-                result.total_count,
-                limit,
-                offset,
-            )),
-            Err(e) => Json(list_response::error::<ProposalListResponse>(e.to_string())),
-        }
+        let result = match repo.list_filtered(query).await {
+            Ok(result) => result,
+            Err(e) => return Json(list_response::error::<ProposalListResponse>(e.to_string())),
+        };
+
+        // Batch the tribunal/readiness summary across only the non-terminal
+        // proposals on this page (draft/in_review). Terminal proposals
+        // (done/rejected/archived/superseded, and any non-active status) keep
+        // `list_summary = None` so the list stays cheap and the UI shows no chips
+        // for them. A summary-query failure is non-fatal: the list still renders
+        // (rows just lack chips).
+        let summary_ids: Vec<String> = result
+            .proposals
+            .iter()
+            .filter(|(p, _)| proposal_status_is_non_terminal(&p.status))
+            .map(|(p, _)| p.id.clone())
+            .collect();
+        let summaries = if summary_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            repo.list_summaries(&summary_ids).await.unwrap_or_default()
+        };
+
+        let rows: Vec<ProposalModel> = result
+            .proposals
+            .iter()
+            .map(|(p, count)| {
+                let model = ProposalModel::from_with_count(p, *count);
+                match summaries.get(&p.id) {
+                    Some(raw) => model.with_list_summary(build_list_summary(p, raw)),
+                    None => model,
+                }
+            })
+            .collect();
+
+        Json(list_response::success::<ProposalListResponse>(
+            rows,
+            result.total_count,
+            limit,
+            offset,
+        ))
     }
 
     /// Update a proposal's editable fields.
@@ -7701,5 +7781,203 @@ The open-questions section collects uncertainties for the team.
         assert!(exported_ids.contains(&"opening"));
         assert!(exported_ids.contains(&"repo-layout"));
         assert!(exported_ids.contains(&"tradeoffs"));
+    }
+}
+
+#[cfg(test)]
+mod list_summary_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{
+        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
+        ProposalRepository,
+    };
+
+    /// A well-formed body that passes all deterministic readiness checks.
+    fn ready_body() -> &'static str {
+        r#"
+# Problem
+Users cannot do X.
+
+# Scope
+In scope: Y. Out of scope: Z.
+
+# Objectives
+- Deliver A
+
+## File map
+```file-map
+    src/main.rs
+```
+
+# Dependencies
+Blocked by service C.
+
+# Open Questions
+What happens if D fails?
+"#
+    }
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    /// Pull the `list_summary` object for a given proposal id out of a
+    /// `proposal_list` response.
+    fn summary_for<'a>(
+        list: &'a serde_json::Value,
+        proposal_id: &str,
+    ) -> Option<&'a serde_json::Value> {
+        list.get("proposals")?
+            .as_array()?
+            .iter()
+            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(proposal_id))
+            .and_then(|p| p.get("list_summary"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_list_surfaces_tribunal_and_gate_summary() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
+        let project = project_repo
+            .create("svc-list-sum", "test", "svc-list-sum-repo")
+            .await
+            .unwrap();
+
+        // Messy: empty body (fails DoR), no target, active refinement, one
+        // blocking objection, and a judge needs-work verdict.
+        let messy = repo
+            .create(ProposalCreateInput {
+                title: "Messy",
+                body: "just some text",
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(&messy.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &messy.id,
+            kind: "objection",
+            body: "unbounded scope",
+            blocking: true,
+            agent_role: "adversary",
+            author_kind: "agent",
+            author_model: Some("m"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
+            proposal_id: &messy.id,
+            kind: "verdict",
+            body: "verdict: needs-work",
+            blocking: true,
+            agent_role: "judge",
+            author_kind: "agent",
+            author_model: Some("m"),
+            source_task_id: None,
+            against_revision_seq: 1,
+            round: 2,
+            body_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        // Clean: DoR-passing body, a target, refinement converged awaiting
+        // review, an approving verdict, no blocking objections.
+        let clean = repo
+            .create(ProposalCreateInput {
+                title: "Clean",
+                body: ready_body(),
+                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.add_target(&clean.id, &project.id, "primary")
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(&clean.id, "refinement_start", None)
+            .await
+            .unwrap();
+        repo.record_refinement_lifecycle(&clean.id, "refinement_awaiting_review", None)
+            .await
+            .unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50 }))
+            .await
+            .unwrap();
+        assert!(
+            list.get("error").is_none(),
+            "proposal_list failed: {:?}",
+            list.get("error")
+        );
+
+        let m = summary_for(&list, &messy.id).expect("messy has a list_summary");
+        assert_eq!(m["refinement_active"], serde_json::json!(true));
+        assert_eq!(m["awaiting_review"], serde_json::json!(false));
+        assert_eq!(m["current_round"], serde_json::json!(2));
+        assert_eq!(m["needs_evidence"], serde_json::json!(false));
+        assert_eq!(m["dor_ready"], serde_json::json!(false));
+        assert_eq!(m["gate_ready"], serde_json::json!(false));
+        assert_eq!(
+            m["unresolved_blocking_count"],
+            serde_json::json!(1),
+            "the judge verdict row must be excluded from the objection count"
+        );
+
+        let c = summary_for(&list, &clean.id).expect("clean has a list_summary");
+        assert_eq!(c["refinement_active"], serde_json::json!(true));
+        assert_eq!(c["awaiting_review"], serde_json::json!(true));
+        assert_eq!(c["dor_ready"], serde_json::json!(true));
+        assert_eq!(c["gate_ready"], serde_json::json!(true));
+        assert_eq!(c["unresolved_blocking_count"], serde_json::json!(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_list_omits_summary_for_terminal_proposals() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let done = repo
+            .create(ProposalCreateInput {
+                title: "Shipped",
+                body: ready_body(),
+                acceptance_criteria: Some("[]"),
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        repo.set_status(&done.id, "done").await.unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50 }))
+            .await
+            .unwrap();
+        let entry = list
+            .get("proposals")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(done.id.as_str()))
+            })
+            .expect("proposal present in list");
+        assert!(
+            entry.get("list_summary").is_none(),
+            "terminal proposals must not carry a list_summary (chips hidden)"
+        );
     }
 }

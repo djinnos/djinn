@@ -71,6 +71,12 @@ export type Proposal = ProposalShowOutputSchema.ProposalModel & {
   /** Body format: 'markdown' (legacy default) or 'mdx' (block-aware). */
   body_format?: "markdown" | "mdx" | string | null;
 };
+/**
+ * Compact tribunal/readiness summary for a proposal list row. Present only on
+ * `proposal_list` (batched across the page) for non-terminal proposals; drives
+ * the list-row tribunal/gate chips.
+ */
+export type ProposalListSummary = ProposalShowOutputSchema.ProposalListSummary;
 export type ProposalFeedback = ProposalShowOutputSchema.ProposalFeedbackModel;
 export type ProposalTarget = ProposalShowOutputSchema.ProposalTargetModel;
 export type ProposalRevision = ProposalShowOutputSchema.ProposalRevisionModel;
