@@ -33,6 +33,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use djinn_core::models::Task;
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
@@ -184,113 +185,25 @@ pub(super) async fn dispatch_task_runtime(
     _pause: CancellationToken,
     resume_lifecycle_metadata: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    // ── Load the task ─────────────────────────────────────────────────────
+    // ── Preflight: load task → resolve dispatch context / branches / flow / trigger ──
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let task = match task_repo.get(&task_id).await {
-        Ok(Some(t)) => t,
-        Ok(None) => {
-            anyhow::bail!("supervisor dispatch: task {task_id} not found");
-        }
-        Err(e) => {
-            anyhow::bail!("supervisor dispatch: failed to load task {task_id}: {e}");
-        }
-    };
-
-    // ── Resolve dispatch context (conflict / review-response) ─────────────
-    let conflict_ctx = conflict_context_for_dispatch(&task.id, &app_state).await;
-    let has_conflict = conflict_ctx.is_some();
-    let has_review_response =
-        matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
-
-    // ── Resolve branches from project config ──────────────────────────────
-    let base_branch = default_target_branch(&task.project_id, &app_state).await;
-    let task_branch = task_branch_name(&task.short_id);
-
-    // ── Pick the supervisor flow ──────────────────────────────────────────
-    let base_flow = crate::roles::flow_for_task_dispatch(&task, has_conflict, has_review_response);
-
-    // ── Stage-aware resume: skip the worker redo when its output is durable ──
-    //
-    // A task that lands back at `needs_task_review` routes to `ReviewResponse`
-    // (worker → reviewer). But the ONLY way a task reaches that status is the
-    // worker having already submitted (`submit_task_review`), so re-running the
-    // worker redoes identical work — the failure mode behind a reviewer-stage
-    // pod kill (Job deadline) redispatching as a fresh ~55-min worker run.
-    //
-    // When the worker's commits are durable on the mirror task_branch (it
-    // exists and carries commits beyond its merge-base with base — the sibling
-    // eager-push makes this hold after the worker stage), upgrade to the
-    // reviewer-only `ReviewResume` flow so the redispatch reviews the existing
-    // diff instead of redoing the work. Base having moved on (another task's
-    // PR merged mid-cycle) does NOT demote to a worker redo: requiring
-    // fast-forwardability here livelocked review-stage tasks on a busy board,
-    // because base moved during nearly every cycle (the t9wi/32bk wedge,
-    // 2026-06-11). This is driven by what DURABLY happened (branch present),
-    // not by an outcome emitted after cancellation — so a cancelled reviewer
-    // run never tricks us into skipping real work (cf. the kw7s cancel-gate
-    // precedent).
-    //
-    // The guard is conservative: a missing/empty task_branch (worker never
-    // pushed, first cycle) keeps `ReviewResponse` and the full worker redo.
-    // Provider-failure and genuine reviewer-rejection paths are unaffected —
-    // a rejection moves the task to `open` (→ NewTask worker flow), never to
-    // `needs_task_review`, so it never reaches this branch.
-    let worker_output_durable = matches!(base_flow, SupervisorFlow::ReviewResponse)
-        && match app_state.mirror.as_ref() {
-            Some(mirror) => {
-                // This runs in the dispatch path. The durability probe is a few
-                // git subprocesses against the mirror (read-only, no lock), but a
-                // wedged git op (a locked / huge mirror) would otherwise stall the
-                // dispatch pass — and with multiple ReviewResponse candidates per
-                // pass that latency is sequential. Bound it: a timeout (or any
-                // probe failure) conservatively yields `false`, i.e. keep the full
-                // worker redo rather than risk skipping it on a stale read.
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(10),
-                    mirror.branch_ahead_of_base(&task.project_id, &task_branch, &base_branch),
-                )
-                .await
-                {
-                    Ok(durable) => durable,
-                    Err(_) => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            branch = %task_branch,
-                            "supervisor dispatch: branch_ahead_of_base durability probe timed out \
-                             (>10s); keeping full worker redo (ReviewResponse)"
-                        );
-                        false
-                    }
-                }
-            }
-            None => false,
-        };
-    let flow = resume_flow(base_flow, worker_output_durable);
+    let task = load_task_or_bail(&task_id, &task_repo).await?;
+    let ctx = DispatchContext::resolve(&task, &app_state).await;
+    let flow = resolve_effective_flow(&ctx, &app_state).await;
     let loop_guard_intervention_role = flow
         .role_sequence()
         .first()
         .map(|role| role.as_str())
         .unwrap_or("worker");
+    let trigger = trigger_for_flow(&flow, ctx.has_conflict);
     if matches!(flow, SupervisorFlow::ReviewResume) {
         tracing::info!(
             task_id = %task.short_id,
-            branch = %task_branch,
+            branch = %ctx.task_branch,
             "supervisor dispatch: worker output durable on task_branch; \
              resuming at reviewer stage (skipping worker redo)"
         );
     }
-
-    // ── Map flow → trigger ────────────────────────────────────────────────
-    let trigger = if has_conflict {
-        TaskRunTrigger::ConflictRetry
-    } else if matches!(
-        flow,
-        SupervisorFlow::ReviewResponse | SupervisorFlow::ReviewResume
-    ) {
-        TaskRunTrigger::ReviewResponse
-    } else {
-        TaskRunTrigger::NewTask
-    };
 
     // ── Resolve per-role model ids ────────────────────────────────────────
     let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
@@ -426,8 +339,8 @@ pub(super) async fn dispatch_task_runtime(
         task_id: task.id.clone(),
         project_id: task.project_id.clone(),
         trigger,
-        base_branch,
-        task_branch,
+        base_branch: ctx.base_branch.clone(),
+        task_branch: ctx.task_branch.clone(),
         flow,
         model_id_per_role,
         read_source_project_ids,
@@ -1145,6 +1058,127 @@ pub(super) async fn dispatch_task_runtime(
                 "supervisor dispatch: teardown failure"
             );
             Err(anyhow::anyhow!("runtime.teardown failed: {e}"))
+        }
+    }
+}
+
+/// Context captured during the preflight phase of `dispatch_task_runtime`.
+///
+/// Holds the task row, the conflict/review context, the resolved branches, and
+/// the base flow selected by the planner-style `flow_for_task_dispatch` helper.
+/// Keeping these values together makes the "effective flow" decision a pure
+/// function over the context plus an optional durability probe.
+struct DispatchContext<'a> {
+    task: &'a Task,
+    has_conflict: bool,
+    base_branch: String,
+    task_branch: String,
+    base_flow: SupervisorFlow,
+}
+
+impl<'a> DispatchContext<'a> {
+    /// Resolve the dispatch context for a task.
+    ///
+    /// Loads the conflict/review context, resolves the target and task branches,
+    /// and selects the base supervisor flow. The durability probe itself is kept
+    /// separate (see `resolve_effective_flow`) so that this struct stays cheap to
+    /// construct and testable without a mirror.
+    async fn resolve(task: &'a Task, app_state: &'a AgentContext) -> Self {
+        let conflict_ctx = conflict_context_for_dispatch(&task.id, app_state).await;
+        let has_conflict = conflict_ctx.is_some();
+        let has_review_response =
+            matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
+        let base_branch = default_target_branch(&task.project_id, app_state).await;
+        let task_branch = task_branch_name(&task.short_id);
+        let base_flow =
+            crate::roles::flow_for_task_dispatch(task, has_conflict, has_review_response);
+
+        Self {
+            task,
+            has_conflict,
+            base_branch,
+            task_branch,
+            base_flow,
+        }
+    }
+}
+
+/// Probe whether a `ReviewResponse` task's worker output is durable on the mirror.
+///
+/// Only `ReviewResponse` can be upgraded to `ReviewResume`; for every other flow
+/// the mirror is irrelevant and we return `false` immediately. When the probe
+/// applies, the mirror must report that the task branch exists and carries commits
+/// beyond the merge-base with `base_branch`.
+///
+/// The probe is bounded by a 10-second timeout and is conservative on any failure
+/// (missing mirror, timeout, error) so that a stale read never skips real worker
+/// work. Logs match the original `dispatch_task_runtime` warning shape.
+async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentContext) -> bool {
+    if !matches!(ctx.base_flow, SupervisorFlow::ReviewResponse) {
+        return false;
+    }
+    let Some(mirror) = app_state.mirror.as_ref() else {
+        return false;
+    };
+    // This runs in the dispatch path. The durability probe is a few
+    // git subprocesses against the mirror (read-only, no lock), but a
+    // wedged git op (a locked / huge mirror) would otherwise stall the
+    // dispatch pass — and with multiple ReviewResponse candidates per
+    // pass that latency is sequential. Bound it: a timeout (or any
+    // probe failure) conservatively yields `false`, i.e. keep the full
+    // worker redo rather than risk skipping it on a stale read.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        mirror.branch_ahead_of_base(&ctx.task.project_id, &ctx.task_branch, &ctx.base_branch),
+    )
+    .await
+    {
+        Ok(durable) => durable,
+        Err(_) => {
+            tracing::warn!(
+                task_id = %ctx.task.short_id,
+                branch = %ctx.task_branch,
+                "supervisor dispatch: branch_ahead_of_base durability probe timed out \
+                 (>10s); keeping full worker redo (ReviewResponse)"
+            );
+            false
+        }
+    }
+}
+
+/// Resolve the effective supervisor flow, applying the ReviewResume durability
+/// upgrade when appropriate.
+async fn resolve_effective_flow(
+    ctx: &DispatchContext<'_>,
+    app_state: &AgentContext,
+) -> SupervisorFlow {
+    let durable = worker_output_durable(ctx, app_state).await;
+    resume_flow(ctx.base_flow, durable)
+}
+
+/// Map the resolved flow and conflict context to a task-run trigger.
+fn trigger_for_flow(flow: &SupervisorFlow, has_conflict: bool) -> TaskRunTrigger {
+    if has_conflict {
+        TaskRunTrigger::ConflictRetry
+    } else if matches!(
+        flow,
+        SupervisorFlow::ReviewResponse | SupervisorFlow::ReviewResume
+    ) {
+        TaskRunTrigger::ReviewResponse
+    } else {
+        TaskRunTrigger::NewTask
+    }
+}
+
+/// Load a task by id or return a typed error for dispatch-time setup failures.
+async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow::Result<Task> {
+    match task_repo.get(task_id).await {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => {
+            anyhow::bail!("supervisor dispatch: task {task_id} not found")
+        }
+        Err(e) => {
+            anyhow::bail!("supervisor dispatch: failed to load task {task_id}: {e}")
         }
     }
 }
