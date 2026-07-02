@@ -215,6 +215,69 @@ fn classify_provider_failure(err: &anyhow::Error) -> Option<ProviderFailureClass
     }
 }
 
+/// Derive the `(CostBasisHint, BillingSource)` a session is created with from
+/// the RESOLVED credential kind plus catalog string rules (t41r PART A).
+///
+/// `credential_is_oauth` is `true` when the resolved credential is an
+/// OAuth-derived config rather than an API key. The subscription decision keys
+/// on whether the provider's OAuth flow is a subscription plan
+/// ([`oauth_is_subscription_plan`]) — OAuth transport ALONE never flips a
+/// metered provider to `SubscriptionPlan`, preserving the guarded invariant
+/// that a hypothetical metered OAuth stays metered. The catalog string rules
+/// (`is_subscription_provider` / `governable_subscription_for_model`) remain an
+/// additional signal so e.g. a `zai-coding-plan/...` API-key session is still
+/// `SubscriptionPlan`.
+fn derive_billing_signal(
+    provider_id: &str,
+    model_name: &str,
+    credential_is_oauth: bool,
+) -> (
+    djinn_supervisor::services::CostBasisHint,
+    djinn_supervisor::services::BillingSource,
+) {
+    use djinn_provider::catalog::builtin::{
+        governable_subscription_for_model, is_subscription_provider,
+    };
+    use djinn_supervisor::services::{BillingSource, CostBasisHint};
+
+    let plan_oauth = credential_is_oauth && oauth_is_subscription_plan(provider_id);
+    let hint = if plan_oauth
+        || is_subscription_provider(provider_id)
+        || governable_subscription_for_model(provider_id, model_name).is_some()
+    {
+        CostBasisHint::SubscriptionPlan
+    } else {
+        CostBasisHint::MeteredApi
+    };
+    // `billing_source` records the concrete credential transport. A
+    // subscription-plan OAuth credential → `plan_oauth` (the case the model id
+    // cannot reveal); everything else — metered API keys AND coding-plan API
+    // keys (whose plan nature is already captured by `cost_basis`) → `api_key`.
+    let billing_source = if plan_oauth {
+        BillingSource::PlanOauth
+    } else {
+        BillingSource::ApiKey
+    };
+    (hint, billing_source)
+}
+
+/// True when `provider_id`'s OAuth flow is a personal subscription plan, so an
+/// OAuth-backed session on it is a plan (no per-token spend) rather than metered
+/// API usage.
+///
+/// The effective OAuth provider handling this catalog id decides (e.g.
+/// `openai` → `chatgpt_codex`), and its builtin `credential_class` is
+/// authoritative. A provider whose OAuth flow is NOT a subscription returns
+/// `false` — this is what keeps OAuth transport alone from implying a plan.
+fn oauth_is_subscription_plan(provider_id: &str) -> bool {
+    use djinn_provider::catalog::builtin::{is_subscription_provider, resolve_oauth_provider};
+    let effective = match provider_id {
+        "chatgpt_codex" | "githubcopilot" => provider_id,
+        other => resolve_oauth_provider(other).unwrap_or(other),
+    };
+    is_subscription_provider(effective)
+}
+
 /// Map a finished reviewer stage's finalize tool + payload onto a
 /// [`StageOutcome`]. Pure (no `task`/tracing deps) so the verdict-handling
 /// branches are unit-testable.
@@ -604,23 +667,23 @@ pub(crate) async fn execute_stage(
     // in-Pod worker never opens its own DB connection.  Host-side
     // `DirectServices` delegates to `SessionRepository::create` verbatim.
     //
-    // Derive a billing classification hint from the resolved credential and
-    // catalog/provider context so `DirectServices::create_session` can choose
-    // `sessions.cost_basis` using explicit signal rather than only
-    // `classify_provider(provider_id)` (which misses Codex OAuth credentials
-    // surfacing under the `openai` namespace).
-    let cost_basis_hint = resolved.as_ref().map(|r| {
-        use djinn_provider::catalog::builtin::{
-            governable_subscription_for_model, is_subscription_provider,
-        };
-        if is_subscription_provider(&r.catalog_provider_id)
-            || governable_subscription_for_model(&r.catalog_provider_id, &r.model_name).is_some()
-        {
-            djinn_supervisor::services::CostBasisHint::SubscriptionPlan
-        } else {
-            djinn_supervisor::services::CostBasisHint::MeteredApi
-        }
+    // Derive the billing classification from the RESOLVED CREDENTIAL (not just
+    // model-id substrings) so `DirectServices::create_session` books
+    // `sessions.cost_basis` on explicit signal: a session on `openai/gpt-5.5`
+    // backed by a ChatGPT/Codex PLAN OAuth credential is a $0-spend plan even
+    // though its model id has no `codex` marker. OAuth transport ALONE does not
+    // imply a subscription — see `oauth_is_subscription_plan`. The catalog
+    // string rules stay as an additional signal (a `zai-coding-plan/...` model
+    // remains projected); the legacy fallback covers `hint = None`.
+    let billing_signal = resolved.as_ref().map(|r| {
+        let credential_is_oauth = matches!(
+            r.provider_credential,
+            Some(crate::actors::slot::helpers::ProviderCredential::OAuthConfig(_))
+        );
+        derive_billing_signal(&r.catalog_provider_id, &r.model_name, credential_is_oauth)
     });
+    let cost_basis_hint = billing_signal.map(|(hint, _)| hint);
+    let billing_source = billing_signal.map(|(_, source)| source);
     let session_record = services
         .create_session(
             djinn_supervisor::services::SerializableCreateSessionParams {
@@ -631,6 +694,7 @@ pub(crate) async fn execute_stage(
                 metadata_json: None,
                 task_run_id: Some(task_run_id.to_string()),
                 cost_basis_hint,
+                billing_source,
             },
         )
         .await
@@ -1057,6 +1121,84 @@ mod tests {
     /// of an `anyhow::Error` carrying a readable context line.
     fn typed(e: ProviderError) -> anyhow::Error {
         anyhow::Error::new(e).context("provider stream event failed")
+    }
+
+    // ── Credential-derived billing signal (t41r PART A) ──────────────────────
+
+    use crate::direct_services::determine_cost_basis;
+    use djinn_supervisor::services::{BillingSource, CostBasisHint};
+
+    /// A non-zero pricing snapshot (a "priced" model), so `determine_cost_basis`
+    /// can distinguish `actual` from `unpriced` for the `MeteredApi` hint.
+    fn priced() -> djinn_core::models::Pricing {
+        djinn_core::models::Pricing {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_read_per_million: 0.5,
+            cache_write_per_million: 0.0,
+        }
+    }
+
+    /// The core forward-fix: `openai/gpt-5.5` (no `codex` marker) backed by a
+    /// PLAN OAuth credential is a `SubscriptionPlan` → `projected`, even though
+    /// `openai` is an API-key provider and the model id has no codex marker.
+    #[test]
+    fn billing_signal_openai_plan_oauth_is_projected() {
+        let (hint, source) = derive_billing_signal("openai", "gpt-5.5", /* oauth */ true);
+        assert_eq!(hint, CostBasisHint::SubscriptionPlan);
+        assert_eq!(source, BillingSource::PlanOauth);
+        // …and that hint books `projected` (priced) at session creation.
+        assert_eq!(
+            determine_cost_basis(Some(hint), Some(&priced()), Some("openai")),
+            "projected"
+        );
+    }
+
+    /// The same `openai/gpt-5.5` model backed by an API key stays `MeteredApi`
+    /// → `actual`. This is the metered path that must never be mistaken for a
+    /// plan.
+    #[test]
+    fn billing_signal_openai_api_key_is_actual() {
+        let (hint, source) = derive_billing_signal("openai", "gpt-5.5", /* oauth */ false);
+        assert_eq!(hint, CostBasisHint::MeteredApi);
+        assert_eq!(source, BillingSource::ApiKey);
+        assert_eq!(
+            determine_cost_basis(Some(hint), Some(&priced()), Some("openai")),
+            "actual"
+        );
+    }
+
+    /// Guarded invariant: OAuth transport ALONE does not flip a provider to a
+    /// subscription plan. A hypothetical metered OAuth provider (whose OAuth
+    /// flow is NOT a subscription) stays `MeteredApi` → `actual`, and is
+    /// recorded as `api_key`, not `plan_oauth`.
+    #[test]
+    fn billing_signal_oauth_transport_alone_is_not_a_plan() {
+        // `anthropic` has no subscription OAuth flow, so even an OAuth-backed
+        // session on it must stay metered.
+        let (hint, source) =
+            derive_billing_signal("anthropic", "claude-opus-4-8", /* oauth */ true);
+        assert_eq!(hint, CostBasisHint::MeteredApi);
+        assert_eq!(source, BillingSource::ApiKey);
+        assert_eq!(
+            determine_cost_basis(Some(hint), Some(&priced()), Some("anthropic")),
+            "actual"
+        );
+    }
+
+    /// A coding-plan provider stays a `SubscriptionPlan` via the catalog string
+    /// rule even on an API-key transport — its `billing_source` is `api_key`
+    /// (the plan nature is carried by `cost_basis`), and it books `projected`.
+    #[test]
+    fn billing_signal_coding_plan_api_key_is_projected() {
+        let (hint, source) =
+            derive_billing_signal("zai-coding-plan", "glm-5.2", /* oauth */ false);
+        assert_eq!(hint, CostBasisHint::SubscriptionPlan);
+        assert_eq!(source, BillingSource::ApiKey);
+        assert_eq!(
+            determine_cost_basis(Some(hint), Some(&priced()), Some("zai-coding-plan")),
+            "projected"
+        );
     }
 
     #[test]

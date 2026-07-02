@@ -93,7 +93,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -116,6 +117,49 @@ impl SessionRepository {
         Ok(session)
     }
 
+    /// Record the credential kind (`sessions.billing_source`) for a session
+    /// immediately after it is created.
+    ///
+    /// This is a small dedicated write rather than a `CreateSessionParams`
+    /// field because only the agent host (dispatch task sessions) knows the
+    /// resolved-credential kind; the ~90 other `create()` call sites (chat,
+    /// post-session extraction, tests) legitimately have no dispatch-time
+    /// credential signal and leave the column `NULL`. Threading a new required
+    /// field through all of them would be pure churn.
+    ///
+    /// `value` must be `"plan_oauth"` or `"api_key"` — the column CHECK
+    /// (migration 88) rejects anything else. Re-fetches and returns the updated
+    /// row so the caller observes the persisted value.
+    pub async fn set_billing_source(&self, id: &str, value: &str) -> Result<SessionRecord> {
+        self.db.ensure_initialized().await?;
+        sqlx::query!(
+            "UPDATE sessions SET billing_source = $1 WHERE id = $2",
+            value,
+            id
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        let session = sqlx::query_as!(
+            SessionRecord,
+            r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
+                status AS "status!", tokens_in, tokens_out,
+                cache_read_tokens, cache_write_tokens, task_run_id, title,
+                parked_reason AS "parked_reason?",
+                cost_usd, input_price_per_million_snapshot,
+                output_price_per_million_snapshot,
+                cache_read_price_per_million_snapshot,
+                cache_write_price_per_million_snapshot,
+                cost_basis,
+                billing_source
+             FROM sessions WHERE id = $1"#,
+            id
+        )
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(session)
+    }
+
     /// Re-fetch a session by id and emit `SessionUpdated`.
     async fn fetch_and_emit_update(&self, id: &str) -> Result<SessionRecord> {
         self.db.ensure_initialized().await?;
@@ -129,7 +173,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -232,7 +277,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE status = 'running'"#
         )
         .fetch_all(self.db.pool())
@@ -273,7 +319,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE task_id = $1 AND status = 'running'"#,
             task_id
         )
@@ -313,7 +360,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE id = $1"#,
             id
         )
@@ -337,7 +385,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE project_id = $1 AND id = $2"#,
             project_id,
             id
@@ -358,7 +407,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE task_id = $1 ORDER BY started_at DESC"#,
             task_id
         )
@@ -380,7 +430,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE task_run_id = $1 ORDER BY started_at DESC"#,
         )
         .bind(task_run_id)
@@ -404,7 +455,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE project_id = $1 AND task_id = $2 ORDER BY started_at DESC"#,
             project_id,
@@ -426,7 +478,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE status = 'running' ORDER BY started_at DESC"#
         )
@@ -481,7 +534,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE project_id = $1 AND status = 'running' ORDER BY started_at DESC"#,
             project_id
@@ -508,7 +562,8 @@ impl SessionRepository {
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
                     s.cache_write_price_per_million_snapshot,
-                    s.cost_basis
+                    s.cost_basis,
+                    s.billing_source
              FROM sessions s
              INNER JOIN tasks t ON t.id = s.task_id
              WHERE s.status = 'running' AND s.agent_type = 'planner' AND t.epic_id = $1
@@ -531,7 +586,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE task_id = $1 AND status = 'running' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -700,7 +756,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' ORDER BY started_at DESC LIMIT 1"#,
             task_id
@@ -784,7 +841,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions
              WHERE task_id = $1 AND status = 'paused' AND agent_type = $2
              ORDER BY started_at DESC LIMIT 1"#,
@@ -853,7 +911,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -918,7 +977,8 @@ impl SessionRepository {
                 output_price_per_million_snapshot,
                 cache_read_price_per_million_snapshot,
                 cache_write_price_per_million_snapshot,
-                cost_basis
+                cost_basis,
+                billing_source
              FROM sessions WHERE id = $1 AND agent_type = 'chat'"#,
             session_id
         )
@@ -946,7 +1006,8 @@ impl SessionRepository {
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
                     s.cache_write_price_per_million_snapshot,
-                    s.cost_basis
+                    s.cost_basis,
+                    s.billing_source
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -984,7 +1045,8 @@ impl SessionRepository {
                     s.output_price_per_million_snapshot,
                     s.cache_read_price_per_million_snapshot,
                     s.cache_write_price_per_million_snapshot,
-                    s.cost_basis
+                    s.cost_basis,
+                    s.billing_source
              FROM sessions s
              LEFT JOIN (
                 SELECT session_id, MAX(created_at) AS last_at
@@ -3088,5 +3150,68 @@ mod tests {
             let parsed = CostBasis::from_db(basis);
             assert_eq!(parsed.as_str(), basis);
         }
+    }
+
+    // ── billing_source (migration 88) ────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn billing_source_recorded_and_persisted() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: Some("projected"),
+            })
+            .await
+            .unwrap();
+        // A freshly created session has no billing_source until the host records it.
+        assert!(created.billing_source.is_none());
+
+        let updated = repo
+            .set_billing_source(&created.id, "plan_oauth")
+            .await
+            .unwrap();
+        assert_eq!(updated.billing_source.as_deref(), Some("plan_oauth"));
+
+        // Persisted: a fresh read sees the recorded value.
+        let fetched = repo.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.billing_source.as_deref(), Some("plan_oauth"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn billing_source_check_constraint_rejects_unknown() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let repo = SessionRepository::new(db.clone(), EventBus::noop());
+
+        let created = repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(&task_id),
+                model: "openai/gpt-5.5",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+
+        // The migration-88 CHECK constraint permits only 'plan_oauth' / 'api_key'.
+        let err = repo.set_billing_source(&created.id, "bogus").await;
+        assert!(
+            err.is_err(),
+            "CHECK constraint must reject an unknown billing_source value"
+        );
     }
 }
