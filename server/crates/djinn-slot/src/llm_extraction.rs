@@ -138,6 +138,98 @@ async fn resolve_llm_extraction_provider_after_creator_attempt(
     }
 }
 
+async fn resolve_creator_scoped_llm_extraction_provider(
+    app_state: &SlotContext,
+    session_id: &str,
+    task_id: &str,
+    creator: Option<String>,
+    memory_model_id: &str,
+) -> LlmExtractionProviderResolution {
+    let attributed_user_id = creator
+        .clone()
+        .or_else(djinn_core::auth_context::current_user_id);
+    let telemetry = crate::helpers::build_telemetry_meta_with_attribution(
+        "memory_extraction",
+        task_id,
+        Some("memory_extraction"),
+        attributed_user_id.as_deref(),
+    );
+    // One-shot completion over a small (taxonomy) prompt — no compaction —
+    // so a generous fixed context window is safe.
+    const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
+    let creator_scoped = djinn_core::auth_context::SESSION_USER_ID
+        .scope(
+            creator.clone(),
+            crate::lifecycle::model_resolution::resolve_model_and_credential(
+                memory_model_id,
+                task_id,
+                app_state,
+            ),
+        )
+        .await;
+    let via_creator = match creator_scoped {
+        Ok(resolved) => {
+            let catalog_provider_id = resolved.catalog_provider_id.clone();
+            let model_name = resolved.model_name.clone();
+            let base_url = if crate::helpers::resolved_needs_base_url(&resolved) {
+                crate::helpers::default_base_url(&catalog_provider_id)
+            } else {
+                String::new()
+            };
+            let provider = crate::helpers::build_provider_from_resolved(
+                resolved,
+                MEMORY_CONTEXT_WINDOW,
+                Some(telemetry.clone()),
+                None,
+                base_url,
+            );
+            match provider.as_ref() {
+                Some(provider) => tracing::debug!(
+                    session_id = %session_id,
+                    task_id = %task_id,
+                    creator_user_id = ?creator,
+                    provider_resolution_stage = "creator_scoped_model_credential",
+                    catalog_provider_id = %catalog_provider_id,
+                    model_id = %memory_model_id,
+                    resolved_model = %model_name,
+                    provider = %provider.name(),
+                    "llm_extraction: creator-scoped model and credential resolved provider"
+                ),
+                None => tracing::warn!(
+                    session_id = %session_id,
+                    task_id = %task_id,
+                    creator_user_id = ?creator,
+                    provider_resolution_stage = "creator_scoped_model_credential",
+                    catalog_provider_id = %catalog_provider_id,
+                    model_id = %memory_model_id,
+                    resolved_model = %model_name,
+                    "llm_extraction: creator-scoped model and credential resolved but provider construction failed; trying scoped memory provider fallback"
+                ),
+            }
+            provider
+        }
+        Err(e) => {
+            tracing::debug!(
+                session_id = %session_id,
+                task_id = %task_id,
+                creator_user_id = ?creator,
+                provider_resolution_stage = "creator_scoped_model_credential",
+                model_id = %memory_model_id,
+                error = %e.reason,
+                "llm_extraction: creator-scoped model resolution failed; trying scoped memory provider fallback"
+            );
+            None
+        }
+    };
+    resolve_llm_extraction_provider_after_creator_attempt(
+        &app_state.db,
+        session_id,
+        via_creator,
+        telemetry,
+    )
+    .await
+}
+
 /// Render the extraction prompt the LLM sees.
 ///
 /// Exposed (not inlined into `run_llm_extraction_inner`) so the prompt schema
@@ -689,89 +781,12 @@ async fn run_llm_extraction_inner(
         // `chatgpt_codex` credential. If creator-scoped resolution fails, fall
         // back only to the explicit org-shared/no-user memory-provider scope;
         // never borrow another user's private credential.
-        let creator = task.created_by_user_id.clone();
-        let attributed_user_id = creator
-            .clone()
-            .or_else(djinn_core::auth_context::current_user_id);
-        let memory_model_id = session.model_id.clone();
-        let telemetry = crate::helpers::build_telemetry_meta_with_attribution(
-            "memory_extraction",
-            &task_id,
-            Some("memory_extraction"),
-            attributed_user_id.as_deref(),
-        );
-        // One-shot completion over a small (taxonomy) prompt — no compaction —
-        // so a generous fixed context window is safe.
-        const MEMORY_CONTEXT_WINDOW: u32 = 128_000;
-        let creator_scoped = djinn_core::auth_context::SESSION_USER_ID
-            .scope(
-                creator.clone(),
-                crate::lifecycle::model_resolution::resolve_model_and_credential(
-                    &memory_model_id,
-                    &task_id,
-                    &app_state,
-                ),
-            )
-            .await;
-        let via_creator = match creator_scoped {
-            Ok(resolved) => {
-                let catalog_provider_id = resolved.catalog_provider_id.clone();
-                let model_name = resolved.model_name.clone();
-                let base_url = if crate::helpers::resolved_needs_base_url(&resolved) {
-                    crate::helpers::default_base_url(&catalog_provider_id)
-                } else {
-                    String::new()
-                };
-                let provider = crate::helpers::build_provider_from_resolved(
-                    resolved,
-                    MEMORY_CONTEXT_WINDOW,
-                    Some(telemetry.clone()),
-                    None,
-                    base_url,
-                );
-                match provider.as_ref() {
-                    Some(provider) => tracing::debug!(
-                        session_id = %session_id,
-                        task_id = %task_id,
-                        creator_user_id = ?creator,
-                        provider_resolution_stage = "creator_scoped_model_credential",
-                        catalog_provider_id = %catalog_provider_id,
-                        model_id = %memory_model_id,
-                        resolved_model = %model_name,
-                        provider = %provider.name(),
-                        "llm_extraction: creator-scoped model and credential resolved provider"
-                    ),
-                    None => tracing::warn!(
-                        session_id = %session_id,
-                        task_id = %task_id,
-                        creator_user_id = ?creator,
-                        provider_resolution_stage = "creator_scoped_model_credential",
-                        catalog_provider_id = %catalog_provider_id,
-                        model_id = %memory_model_id,
-                        resolved_model = %model_name,
-                        "llm_extraction: creator-scoped model and credential resolved but provider construction failed; trying scoped memory provider fallback"
-                    ),
-                }
-                provider
-            }
-            Err(e) => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    task_id = %task_id,
-                    creator_user_id = ?creator,
-                    provider_resolution_stage = "creator_scoped_model_credential",
-                    model_id = %memory_model_id,
-                    error = %e.reason,
-                    "llm_extraction: creator-scoped model resolution failed; trying scoped memory provider fallback"
-                );
-                None
-            }
-        };
-        match resolve_llm_extraction_provider_after_creator_attempt(
-            &app_state.db,
+        match resolve_creator_scoped_llm_extraction_provider(
+            &app_state,
             &session_id,
-            via_creator,
-            telemetry,
+            &task_id,
+            task.created_by_user_id.clone(),
+            &session.model_id,
         )
         .await
         {
@@ -1778,6 +1793,298 @@ mod tests {
             Some("memory_extraction"),
             creator,
         )
+    }
+
+    struct CredentialScopedTestCallbacks;
+
+    impl crate::host::SlotHostCallbacks for CredentialScopedTestCallbacks {
+        fn interrupt_paused_worker_session<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+
+        fn resolve_mcp_tools<'a>(
+            &'a self,
+            _worktree_path: &'a str,
+            _role_name: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::host::ResolvedMcpTools, String>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { Err("not implemented in credential-scoped test".into()) })
+        }
+
+        fn render_prompt(
+            &self,
+            _role_name: &str,
+            _task: &djinn_core::models::Task,
+            _context_json: &serde_json::Value,
+        ) -> String {
+            String::new()
+        }
+
+        fn initial_user_message<'a>(
+            &'a self,
+            _task_id: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
+            Box::pin(async { String::new() })
+        }
+
+        fn build_mcp_state(&self, _ctx: &SlotContext) -> djinn_control_plane::McpState {
+            panic!("not implemented in credential-scoped test")
+        }
+
+        fn require_project_id_for_task_ops<'a>(
+            &'a self,
+            _project: &'a str,
+            _ctx: &'a SlotContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            String,
+                            djinn_control_plane::tools::task_tools::ErrorResponse,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async {
+                Err(djinn_control_plane::tools::task_tools::ErrorResponse {
+                    error: "not implemented in credential-scoped test".into(),
+                })
+            })
+        }
+
+        fn resolve_provider_credential<'a>(
+            &'a self,
+            provider_id: &'a str,
+            ctx: &'a SlotContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<crate::helpers::ProviderCredential, String>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let key_name = ctx
+                    .catalog
+                    .list_providers()
+                    .into_iter()
+                    .find(|provider| provider.id == provider_id)
+                    .and_then(|provider| provider.env_vars.into_iter().next())
+                    .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
+                let credential_repo = djinn_provider::repos::CredentialRepository::new(
+                    ctx.db.clone(),
+                    ctx.event_bus.clone(),
+                );
+                match credential_repo
+                    .get_decrypted(&key_name)
+                    .await
+                    .map_err(|error| format!("credential lookup failed: {error}"))?
+                {
+                    Some(value) => Ok(crate::helpers::ProviderCredential::ApiKey(key_name, value)),
+                    None => Err(format!(
+                        "no credential stored for provider {provider_id} (expected key {key_name})"
+                    )),
+                }
+            })
+        }
+
+        fn run_task_dispatch<'a>(
+            &'a self,
+            _task_id: String,
+            _project_path: String,
+            _model_id: String,
+            _ctx: SlotContext,
+            _kill: tokio_util::sync::CancellationToken,
+            _pause: tokio_util::sync::CancellationToken,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn touch_activity_rpc<'a>(
+            &'a self,
+            _task_id: String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn flush_session_tokens_rpc<'a>(
+            &'a self,
+            _session_id: String,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn credential_scoped_test_context(db: djinn_db::Database) -> SlotContext {
+        let mut ctx = agent_context_from_db(db, CancellationToken::new());
+        ctx.callbacks = std::sync::Arc::new(CredentialScopedTestCallbacks);
+        ctx
+    }
+
+    fn provider_auth_key(config: &djinn_provider::provider::ProviderConfig) -> Option<&str> {
+        match &config.auth {
+            djinn_provider::provider::AuthMethod::BearerToken(key) => Some(key),
+            djinn_provider::provider::AuthMethod::ApiKeyHeader { key, .. } => Some(key),
+            djinn_provider::provider::AuthMethod::NoAuth => None,
+        }
+    }
+
+    async fn seed_credential_scope_users(db: djinn_db::Database) -> (String, String) {
+        let users = djinn_db::UserRepository::new(db);
+        let creator = users
+            .upsert_from_github(710_001, "credential-scope-creator", None, None)
+            .await
+            .expect("seed creator user");
+        let other = users
+            .upsert_from_github(710_002, "credential-scope-other", None, None)
+            .await
+            .expect("seed other user");
+
+        (creator.id, other.id)
+    }
+
+    #[tokio::test]
+    async fn creator_scoped_llm_extraction_fails_closed_with_only_other_user_private_credential() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("initialize test db");
+        let (creator_user_id, other_user_id) = seed_credential_scope_users(db.clone()).await;
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .expect("configure memory model");
+        djinn_provider::repos::CredentialRepository::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+        )
+        .set_with_owner(
+            "anthropic",
+            "ANTHROPIC_API_KEY",
+            "other-user-private-key",
+            Some(&other_user_id),
+        )
+        .await
+        .expect("seed other user's private credential");
+        let ctx = credential_scoped_test_context(db);
+
+        let resolution = resolve_creator_scoped_llm_extraction_provider(
+            &ctx,
+            "session-creator-absent",
+            "task-creator-absent",
+            Some(creator_user_id),
+            "anthropic/claude-3-5-haiku-latest",
+        )
+        .await;
+
+        match resolution {
+            LlmExtractionProviderResolution::NoProvider { error, .. } => assert!(
+                error.contains("no connected builtin provider models are available")
+                    || error.contains("no credential stored"),
+                "creator-scoped extraction should fail closed without creator/org-shared credentials: {error}"
+            ),
+            LlmExtractionProviderResolution::Provider(provider) => {
+                let config = provider
+                    .config_snapshot()
+                    .expect("unexpected provider should expose config snapshot");
+                assert_ne!(
+                    provider_auth_key(&config),
+                    Some("other-user-private-key"),
+                    "creator-scoped extraction must never borrow another user's private key"
+                );
+                panic!(
+                    "expected no provider when only another user's private credential exists, got {}",
+                    provider.name()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn creator_scoped_llm_extraction_uses_org_shared_fallback_not_other_user_private() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("initialize test db");
+        let (creator_user_id, other_user_id) = seed_credential_scope_users(db.clone()).await;
+        djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .set(
+                "settings.raw",
+                r#"{"models":["anthropic/claude-3-5-haiku-latest"]}"#,
+            )
+            .await
+            .expect("configure memory model");
+        let credential_repo = djinn_provider::repos::CredentialRepository::new(
+            db.clone(),
+            djinn_core::events::EventBus::noop(),
+        );
+        credential_repo
+            .set_with_owner(
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "other-user-private-key",
+                Some(&other_user_id),
+            )
+            .await
+            .expect("seed other user's private credential");
+        credential_repo
+            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-shared-key", None)
+            .await
+            .expect("seed org-shared credential");
+        let ctx = credential_scoped_test_context(db);
+
+        let resolution = resolve_creator_scoped_llm_extraction_provider(
+            &ctx,
+            "session-org-fallback",
+            "task-org-fallback",
+            Some(creator_user_id.clone()),
+            "anthropic/claude-3-5-haiku-latest",
+        )
+        .await;
+
+        let provider = match resolution {
+            LlmExtractionProviderResolution::Provider(provider) => provider,
+            LlmExtractionProviderResolution::NoProvider { error, .. } => {
+                panic!("expected org-shared provider fallback, got error: {error}")
+            }
+        };
+        assert_eq!(provider.name(), "anthropic");
+        let config = provider
+            .config_snapshot()
+            .expect("resolved provider should expose config snapshot");
+        assert_eq!(
+            provider_auth_key(&config),
+            Some("org-shared-key"),
+            "extraction should use the explicit org-shared fallback credential"
+        );
+        assert_ne!(
+            provider_auth_key(&config),
+            Some("other-user-private-key"),
+            "extraction must not use another user's private credential"
+        );
+        assert_eq!(
+            config.telemetry.and_then(|telemetry| telemetry.user_id),
+            Some(creator_user_id),
+            "provider telemetry remains attributed to the extraction creator"
+        );
     }
 
     #[tokio::test]
