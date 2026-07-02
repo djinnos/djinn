@@ -2406,3 +2406,146 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         "ignored wind-down must not write a misleading summary activity: {entries:?}"
     );
 }
+
+/// Regression (incident 2026-07-02): a conversation whose stored transcript
+/// ends with an assistant `tool_calls` message that was never answered — a
+/// prior session terminated at/after submission or was killed mid-tool-call —
+/// must NOT be replayed verbatim to the provider. `run_reply_loop` sanitizes
+/// every request at the provider seam, so the dangling call is answered by a
+/// synthesized tool result before it can 400 ("tool_call_ids did not have
+/// response messages"). This covers all replay flows (redispatch, retry,
+/// rework-after-review continuation) since every turn passes through the seam.
+#[tokio::test]
+async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
+    use std::sync::Mutex;
+
+    let tools = vec![dummy_tool_schema("submit_work")];
+
+    /// Captures the conversation of the first stream call, then defers to a
+    /// MockProvider that finalizes so the loop terminates.
+    struct CapturingProvider {
+        first_conversation: Arc<Mutex<Option<Conversation>>>,
+        inner: MockProvider,
+    }
+
+    impl LlmProvider for CapturingProvider {
+        fn name(&self) -> &str {
+            "capturing"
+        }
+        fn stream<'a>(
+            &'a self,
+            conversation: &'a Conversation,
+            tools: &'a [serde_json::Value],
+            tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            {
+                let mut slot = self.first_conversation.lock().unwrap();
+                if slot.is_none() {
+                    *slot = Some(conversation.clone());
+                }
+            }
+            self.inner.stream(conversation, tools, tool_choice)
+        }
+    }
+
+    let inner = MockProvider::new(vec![MockResponse {
+        text: None,
+        tool_calls: vec![ContentBlock::ToolUse {
+            id: "fin1".to_string(),
+            name: "submit_work".to_string(),
+            input: serde_json::json!({"task_id": "t1", "summary": "done"}),
+        }],
+        input_tokens: 50,
+        output_tokens: 10,
+    }]);
+    let first_conversation = Arc::new(Mutex::new(None));
+    let provider = CapturingProvider {
+        first_conversation: Arc::clone(&first_conversation),
+        inner,
+    };
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let worktree_path = std::path::PathBuf::from("/tmp");
+
+    // Seed a transcript ending in an UNANSWERED assistant tool call, exactly as
+    // a prior session's persisted history would on a rework continuation.
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+    conv.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "apply_patch:45".to_string(),
+            name: "apply_patch".to_string(),
+            input: serde_json::json!({"patch": "..."}),
+        }],
+        metadata: None,
+    });
+
+    let (result, _output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &tools,
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "openai/gpt-5.4",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+
+    // The provider must have received a synthesized tool result answering the
+    // dangling id — the original assistant call is preserved (context intact).
+    let captured = first_conversation
+        .lock()
+        .unwrap()
+        .take()
+        .expect("provider was called at least once");
+    let answered_ids: Vec<&str> = captured
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        answered_ids.contains(&"apply_patch:45"),
+        "the dangling tool call must be answered by a synthesized result before dispatch; \
+         got tool results for {answered_ids:?}"
+    );
+    assert!(
+        captured.messages.iter().any(|m| m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "apply_patch:45"))),
+        "the original assistant tool call is preserved (context of what it was doing)"
+    );
+}

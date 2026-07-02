@@ -42,6 +42,12 @@ pub fn is_orphaned_tool_call_error_str(msg: &str) -> bool {
     msg.contains("no tool call found for function call output")
         || msg.contains("no tool output found for function call")
         || msg.contains("no function call found")
+        // OpenAI-compatible Chat Completions variant (e.g. kimi-for-coding):
+        // "an assistant message with 'tool_calls' must be followed by tool
+        //  messages responding to each 'tool_call_id'. The following
+        //  tool_call_ids did not have response messages: ...".
+        || msg.contains("must be followed by tool messages")
+        || msg.contains("did not have response messages")
 }
 
 /// Whether `e` is an orphaned tool-call / tool-result reference error.
@@ -65,6 +71,14 @@ mod tests {
             "provider stream event failed: display=provider API error 400 Bad Request: { \
              \"error\": { \"message\": \"No tool output found for function call \
              call_GTQn9uVLax1RG4uWvMNrl3Sq.\", \"type\": \"invalid_request_error\" } }"
+        ));
+        // The OpenAI-compatible Chat Completions variant (kimi-for-coding, 2026-07-02).
+        assert!(is_orphaned_tool_call_error_str(
+            "provider stream event failed: provider API error 400 Bad Request: {\"error\":\
+             {\"type\":\"invalid_request_error\",\"message\":\"an assistant message with \
+             'tool_calls' must be followed by tool messages responding to each \
+             'tool_call_id'. The following tool_call_ids did not have response messages: \
+             code_search:24\"}}"
         ));
         // Negative cases.
         assert!(!is_orphaned_tool_call_error_str("rate limited"));
