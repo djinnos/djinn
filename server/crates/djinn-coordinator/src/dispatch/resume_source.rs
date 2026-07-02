@@ -4,6 +4,11 @@
 //! database work. Callers translate durable lifecycle/review/checkpoint rows
 //! into [`ResumeSourceCandidate`] values, then use [`select_resume_source`] to
 //! choose the safest source in a deterministic precedence order.
+//!
+//! Dead-code warnings are suppressed here because the public API is consumed by
+//! tests today and will be wired into the dispatch path by task 9tun.
+
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -227,26 +232,24 @@ fn validate_candidate(
         });
     }
 
-    if candidate.kind != ResumeSourceKind::CleanTaskBranch {
-        if let Some(expected) = expected_session_lineage {
-            if candidate.session_lineage.as_deref() != Some(expected) {
-                return Err(ResumeSourceSkipReason::SessionLineageMismatch {
-                    expected: expected.to_owned(),
-                    actual: candidate.session_lineage.clone(),
-                });
-            }
-        }
+    if candidate.kind != ResumeSourceKind::CleanTaskBranch
+        && let Some(expected) = expected_session_lineage
+        && candidate.session_lineage.as_deref() != Some(expected)
+    {
+        return Err(ResumeSourceSkipReason::SessionLineageMismatch {
+            expected: expected.to_owned(),
+            actual: candidate.session_lineage.clone(),
+        });
     }
 
-    if let Some(max_age_secs) = config.max_checkpoint_age_secs {
-        if let Some(age_secs) = candidate.age_secs {
-            if age_secs > max_age_secs {
-                return Err(ResumeSourceSkipReason::SourceStale {
-                    age_secs,
-                    max_age_secs,
-                });
-            }
-        }
+    if let Some(max_age_secs) = config.max_checkpoint_age_secs
+        && let Some(age_secs) = candidate.age_secs
+        && age_secs > max_age_secs
+    {
+        return Err(ResumeSourceSkipReason::SourceStale {
+            age_secs,
+            max_age_secs,
+        });
     }
 
     match candidate.kind {
