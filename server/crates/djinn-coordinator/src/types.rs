@@ -297,6 +297,33 @@ pub(super) const REOPEN_INTERVENTION_THRESHOLD: i64 = 3;
 /// scoped task against the existing branch) can finish it.
 pub(super) const MAX_PLANNER_INTERVENTIONS: i64 = 1;
 
+/// Number of CONSECUTIVE stall-cancelled sessions (with no durable task-status
+/// progress between them) after which the coordinator routes the task to a
+/// Planner intervention instead of blindly redispatching it again.
+///
+/// A worker task stall-killed twice in a row without its status advancing is
+/// caught in a redispatch loop that the reopen-count escalation (trigger A/B)
+/// never observes: a stall kill releases the task straight back into execution
+/// without passing through `open`, so `reopen_count` stays flat and the loop is
+/// invisible to the reopen threshold. Left alone it can burn a dispatch slot
+/// for hours (the overnight incident: one task stall-killed 14 times). On the
+/// SECOND strike we hand it to the Planner (decompose / rescope / close) rather
+/// than dispatch a third doomed session.
+pub(super) const STALL_CANCEL_ESCALATION_THRESHOLD: u32 = 2;
+
+/// Per-task record of consecutive stall cancellations without durable
+/// task-status progress, driving the second-strike Planner escalation
+/// (see [`STALL_CANCEL_ESCALATION_THRESHOLD`]).
+#[derive(Debug, Clone)]
+pub(super) struct StallCancelStreak {
+    /// Consecutive stall-cancelled sessions with no status change between them.
+    pub(super) count: u32,
+    /// Task status observed at the most recent stall cancel. A different status
+    /// on the next cancel means the task made durable progress in between, so
+    /// the streak resets rather than escalating.
+    pub(super) last_status: String,
+}
+
 /// Per-session total-token ceiling.  A session that has consumed more than
 /// this many tokens across all turns has likely entered a runaway loop
 /// (repeated identical tool calls, circular reasoning, or broken self-correction).

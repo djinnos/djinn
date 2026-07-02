@@ -614,3 +614,7 @@ impl CoordinatorActor {
 #[cfg(test)]
 #[path = "refinement_cap_tests.rs"]
 mod refinement_cap_tests;
+
+#[cfg(test)]
+#[path = "refinement_dor_status_tests.rs"]
+mod refinement_dor_status_tests;

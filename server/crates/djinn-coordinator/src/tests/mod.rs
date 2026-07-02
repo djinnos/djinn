@@ -475,6 +475,8 @@ fn coordinator_actor_for_tests(
         conversations_resolved: HashMap::new(),
         handled_dequeues: HashMap::new(),
         stall_killed: HashSet::new(),
+        stall_progress_watermark: HashMap::new(),
+        stall_cancel_streak: HashMap::new(),
         last_idle_consolidation: None,
         idle_consolidation_cancel: None,
         idle_consolidation_handle: None,
