@@ -1,17 +1,19 @@
-// Create/read/import/export/list CRUD tools for the global Proposals layer.
+// Create/read/import/export/list/update/block-patch/delete CRUD tools for the
+// global Proposals layer.
 //
-// This submodule owns the read/list/create/import/export/target surface plus
-// the cohesive list/show/target response shaping used by those tools.
+// This submodule owns the create/import/export/show/list/update/block-patch/
+// delete mutation surface plus target add/remove and the cohesive list/show/
+// target response shaping used by those tools.
 //
 // CRUD/target ownership checklist for task xpj0:
 // - moved here: `proposal_add_target`, `proposal_remove_target`,
 //   `target_models`, `finish_targets`, and `graduated_epic_models`;
 // - already owned here: create/import/export/show/list tools and list-summary
-//   tests; update/delete/block-patch remain in `mod.rs` until their sibling
-//   extraction lands because they share the current remaining-tool router;
+//   tests; update/delete/block-patch moved here from the py7d sibling slice;
 // - intentionally shared in `mod.rs`: composed gate/readiness helpers and
-//   `err_single`/`err_show` response constructors used by later feedback,
-//   signoff, lifecycle, and refinement slices.
+//   `err_single`/`err_show`/`err_targets` response constructors used by later
+//   feedback, signoff, lifecycle, and refinement slices.
+//
 
 use std::borrow::Cow;
 
@@ -29,21 +31,23 @@ use crate::tools::proposal_blocks::{
     parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
-    ProposalDebateTrailModel, ProposalEpicModel, ProposalListSummary, ProposalModel,
-    ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse, ProposalTargetModel,
-    ProposalTargetsResponse,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListSummary,
+    ProposalModel, ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
+    ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
     validate_ac_count, validate_design, validate_limit, validate_mdx_body, validate_offset,
-    validate_proposal_create_status, validate_sort, validate_title,
+    validate_proposal_create_status, validate_proposal_status, validate_sort, validate_title,
 };
 use djinn_db::{
     EpicRepository, ProjectRepository, ProposalListQuery, ProposalListSummaryRow,
     ProposalRepository,
 };
 
-use super::mdx::{parse_proposal_mdx, split_proposal_mdx_frontmatter};
+use super::mdx::{
+    ProposalBlockPatchParams, apply_block_patch, parse_proposal_mdx, split_proposal_mdx_frontmatter,
+};
 
 // Re-import shared helpers kept in `mod.rs` as `pub(super)`.
 use super::{
@@ -299,7 +303,29 @@ pub struct ProposalTargetParams {
     pub role: Option<String>,
 }
 
-// ── Tool router: create / import / export / show / list/target ──────────────────────
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalUpdateParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
+    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
+    /// draft | in_review | approved | building | done | rejected | archived | superseded.
+    pub status: Option<String>,
+    /// UUID or short_id of the proposal that supersedes this one.
+    pub superseded_by: Option<String>,
+    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
+    pub body_format: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalDeleteParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+}
+
+// ── Tool router: create / import / export / show / list / update / block-patch / delete / target ──
 
 #[tool_router(router = proposal_create_tool_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -790,6 +816,7 @@ impl DjinnMcpServer {
             offset,
         ))
     }
+
     /// Add (or re-role) a target project on a proposal.
     #[tool(
         description = "Add a target project to a proposal (or change its role if already present). `project` is a UUID or owner/repo slug; `role` is `primary` (default) or `reference`. This is the re-target capability — editable at any time. Returns the proposal's updated target list."
@@ -855,6 +882,227 @@ impl DjinnMcpServer {
             return Json(err_targets(e.to_string()));
         }
         finish_targets(&repo, &project_repo, &proposal.id).await
+    }
+
+    /// Update a proposal's editable fields.
+    #[tool(
+        description = "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change."
+    )]
+    pub async fn proposal_update(
+        &self,
+        Parameters(p): Parameters<ProposalUpdateParams>,
+    ) -> Json<ProposalSingleResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_single(e));
+        }
+
+        let title = if let Some(ref t) = p.title {
+            match validate_title(t) {
+                Ok(v) => v,
+                Err(e) => return Json(err_single(e)),
+            }
+        } else {
+            existing.title.clone()
+        };
+
+        let body = p.body.as_deref().unwrap_or(&existing.body);
+        if let Err(e) = validate_design(body) {
+            return Json(err_single(e));
+        }
+        // Effective body_format: explicitly passed, else the proposal's current
+        // format (matches the repository's own fallback on update).
+        let body_format = p
+            .body_format
+            .as_deref()
+            .unwrap_or(existing.body_format.as_str());
+        if let Err(e) = validate_mdx_body(body, Some(body_format)) {
+            return Json(err_single(e));
+        }
+        if p.body.is_some()
+            && body_format == "mdx"
+            && let Err(e) = validate_question_form_placement(body)
+        {
+            return Json(err_single(e));
+        }
+
+        let ac_json = if let Some(ac) = &p.acceptance_criteria {
+            if let Err(e) = validate_ac_count(ac.len()) {
+                return Json(err_single(e));
+            }
+            serde_json::to_string(ac).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            existing.acceptance_criteria.clone()
+        };
+
+        let status = p.status.as_deref().unwrap_or(&existing.status);
+        if let Err(e) = validate_proposal_status(status) {
+            return Json(err_single(e));
+        }
+
+        // Composed gate (task cuzf): block entering `in_review` when
+        // DoR or tribunal conditions are not met. Existing body/MDX/AC-count
+        // validation already passed above.
+        if status == "in_review" {
+            let target_count = repo
+                .targets(&existing.id)
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let gate = evaluate_composed_gate(&repo, &existing, body, &ac_json, target_count).await;
+            if let Some(err) = gate.to_error_string() {
+                return Json(err_single(err));
+            }
+        }
+
+        // Resolve superseded_by to a canonical proposal id when provided.
+        let superseded_by = if let Some(ref s) = p.superseded_by {
+            match repo.resolve(s).await.ok().flatten() {
+                Some(target) => Some(target.id),
+                None => return Json(err_single(format!("superseded_by proposal not found: {s}"))),
+            }
+        } else {
+            existing.superseded_by.clone()
+        };
+
+        match repo
+            .update(
+                &existing.id,
+                djinn_db::ProposalUpdateInput {
+                    title: &title,
+                    body,
+                    acceptance_criteria: &ac_json,
+                    status,
+                    superseded_by: superseded_by.as_deref(),
+                    body_format: p.body_format.as_deref(),
+                    // Plain `proposal_update` writes carry no authoring
+                    // attribution metadata — block-patch / native-skill tagging
+                    // is reserved for the targeted patch primitive.
+                    event_metadata: None,
+                },
+            )
+            .await
+        {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+
+    /// Apply a single targeted MDX block patch to a proposal body.
+    ///
+    /// Locates a specific range in the proposal body using the provided
+    /// selector (heading, exact text, or byte range), then replaces or wraps
+    /// that range with the given MDX content. Unrelated body content is
+    /// preserved. Each successful patch increments `latest_revision_seq` exactly
+    /// once and records targeted-block-patch metadata.
+    #[tool(
+        description = "Apply a single targeted MDX block patch to a proposal body. Locates a range via selector (heading_text, exact_text, or byte_range), then replaces or wraps it with the given block_mdx. Unrelated content is preserved. Each successful patch records one proposal revision with targeted-block-patch metadata."
+    )]
+    pub async fn proposal_block_patch(
+        &self,
+        Parameters(p): Parameters<ProposalBlockPatchParams>,
+    ) -> Json<ProposalSingleResponse> {
+        // 1. Resolve proposal.
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_single(proposal_not_found_error(&p.id)));
+        };
+
+        // 2. Edit gate.
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_single(e));
+        }
+
+        // 3. Stale revision guard.
+        if let Some(expected_seq) = p.expected_latest_revision_seq
+            && existing.latest_revision_seq != expected_seq
+        {
+            return Json(err_single(format!(
+                "stale revision: expected latest_revision_seq={}, but proposal has {}",
+                expected_seq, existing.latest_revision_seq
+            )));
+        }
+
+        // 4. Apply the patch (selector resolution, body build, MDX validation,
+        //    and metadata) via the shared pure transformation.
+        let outcome = match apply_block_patch(&existing.body, &existing.body_format, &p) {
+            Ok(o) => o,
+            Err(e) => return Json(err_single(e)),
+        };
+
+        // 5. Persist through the revisioning path.
+        let ac_json = existing.acceptance_criteria.clone();
+        match repo
+            .update(
+                &existing.id,
+                djinn_db::ProposalUpdateInput {
+                    title: &existing.title,
+                    body: &outcome.new_body,
+                    acceptance_criteria: &ac_json,
+                    status: &existing.status,
+                    superseded_by: existing.superseded_by.as_deref(),
+                    body_format: Some(outcome.new_body_format),
+                    event_metadata: Some(&outcome.event_metadata),
+                },
+            )
+            .await
+        {
+            Ok(updated) => Json(ProposalSingleResponse {
+                proposal: Some(ProposalModel::from(&updated)),
+                mdx: None,
+                error: None,
+            }),
+            Err(e) => Json(err_single(e.to_string())),
+        }
+    }
+
+    /// Delete a proposal (cascades to its targets and feedback).
+    #[tool(
+        description = "Delete a proposal (by UUID or short_id). Cascades to its targets and feedback. Returns {ok}."
+    )]
+    pub async fn proposal_delete(
+        &self,
+        Parameters(p): Parameters<ProposalDeleteParams>,
+    ) -> Json<ProposalDeleteResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(existing) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(ProposalDeleteResponse {
+                ok: None,
+                error: Some(proposal_not_found_error(&p.id)),
+            });
+        };
+        if let Err(e) = self
+            .gate_proposal_edit(existing.author_user_id.as_deref())
+            .await
+        {
+            return Json(ProposalDeleteResponse {
+                ok: None,
+                error: Some(e),
+            });
+        }
+        match repo.delete(&existing.id).await {
+            Ok(()) => Json(ProposalDeleteResponse {
+                ok: Some(true),
+                error: None,
+            }),
+            Err(e) => Json(ProposalDeleteResponse {
+                ok: None,
+                error: Some(e.to_string()),
+            }),
+        }
     }
 }
 
@@ -1055,5 +1303,156 @@ What happens if D fails?
             entry.get("list_summary").is_none(),
             "terminal proposals must not carry a list_summary (chips hidden)"
         );
+    }
+}
+
+// ── Schema-lean regression tests ──────────────────────────────────────────
+//
+// Guard `ProposalCreateParams` and `ProposalUpdateParams` against accidental
+// inlining of block vocabulary (tags, field schemas, catalog enums). Clients
+// discover vocabulary via `get_block_catalog` / `proposal_blocks`, then
+// submit proposal bodies through the existing `body` + `body_format` fields.
+
+#[cfg(test)]
+mod schema_lean_tests {
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    /// Recursively collect every string value reachable from `value`.
+    fn collect_strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(s) => out.push(s.clone()),
+            Value::Array(arr) => {
+                for item in arr {
+                    collect_strings(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for v in map.values() {
+                    collect_strings(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Assert that the serialized JSON schema does not mention any of the
+    /// given forbidden terms.  A single traversal collects all string values
+    /// (keys, enum entries, titles, descriptions, …) and a linear scan
+    /// checks every one.
+    fn assert_schema_excludes_terms(schema: &Value, forbidden: &[&str], context: &str) {
+        let mut strings = Vec::new();
+        collect_strings(schema, &mut strings);
+        for term in forbidden {
+            for s in &strings {
+                assert!(
+                    !s.contains(term),
+                    "{context} schema unexpectedly contains forbidden term \
+                     \"{term}\" in string value \"{s}\""
+                );
+            }
+        }
+    }
+
+    /// Terms that must never appear in a proposal write-schema.  These
+    /// cover: generic vocabulary field names, concrete MDX block tags, and
+    /// block-field/enum concepts.
+    const FORBIDDEN_BLOCK_TERMS: &[&str] = &[
+        // generic vocabulary surface
+        "block_types",
+        "catalog",
+        "blocks",
+        // concrete MDX block tags (must match proposal_block_catalog.json)
+        "AnnotatedCode",
+        "ApiEndpoint",
+        "Callout",
+        "Checklist",
+        "Columns",
+        "Decisions",
+        "Diagram",
+        "Diff",
+        "FileTree",
+        "JsonExplorer",
+        "QuestionForm",
+        "RichText",
+        "Tabs",
+        "Wireframe",
+        // kebab-case type identifiers
+        "annotated-code",
+        "api-endpoint",
+        "callout",
+        "checklist",
+        "columns",
+        "decisions",
+        "diagram",
+        "diff",
+        "file-tree",
+        "json-explorer",
+        "question-form",
+        "rich-text",
+        "tabs",
+        "wireframe",
+        // block enum / field schema vocabulary
+        "BlockType",
+        "ProposalBlock",
+    ];
+
+    /// Expected top-level properties for `ProposalCreateParams`.
+    const CREATE_ALLOWED_PROPS: &[&str] = &[
+        "title",
+        "body",
+        "acceptance_criteria",
+        "target_projects",
+        "status",
+        "body_format",
+    ];
+
+    /// Expected top-level properties for `ProposalUpdateParams`.
+    const UPDATE_ALLOWED_PROPS: &[&str] = &[
+        "id",
+        "title",
+        "body",
+        "acceptance_criteria",
+        "status",
+        "superseded_by",
+        "body_format",
+    ];
+
+    #[test]
+    fn proposal_create_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalCreateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalCreateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, CREATE_ALLOWED_PROPS,
+            "ProposalCreateParams properties drifted: got {prop_keys:?}, \
+             expected {CREATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalCreateParams");
+    }
+
+    #[test]
+    fn proposal_update_params_schema_is_lean_and_excludes_block_vocabulary() {
+        let schema = schema_for!(super::ProposalUpdateParams);
+        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
+
+        // Verify allowed properties.
+        let props = json["properties"]
+            .as_object()
+            .expect("ProposalUpdateParams schema should have properties object");
+        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
+        assert_eq!(
+            prop_keys, UPDATE_ALLOWED_PROPS,
+            "ProposalUpdateParams properties drifted: got {prop_keys:?}, \
+             expected {UPDATE_ALLOWED_PROPS:?}"
+        );
+
+        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
     }
 }
