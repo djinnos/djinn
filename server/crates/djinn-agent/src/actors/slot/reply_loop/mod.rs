@@ -185,7 +185,7 @@ pub(crate) async fn run_reply_loop(
         max_turns_override,
     } = ctx;
 
-    let mut slot_ctx = super::host_callbacks::agent_to_dispatch_slot_context(app_state);
+    let mut slot_ctx = super::host_callbacks::agent_to_reply_loop_slot_context(app_state, services);
     slot_ctx.tool_dispatcher = Some(Arc::new(AgentToolDispatcher::new(
         app_state,
         services,

@@ -2074,3 +2074,360 @@ fn failed_outcome_blocks_with_block_policy() {
         "Failed should block with Block policy"
     );
 }
+
+// ── Fix 1: DB-truth liveness backstop for the stall killer ───────────────
+//
+// The coordinator's idle measurement comes from an in-memory ActivityTracker
+// fed only by a remote worker's `touch_activity` RPC bridge. When that bridge
+// drifts the tracker goes silent and the stall killer false-flags a busy
+// worker as idle (the overnight incident: 88 productive sessions killed at the
+// 30-minute mark). The backstop consults a signal the drift cannot touch — the
+// session ROW's token counters, persisted mid-flight — and spares any session
+// whose counters advanced since the previous sweep.
+
+/// A session that is well past the idle threshold with a SILENT activity
+/// tracker is NOT stall-killed when its DB token counters advanced since the
+/// last stall sweep — DB-visible progress is independent evidence of liveness.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stall_backstop_spares_session_with_advancing_db_tokens() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-backstop-spare").await;
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Backdate well past every idle threshold; with no pool slot the stall
+    // check falls back to wall-clock-from-started_at and reads the tracker as
+    // silent (`activity_tracked == false`).
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
+    // The session row shows real token progress (mid-flight flush).
+    session_repo
+        .flush_tokens(&session.id, 2000, 500, 0, 0)
+        .await
+        .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    // Seed the watermark from a prior sweep BELOW the live total so the current
+    // sweep observes an advance.
+    actor
+        .stall_progress_watermark
+        .insert(session.id.clone(), 1000);
+
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        !actor.stall_killed.contains(&session.id),
+        "a session whose DB token counters advanced since the last sweep must be spared the idle kill"
+    );
+    assert_eq!(
+        actor.stall_progress_watermark.get(&session.id).copied(),
+        Some(2500),
+        "the backstop must roll the watermark forward to the observed DB total"
+    );
+}
+
+/// A truly-dead session — silent activity tracker AND frozen DB token counters
+/// (no advance since the last sweep) — is still stall-killed at threshold. The
+/// backstop only spares demonstrable progress; it must not become a blanket
+/// amnesty that wedges genuinely hung sessions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stall_kill_still_fires_without_db_progress() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-backstop-dead").await;
+    let run_id = "run-stall-dead";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
+    // Frozen counters: the row shows tokens, but the watermark below already
+    // matches them, so no advance is observed.
+    session_repo
+        .flush_tokens(&session.id, 3000, 0, 0, 0)
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(runtime.clone()));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+    // Age the activity timestamp so the idle measurement is over threshold.
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(40 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    // Watermark already equals the live DB total → no progress observed.
+    actor
+        .stall_progress_watermark
+        .insert(session.id.clone(), 3000);
+
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "a session with no DB progress and a silent activity tracker must still be stall-killed"
+    );
+    cancel.cancel();
+}
+
+// ── Fix 2: second-strike stall escalation ────────────────────────────────
+//
+// A task stall-killed on two consecutive sessions without durable status
+// progress is caught in a redispatch loop the reopen-count escalation never
+// sees (a stall kill never passes through `open`). On the second strike the
+// coordinator routes it to the Planner instead of dispatching a third session.
+
+/// Helper: stand up a running worker session for `task` on a live slot pool
+/// whose activity is aged past the idle threshold, ready for a stall kill.
+async fn dispatch_stalled_worker_session(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    task: &djinn_core::models::Task,
+    run_id: &str,
+) -> (
+    SlotPoolHandle,
+    CancellationToken,
+    djinn_core::models::SessionRecord,
+) {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
+
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(RecordingRuntimeOps::new(true)));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id, _project_path, _model_id, _app_state, kill, _pause| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(40 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    (pool, cancel, session)
+}
+
+/// The FIRST stall cancel of a task does not escalate — it just kills and
+/// releases for redispatch (one stall is not yet a loop).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_stall_cancel_does_not_escalate_to_planner() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-strike-one").await;
+    let (pool, cancel, session) =
+        dispatch_stalled_worker_session(&db, &tx, &task, "run-strike-one").await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "the stalled session is killed"
+    );
+    let streak = actor
+        .stall_cancel_streak
+        .get(&task.id)
+        .expect("first strike records a streak");
+    assert_eq!(streak.count, 1, "first strike is count 1");
+    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    assert!(
+        markers.is_empty(),
+        "a single stall cancel must not escalate to the Planner"
+    );
+    cancel.cancel();
+}
+
+/// Two CONSECUTIVE stall cancels with no durable status progress between them
+/// escalate to a Planner intervention BEFORE a third dispatch. The first strike
+/// is pre-seeded (a prior session already stall-cancelled at this status); the
+/// second real kill crosses the threshold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_consecutive_stall_cancel_escalates_to_planner() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-strike-two").await;
+    let (pool, cancel, session) =
+        dispatch_stalled_worker_session(&db, &tx, &task, "run-strike-two").await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool;
+    // Pre-seed the first strike at the task's current status: a prior session
+    // already stall-cancelled and the status has not advanced since.
+    let current = actor
+        .task_repo()
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .status;
+    actor.stall_cancel_streak.insert(
+        task.id.clone(),
+        StallCancelStreak {
+            count: 1,
+            last_status: current,
+        },
+    );
+
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "the second stalled session is killed"
+    );
+    let markers = planner_intervention_markers(&actor.task_repo(), &task.id).await;
+    assert!(
+        !markers.is_empty(),
+        "the second consecutive stall cancel without status progress must route to a Planner intervention"
+    );
+    assert!(
+        !actor.stall_cancel_streak.contains_key(&task.id),
+        "the streak is cleared once the escalation fires"
+    );
+    cancel.cancel();
+}

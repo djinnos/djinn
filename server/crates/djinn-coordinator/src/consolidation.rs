@@ -484,6 +484,8 @@ mod tests {
             conversations_resolved: std::collections::HashMap::new(),
             handled_dequeues: std::collections::HashMap::new(),
             stall_killed: std::collections::HashSet::new(),
+            stall_progress_watermark: std::collections::HashMap::new(),
+            stall_cancel_streak: std::collections::HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
             idle_consolidation_handle: None,
