@@ -76,4 +76,11 @@ pub struct SubmitGrooming {
     pub tasks_reviewed: Vec<TaskGroomingEntry>,
     pub summary: Option<String>,
     pub decision: Option<String>,
+    /// Epics (UUID or short_id) that block this planning epic. When the planner
+    /// concludes "blocked on epic X, no tasks created", listing X here durably
+    /// records the epic-blocker edge so the coordinator parks this epic's
+    /// planning until X closes — instead of re-deriving "blocked" via a fresh
+    /// LLM session on every stale-sweep. Idempotent; ignored when empty.
+    #[serde(default)]
+    pub blocked_on: Vec<String>,
 }
