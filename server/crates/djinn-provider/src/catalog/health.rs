@@ -9,8 +9,19 @@ use serde::{Deserialize, Serialize};
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 /// Initial cooldown after first circuit-breaker trip: 5 seconds.
 const INITIAL_COOLDOWN: Duration = Duration::from_secs(5);
-/// Maximum cooldown: 5 minutes.
-const MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// Maximum escalating cooldown: 4 hours.
+///
+/// This is the ceiling of the *escalating* auto-disable ladder
+/// (`compute_cooldown`): each consecutive trip triples the previous cooldown
+/// (5s → 15s → 45s … → 4h) so a persistently-broken model stays demoted for
+/// progressively longer instead of re-enabling on a fixed short TTL. The old
+/// ceiling was 5 minutes, which let a genuinely-broken model
+/// (`xiaomi-token-plan-sgp/mimo-v2.5-pro`, 78 failures vs 16 successes) trip the
+/// breaker ~50 times in one night: disable → 5-min cooldown → re-enable → grab a
+/// priority task → produce nothing for 30 minutes → trip → repeat, burning a
+/// worker slot every cycle. A multi-hour ceiling means each successive trip on a
+/// truly-dead model costs the fleet exponentially less.
+const MAX_COOLDOWN: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// Minimum cooldown applied when a model is tripped via [`HealthTracker::record_stall`]
 /// (a zero-token / first-LLM-call-hung stall). This is the key knob that makes
@@ -23,7 +34,28 @@ const MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// the 240s task-cooldown rung), so the next model in the creator's ordered list
 /// is selected instead. The cooldown still auto-expires, so a one-off stall
 /// self-heals; repeated stalls escalate via the normal ladder and pin at the cap.
-const STALL_MIN_COOLDOWN: Duration = MAX_COOLDOWN;
+///
+/// Deliberately a *fixed* 5 minutes rather than `MAX_COOLDOWN`: now that the
+/// escalation ceiling is multi-hour, aliasing this to `MAX_COOLDOWN` would floor
+/// a *single* one-off stall at 4h and destroy the self-heal property. The stall
+/// floor only needs to outlast the 240s task-redispatch ladder; repeated stalls
+/// still escalate past this floor via `compute_cooldown` up to `MAX_COOLDOWN`.
+const STALL_MIN_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// Rolling-window trip-rate ceiling: if a `(scope, model)` bucket's breaker trips
+/// this many times within [`TRIP_RATE_WINDOW`], it is **hard-disabled** — held
+/// unavailable with NO auto-expiry until a human re-enables it via the
+/// `model_health` `enable` action. This is the backstop the escalating cooldown
+/// alone can't provide: even a 4h ceiling still lets a hopeless model flap a
+/// couple of times a day, and the incident model was flapping every 10–40 min.
+/// A model that keeps tripping despite the escalating cooldown is not "recovering
+/// on a clock" — it is broken, and continuing to auto-re-enable it just keeps
+/// feeding it priority tasks it cannot complete. `8` trips in `6h` is well above
+/// what a transiently-flaky-but-usable model produces, yet well below the ~50
+/// trips/night the incident model sustained.
+const TRIP_RATE_CEILING: usize = 8;
+/// Rolling window over which [`TRIP_RATE_CEILING`] trips force a hard-disable.
+const TRIP_RATE_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Identifies a single circuit-breaker bucket.
 ///
@@ -113,9 +145,24 @@ pub struct ModelHealth {
     pub consecutive_failures: u32,
     pub total_failures: u32,
     pub total_successes: u32,
+    /// Current escalating-cooldown tier: how many times the breaker has tripped
+    /// without an intervening success. Drives `compute_cooldown` (5s·3^tier,
+    /// capped at `MAX_COOLDOWN`). Reset to 0 by a successful session.
     pub disable_ttl_trips: u32,
-    /// Seconds until the cooldown expires; `None` when not currently disabled.
+    /// Seconds until the cooldown expires; `None` when not currently disabled
+    /// **or when hard-disabled** (a hard-disable has no auto-expiry).
     pub cooldown_seconds_remaining: Option<u64>,
+    /// Hard-disabled: the trip-rate ceiling ([`TRIP_RATE_CEILING`] trips within
+    /// [`TRIP_RATE_WINDOW`]) was hit, so the bucket is held unavailable with NO
+    /// auto-expiry until a human re-enables it. `#[serde(default)]` keeps older
+    /// persisted snapshots (which had no such field) loading as not-hard-disabled.
+    #[serde(default)]
+    pub hard_disabled: bool,
+    /// Number of breaker trips currently inside the rolling [`TRIP_RATE_WINDOW`].
+    /// Surfaced so operators can see how close a bucket is to the hard-disable
+    /// ceiling. `#[serde(default)]` for back-compat with pre-ceiling snapshots.
+    #[serde(default)]
+    pub trips_in_window: u32,
 }
 
 #[derive(Default)]
@@ -126,15 +173,53 @@ struct ModelState {
     total_failures: u32,
     total_successes: u32,
     disable_ttl_trips: u32,
+    /// Hard-disabled by the trip-rate ceiling — no auto-expiry, human re-enable
+    /// only. Distinct from `auto_disabled` (which self-heals on cooldown).
+    hard_disabled: bool,
+    /// Monotonic timestamps of recent breaker trips, pruned to
+    /// [`TRIP_RATE_WINDOW`]. When its length reaches [`TRIP_RATE_CEILING`] the
+    /// bucket is hard-disabled. Only genuine (escalating) trips are recorded —
+    /// account-quota throttles do not count toward the ceiling.
+    trip_times: Vec<Instant>,
 }
 
 impl ModelState {
     fn is_available(&self, now: Instant) -> bool {
+        // Hard-disabled buckets never auto-recover — a human must re-enable.
+        if self.hard_disabled {
+            return false;
+        }
         if !self.auto_disabled {
             return true;
         }
         // Cooldown expired → model auto-re-enables on next availability check.
         matches!(self.cooldown_until, Some(until) if now >= until)
+    }
+
+    /// Count of breaker trips still inside the rolling [`TRIP_RATE_WINDOW`].
+    fn trips_in_window(&self, now: Instant) -> u32 {
+        self.trip_times
+            .iter()
+            .filter(|t| now.duration_since(**t) < TRIP_RATE_WINDOW)
+            .count() as u32
+    }
+
+    /// Record a genuine breaker trip against the rolling trip-rate window and
+    /// hard-disable the bucket if the ceiling is reached. Returns `true` when
+    /// this trip crossed the ceiling (for one-shot logging).
+    fn register_trip(&mut self, now: Instant) -> bool {
+        // Prune trips that have aged out of the window, then record this one.
+        self.trip_times
+            .retain(|t| now.duration_since(*t) < TRIP_RATE_WINDOW);
+        self.trip_times.push(now);
+        if !self.hard_disabled && self.trip_times.len() >= TRIP_RATE_CEILING {
+            self.hard_disabled = true;
+            // No auto-expiry: clear the cooldown deadline so `is_available`
+            // relies solely on the `hard_disabled` gate until a human re-enables.
+            self.cooldown_until = None;
+            return true;
+        }
+        false
     }
 
     fn cooldown_seconds_remaining(&self, now: Instant) -> Option<u64> {
@@ -150,13 +235,16 @@ impl ModelState {
         ModelHealth {
             model_id: key.model_id.clone(),
             scope: key.scope.clone(),
-            // Report as disabled only when cooldown has not yet expired.
-            auto_disabled: self.auto_disabled && !self.is_available(now),
+            // Report as disabled when hard-disabled, or when an ordinary cooldown
+            // has not yet expired.
+            auto_disabled: self.hard_disabled || (self.auto_disabled && !self.is_available(now)),
             consecutive_failures: self.consecutive_failures,
             total_failures: self.total_failures,
             total_successes: self.total_successes,
             disable_ttl_trips: self.disable_ttl_trips,
             cooldown_seconds_remaining: self.cooldown_seconds_remaining(now),
+            hard_disabled: self.hard_disabled,
+            trips_in_window: self.trips_in_window(now),
         }
     }
 
@@ -251,6 +339,12 @@ impl HealthTracker {
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.consecutive_failures = 0;
         state.total_successes += 1;
+        // A productive session is proof the model recovered — reset the
+        // escalating-cooldown tier and clear the rolling trip window so the next
+        // failure starts fresh at the base cooldown and the hard-disable ceiling
+        // isn't reached by ancient, since-recovered trips.
+        state.disable_ttl_trips = 0;
+        state.trip_times.clear();
         if state.auto_disabled && state.is_available(now) {
             state.auto_disabled = false;
             state.cooldown_until = None;
@@ -278,14 +372,28 @@ impl HealthTracker {
             state.auto_disabled = true;
             state.cooldown_until = Some(now + cooldown);
             state.disable_ttl_trips += 1;
+            let hard_disabled = state.register_trip(now);
             djinn_telemetry::breaker::increment_trip();
             tracing::warn!(
                 model_id = %key.model_id,
                 scope = ?key.scope,
                 consecutive_failures = state.consecutive_failures,
                 cooldown_secs = cooldown.as_secs(),
+                disable_ttl_trips = state.disable_ttl_trips,
+                trips_in_window = state.trips_in_window(now),
+                hard_disabled,
                 "model circuit-breaker tripped"
             );
+            if hard_disabled {
+                tracing::error!(
+                    model_id = %key.model_id,
+                    scope = ?key.scope,
+                    trips_in_window = TRIP_RATE_CEILING,
+                    window_hours = TRIP_RATE_WINDOW.as_secs() / 3600,
+                    "model breaker hit trip-rate ceiling — HARD-DISABLED until a human \
+                     re-enables it via model_health(enable)"
+                );
+            }
         }
     }
 
@@ -340,18 +448,36 @@ impl HealthTracker {
         state.auto_disabled = true;
         state.cooldown_until = Some(now + cooldown);
         // A throttle resets on a clock, not on model health — don't ratchet the
-        // escalating cooldown cap for it (idea 6). Genuine failures still do.
-        if escalate {
+        // escalating cooldown cap for it (idea 6), and don't count it toward the
+        // hard-disable ceiling (a quota-limited account is not a broken model).
+        // Genuine failures/stalls do both.
+        let hard_disabled = if escalate {
             state.disable_ttl_trips += 1;
-        }
+            state.register_trip(now)
+        } else {
+            false
+        };
         djinn_telemetry::breaker::increment_trip();
         tracing::warn!(
             model_id = %key.model_id,
             scope = ?key.scope,
             consecutive_failures = state.consecutive_failures,
             cooldown_secs = cooldown.as_secs(),
+            disable_ttl_trips = state.disable_ttl_trips,
+            trips_in_window = state.trips_in_window(now),
+            hard_disabled,
             "model circuit-breaker tripped on stall (failing over to next model)"
         );
+        if hard_disabled {
+            tracing::error!(
+                model_id = %key.model_id,
+                scope = ?key.scope,
+                trips_in_window = TRIP_RATE_CEILING,
+                window_hours = TRIP_RATE_WINDOW.as_secs() / 3600,
+                "model breaker hit trip-rate ceiling on stalls — HARD-DISABLED until a \
+                 human re-enables it via model_health(enable)"
+            );
+        }
     }
 
     /// Returns `true` when the `(scope, model)` bucket is not circuit-breaker
@@ -384,6 +510,7 @@ impl HealthTracker {
                     (
                         key.clone(),
                         state.auto_disabled,
+                        state.hard_disabled,
                         state.cooldown_until,
                         state.consecutive_failures,
                     )
@@ -396,8 +523,10 @@ impl HealthTracker {
         let mut snapshot: Vec<_> = entries
             .into_iter()
             .filter_map(
-                |(key, auto_disabled, cooldown_until, consecutive_failures)| {
-                    let state = if !auto_disabled {
+                |(key, auto_disabled, hard_disabled, cooldown_until, consecutive_failures)| {
+                    let state = if hard_disabled {
+                        "hard_disabled"
+                    } else if !auto_disabled {
                         return None;
                     } else if cooldown_until.is_some_and(|until| now >= until) {
                         "half_open"
@@ -479,9 +608,21 @@ impl HealthTracker {
                 total_failures: health.total_failures,
                 total_successes: health.total_successes,
                 disable_ttl_trips: health.disable_ttl_trips,
+                hard_disabled: health.hard_disabled,
+                // Seed the rolling window with the persisted count so the
+                // hard-disable ceiling survives a leader failover / restart
+                // instead of resetting to zero. Timestamps are unknown across
+                // the persist boundary, so anchor them at `now`: they age out
+                // naturally over `TRIP_RATE_WINDOW`.
+                trip_times: vec![now; (health.trips_in_window as usize).min(TRIP_RATE_CEILING)],
             };
 
-            if health.auto_disabled {
+            if health.hard_disabled {
+                // A hard-disable has no auto-expiry — keep it disabled with no
+                // cooldown deadline regardless of the persisted remaining seconds.
+                state.auto_disabled = true;
+                state.cooldown_until = None;
+            } else if health.auto_disabled {
                 if let Some(seconds) = health.cooldown_seconds_remaining {
                     if seconds > 0 {
                         state.cooldown_until = Some(now + Duration::from_secs(seconds));
@@ -517,6 +658,8 @@ impl HealthTracker {
                 total_successes: 0,
                 disable_ttl_trips: 0,
                 cooldown_seconds_remaining: None,
+                hard_disabled: false,
+                trips_in_window: 0,
             })
     }
 
@@ -561,24 +704,33 @@ impl HealthTracker {
         keys.len()
     }
 
-    /// Re-enable an auto-disabled bucket without clearing counters.
+    /// Re-enable an auto-disabled (or **hard-disabled**) bucket without clearing
+    /// failure/success counters. This is the human re-enable path a hard-disable
+    /// requires, so it also clears the trip-rate window: otherwise the ceiling
+    /// would still be tripped and the very next failure would immediately
+    /// re-hard-disable the bucket.
     pub fn enable(&self, scope: Option<&str>, model_id: &str) {
         let mut map = self.inner.lock().unwrap();
         let state = map.entry(HealthKey::new(scope, model_id)).or_default();
         state.auto_disabled = false;
+        state.hard_disabled = false;
         state.cooldown_until = None;
+        state.trip_times.clear();
     }
 
-    /// Re-enable every scope's bucket for `model_id` without clearing counters
-    /// (ops convenience: "let everyone use this model again now"). Returns the
-    /// number of buckets re-enabled.
+    /// Re-enable every scope's bucket for `model_id` without clearing failure
+    /// counters (ops convenience: "let everyone use this model again now"). Also
+    /// clears any hard-disable + the trip-rate window (see [`Self::enable`]).
+    /// Returns the number of buckets re-enabled.
     pub fn enable_model_all_scopes(&self, model_id: &str) -> usize {
         let mut map = self.inner.lock().unwrap();
         let mut n = 0;
         for (key, state) in map.iter_mut() {
             if key.model_id == model_id {
                 state.auto_disabled = false;
+                state.hard_disabled = false;
                 state.cooldown_until = None;
+                state.trip_times.clear();
                 n += 1;
             }
         }
@@ -629,6 +781,7 @@ mod tests {
                     total_failures: 3,
                     total_successes: 0,
                     disable_ttl_trips: 1,
+                    ..Default::default()
                 },
             );
             map.insert(
@@ -640,6 +793,7 @@ mod tests {
                     total_failures: 4,
                     total_successes: 0,
                     disable_ttl_trips: 1,
+                    ..Default::default()
                 },
             );
             map.insert(
@@ -651,6 +805,7 @@ mod tests {
                     total_failures: 0,
                     total_successes: 1,
                     disable_ttl_trips: 0,
+                    ..Default::default()
                 },
             );
         }
@@ -750,6 +905,107 @@ mod tests {
     }
 
     #[test]
+    fn success_resets_escalation_tier_and_trip_window() {
+        // Fix 1: a productive session on a model that had been escalating must
+        // reset both the cooldown tier (`disable_ttl_trips`) and the rolling
+        // trip-rate window, so the next failure starts fresh at the base cooldown
+        // and old, since-recovered trips don't count toward the hard-disable
+        // ceiling.
+        let ht = HealthTracker::new();
+        for _ in 0..3 {
+            trip_breaker(&ht, TEST_MODEL);
+            expire_cooldown(&ht, S, TEST_MODEL);
+        }
+        let escalated = ht.model_health(S, TEST_MODEL);
+        assert_eq!(escalated.disable_ttl_trips, 3);
+        assert_eq!(escalated.trips_in_window, 3);
+
+        ht.record_success(S, TEST_MODEL);
+        let recovered = ht.model_health(S, TEST_MODEL);
+        assert_eq!(recovered.disable_ttl_trips, 0, "success resets the tier");
+        assert_eq!(recovered.trips_in_window, 0, "success clears the window");
+        assert_eq!(recovered.consecutive_failures, 0);
+
+        // The next trip starts back at the base cooldown, not the escalated one.
+        let h = trip_breaker(&ht, TEST_MODEL);
+        assert_eq!(h.disable_ttl_trips, 1);
+        let remaining = h.cooldown_seconds_remaining.unwrap();
+        assert!(remaining <= INITIAL_COOLDOWN.as_secs());
+        assert!(remaining >= INITIAL_COOLDOWN.as_secs().saturating_sub(1));
+    }
+
+    #[test]
+    fn trip_rate_ceiling_hard_disables_until_manual_enable() {
+        // Fix 1: a model that trips CEILING times within the window is hard-
+        // disabled with NO auto-expiry; only the human `enable` path recovers it.
+        let ht = HealthTracker::new();
+        for _ in 0..TRIP_RATE_CEILING {
+            trip_breaker(&ht, TEST_MODEL);
+            expire_cooldown(&ht, S, TEST_MODEL);
+        }
+        let h = ht.model_health(S, TEST_MODEL);
+        assert!(h.hard_disabled);
+        assert!(h.auto_disabled);
+        assert!(h.cooldown_seconds_remaining.is_none());
+        assert_eq!(h.trips_in_window, TRIP_RATE_CEILING as u32);
+        // No amount of cooldown expiry re-enables a hard-disabled bucket.
+        expire_cooldown(&ht, S, TEST_MODEL);
+        assert!(!ht.is_available(S, TEST_MODEL));
+
+        // The existing admin `enable` action clears the hard-disable AND the
+        // trip window, so the model is usable again and does not instantly
+        // re-hard-disable on the next trip.
+        ht.enable(S, TEST_MODEL);
+        assert!(ht.is_available(S, TEST_MODEL));
+        let enabled = ht.model_health(S, TEST_MODEL);
+        assert!(!enabled.hard_disabled);
+        assert_eq!(enabled.trips_in_window, 0);
+        // Counters (total failures) are preserved by enable.
+        assert!(enabled.total_failures >= TRIP_RATE_CEILING as u32);
+    }
+
+    #[test]
+    fn throttle_stalls_never_hit_the_hard_disable_ceiling() {
+        // A quota throttle (`escalate = false`) resets on a clock, not on model
+        // health, so it must NOT count toward the hard-disable ceiling — even far
+        // more than CEILING throttle trips must keep auto-recovering.
+        let ht = HealthTracker::new();
+        for _ in 0..(TRIP_RATE_CEILING * 3) {
+            ht.record_stall(S, TEST_MODEL, false);
+            let h = ht.model_health(S, TEST_MODEL);
+            assert!(!h.hard_disabled, "throttles never hard-disable");
+            assert_eq!(h.trips_in_window, 0, "throttles are not counted");
+            assert_eq!(h.disable_ttl_trips, 0);
+            expire_cooldown(&ht, S, TEST_MODEL);
+            assert!(ht.is_available(S, TEST_MODEL), "throttle always self-heals");
+        }
+    }
+
+    #[test]
+    fn hard_disable_survives_persistence_round_trip() {
+        // A hard-disable must persist across a leader failover (settings-blob
+        // snapshot → restore) so a restart doesn't silently re-enable a model a
+        // human hasn't cleared.
+        let ht = HealthTracker::new();
+        for _ in 0..TRIP_RATE_CEILING {
+            trip_breaker(&ht, TEST_MODEL);
+            expire_cooldown(&ht, S, TEST_MODEL);
+        }
+        assert!(ht.model_health(S, TEST_MODEL).hard_disabled);
+
+        let snapshot = ht.all_health();
+        let restored = HealthTracker::new();
+        restored.restore_all(snapshot);
+        let h = restored.model_health(S, TEST_MODEL);
+        assert!(h.hard_disabled, "hard-disable survived the round trip");
+        assert!(!restored.is_available(S, TEST_MODEL));
+        assert!(
+            h.cooldown_seconds_remaining.is_none(),
+            "still no auto-expiry"
+        );
+    }
+
+    #[test]
     fn compute_cooldown_grows_exponentially_and_caps() {
         let mut state = ModelState::default();
 
@@ -764,10 +1020,17 @@ mod tests {
         state.disable_ttl_trips = 3;
         assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN * 27);
 
-        state.disable_ttl_trips = 4;
+        // 5s·3^n keeps climbing well past the old 5-minute ceiling now that the
+        // cap is 4h: 5·3^7 = 10935s (~3h) is still below the cap…
+        state.disable_ttl_trips = 7;
+        assert_eq!(state.compute_cooldown(), INITIAL_COOLDOWN * 3u32.pow(7));
+        assert!(state.compute_cooldown() < MAX_COOLDOWN);
+
+        // …and 5·3^8 = 32805s (~9h) exceeds it, so it pins at MAX_COOLDOWN.
+        state.disable_ttl_trips = 8;
         assert_eq!(state.compute_cooldown(), MAX_COOLDOWN);
 
-        state.disable_ttl_trips = 12;
+        state.disable_ttl_trips = 20;
         assert_eq!(state.compute_cooldown(), MAX_COOLDOWN);
     }
 
@@ -802,28 +1065,50 @@ mod tests {
     }
 
     #[test]
-    fn repeated_trips_cooldown_caps_at_maximum() {
+    fn repeated_trips_escalate_cooldown_then_hard_disable_at_ceiling() {
         let ht = HealthTracker::new();
 
-        for expected_trip in 1..=6 {
+        // Trips 1..CEILING escalate the cooldown (5s·3^(n-1)) and self-heal after
+        // an expired cooldown — never reaching the multi-hour cap because the
+        // hard-disable ceiling backstops first.
+        for expected_trip in 1..TRIP_RATE_CEILING as u32 {
             let health = trip_breaker(&ht, TEST_MODEL);
             assert_eq!(health.disable_ttl_trips, expected_trip);
+            assert!(
+                !health.hard_disabled,
+                "below the ceiling, not hard-disabled"
+            );
+            assert_eq!(health.trips_in_window, expected_trip);
             let remaining = health.cooldown_seconds_remaining.unwrap();
-            assert!(remaining <= MAX_COOLDOWN.as_secs());
-            if expected_trip == 4 {
-                assert!(remaining <= 135);
-                assert!(remaining >= 134);
-            }
-            if expected_trip >= 5 {
-                assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
-            }
-
+            let expected = (INITIAL_COOLDOWN.as_secs() * 3u64.pow(expected_trip - 1))
+                .min(MAX_COOLDOWN.as_secs());
+            assert!(remaining <= expected);
+            assert!(remaining >= expected.saturating_sub(1));
+            // Cooldown auto-expires → the bucket is available again (self-heal).
             expire_cooldown(&ht, S, TEST_MODEL);
+            assert!(ht.is_available(S, TEST_MODEL));
         }
 
-        let health = ht.model_health(S, TEST_MODEL);
-        assert_eq!(health.disable_ttl_trips, 6);
-        assert!(ht.is_available(S, TEST_MODEL));
+        // The CEILING-th trip within the window flips the bucket to hard-disabled:
+        // no cooldown deadline, and NOT available even after expiry.
+        let health = trip_breaker(&ht, TEST_MODEL);
+        assert_eq!(health.disable_ttl_trips, TRIP_RATE_CEILING as u32);
+        assert!(
+            health.hard_disabled,
+            "ceiling trip hard-disables the bucket"
+        );
+        assert!(health.auto_disabled, "hard-disabled reports as disabled");
+        assert!(
+            health.cooldown_seconds_remaining.is_none(),
+            "no auto-expiry"
+        );
+        assert!(!ht.is_available(S, TEST_MODEL));
+        // Even forcing the (absent) cooldown into the past does not re-enable it.
+        expire_cooldown(&ht, S, TEST_MODEL);
+        assert!(
+            !ht.is_available(S, TEST_MODEL),
+            "hard-disable never self-heals"
+        );
     }
 
     #[test]
@@ -882,17 +1167,21 @@ mod tests {
     }
 
     #[test]
-    fn repeated_stalls_escalate_trips_and_stay_capped() {
+    fn repeated_stalls_escalate_trips_and_stay_floored() {
         let ht = HealthTracker::new();
         for expected_trip in 1..=4 {
             ht.record_stall(S, TEST_MODEL, true);
             let h = ht.model_health(S, TEST_MODEL);
             assert_eq!(h.disable_ttl_trips, expected_trip);
+            assert_eq!(h.trips_in_window, expected_trip);
+            assert!(!h.hard_disabled, "4 trips is below the ceiling");
             assert!(h.auto_disabled);
-            // Every stall cooldown is floored at the cap.
+            // The early rungs (5s/15s/45s/135s) are all below the stall floor, so
+            // every stall cooldown is floored at STALL_MIN_COOLDOWN (5 min) — no
+            // longer aliased to the multi-hour MAX_COOLDOWN.
             let remaining = h.cooldown_seconds_remaining.unwrap();
-            assert!(remaining <= MAX_COOLDOWN.as_secs());
-            assert!(remaining >= MAX_COOLDOWN.as_secs().saturating_sub(1));
+            assert!(remaining <= STALL_MIN_COOLDOWN.as_secs());
+            assert!(remaining >= STALL_MIN_COOLDOWN.as_secs().saturating_sub(1));
             assert!(!ht.is_available(S, TEST_MODEL));
             expire_cooldown(&ht, S, TEST_MODEL);
         }
@@ -1005,6 +1294,8 @@ mod tests {
             total_successes: 2,
             disable_ttl_trips: 1,
             cooldown_seconds_remaining: Some(4),
+            hard_disabled: false,
+            trips_in_window: 1,
         }]);
 
         let scope = Some("user-a");
@@ -1032,7 +1323,8 @@ mod tests {
         let restored = ht.model_health(scope, "a/model");
         assert!(ht.is_available(scope, "a/model"));
         assert!(!restored.auto_disabled);
-        assert_eq!(restored.disable_ttl_trips, 1);
+        // A success resets the escalation tier (Fix 1): next failure starts fresh.
+        assert_eq!(restored.disable_ttl_trips, 0);
         assert_eq!(restored.consecutive_failures, 0);
 
         for failures in 1..CIRCUIT_BREAKER_THRESHOLD {
@@ -1040,12 +1332,12 @@ mod tests {
             let health = ht.model_health(scope, "a/model");
             assert!(ht.is_available(scope, "a/model"));
             assert!(!health.auto_disabled);
-            assert_eq!(health.disable_ttl_trips, 1);
+            assert_eq!(health.disable_ttl_trips, 0);
             assert_eq!(health.consecutive_failures, failures);
         }
 
         let before_expiry = ht.model_health(scope, "a/model");
-        assert_eq!(before_expiry.disable_ttl_trips, 1);
+        assert_eq!(before_expiry.disable_ttl_trips, 0);
 
         ht.restore_all(vec![ModelHealth {
             model_id: "a/model".to_string(),
@@ -1056,6 +1348,8 @@ mod tests {
             total_successes: 2,
             disable_ttl_trips: 1,
             cooldown_seconds_remaining: Some(2),
+            hard_disabled: false,
+            trips_in_window: 1,
         }]);
         assert!(!ht.is_available(scope, "a/model"));
         assert_eq!(ht.model_health(scope, "a/model").disable_ttl_trips, 1);
