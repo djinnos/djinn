@@ -60,6 +60,53 @@ fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tra
     )
 }
 
+/// Default pre-session liveness deadline: how long stage init has to reach the
+/// first reply-loop session/turn before the run is failed fast.
+///
+/// 8 minutes — comfortably above a legitimately slow setup (a cold cargo target
+/// seed can take ~2 min, plus workspace clone + context/prompt assembly) but
+/// far under the orphan reaper's ~15-min catch and the 3h in-pod soft deadline.
+/// Overridable via `DJINN_PRESESSION_DEADLINE_SECS` (0 / unparseable → default).
+const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
+
+/// Initial step label used before the worker emits its first stage marker —
+/// the window right after the handshake while the in-pod supervisor creates the
+/// `task_runs` row and begins setup.
+const PRE_SESSION_INITIAL_STEP: &str = "run_create";
+
+/// How often the pre-session watchdog re-checks the DB for a session row when
+/// the deadline fires (the DB is the authoritative disarm signal; the stream
+/// markers only name the step).
+fn pre_session_deadline() -> std::time::Duration {
+    let secs = std::env::var("DJINN_PRESESSION_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(PRE_SESSION_DEADLINE_SECS_DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Typed error surfaced when stage init never reaches the first reply-loop turn
+/// within the pre-session liveness deadline. Names the in-pod step the run hung
+/// on so the failure is diagnosable straight from host logs.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "pre-session stage-init deadline exceeded: no session / first provider turn after \
+     {elapsed_secs}s (hung at step '{step}')"
+)]
+pub struct PreSessionTimeout {
+    pub step: String,
+    pub elapsed_secs: u64,
+}
+
+/// Outcome of awaiting the worker's report stream: either a terminal report
+/// (or `None` when the stream closed / was cancelled) or a pre-session deadline
+/// breach.
+enum ReportAwait {
+    Report(Option<TaskRunReport>),
+    PreSessionTimeout(PreSessionTimeout),
+}
+
 /// Persist and surface a credential revocation after a run hit a 401.
 ///
 /// Marks the stored credential for the run's provider revoked (the F5-safe
@@ -365,6 +412,32 @@ pub(super) async fn dispatch_task_runtime(
         commit_author_email,
     };
 
+    // ── Announce dispatch live (pre-session UI tracking) ──────────────────
+    //
+    // Emit `session.dispatched` the instant the run is dispatched — before the
+    // pod even boots — so the UI shows the task as "starting" immediately,
+    // instead of the old derived "setting up" pseudo-status. The in-pod
+    // supervisor creates the `task_runs` row as `starting` shortly after; this
+    // event is the live nudge (F5 refetch resolves the same state from
+    // `task_show`/`task_list`, which surface the `starting` run). The first
+    // reply-loop `session.started` upgrades it to `running`.
+    {
+        let agent_type = spec
+            .flow
+            .role_sequence()
+            .first()
+            .map(|role| role.as_str())
+            .unwrap_or("worker");
+        app_state
+            .event_bus
+            .send(djinn_core::events::DjinnEventEnvelope::session_dispatched(
+                &spec.project_id,
+                &spec.task_id,
+                &model_id,
+                agent_type,
+            ));
+    }
+
     // ── Resolve per-role provider credentials (Phase 7a) ──────────────────
     //
     // The host pulls every role's credential from the vault (or OAuth token
@@ -536,16 +609,30 @@ pub(super) async fn dispatch_task_runtime(
     // the Test runtime) so a terminally dead Job/Pod is detected within ~15s,
     // its real death reason captured, and the slot freed promptly.
     let mut infra_death: Option<String> = None;
+    // Pre-session liveness deadline: a stage-init hang that never reaches the
+    // first reply-loop session must fail FAST (minutes, not the orphan reaper's
+    // ~15-min catch or the 3h in-pod soft deadline), naming the in-pod step it
+    // hung on. Set when `await_report_from_stream` breaches the deadline before
+    // any session appears; handled below like a handshake timeout (fail over +
+    // spare the terminal streak) but with a typed, step-named error.
+    let mut presession_timeout: Option<PreSessionTimeout> = None;
     let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
         Ok(bistream) => {
-            tokio::select! {
+            let await_outcome = tokio::select! {
                 biased;
                 // The report stream is authoritative for a *clean* exit — a
                 // worker that exits normally flushes its TerminalReport here.
                 // Prefer it (biased) so a Job that flips Failed in the same
                 // instant the worker delivered a report doesn't shadow the
-                // real outcome.
-                res = await_report_from_stream(bistream, &kill, &spec.task_run_id, &spec.task_id) => res,
+                // real outcome. Also enforces the pre-session deadline.
+                res = await_report_from_stream(
+                    bistream,
+                    &kill,
+                    app_state.db.clone(),
+                    &spec.task_run_id,
+                    &spec.task_id,
+                    pre_session_deadline(),
+                ) => res,
                 reason = runtime.watch_infra_death(&handle) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -555,8 +642,16 @@ pub(super) async fn dispatch_task_runtime(
                          (OOM / eviction / Job failure); finalizing run as interrupted"
                     );
                     infra_death = Some(reason);
+                    Ok(ReportAwait::Report(None))
+                }
+            };
+            match await_outcome {
+                Ok(ReportAwait::Report(report)) => Ok(report),
+                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
+                    presession_timeout = Some(timeout);
                     Ok(None)
                 }
+                Err(e) => Err(e),
             }
         }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
@@ -575,11 +670,18 @@ pub(super) async fn dispatch_task_runtime(
     // synthesized — defaulting to `Interrupted` when the report is missing.
     // Slot serialization means at most one in-flight run per task, so
     // reaping by `task_id` finds exactly the right row.
-    let reap_status = teardown
-        .as_ref()
-        .ok()
-        .map(report_to_terminal_status)
-        .unwrap_or(TaskRunStatus::Interrupted);
+    let reap_status = if presession_timeout.is_some() {
+        // A stage-init hang is a definite failure of THIS run — mark it Failed
+        // (not the generic Interrupted stub) so the `starting` row is flipped
+        // terminal and the coordinator redispatches promptly.
+        TaskRunStatus::Failed
+    } else {
+        teardown
+            .as_ref()
+            .ok()
+            .map(report_to_terminal_status)
+            .unwrap_or(TaskRunStatus::Interrupted)
+    };
     reap_orphan_task_run(&app_state, &task.id, reap_status).await;
 
     // Deterministic teardown backstop: remove the worker's private Cargo target
@@ -683,6 +785,55 @@ pub(super) async fn dispatch_task_runtime(
                 "supervisor dispatch: failed to finalize session row after infra death"
             ),
         }
+    }
+
+    // Pre-session stage-init deadline breached: the run never reached its first
+    // reply-loop turn within the bounded window. The Job was torn down above
+    // and the `starting` task_run row reaped as Failed. Surface the typed,
+    // step-named failure where operators look, feed the breaker as a stall so
+    // dispatch fails over and the coordinator spares the terminal
+    // MAX_DISPATCH_FAILURES streak (this is an infra/setup wedge, not the
+    // task's fault), and return the typed error so host logs name the step.
+    if let Some(timeout) = presession_timeout {
+        let PreSessionTimeout { step, elapsed_secs } = &timeout;
+        tracing::error!(
+            task_id = %task.short_id,
+            task_run_id = %spec.task_run_id,
+            %model_id,
+            stage_step = %step,
+            elapsed_secs,
+            "supervisor dispatch: pre-session stage-init deadline exceeded before first \
+             provider turn; failing run fast"
+        );
+        app_state
+            .health_tracker
+            .record_stall(creator_scope.as_deref(), &model_id, true);
+        app_state.health_tracker.note_task_provider_failure(
+            &task.id,
+            djinn_provider::catalog::health::TaskFailureSignal {
+                throttle: true,
+                retry_after_ms: None,
+            },
+        );
+        let _ = task_repo
+            .log_activity(
+                Some(&task.id),
+                "agent-supervisor",
+                "system",
+                "stage_init_timeout",
+                &serde_json::json!({
+                    "body": format!(
+                        "Stage init hung at step '{step}' — no session / first provider \
+                         turn within {elapsed_secs}s (pre-session liveness deadline). \
+                         Tore down the Job and failed over off model {model_id}."
+                    ),
+                    "stage_step": step,
+                    "elapsed_secs": elapsed_secs,
+                })
+                .to_string(),
+            )
+            .await;
+        return Err(anyhow::Error::new(timeout));
     }
 
     match (report_result, teardown) {
@@ -1249,18 +1400,31 @@ async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &s
 async fn await_report_from_stream(
     mut stream: BiStream,
     kill: &CancellationToken,
-    session_id: &str,
+    db: djinn_db::Database,
+    task_run_id: &str,
     task_id: &str,
-) -> anyhow::Result<Option<TaskRunReport>> {
+    pre_session_deadline: std::time::Duration,
+) -> anyhow::Result<ReportAwait> {
+    let started = tokio::time::Instant::now();
+    // Pre-session watchdog: fires once at the deadline; the `if !session_reached`
+    // guard disables the arm as soon as we observe the first turn, so a normal
+    // (even slow) setup is never killed. Pinned so the already-elapsed future is
+    // not polled again after disarm.
+    let deadline = tokio::time::sleep(pre_session_deadline);
+    tokio::pin!(deadline);
+
+    let mut last_step = PRE_SESSION_INITIAL_STEP.to_string();
+    let mut session_reached = false;
+
     loop {
         tokio::select! {
             biased;
             _ = kill.cancelled() => {
-                let rpc_span = supervisor_rpc_span("kill", session_id, task_id);
+                let rpc_span = supervisor_rpc_span("kill", task_run_id, task_id);
                 async move {
                     tracing::debug!(
                         op = "kill",
-                        session_id = %session_id,
+                        session_id = %task_run_id,
                         task_id = %task_id,
                         "supervisor dispatch: kill fired while awaiting terminal report; \
                          proceeding to teardown"
@@ -1268,33 +1432,90 @@ async fn await_report_from_stream(
                 }
                 .instrument(rpc_span)
                 .await;
-                return Ok(None);
+                return Ok(ReportAwait::Report(None));
+            }
+            _ = &mut deadline, if !session_reached => {
+                // Authoritative DB double-check before failing: the worker may
+                // have created the session without us seeing a stream marker
+                // (older image, dropped frame). Only a genuine no-session hang
+                // trips the deadline.
+                let session_repo =
+                    djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::new(|_| {}));
+                match session_repo.exists_for_task_run(task_run_id).await {
+                    Ok(true) => {
+                        // A session exists — first turn was reached; disarm and
+                        // keep awaiting the terminal report.
+                        session_reached = true;
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        // Fail open on a DB error: don't kill a possibly-live run
+                        // just because the backstop query flaked. Disarm and let
+                        // the coarse reapers handle any genuine hang.
+                        tracing::warn!(
+                            task_id = %task_id,
+                            task_run_id = %task_run_id,
+                            error = %e,
+                            "supervisor dispatch: pre-session deadline DB check failed; \
+                             disarming watchdog (falling back to coarse reapers)"
+                        );
+                        session_reached = true;
+                        continue;
+                    }
+                }
+                let elapsed_secs = started.elapsed().as_secs();
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_run_id = %task_run_id,
+                    stage_step = %last_step,
+                    elapsed_secs,
+                    "supervisor dispatch: pre-session liveness deadline breached before first turn"
+                );
+                return Ok(ReportAwait::PreSessionTimeout(PreSessionTimeout {
+                    step: last_step.clone(),
+                    elapsed_secs,
+                }));
             }
             frame = stream.events_rx.recv() => {
                 match frame {
                     Some(StreamEvent::Report(report)) => {
-                        let rpc_span = supervisor_rpc_span("terminal_report", session_id, task_id);
+                        let rpc_span = supervisor_rpc_span("terminal_report", task_run_id, task_id);
                         let report_task_run_id = report.task_run_id.clone();
                         async move {
                             tracing::info!(
                                 event = "supervisor.rpc.terminal_report",
                                 op = "terminal_report",
-                                session_id = %session_id,
+                                session_id = %task_run_id,
                                 task_id = %task_id,
                                 task_run_id = %report_task_run_id,
                             );
                         }
                         .instrument(rpc_span)
                         .await;
-                        return Ok(Some(report));
+                        return Ok(ReportAwait::Report(Some(report)));
                     }
-                    Some(other) => {
-                        tracing::trace!(event = ?other, "supervisor dispatch: dropping non-terminal frame");
+                    Some(StreamEvent::StageStep { step }) => {
+                        // The reply-loop marker (or any reply-loop activity)
+                        // means the first turn is reached — disarm the deadline.
+                        if step == djinn_runtime::STAGE_STEP_FIRST_TURN {
+                            session_reached = true;
+                        }
+                        last_step = step;
+                    }
+                    Some(
+                        StreamEvent::AssistantDelta { .. }
+                        | StreamEvent::ToolCall { .. }
+                        | StreamEvent::FinalizePayload { .. }
+                        | StreamEvent::StageOutcome { .. },
+                    ) => {
+                        // Any reply-loop event proves the session is live.
+                        session_reached = true;
                     }
                     // Channel closed without a terminal report — the supervisor
                     // path persists state as a side effect; the caller uses the
                     // teardown stub for the terminal status.
-                    None => return Ok(None),
+                    None => return Ok(ReportAwait::Report(None)),
                 }
             }
         }
@@ -1609,6 +1830,29 @@ mod tests {
         }
     }
 
+    /// Lazy (unconnected) Postgres handle for the await tests below. The pool
+    /// is `connect_lazy_with`, so this never touches the network unless a query
+    /// runs — and with `no_deadline()` the pre-session watchdog never fires, so
+    /// none of these tests query the DB.
+    fn lazy_db() -> djinn_db::Database {
+        djinn_db::Database::open_in_memory().expect("lazy in-memory db handle")
+    }
+
+    /// A deadline far beyond any test's wall-clock so the pre-session watchdog
+    /// arm never fires — isolates the report/kill/close behaviour.
+    fn no_deadline() -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+
+    /// Unwrap the terminal-report arm, panicking on an unexpected pre-session
+    /// timeout.
+    fn expect_report(outcome: ReportAwait) -> Option<TaskRunReport> {
+        match outcome {
+            ReportAwait::Report(report) => report,
+            ReportAwait::PreSessionTimeout(t) => panic!("unexpected pre-session timeout: {t:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn await_report_returns_streamed_report() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1625,9 +1869,18 @@ mod tests {
             .await
             .expect("send report");
 
-        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-id-b",
+                "task-id-b",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
         assert_eq!(got.expect("some report").task_run_id, "id-B");
     }
 
@@ -1648,9 +1901,18 @@ mod tests {
             .await
             .unwrap();
 
-        let got = await_report_from_stream(bistream, &kill, "session-terminal", "task-terminal")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-terminal",
+                "task-terminal",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
 
         assert!(got.is_some());
         let span = layer
@@ -1692,9 +1954,18 @@ mod tests {
             .await
             .unwrap();
 
-        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-id-b",
+                "task-id-b",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
         assert_eq!(got.expect("some report").task_run_id, "id-B");
     }
 
@@ -1705,9 +1976,18 @@ mod tests {
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         kill.cancel();
-        let got = await_report_from_stream(bistream, &kill, "session-kill", "task-kill")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-kill",
+                "task-kill",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
         assert!(got.is_none());
     }
 
@@ -1721,9 +2001,18 @@ mod tests {
         let kill = CancellationToken::new();
         kill.cancel();
 
-        let got = await_report_from_stream(bistream, &kill, "session-kill", "task-kill")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-kill",
+                "task-kill",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
 
         assert!(got.is_none());
         let span = layer
@@ -1747,9 +2036,111 @@ mod tests {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         drop(events_tx);
-        let got = await_report_from_stream(bistream, &kill, "session-closed", "task-closed")
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "session-closed",
+                "task-closed",
+                no_deadline(),
+            )
             .await
-            .expect("await ok");
+            .expect("await ok"),
+        );
         assert!(got.is_none());
+    }
+
+    /// Pre-session deadline (DB-backed): with no session row for the run and no
+    /// `reply_loop` marker, the watchdog fires a typed `PreSessionTimeout`
+    /// naming the last stage step seen — here `context_build`. Tiny deadline;
+    /// the event sender is kept alive so `recv()` would otherwise pend forever
+    /// (proving the deadline, not the stream close, is what bounds the wait).
+    #[tokio::test]
+    async fn await_report_pre_session_deadline_fires_naming_last_step() {
+        let db = lazy_db();
+        // Materialise the schema so `exists_for_task_run` returns Ok(false)
+        // (real query, no matching session) rather than fail-open on a DB error.
+        db.ensure_initialized().await.expect("schema ready");
+
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        events_tx
+            .send(StreamEvent::StageStep {
+                step: djinn_runtime::stage_step::WORKSPACE_ATTACH.to_string(),
+            })
+            .await
+            .unwrap();
+        events_tx
+            .send(StreamEvent::StageStep {
+                step: djinn_runtime::stage_step::CONTEXT_BUILD.to_string(),
+            })
+            .await
+            .unwrap();
+
+        let outcome = await_report_from_stream(
+            bistream,
+            &kill,
+            db,
+            "run-hang-no-session",
+            "task-hang",
+            std::time::Duration::from_millis(150),
+        )
+        .await
+        .expect("await ok");
+
+        match outcome {
+            ReportAwait::PreSessionTimeout(t) => {
+                assert_eq!(
+                    t.step,
+                    djinn_runtime::stage_step::CONTEXT_BUILD,
+                    "timeout names the last stage step reached"
+                );
+            }
+            ReportAwait::Report(_) => panic!("expected pre-session timeout, got a report"),
+        }
+        drop(events_tx);
+    }
+
+    /// A `reply_loop` marker disarms the deadline even when it is tiny, and the
+    /// subsequent terminal report is still returned — proving a normal (even
+    /// slow) setup is never spuriously killed once the first turn is reached.
+    #[tokio::test]
+    async fn await_report_first_turn_marker_disarms_tiny_deadline() {
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        events_tx
+            .send(StreamEvent::StageStep {
+                step: djinn_runtime::STAGE_STEP_FIRST_TURN.to_string(),
+            })
+            .await
+            .unwrap();
+        events_tx
+            .send(StreamEvent::Report(report(
+                "run-live",
+                vec![RoleKind::Worker],
+                TaskRunOutcome::Closed {
+                    reason: "done".into(),
+                },
+            )))
+            .await
+            .unwrap();
+
+        let got = expect_report(
+            await_report_from_stream(
+                bistream,
+                &kill,
+                lazy_db(),
+                "run-live",
+                "task-live",
+                std::time::Duration::from_millis(50),
+            )
+            .await
+            .expect("await ok"),
+        );
+        assert_eq!(
+            got.expect("report after first turn").task_run_id,
+            "run-live"
+        );
     }
 }

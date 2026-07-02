@@ -79,6 +79,7 @@ mod reentrance;
 pub(crate) mod refinement;
 mod refinement_dispatch;
 mod refinement_outcome;
+mod recover_terminal_linked_spike_evidence;
 pub mod rules;
 mod types;
 mod wave;

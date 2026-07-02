@@ -271,6 +271,21 @@ pub trait SupervisorServices: Send + Sync + 'static {
     /// trackers so the host's poller stays accurate.
     async fn touch_activity(&self, task_id: String) -> Result<(), String>;
 
+    /// Emit a coarse stage-init progress marker (see
+    /// [`djinn_runtime::StreamEvent::StageStep`]) so the host-side pre-session
+    /// liveness deadline can name the in-pod step a hung setup is stuck on
+    /// (workspace attach, cargo seed, context build, ...) and detect when the
+    /// first reply-loop turn is reached ([`djinn_runtime::STAGE_STEP_FIRST_TURN`]).
+    ///
+    /// Fire-and-forget and diagnostic-only: the default impl is a no-op, so
+    /// only the in-pod worker transport (which forwards it on the shared frame
+    /// channel as a [`djinn_runtime::WorkerEvent::StageStep`]) needs to
+    /// override it. Host-side / test service impls that drive the run in-process
+    /// leave it a no-op — the deadline's DB-truth backstop covers those paths.
+    async fn report_stage_step(&self, _step: &'static str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Apply a [`djinn_core::models::TransitionAction`] to the given task
     /// on the host. The supervisor stage loop calls this at every stage
     /// boundary so the task walks its full status machine
