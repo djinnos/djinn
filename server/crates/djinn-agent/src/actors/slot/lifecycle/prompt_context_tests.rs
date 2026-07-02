@@ -584,7 +584,8 @@ async fn worker_resume_note_injected_for_worker_role() {
 async fn worker_resume_note_included_for_auto_submit_source() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "Auto-submit epic", "Auto-submit task").await;
+    let _task =
+        create_project_epic_task(&db, &events, "Auto-submit epic", "Auto-submit task").await;
     let role = WorkerRole;
     let metadata = resume_metadata_with_auto_submit();
     let note = build_worker_resume_note(role.config().name, Some(&metadata));
