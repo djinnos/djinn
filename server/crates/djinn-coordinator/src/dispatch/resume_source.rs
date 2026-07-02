@@ -5,11 +5,6 @@
 //! into [`ResumeSourceCandidate`] values, then use [`select_resume_source`] to
 //! choose the safest source in a deterministic precedence order.
 //!
-//! Dead-code warnings are suppressed here because the public API is consumed by
-//! tests today and will be wired into the dispatch path by task 9tun.
-
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 use crate::{ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason};
