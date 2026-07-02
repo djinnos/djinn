@@ -18,7 +18,7 @@ mod mdx;
 // MCP-extension consumers.
 pub use create::{
     ProposalCreateParams, ProposalExportParams, ProposalImportParams, ProposalListParams,
-    ProposalListResponse, ProposalShowParams,
+    ProposalListResponse, ProposalShowParams, ProposalTargetParams,
 };
 
 // Re-export MDX/block-patch types so the public module path
@@ -37,9 +37,8 @@ use crate::tools::acting_user::acting_caps;
 use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::proposal_blocks::validate_question_form_placement;
 use crate::tools::proposal_ops::{
-    ProposalDeleteResponse, ProposalEpicModel, ProposalFeedbackResponse, ProposalModel,
+    ProposalDeleteResponse, ProposalFeedbackResponse, ProposalModel,
     ProposalReconcileObsoleteEpicResponse, ProposalShowResponse, ProposalSingleResponse,
-    ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -50,29 +49,6 @@ use djinn_db::{EpicRepository, ProjectRepository, ProposalRepository, TaskReposi
 
 pub(super) fn proposal_not_found_error(id: &str) -> String {
     format!("proposal not found: {id}")
-}
-
-/// List a proposal's targets and resolve each project id to an `owner/repo`
-/// slug + name for display chips.
-pub(super) async fn target_models(
-    proposal_repo: &ProposalRepository,
-    project_repo: &ProjectRepository,
-    proposal_id: &str,
-) -> Result<Vec<ProposalTargetModel>, String> {
-    let targets = proposal_repo
-        .targets(proposal_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(targets.len());
-    for t in &targets {
-        let mut m = ProposalTargetModel::from(t);
-        if let Ok(Some(p)) = project_repo.get(&t.project_id).await {
-            m.project_path = Some(format!("{}/{}", p.github_owner, p.github_repo));
-            m.project_name = Some(p.name);
-        }
-        out.push(m);
-    }
-    Ok(out)
 }
 
 // ── Param structs left in mod.rs for the follow-up slices. ────────────────────
@@ -97,16 +73,6 @@ pub struct ProposalUpdateParams {
 pub struct ProposalDeleteParams {
     /// Proposal UUID or short_id.
     pub id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalTargetParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    /// Target project: UUID or owner/repo slug (must be registered).
-    pub project: String,
-    /// `primary` (a write-target, default) or `reference` (read-only context).
-    pub role: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -811,73 +777,6 @@ impl DjinnMcpServer {
                 error: Some(e.to_string()),
             }),
         }
-    }
-
-    /// Add (or re-role) a target project on a proposal.
-    #[tool(
-        description = "Add a target project to a proposal (or change its role if already present). `project` is a UUID or owner/repo slug; `role` is `primary` (default) or `reference`. This is the re-target capability — editable at any time. Returns the proposal's updated target list."
-    )]
-    pub async fn proposal_add_target(
-        &self,
-        Parameters(p): Parameters<ProposalTargetParams>,
-    ) -> Json<ProposalTargetsResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(err_targets(proposal_not_found_error(&p.id)));
-        };
-        if let Err(e) = self
-            .gate_proposal_edit(proposal.author_user_id.as_deref())
-            .await
-        {
-            return Json(err_targets(e));
-        }
-        let role = p.role.as_deref().unwrap_or("primary");
-        if !matches!(role, "primary" | "reference") {
-            return Json(err_targets(format!(
-                "invalid role: {role:?} (expected primary or reference)"
-            )));
-        }
-        let project_id = match project_repo.resolve(&p.project).await {
-            Ok(Some(id)) => id,
-            _ => return Json(err_targets(format!("project not found: {}", p.project))),
-        };
-        if let Err(e) = repo.add_target(&proposal.id, &project_id, role).await {
-            return Json(err_targets(e.to_string()));
-        }
-        finish_targets(&repo, &project_repo, &proposal.id).await
-    }
-
-    /// Remove a target project from a proposal.
-    #[tool(
-        description = "Remove a target project from a proposal. `project` is a UUID or owner/repo slug. No-op if it wasn't a target. Returns the proposal's updated target list."
-    )]
-    pub async fn proposal_remove_target(
-        &self,
-        Parameters(p): Parameters<ProposalTargetParams>,
-    ) -> Json<ProposalTargetsResponse> {
-        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
-        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
-        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
-            return Json(err_targets(proposal_not_found_error(&p.id)));
-        };
-        if let Err(e) = self
-            .gate_proposal_edit(proposal.author_user_id.as_deref())
-            .await
-        {
-            return Json(err_targets(e));
-        }
-        // Fall back to the raw value so a stale target can still be removed.
-        let project_id = project_repo
-            .resolve(&p.project)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| p.project.clone());
-        if let Err(e) = repo.remove_target(&proposal.id, &project_id).await {
-            return Json(err_targets(e.to_string()));
-        }
-        finish_targets(&repo, &project_repo, &proposal.id).await
     }
 
     /// Add a feedback entry (plain discussion) to a proposal.
@@ -1729,52 +1628,6 @@ pub(super) fn err_show(error: impl Into<String>) -> ProposalShowResponse {
     }
 }
 
-/// Resolve a proposal's graduated epics to `{epic_short_id, project_path,
-/// status}` display models.
-pub(super) async fn graduated_epic_models(
-    repo: &ProposalRepository,
-    epic_repo: &EpicRepository,
-    project_repo: &ProjectRepository,
-    proposal_id: &str,
-    latest_revision_seq: i32,
-    pending_reconcile: bool,
-) -> Result<Vec<ProposalEpicModel>, String> {
-    let links = repo
-        .graduated_epics(proposal_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let reconciliations = repo
-        .latest_epic_reconciliations(proposal_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(links.len());
-    for (epic_id, project_id) in links {
-        let Some(epic) = epic_repo.get(&epic_id).await.ok().flatten() else {
-            continue;
-        };
-        let reconciled_at_revision_seq = reconciliations.get(&epic_id).copied();
-        let needs_reconcile = pending_reconcile
-            && reconciled_at_revision_seq
-                .map(|seq| seq < latest_revision_seq)
-                .unwrap_or(false);
-        let project_path = match project_repo.get(&project_id).await {
-            Ok(Some(p)) => format!("{}/{}", p.github_owner, p.github_repo),
-            _ => project_id.clone(),
-        };
-        out.push(ProposalEpicModel {
-            epic_id,
-            epic_short_id: epic.short_id,
-            epic_title: epic.title,
-            epic_emoji: epic.emoji,
-            project_path,
-            status: epic.status,
-            reconciled_at_revision_seq,
-            needs_reconcile,
-        });
-    }
-    Ok(out)
-}
-
 pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     ProposalSingleResponse {
         proposal: None,
@@ -1783,31 +1636,10 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
     }
 }
 
-pub(super) fn err_targets(error: impl Into<String>) -> ProposalTargetsResponse {
-    ProposalTargetsResponse {
-        targets: None,
-        error: Some(error.into()),
-    }
-}
-
 pub(super) fn err_feedback(error: impl Into<String>) -> ProposalFeedbackResponse {
     ProposalFeedbackResponse {
         feedback: None,
         error: Some(error.into()),
-    }
-}
-
-async fn finish_targets(
-    repo: &ProposalRepository,
-    project_repo: &ProjectRepository,
-    proposal_id: &str,
-) -> Json<ProposalTargetsResponse> {
-    match target_models(repo, project_repo, proposal_id).await {
-        Ok(targets) => Json(ProposalTargetsResponse {
-            targets: Some(targets),
-            error: None,
-        }),
-        Err(e) => Json(err_targets(e)),
     }
 }
 
@@ -5392,9 +5224,9 @@ The open-questions section collects uncertainties for the team.
 // ── Router composition ────────────────────────────────────────────────────────
 
 impl DjinnMcpServer {
-    /// Composite router for all proposal tools (CRUD + remaining).
-    /// Combines the create/import/export/show/list router from `create.rs`
-    /// with the update/delete/target/feedback/signoff/lifecycle router here.
+    /// Composite router for all proposal tools (CRUD/targets + remaining).
+    /// Combines the create/import/export/show/list/target router from `create.rs`
+    /// with the update/delete/feedback/signoff/lifecycle router here.
     pub fn proposal_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         Self::proposal_create_tool_router() + Self::proposal_remaining_tool_router()
     }
