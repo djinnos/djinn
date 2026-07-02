@@ -7,7 +7,11 @@
 //!
 use serde::{Deserialize, Serialize};
 
-use crate::{ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason};
+use crate::{
+    AutoSubmitLifecycleMetadata, AutoSubmitSkipReason, CheckpointLifecycleMetadata,
+    CheckpointSafetyScanMetadata, ResumeLifecycleConfig, ResumeLifecycleMetadata,
+    ResumeSelectionReason, WorkerLifecycleMetadata,
+};
 
 /// Resume source classes, ordered by [`source_precedence`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +25,157 @@ pub enum ResumeSourceKind {
     AlternateCheckpointRef,
     /// Clean task branch fallback when no prior output can be resumed safely.
     CleanTaskBranch,
+}
+
+/// Build pure selector candidates from passive lifecycle metadata.
+///
+/// The coordinator uses this seam before spawning a replacement worker. It is
+/// deliberately side-effect free: all git/ref/safety facts must already be in
+/// `lifecycle` and its `extra` maps. A clean task-branch candidate is always
+/// appended so enabled resume selection degrades to an explicit, machine-readable
+/// fallback instead of panicking or silently resuming unsafe output.
+pub fn build_resume_source_candidates(
+    task_id: &str,
+    target_task_ref: &str,
+    prior_session_lineage: Option<&str>,
+    lifecycle: &WorkerLifecycleMetadata,
+) -> Vec<ResumeSourceCandidate> {
+    let mut candidates = Vec::new();
+
+    if let Some(auto_submit) = lifecycle.auto_submit.as_ref() {
+        candidates.push(auto_submit_candidate(
+            task_id,
+            target_task_ref,
+            prior_session_lineage,
+            auto_submit,
+        ));
+    }
+
+    if let Some(checkpoint) = lifecycle.checkpoint.as_ref() {
+        candidates.push(checkpoint_candidate(
+            ResumeSourceKind::TaskBranchCheckpoint,
+            task_id,
+            target_task_ref,
+            prior_session_lineage,
+            checkpoint,
+            None,
+            None,
+        ));
+
+        if let Some(alternate_ref) = string_extra(&checkpoint.extra, "alternate_checkpoint_ref")
+            .or_else(|| string_extra(&checkpoint.extra, "alternate_ref_name"))
+        {
+            let alternate_sha = string_extra(&checkpoint.extra, "alternate_checkpoint_sha")
+                .or_else(|| string_extra(&checkpoint.extra, "alternate_commit_sha"));
+            candidates.push(checkpoint_candidate(
+                ResumeSourceKind::AlternateCheckpointRef,
+                task_id,
+                &alternate_ref,
+                prior_session_lineage,
+                checkpoint,
+                Some(alternate_ref.clone()),
+                alternate_sha,
+            ));
+        }
+    }
+
+    candidates.push(ResumeSourceCandidate::clean_task_branch(
+        task_id,
+        target_task_ref,
+    ));
+    candidates
+}
+
+fn auto_submit_candidate(
+    task_id: &str,
+    target_task_ref: &str,
+    prior_session_lineage: Option<&str>,
+    metadata: &AutoSubmitLifecycleMetadata,
+) -> ResumeSourceCandidate {
+    let submit_or_review_id = metadata
+        .submission_id
+        .clone()
+        .or_else(|| string_extra(&metadata.extra, "review_id"))
+        .or_else(|| string_extra(&metadata.extra, "submit_id"));
+    let state = if submit_or_review_id.is_some() && metadata.skipped_reason.is_none() {
+        AutoSubmitResumeState::Accepted
+    } else if matches!(
+        metadata.skipped_reason,
+        Some(AutoSubmitSkipReason::ReviewRequired)
+    ) {
+        AutoSubmitResumeState::NotAccepted
+    } else if metadata.skipped_reason.is_some() {
+        AutoSubmitResumeState::Blocked
+    } else {
+        AutoSubmitResumeState::NotAccepted
+    };
+
+    ResumeSourceCandidate {
+        kind: ResumeSourceKind::AutoSubmit,
+        task_id: string_extra(&metadata.extra, "task_id").unwrap_or_else(|| task_id.to_owned()),
+        session_lineage: lineage_from_extra(&metadata.extra, prior_session_lineage),
+        checkpoint_sha: None,
+        submit_or_review_id,
+        target_ref: string_extra(&metadata.extra, "target_ref")
+            .unwrap_or_else(|| target_task_ref.to_owned()),
+        auto_submit_state: Some(state),
+        checkpoint_safety: None,
+        age_secs: u64_extra(&metadata.extra, "age_secs"),
+    }
+}
+
+fn checkpoint_candidate(
+    kind: ResumeSourceKind,
+    task_id: &str,
+    target_ref: &str,
+    prior_session_lineage: Option<&str>,
+    metadata: &CheckpointLifecycleMetadata,
+    target_override: Option<String>,
+    sha_override: Option<String>,
+) -> ResumeSourceCandidate {
+    ResumeSourceCandidate {
+        kind,
+        task_id: string_extra(&metadata.extra, "task_id").unwrap_or_else(|| task_id.to_owned()),
+        session_lineage: lineage_from_extra(&metadata.extra, prior_session_lineage),
+        checkpoint_sha: sha_override.or_else(|| metadata.commit_sha.clone()),
+        submit_or_review_id: None,
+        target_ref: target_override
+            .or_else(|| metadata.ref_name.clone())
+            .unwrap_or_else(|| target_ref.to_owned()),
+        auto_submit_state: None,
+        checkpoint_safety: Some(safety_verdict(metadata.safety_scan.as_ref())),
+        age_secs: u64_extra(&metadata.extra, "age_secs"),
+    }
+}
+
+fn safety_verdict(scan: Option<&CheckpointSafetyScanMetadata>) -> CheckpointSafetyVerdict {
+    match scan {
+        Some(scan) if scan.passed => CheckpointSafetyVerdict::Safe,
+        Some(scan) => CheckpointSafetyVerdict::Unsafe {
+            findings: scan.findings.clone(),
+        },
+        None => CheckpointSafetyVerdict::Missing,
+    }
+}
+
+fn lineage_from_extra(
+    extra: &serde_json::Map<String, serde_json::Value>,
+    fallback: Option<&str>,
+) -> Option<String> {
+    string_extra(extra, "session_lineage")
+        .or_else(|| string_extra(extra, "session_id"))
+        .or_else(|| fallback.map(str::to_owned))
+}
+
+fn string_extra(extra: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    extra.get(key).and_then(|value| match value {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn u64_extra(extra: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u64> {
+    extra.get(key).and_then(serde_json::Value::as_u64)
 }
 
 impl ResumeSourceKind {
@@ -151,6 +306,7 @@ impl ResumeSourceCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResumeSourceSelection {
     pub chosen_kind: ResumeSourceKind,
+    pub prior_session_lineage: Option<String>,
     pub checkpoint_sha: Option<String>,
     pub submit_or_review_id: Option<String>,
     pub target_ref: String,
@@ -194,6 +350,7 @@ pub fn select_resume_source(
             Ok(()) => {
                 return Some(ResumeSourceSelection {
                     chosen_kind: candidate.kind,
+                    prior_session_lineage: candidate.session_lineage.clone(),
                     checkpoint_sha: candidate.checkpoint_sha.clone(),
                     submit_or_review_id: candidate.submit_or_review_id.clone(),
                     target_ref: candidate.target_ref.clone(),
@@ -305,6 +462,12 @@ pub fn selection_to_metadata(selection: &ResumeSourceSelection) -> ResumeLifecyc
     if let Some(id) = &selection.submit_or_review_id {
         extra.insert("submit_or_review_id".to_string(), serde_json::json!(id));
     }
+    if let Some(lineage) = &selection.prior_session_lineage {
+        extra.insert(
+            "prior_session_lineage".to_string(),
+            serde_json::json!(lineage),
+        );
+    }
     extra.insert("skipped".to_string(), serde_json::json!(selection.skipped));
 
     ResumeLifecycleMetadata {
@@ -378,6 +541,121 @@ mod tests {
 
     fn select(candidates: Vec<ResumeSourceCandidate>) -> ResumeSourceSelection {
         select_resume_source(&config(), TASK, Some(LINEAGE), &candidates).expect("selection")
+    }
+
+    fn lifecycle_with_checkpoint(
+        sha: Option<&str>,
+        safety: Option<CheckpointSafetyScanMetadata>,
+    ) -> WorkerLifecycleMetadata {
+        let mut extra = serde_json::Map::new();
+        extra.insert("session_id".to_string(), serde_json::json!(LINEAGE));
+        WorkerLifecycleMetadata {
+            checkpoint: Some(CheckpointLifecycleMetadata {
+                checkpoint_id: Some("ckpt-1".to_string()),
+                commit_sha: sha.map(str::to_owned),
+                ref_name: Some(TASK_REF.to_string()),
+                requested_for: None,
+                safety_scan: safety,
+                preservation_outcome: None,
+                extra,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn builds_candidates_from_accepted_auto_submit_metadata() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("session_id".to_string(), serde_json::json!(LINEAGE));
+        let lifecycle = WorkerLifecycleMetadata {
+            auto_submit: Some(AutoSubmitLifecycleMetadata {
+                considered: true,
+                green: Some(true),
+                verification_command: Some("cargo test".to_string()),
+                submission_id: Some("submit-1".to_string()),
+                skipped_reason: None,
+                extra,
+            }),
+            ..Default::default()
+        };
+
+        let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
+        let selection = select(candidates);
+        let metadata = selection_to_metadata(&selection);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::AutoSubmit);
+        assert_eq!(selection.submit_or_review_id.as_deref(), Some("submit-1"));
+        assert_eq!(
+            metadata.extra["prior_session_lineage"],
+            serde_json::json!(LINEAGE)
+        );
+    }
+
+    #[test]
+    fn builds_safe_checkpoint_and_alternate_ref_candidates() {
+        let mut lifecycle = lifecycle_with_checkpoint(
+            Some("ckpt-sha"),
+            Some(CheckpointSafetyScanMetadata {
+                passed: true,
+                scanner: Some("scanner".to_string()),
+                findings: vec![],
+            }),
+        );
+        let checkpoint = lifecycle.checkpoint.as_mut().expect("checkpoint");
+        checkpoint.extra.insert(
+            "alternate_checkpoint_ref".to_string(),
+            serde_json::json!("refs/djinn/checkpoints/task-1/session-1"),
+        );
+        checkpoint.extra.insert(
+            "alternate_checkpoint_sha".to_string(),
+            serde_json::json!("alt-sha"),
+        );
+
+        let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == ResumeSourceKind::TaskBranchCheckpoint
+                && candidate.checkpoint_sha.as_deref() == Some("ckpt-sha")
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == ResumeSourceKind::AlternateCheckpointRef
+                && candidate.checkpoint_sha.as_deref() == Some("alt-sha")
+                && candidate.target_ref == "refs/djinn/checkpoints/task-1/session-1"
+        }));
+    }
+
+    #[test]
+    fn missing_safety_and_mismatched_metadata_fall_back_cleanly() {
+        let mut lifecycle = lifecycle_with_checkpoint(Some("ckpt-sha"), None);
+        lifecycle
+            .checkpoint
+            .as_mut()
+            .expect("checkpoint")
+            .extra
+            .insert("task_id".to_string(), serde_json::json!("other-task"));
+
+        let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
+        let selection = select(candidates);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::CleanTaskBranch);
+        assert!(selection.skipped.iter().any(|skipped| {
+            matches!(
+                skipped.reason,
+                ResumeSourceSkipReason::TaskIdMismatch { .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn empty_lifecycle_builds_clean_fallback_candidate() {
+        let candidates = build_resume_source_candidates(
+            TASK,
+            TASK_REF,
+            Some(LINEAGE),
+            &WorkerLifecycleMetadata::default(),
+        );
+
+        assert_eq!(candidates, vec![clean()]);
     }
 
     #[test]
