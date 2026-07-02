@@ -150,7 +150,10 @@ pub(crate) fn task_with_ci(
 
 pub(crate) fn assert_contains_all(haystack: &str, needles: &[&str]) {
     for needle in needles {
-        assert!(haystack.contains(needle), "missing {needle:?} in {haystack}");
+        assert!(
+            haystack.contains(needle),
+            "missing {needle:?} in {haystack}"
+        );
     }
 }
 
@@ -161,7 +164,10 @@ pub(crate) fn assert_ordered(haystack: &str, needles: &[&str]) {
             .find(needle)
             .map(|pos| previous + pos)
             .unwrap_or_else(|| panic!("missing ordered marker {needle:?} in {haystack}"));
-        assert!(pos >= previous, "{needle:?} appeared out of order in {haystack}");
+        assert!(
+            pos >= previous,
+            "{needle:?} appeared out of order in {haystack}"
+        );
         previous = pos;
     }
 }

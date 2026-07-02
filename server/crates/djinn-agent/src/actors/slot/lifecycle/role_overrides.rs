@@ -1,37 +1,16 @@
-//! Per-stage role-config resolution shared by the supervisor-driven dispatch
-//! path.
+//! Per-stage role-config resolution shared by the supervisor-driven dispatch path.
 //!
-//! Every stage in a supervisor task-run is invoked with a
-//! [`djinn_runtime::RoleKind`] (the flow-enum role: `Planner`, `Worker`,
-//! `Reviewer`, `Verifier`, `Architect`).  The RoleKind alone is not enough
-//! to render a session prompt — the stage also needs the project-level DB
-//! fields that used to be loaded by the legacy `run_task_lifecycle` path:
+//! Maps a `RoleKind` to the effective `AgentRole` and project-level override
+//! fields (system prompt extensions, learned prompt, MCP servers, skills, model
+//! preference). Two paths feed the same output:
 //!
-//! - `system_prompt_extensions` — free-form text appended after the base
-//!   template.
-//! - `learned_prompt` — auto-improvement amendments, also appended.
-//! - `mcp_servers` / `skills` — per-role tool/skill lists (override project
-//!   defaults from `settings.json`).
-//! - `model_preference` — role-level preference that dispatch uses to seed
-//!   `TaskRunSpec::model_id_per_role`.
+//! 1. Specialist override (Worker stage): when `task.agent_type` resolves to a
+//!    specialist `Agent` row, its `base_role` picks the runtime role and its
+//!    fields populate every override slot.
+//! 2. Default role config: load the project's `is_default = 1` row for the
+//!    `RoleKind`'s `base_role`; missing rows yield empty defaults.
 //!
-//! Two resolution paths feed the same output struct:
-//!
-//! 1. **Specialist override** (Worker stage only): when the task row carries
-//!    an `agent_type` that resolves to a non-empty specialist `Agent` row, the
-//!    specialist takes over the stage — its `base_role` picks the runtime
-//!    `AgentRole` impl, and its fields populate every override slot.  This is
-//!    how the planner can route a task to `"rust-expert"` (base_role=worker)
-//!    or `"senior-worker"` (base_role=worker) and have that role's
-//!    prompt/skills/MCP config land on the Worker stage.
-//! 2. **Default role config**: when no specialist applies, we fall back to
-//!    the project's `is_default = 1` row for the RoleKind's `base_role`.
-//!    That row carries the project-wide prompt extensions + learned_prompt
-//!    + MCP/skill defaults.  Missing rows just yield empty defaults — the
-//!      stage still runs against the code-level `AgentRole` template.
-//!
-//! Every DB failure is non-fatal: we log + return defaults so the stage
-//! keeps running rather than failing a task-run on a transient DB blip.
+//! All DB failures are non-fatal.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -44,41 +23,27 @@ use crate::AgentType;
 use crate::context::AgentContext;
 use crate::roles::{AgentRole, role_impl_for};
 
-/// Per-stage role-config bundle consumed by `execute_stage` when composing
-/// `PromptContextInputs`, `resolve_mcp_and_skills`, and
-/// `resolve_setup_context`.
-///
-/// All fields have sensible empty defaults so the stage can proceed even when
-/// the project has no DB-level role rows configured.
+/// Per-stage role-config bundle consumed by `execute_stage`.
+/// All fields have sensible empty defaults so the stage can proceed
+/// even when the project has no DB-level role rows configured.
 pub(crate) struct ResolvedRoleOverrides {
-    /// The effective runtime role whose template renders the base prompt.
-    /// Same as the flow-enum role unless a specialist override switched in a
-    /// different `base_role`.
+    /// Runtime role that renders the base prompt.
     pub runtime_role: Arc<dyn AgentRole>,
-    /// Role-level system prompt extensions (project default row or specialist).
-    /// Empty string when no DB row exists.
+    /// Project/specialist system prompt extensions; empty when absent.
     pub system_prompt_extensions: String,
-    /// Learned-prompt amendments from `learned_prompt_history`.
+    /// Auto-improvement amendments from `learned_prompt_history`.
     pub learned_prompt: Option<String>,
-    /// MCP server names from the DB row's `mcp_servers` JSON array.
-    /// `None` means the DB row is absent (so settings defaults apply);
-    /// `Some(vec)` — including `Some(vec![])` — is an explicit override.
+    /// MCP server names from the DB row's JSON array. `None` means no row.
     pub mcp_servers: Option<Vec<String>>,
-    /// Skill names from the DB row's `skills` JSON array.  Empty when no DB
-    /// row exists.
+    /// Skill names from the DB row's JSON array; empty when absent.
     pub skills: Vec<String>,
-    /// Role-level `model_preference` (consulted by the supervisor-runner for
-    /// `TaskRunSpec::model_id_per_role` seeding; threaded here for
-    /// completeness and future use).
+    /// Role-level model preference used for `TaskRunSpec` seeding.
     pub model_preference: Option<String>,
-    /// `true` when a specialist override swapped the runtime role (i.e. the
-    /// stage is no longer rendering the injected RoleKind's template).
-    /// Drives the `role_for_epic_check` decision in the caller.
+    /// `true` when a specialist override swapped the runtime role.
     pub specialist_overrode_runtime_role: bool,
 }
 
 impl ResolvedRoleOverrides {
-    /// Build an empty `ResolvedRoleOverrides` bound to `runtime_role`.
     fn empty(runtime_role: Arc<dyn AgentRole>) -> Self {
         Self {
             runtime_role,
@@ -91,8 +56,6 @@ impl ResolvedRoleOverrides {
         }
     }
 
-    /// Populate the override fields from a DB `Agent` row, keeping
-    /// `runtime_role` and `specialist_overrode_runtime_role` untouched.
     fn apply_agent_fields(&mut self, agent: &Agent) {
         self.system_prompt_extensions = agent.system_prompt_extensions.clone();
         self.learned_prompt = agent.learned_prompt.clone();
@@ -103,10 +66,6 @@ impl ResolvedRoleOverrides {
 }
 
 /// Map a [`RoleKind`] to the in-tree [`AgentType`] used by `role_impl_for`.
-///
-/// `RoleKind::Verifier` maps to `AgentType::Worker` to preserve the
-/// `stage::role_arc_for` behaviour (verifier stage currently reuses the
-/// worker role impl).
 fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
     match kind {
         RoleKind::Planner => AgentType::Planner,
@@ -115,50 +74,20 @@ fn agent_type_for_role_kind(kind: RoleKind) -> AgentType {
         RoleKind::Verifier => AgentType::Worker,
         RoleKind::Architect => AgentType::Architect,
         RoleKind::Lead => AgentType::Lead,
-        // Default for refinement — the concrete tribunal role is resolved from
-        // task.agent_type in resolve_role_overrides below.
         RoleKind::Refinement => AgentType::Advocate,
     }
 }
 
-/// Resolve the effective role configuration for one stage of a supervisor
-/// task-run.
-///
-/// Mirrors the legacy `run_task_lifecycle` logic:
-///
-/// 1. If `task.agent_type` names a specialist that resolves to an `Agent`
-///    row, the specialist wins: its `base_role` picks the runtime
-///    `AgentRole`, and its field values (prompt extensions, learned prompt,
-///    MCP servers, skills, model preference) populate
-///    every override slot.  If the specialist's `base_role` string fails to
-///    parse, we keep the injected role but still pick up the specialist's
-///    override fields (legacy-parity behaviour — `AgentType::from_str`
-///    failure was logged and the role was left alone).
-///
-///    Specialist override is only consulted for the Worker stage because
-///    specialists are defined as worker specializations (see
-///    `role_for_task_dispatch` in `roles/mod.rs`, which limits `task.agent_type`
-///    routing to the five base roles).  Other stages (Planner/Reviewer/
-///    Verifier/Architect) always use the default-role path.
-///
-/// 2. Otherwise, load the project's `is_default = 1` row for the RoleKind's
-///    `base_role`.  A present row populates the override slots but leaves
-///    `runtime_role` alone.  A missing row yields all-empty defaults.
-///
-/// DB errors on either path are logged at `warn` and fall through to empty
-/// defaults — the stage never fails to run because of a role-config lookup.
-pub(crate) async fn resolve_role_overrides(
+/// Resolve a specialist or tribunal override for the stage, populating
+/// `out` and returning `true` when the override fully determines the role.
+async fn resolve_runtime_role_override(
     task: &Task,
     role_kind: RoleKind,
-    app_state: &AgentContext,
-) -> ResolvedRoleOverrides {
-    let injected_agent_type = agent_type_for_role_kind(role_kind);
-    let injected_role = role_impl_for(injected_agent_type);
-    let mut out = ResolvedRoleOverrides::empty(injected_role.clone());
-
-    let role_repo = AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
-    // ── Specialist override path ─────────────────────────────────────────
+    injected_agent_type: AgentType,
+    role_repo: &AgentRepository,
+    out: &mut ResolvedRoleOverrides,
+) -> bool {
+    // Specialist override path (Worker stage only).
     if role_kind == RoleKind::Worker
         && let Some(specialist_name) = task.agent_type.as_deref()
         && !specialist_name.is_empty()
@@ -176,8 +105,7 @@ pub(crate) async fn resolve_role_overrides(
                 );
                 match AgentType::from_str(&agent.base_role) {
                     Ok(agent_type) => {
-                        let specialist_role = role_impl_for(agent_type);
-                        out.runtime_role = specialist_role;
+                        out.runtime_role = role_impl_for(agent_type);
                         out.specialist_overrode_runtime_role = agent_type != injected_agent_type;
                     }
                     Err(_) => {
@@ -190,7 +118,7 @@ pub(crate) async fn resolve_role_overrides(
                     }
                 }
                 out.apply_agent_fields(&agent);
-                return out;
+                return true;
             }
             Ok(None) => {
                 tracing::debug!(
@@ -199,7 +127,6 @@ pub(crate) async fn resolve_role_overrides(
                     "Stage: task.agent_type does not resolve to a specialist row; \
                      falling back to default role config"
                 );
-                // Fall through to the default-role path.
             }
             Err(e) => {
                 tracing::warn!(
@@ -208,23 +135,18 @@ pub(crate) async fn resolve_role_overrides(
                     error = %e,
                     "Stage: failed to load specialist agent row; falling back to default role config"
                 );
-                // Fall through to the default-role path.
             }
         }
     }
 
-    // ── Refinement tribunal override path ──────────────────────────────────
-    // For `RoleKind::Refinement`, the `task.agent_type` field directly names
-    // the tribunal role ("advocate", "adversary", or "judge"). We resolve it
-    // to `AgentType` via `from_str` — no DB specialist row needed.
+    // Refinement tribunal override path.
     if role_kind == RoleKind::Refinement
         && let Some(tribunal_role) = task.agent_type.as_deref()
         && !tribunal_role.is_empty()
     {
         match AgentType::from_str(tribunal_role) {
             Ok(agent_type) => {
-                let tribunal_impl = role_impl_for(agent_type);
-                out.runtime_role = tribunal_impl;
+                out.runtime_role = role_impl_for(agent_type);
                 out.specialist_overrode_runtime_role = agent_type != injected_agent_type;
             }
             Err(_) => {
@@ -236,9 +158,31 @@ pub(crate) async fn resolve_role_overrides(
             }
         }
     }
-    // Fall through to the default-role path for prompt extensions, etc.
 
-    // ── Default role config path ─────────────────────────────────────────
+    false
+}
+
+/// Resolve the effective role configuration for one stage of a supervisor task-run.
+///
+/// DB errors on either path are logged and fall through to empty defaults.
+pub(crate) async fn resolve_role_overrides(
+    task: &Task,
+    role_kind: RoleKind,
+    app_state: &AgentContext,
+) -> ResolvedRoleOverrides {
+    let injected_agent_type = agent_type_for_role_kind(role_kind);
+    let injected_role = role_impl_for(injected_agent_type);
+    let mut out = ResolvedRoleOverrides::empty(injected_role.clone());
+    let role_repo = AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+
+    // Try specialist/tribunal override first.
+    if resolve_runtime_role_override(task, role_kind, injected_agent_type, &role_repo, &mut out)
+        .await
+    {
+        return out;
+    }
+
+    // Default role config path.
     let base_role = injected_agent_type.as_str();
     match role_repo
         .get_default_for_base_role(&task.project_id, base_role)
@@ -247,11 +191,7 @@ pub(crate) async fn resolve_role_overrides(
         Ok(Some(agent)) => {
             out.apply_agent_fields(&agent);
         }
-        Ok(None) => {
-            // No project-level default configured — legit for fresh projects
-            // and for RoleKinds that have no DB row (e.g. architect before a
-            // user configures one).  Empty overrides are the right answer.
-        }
+        Ok(None) => {}
         Err(e) => {
             tracing::warn!(
                 task_id = %task.short_id,
@@ -312,10 +252,6 @@ mod tests {
 
     #[tokio::test]
     async fn seeded_project_default_row_yields_empty_overrides() {
-        // `ProjectRepository::create` seeds a default row for every base_role
-        // with empty JSON fields. That row populates `mcp_servers =
-        // Some(vec![])` / `skills = vec![]` / empty extensions — the "no
-        // project-level customisation" baseline.
         let db = crate::test_helpers::create_test_db();
         let project_id = setup_project(&db).await;
         let task = make_task(&db, &project_id, None).await;
@@ -327,7 +263,6 @@ mod tests {
         assert!(out.skills.is_empty());
         assert!(out.model_preference.is_none());
         assert!(!out.specialist_overrode_runtime_role);
-        // Injected role stays put.
         assert_eq!(out.runtime_role.config().name, "worker");
     }
 
@@ -336,8 +271,6 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let project_id = setup_project(&db).await;
         let role_repo = AgentRepository::new(db.clone(), EventBus::noop());
-        // Clear the auto-seeded worker row so we can install one with real
-        // overrides in its place.
         role_repo
             .delete_for_base_role(&project_id, "worker")
             .await
@@ -375,9 +308,6 @@ mod tests {
         let db = crate::test_helpers::create_test_db();
         let project_id = setup_project(&db).await;
         let role_repo = AgentRepository::new(db.clone(), EventBus::noop());
-        // Create a specialist under base_role=planner so the runtime role
-        // swaps from Worker → Planner, proving the specialist_overrode_…
-        // flag flips correctly.
         role_repo
             .create_for_project(
                 &project_id,
@@ -402,8 +332,6 @@ mod tests {
         assert!(out.specialist_overrode_runtime_role);
         assert_eq!(out.system_prompt_extensions, "plan carefully");
         assert_eq!(out.skills, vec!["planning".to_string()]);
-        // `Some(vec![])` is an explicit opt-out of MCP defaults (distinct
-        // from `None`).
         assert_eq!(out.mcp_servers, Some(Vec::<String>::new()));
     }
 
@@ -428,8 +356,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // Customise the auto-seeded default planner row so we can verify the
-        // planner-stage fallback reads from it.
         role_repo
             .set_default_system_prompt_extensions(&project_id, "planner", "default-planner-ext")
             .await
@@ -438,7 +364,6 @@ mod tests {
         let task = make_task(&db, &project_id, Some("rust-expert")).await;
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Planner, &ctx).await;
-        // Planner stage ignores the specialist and falls back to default.
         assert_eq!(out.runtime_role.config().name, "planner");
         assert!(!out.specialist_overrode_runtime_role);
         assert_eq!(out.system_prompt_extensions, "default-planner-ext");
@@ -448,14 +373,11 @@ mod tests {
     async fn missing_specialist_falls_back_to_default() {
         let db = crate::test_helpers::create_test_db();
         let project_id = setup_project(&db).await;
-        // Customise the auto-seeded default worker row so the fallback has
-        // something non-empty to assert against.
         let role_repo = AgentRepository::new(db.clone(), EventBus::noop());
         role_repo
             .set_default_system_prompt_extensions(&project_id, "worker", "default-worker-ext")
             .await
             .unwrap();
-        // task.agent_type points at a name that does not exist.
         let task = make_task(&db, &project_id, Some("nonexistent-expert")).await;
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Worker, &ctx).await;
