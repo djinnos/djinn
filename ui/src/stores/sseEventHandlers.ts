@@ -234,7 +234,11 @@ export function initSSEEventHandlers(): () => void {
         agent_type: payload.agent_type,
         model_id: payload.model_id,
         started_at: new Date().toISOString(),
-        status: "dispatched",
+        // Live pre-session tracking state (matches the backend
+        // `TaskRunStatus::Starting` wire string and what `task_show`/
+        // `task_list` surface on refetch) so the card renders a real
+        // "starting" status instead of the old derived "setting up" label.
+        status: "starting",
       },
     });
   });

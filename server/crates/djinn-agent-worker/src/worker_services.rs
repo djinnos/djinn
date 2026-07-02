@@ -201,6 +201,10 @@ impl SupervisorServices for WorkerSupervisorServices {
         &self.cancel
     }
 
+    async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
+        self.rpc.report_stage_step(step).await
+    }
+
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
         self.rpc.load_task(task_id).await
     }

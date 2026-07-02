@@ -578,6 +578,7 @@ struct AttachedSlot {
 fn worker_event_to_stream_event(event: WorkerEvent) -> Option<StreamEvent> {
     match event {
         WorkerEvent::TerminalReport(report) => Some(StreamEvent::Report(report)),
+        WorkerEvent::StageStep { step } => Some(StreamEvent::StageStep { step }),
         WorkerEvent::Placeholder => None,
     }
 }

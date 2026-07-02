@@ -74,6 +74,7 @@ mod health;
 pub mod messages;
 pub mod pr_poller;
 mod prompt_eval;
+mod recover_terminal_linked_spike_evidence;
 mod reentrance;
 #[allow(dead_code)]
 pub(crate) mod refinement;

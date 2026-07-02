@@ -552,7 +552,15 @@ impl TaskRunSupervisor {
                 project_id: spec.project_id.clone(),
                 task_id: spec.task_id.clone(),
                 trigger_type: trigger_str.clone(),
-                status: None,
+                // Pre-session tracking state: the run is visible to the UI and
+                // the host-side pre-session liveness deadline from dispatch,
+                // and flips to `running` when the first reply-loop session is
+                // created (`SessionRepository::create`). See `TaskRunStatus`.
+                status: Some(
+                    djinn_core::models::TaskRunStatus::Starting
+                        .as_str()
+                        .to_string(),
+                ),
                 workspace_path: None,
                 mirror_ref: None,
             })
@@ -568,6 +576,14 @@ impl TaskRunSupervisor {
             }
             return Err(SupervisorError::CreateTaskRun(e));
         }
+
+        // Coarse pre-session progress marker: the host-side liveness deadline
+        // names this step if the ephemeral clone hangs (the biggest suspect
+        // for a stage-init wedge). Best-effort — never blocks the run.
+        let _ = self
+            .services
+            .report_stage_step(djinn_runtime::stage_step::WORKSPACE_ATTACH)
+            .await;
 
         // Try to clone on task_branch first (preserves prior cycle's commits
         // in the mirror — workspace.push_to_origin writes them back after

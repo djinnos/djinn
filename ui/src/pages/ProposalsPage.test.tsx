@@ -281,7 +281,7 @@ describe("ProposalsPage", () => {
     });
   });
 
-  it("renders tribunal and gate chips from each row's list summary", async () => {
+  it("renders one unified tribunal chip and a gate dot from each row's list summary", async () => {
     const proposals = [
       makeProposal({
         id: "p-review",
@@ -360,19 +360,159 @@ describe("ProposalsPage", () => {
     expect(reviewSection).not.toBeNull();
     const section = within(reviewSection!);
 
-    // Tribunal chip variants.
+    // One unified tribunal chip per state.
     expect(section.getByText("Review")).toBeInTheDocument();
-    expect(section.getByText("R3")).toBeInTheDocument();
+    expect(section.getByText("R3 running")).toBeInTheDocument();
     expect(section.getByText("evidence")).toBeInTheDocument();
 
-    // Gate chip: DoR blocker (running row) + objection blocker + ready dot.
-    expect(section.getByText("DoR ✗")).toBeInTheDocument();
-    expect(section.getByText("⛔2")).toBeInTheDocument();
-    expect(
-      section.getByTitle("2 unresolved blocking objections"),
-    ).toBeInTheDocument();
+    // Idle-but-blocking row shows a single red tribunal chip (no scattered
+    // objection glyph in the gate slot).
+    expect(section.getByText("R1 · 2 open")).toBeInTheDocument();
+    expect(section.queryByText("⛔2")).not.toBeInTheDocument();
+    expect(section.queryByText("DoR ✗")).not.toBeInTheDocument();
+
+    // Gate dots carry their reason in the tooltip only.
     expect(section.getByTitle("Gate ready")).toBeInTheDocument();
-    expect(section.getByTitle("Parked on evidence")).toBeInTheDocument();
+    expect(
+      section.getByTitle("Gate blocked — 2 unresolved blocking objections"),
+    ).toBeInTheDocument();
+    expect(
+      section.getByTitle("Gate blocked — parked on evidence"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a neutral (not red) gate for a fresh draft failing Definition of Ready", async () => {
+    const proposals = [
+      makeProposal({
+        id: "p-fresh-draft",
+        short_id: "frsh",
+        title: "Fresh draft proposal",
+        status: "draft",
+        // No tribunal has ever engaged — DoR failing is the expected state.
+        list_summary: {
+          refinement_active: false,
+          awaiting_review: false,
+          current_round: 0,
+          needs_evidence: false,
+          dor_ready: false,
+          gate_ready: false,
+          unresolved_blocking_count: 0,
+        },
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    // Neutral dot, explanatory tooltip, no red alarm, no "DoR ✗" text.
+    const gate = await screen.findByTitle("Definition of Ready not yet met");
+    expect(gate).toBeInTheDocument();
+    expect(gate.querySelector("span")).toHaveClass("bg-transparent");
+    expect(gate.querySelector(".bg-red-500")).toBeNull();
+    expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Gate blocked/)).not.toBeInTheDocument();
+  });
+
+  it("shows a red gate only once a tribunal has engaged and the gate is stuck", async () => {
+    const proposals = [
+      makeProposal({
+        id: "p-engaged-blocked",
+        short_id: "engb",
+        title: "Engaged and blocked proposal",
+        status: "in_review",
+        list_summary: {
+          refinement_active: false,
+          awaiting_review: false,
+          current_round: 2,
+          needs_evidence: false,
+          dor_ready: true,
+          gate_ready: false,
+          unresolved_blocking_count: 3,
+        },
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    const gate = await screen.findByTitle(
+      "Gate blocked — 3 unresolved blocking objections",
+    );
+    expect(gate.querySelector(".bg-red-500")).not.toBeNull();
+  });
+
+  it("sorts awaiting-review rows first and summarizes them in the group header", async () => {
+    const proposals = [
+      makeProposal({
+        id: "p-recent-plain",
+        short_id: "rp01",
+        title: "Recently updated plain row",
+        status: "in_review",
+        updated_at: "2026-06-10T00:00:00Z",
+        list_summary: {
+          refinement_active: true,
+          awaiting_review: false,
+          current_round: 1,
+          needs_evidence: false,
+          dor_ready: false,
+          gate_ready: false,
+          unresolved_blocking_count: 0,
+        },
+      }),
+      makeProposal({
+        id: "p-older-awaiting",
+        short_id: "oa01",
+        title: "Older awaiting review row",
+        status: "in_review",
+        updated_at: "2026-06-01T00:00:00Z",
+        list_summary: {
+          refinement_active: false,
+          awaiting_review: true,
+          current_round: 2,
+          needs_evidence: false,
+          dor_ready: true,
+          gate_ready: true,
+          unresolved_blocking_count: 0,
+        },
+      }),
+    ];
+
+    vi.mocked(callMcpTool).mockImplementation(async (toolName) => {
+      if (toolName === "proposal_list") {
+        return { proposals } as never;
+      }
+      return {} as never;
+    });
+
+    renderProposalsRoute("/proposals");
+
+    // Header summarizes the awaiting-review count.
+    expect(
+      await screen.findByRole("button", {
+        name: /In Review\s+2\s+·\s+1 awaiting review/,
+      }),
+    ).toBeInTheDocument();
+
+    // The older awaiting-review row is ordered before the more-recent plain one.
+    const titles = screen
+      .getAllByText(/review row|plain row/)
+      .map((el) => el.textContent);
+    expect(titles).toEqual([
+      "Older awaiting review row",
+      "Recently updated plain row",
+    ]);
   });
 
   it("renders no chips for a row without a list summary", async () => {
@@ -396,6 +536,9 @@ describe("ProposalsPage", () => {
 
     expect(await screen.findByText("No summary proposal")).toBeInTheDocument();
     expect(screen.queryByTitle("Gate ready")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTitle("Definition of Ready not yet met"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("DoR ✗")).not.toBeInTheDocument();
   });
 

@@ -7,10 +7,22 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wire strings are the lowercase variant names; the DB stores them as
 /// VARCHAR(64).  Terminal statuses (Completed, Failed, Interrupted) cause the
-/// run's `ended_at` to be stamped; `Running` leaves it NULL.
+/// run's `ended_at` to be stamped; `Starting` / `Running` leave it NULL.
+///
+/// `Starting` is the pre-session tracking state: a dispatched run holds it from
+/// the moment the in-pod supervisor creates the `task_runs` row until the first
+/// reply-loop session is created (see `SessionRepository::create`, which flips
+/// `starting → running`). It exists so the UI and the host-side pre-session
+/// liveness deadline can see a dispatched run BEFORE any `sessions` row exists,
+/// closing the invisible "setting up" gap. Both `Starting` and `Running` are
+/// "live" (non-terminal) states and are treated identically by the task_run
+/// reapers (`reap_running_for_task`, `reap_stale_running`, `running_ids`).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRunStatus {
+    /// Dispatched, pre-first-session. Set when the run row is created; flipped
+    /// to `Running` at the first reply-loop session.
+    Starting,
     Running,
     Completed,
     Failed,
@@ -20,6 +32,7 @@ pub enum TaskRunStatus {
 impl TaskRunStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Starting => "starting",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -30,6 +43,12 @@ impl TaskRunStatus {
     /// True for statuses that close out a run (i.e. should set `ended_at`).
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Interrupted)
+    }
+
+    /// True for the live (non-terminal) states a dispatched run occupies while
+    /// the pod is running — `Starting` (pre-session) or `Running`.
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::Starting | Self::Running)
     }
 }
 
@@ -44,6 +63,7 @@ impl FromStr for TaskRunStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),

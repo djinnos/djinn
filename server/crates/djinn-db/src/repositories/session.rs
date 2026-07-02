@@ -83,6 +83,25 @@ impl SessionRepository {
         .execute(self.db.pool())
         .await?;
 
+        // Pre-session tracking transition: a dispatched `task_run` holds
+        // `starting` from creation (in-pod supervisor) until its first
+        // reply-loop session is created — this is that first turn, so flip it
+        // to `running`. Guarded on `status = 'starting'` so it is a no-op for
+        // subsequent per-stage sessions (already `running`), terminal runs
+        // (post-session extraction), and chat sessions (`task_run_id` NULL).
+        // This transition is what flips the UI off its "starting" badge; the
+        // host-side pre-session liveness deadline disarms on the `sessions`
+        // row itself.
+        if let Some(run_id) = params.task_run_id {
+            sqlx::query!(
+                "UPDATE task_runs SET status = 'running', ended_at = NULL
+                 WHERE id = $1 AND status = 'starting'",
+                run_id,
+            )
+            .execute(self.db.pool())
+            .await?;
+        }
+
         let session = sqlx::query_as!(
             SessionRecord,
             r#"SELECT id, project_id, task_id, model_id, agent_type, started_at, ended_at,
@@ -1296,6 +1315,22 @@ impl SessionRepository {
         .await?)
     }
 
+    /// True when at least one `sessions` row references the given task_run.
+    ///
+    /// Used by the host-side pre-session liveness deadline as its DB-truth
+    /// disarm signal: once any session exists for the run, the first reply-loop
+    /// turn has been reached and liveness is owned by the coordinator's session
+    /// stall detector / zombie reaper, so the pre-session deadline stands down.
+    pub async fn exists_for_task_run(&self, task_run_id: &str) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let found: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM sessions WHERE task_run_id = $1 LIMIT 1")
+                .bind(task_run_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+        Ok(found.is_some())
+    }
+
     /// Backdate a session's `started_at` by a PostgreSQL `interval` string
     /// (e.g. `'20 minutes'`, `'30 seconds'`).
     ///
@@ -1444,6 +1479,125 @@ mod tests {
         .unwrap();
 
         (epic.project_id, task_id)
+    }
+
+    /// Creating the first reply-loop session flips its `starting` task_run to
+    /// `running`, and a subsequent session on the same run is a no-op (stays
+    /// `running`) — the pre-session tracking transition. A session with no
+    /// task_run, or one whose run is already terminal, leaves the run untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_session_flips_starting_task_run_to_running() {
+        use crate::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+
+        let db = test_db();
+        let (bus, _captured) = capturing_bus();
+        db.ensure_initialized().await.unwrap();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+
+        let run_repo = TaskRunRepository::new(db.clone());
+        let run_id = uuid::Uuid::now_v7().to_string();
+        run_repo
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project_id,
+                task_id: &task_id,
+                trigger_type: "new_task",
+                status: Some("starting"),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            run_repo.get(&run_id).await.unwrap().unwrap().status,
+            "starting"
+        );
+
+        let repo = SessionRepository::new(db.clone(), bus.clone());
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "openai/gpt-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            run_repo.get(&run_id).await.unwrap().unwrap().status,
+            "running",
+            "first session flips starting → running"
+        );
+
+        // Mark the run terminal, then a late (extraction) session must NOT
+        // resurrect it back to running.
+        run_repo
+            .update_status(&run_id, djinn_core::models::TaskRunStatus::Completed)
+            .await
+            .unwrap();
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "openai/gpt-a",
+            agent_type: "reviewer",
+            metadata_json: None,
+            task_run_id: Some(&run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            run_repo.get(&run_id).await.unwrap().unwrap().status,
+            "completed",
+            "guarded flip is a no-op for a non-starting run"
+        );
+    }
+
+    /// `exists_for_task_run` is the pre-session deadline's disarm probe: false
+    /// before any session exists, true once one does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exists_for_task_run_tracks_session_presence() {
+        use crate::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
+
+        let db = test_db();
+        let (bus, _captured) = capturing_bus();
+        db.ensure_initialized().await.unwrap();
+        let (project_id, task_id) = create_task(&db, bus.clone()).await;
+        let repo = SessionRepository::new(db.clone(), bus.clone());
+
+        let run_repo = TaskRunRepository::new(db.clone());
+        let run_id = uuid::Uuid::now_v7().to_string();
+        run_repo
+            .create(CreateTaskRunParams {
+                id: &run_id,
+                project_id: &project_id,
+                task_id: &task_id,
+                trigger_type: "new_task",
+                status: Some("starting"),
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(!repo.exists_for_task_run(&run_id).await.unwrap());
+        repo.create(CreateSessionParams {
+            project_id: &project_id,
+            task_id: Some(&task_id),
+            model: "openai/gpt-a",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(&run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+        assert!(repo.exists_for_task_run(&run_id).await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
