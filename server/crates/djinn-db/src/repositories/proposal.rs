@@ -2746,9 +2746,11 @@ impl ProposalRepository {
     /// Apply Planner-authored acceptance-criteria amendments as real spec edits.
     ///
     /// Unlike [`Self::set_acceptance_criteria`], this bumps the proposal head
-    /// revision and inserts a feedback audit entry. Unlike [`Self::update`], it
-    /// intentionally retains existing sign-offs and does not demote approved
-    /// proposals; the audit event is the mechanism for humans to object.
+    /// revision and stamps the structured change list on the new revision's
+    /// `event_metadata` (`kind = "ac_amendment"`) so it surfaces in the History
+    /// stream. Unlike [`Self::update`], it intentionally retains existing
+    /// sign-offs and does not demote approved proposals; the history audit entry
+    /// is the mechanism for humans to object.
     pub async fn amend_acceptance_criteria(
         &self,
         proposal_id: &str,
@@ -2874,6 +2876,18 @@ impl ProposalRepository {
         .execute(self.db.pool())
         .await?;
         let editor = djinn_core::auth_context::current_user_id();
+        // The structured change list rides on the spec revision itself, under
+        // `event_metadata.kind = "ac_amendment"`. This keeps the amendment audit
+        // in the History stream (where it belongs) rather than the reviewer
+        // FEEDBACK pane, while the revision's `event_kind` stays `spec_revision`
+        // so existing seq/spec-revision lookups keep working.
+        let amendments_json = serde_json::to_value(&audit_entries)
+            .map_err(|e| Error::InvalidData(format!("failed to encode amendment audit: {e}")))?;
+        let event_metadata = serde_json::json!({
+            "kind": "ac_amendment",
+            "reason": reason,
+            "amendments": amendments_json,
+        });
         self.insert_revision(ProposalRevisionSnapshot {
             proposal_id,
             seq: next_revision_seq,
@@ -2882,24 +2896,7 @@ impl ProposalRepository {
             body_format: &current.body_format,
             acceptance_criteria: &acceptance_criteria,
             edited_by: editor.as_deref(),
-            // AC amendments stamp a separate `proposal_feedback` audit entry
-            // that holds the structured change list — no extra metadata needed
-            // on the spec revision itself.
-            event_metadata: None,
-        })
-        .await?;
-
-        let audit_json = serde_json::to_string(&audit_entries)
-            .map_err(|e| Error::InvalidData(format!("failed to encode amendment audit: {e}")))?;
-        let body = format!(
-            "Acceptance criteria amended\nreason: {reason}\nrevision: {old_revision_seq} -> {next_revision_seq}\namendments: {audit_json}"
-        );
-        self.add_feedback(ProposalFeedbackCreateInput {
-            proposal_id,
-            parent_id: None,
-            author_kind: "ai",
-            author_model: None,
-            body: &body,
+            event_metadata: Some(&event_metadata),
         })
         .await?;
 
@@ -4227,25 +4224,25 @@ mod tests {
         assert_eq!(parsed[1]["criterion"], serde_json::json!("waive me"));
         assert_eq!(parsed[1]["waived"], serde_json::json!(true));
 
+        // No feedback row is written on amendment anymore — the audit rides on
+        // the revision's `event_metadata` instead.
         let feedback = repo.feedback(&p.id).await.unwrap();
-        assert_eq!(feedback.len(), 1);
-        let audit = &feedback[0];
-        assert_eq!(audit.author_kind, "ai");
-        assert!(
-            audit
-                .body
-                .contains("reason: criterion 2 cannot be verified by agents")
+        assert!(feedback.is_empty());
+
+        // The bumped spec revision (seq 2) carries the structured amendment audit.
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        let amend_rev = revisions
+            .iter()
+            .find(|r| r.seq == 2 && r.event_kind == "spec_revision")
+            .expect("amendment spec revision at seq 2");
+        let meta: serde_json::Value =
+            serde_json::from_str(amend_rev.event_metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["kind"], serde_json::json!("ac_amendment"));
+        assert_eq!(
+            meta["reason"],
+            serde_json::json!("criterion 2 cannot be verified by agents")
         );
-        assert!(audit.body.contains("revision: 1 -> 2"));
-        let amendments_json = audit
-            .body
-            .strip_prefix(&format!(
-                "Acceptance criteria amended\nreason: {}\nrevision: 1 -> 2\namendments: ",
-                "criterion 2 cannot be verified by agents"
-            ))
-            .unwrap();
-        let audit_entries: serde_json::Value = serde_json::from_str(amendments_json).unwrap();
-        let audit_entries = audit_entries.as_array().unwrap();
+        let audit_entries = meta["amendments"].as_array().unwrap();
         assert_eq!(audit_entries.len(), 3);
         assert_eq!(audit_entries[0]["operation"], serde_json::json!("rewrite"));
         assert_eq!(audit_entries[1]["operation"], serde_json::json!("drop"));
@@ -4259,12 +4256,11 @@ mod tests {
             serde_json::json!({"dropped": true})
         );
 
+        // Only the `proposal updated` event fires — no `proposal_feedback created`.
         let events = captured.lock().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].entity_type, "proposal_feedback");
-        assert_eq!(events[0].action, "created");
-        assert_eq!(events[1].entity_type, "proposal");
-        assert_eq!(events[1].action, "updated");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].entity_type, "proposal");
+        assert_eq!(events[0].action, "updated");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
