@@ -7,9 +7,7 @@ use djinn_db::{Database, TaskRepository};
 
 use crate::roles::{ReviewerRole, WorkerRole};
 
-use super::test_support::{
-    assemble_for_role, assert_contains_all, create_epic, task_with_ci,
-};
+use super::test_support::{assemble_for_role, assert_contains_all, create_epic, task_with_ci};
 use crate::test_helpers::create_test_project;
 
 fn ci_directive_section(prompt: &str) -> &str {
@@ -17,9 +15,7 @@ fn ci_directive_section(prompt: &str) -> &str {
         .find("## ⛔ BLOCKING: Required CI Failing")
         .expect("prompt must contain promoted CI BLOCKING section");
     let rest = &prompt[start..];
-    rest[3..]
-        .find("\n## ")
-        .map_or(rest, |end| &rest[..3 + end])
+    rest[3..].find("\n## ").map_or(rest, |end| &rest[..3 + end])
 }
 
 fn assert_single_structured_ci_directive(prompt: &str) {
@@ -172,7 +168,10 @@ fn build_ci_blocking_directive_absence_cases() {
                 Some("abc123"),
             ),
         ),
-        ("unknown CI", task_with_ci("unknown", None, None, "[]", None, None)),
+        (
+            "unknown CI",
+            task_with_ci("unknown", None, None, "[]", None, None),
+        ),
         (
             "failing CI without remediation baseline",
             task_with_ci(
@@ -343,13 +342,15 @@ fn sa4x_directive_absent_for_advisory_statuses_or_missing_baseline() {
             "directive must be None for ci_status={status}"
         );
     }
-    assert!(build_ci_blocking_directive(&task_with_ci(
-        "failing",
-        Some(E2E_HEAD_SHA),
-        Some(E2E_PR_NUMBER),
-        E2E_CHECKS,
-        Some(E2E_FINGERPRINT),
-        None,
-    ))
-    .is_none());
+    assert!(
+        build_ci_blocking_directive(&task_with_ci(
+            "failing",
+            Some(E2E_HEAD_SHA),
+            Some(E2E_PR_NUMBER),
+            E2E_CHECKS,
+            Some(E2E_FINGERPRINT),
+            None,
+        ))
+        .is_none()
+    );
 }

@@ -89,7 +89,14 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
             .expect("link epic to proposal");
     }
 
-    let task = create_task(&db, &events, &subject_epic.id, "Decompose subject epic", None).await;
+    let task = create_task(
+        &db,
+        &events,
+        &subject_epic.id,
+        "Decompose subject epic",
+        None,
+    )
+    .await;
     let epic_context = lead_epic_context(db, &task).await;
 
     assert_contains_all(
@@ -114,7 +121,10 @@ async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
     let epic_context = lead_epic_context(db, &task).await;
 
     for section in ["### Blocking Epics", "### Proposal Sibling Epics"] {
-        assert!(!epic_context.contains(section), "unexpected section {section}");
+        assert!(
+            !epic_context.contains(section),
+            "unexpected section {section}"
+        );
     }
 }
 
@@ -158,13 +168,17 @@ async fn conflict_context_formats_files_and_preserves_prompt_fields() {
 async fn prompt_sections_append_in_canonical_order() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "Prompt section epic", "Prompt section task").await;
+    let task =
+        create_project_epic_task(&db, &events, "Prompt section epic", "Prompt section task").await;
     let role = LeadRole;
     let skills = vec![
         skill("alpha-skill", "First skill", "Alpha body.", true),
         skill("beta-skill", "Second skill", "Beta body.", false),
     ];
-    let sources = vec![source("repo-a", "Repository A"), source("repo-b", "Repository B")];
+    let sources = vec![
+        source("repo-a", "Repository A"),
+        source("repo-b", "Repository B"),
+    ];
 
     let ctx = assemble_for_role(
         db,
@@ -216,7 +230,12 @@ fn format_conflict_files_cases() {
     let result = format_conflict_files(Some(&ctx)).expect("should produce Some");
     assert_contains_all(
         &result,
-        &["- src/main.rs", "- Cargo.toml", "- tests/integration.rs", "\n"],
+        &[
+            "- src/main.rs",
+            "- Cargo.toml",
+            "- tests/integration.rs",
+            "\n",
+        ],
     );
 
     let empty = MergeConflictMetadata {
@@ -353,10 +372,15 @@ async fn load_epic_context_returns_context_when_epic_exists() {
 async fn load_knowledge_context_returns_none_when_no_notes() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
+    let task =
+        create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
 
-    assert!(load_knowledge_context(&task, None, &app_state).await.is_none());
+    assert!(
+        load_knowledge_context(&task, None, &app_state)
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
