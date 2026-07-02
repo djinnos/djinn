@@ -1102,6 +1102,36 @@ mod tests {
         }
     }
 
+    async fn insert_raw_evidence_findings_entry(
+        db: &Database,
+        proposal_id: &str,
+        spike_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        body_metadata: Option<&serde_json::Value>,
+    ) -> String {
+        db.ensure_initialized().await.unwrap();
+        let id = uuid::Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO proposal_debate_trail
+                (id, proposal_id, kind, body, blocking, agent_role, author_kind,
+                 author_user_id, author_model, source_task_id,
+                 against_revision_seq, round, body_metadata)
+             VALUES ($1, $2, 'evidence_findings', 'raw malformed fixture', false, 'spike', 'agent',
+                     NULL, NULL, $3, $4, $5, $6)",
+        )
+        .bind(&id)
+        .bind(proposal_id)
+        .bind(spike_task_id)
+        .bind(against_revision_seq)
+        .bind(round)
+        .bind(body_metadata)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
     async fn setup_linked_evidence_spike_fixture(
         db: &Database,
         tx: &broadcast::Sender<DjinnEventEnvelope>,
@@ -2579,22 +2609,15 @@ mod tests {
             let (proposal_repo, task_repo, proposal, spike_task, claim) =
                 setup_linked_evidence_spike_fixture(&db, &tx, title).await;
             if let Some(metadata) = metadata.as_ref() {
-                proposal_repo
-                    .add_debate_trail_entry(ProposalDebateTrailCreateInput {
-                        proposal_id: &proposal.id,
-                        kind: "evidence_findings",
-                        body: "malformed event findings",
-                        blocking: false,
-                        agent_role: "spike",
-                        author_kind: "agent",
-                        author_model: None,
-                        source_task_id: Some(&spike_task.id),
-                        against_revision_seq: claim.against_revision_seq,
-                        round: claim.round,
-                        body_metadata: Some(metadata),
-                    })
-                    .await
-                    .unwrap();
+                insert_raw_evidence_findings_entry(
+                    &db,
+                    &proposal.id,
+                    &spike_task.id,
+                    claim.round,
+                    claim.against_revision_seq,
+                    Some(metadata),
+                )
+                .await;
             }
             let closed = task_repo
                 .set_status_with_reason(&spike_task.id, "closed", Some("completed"))
