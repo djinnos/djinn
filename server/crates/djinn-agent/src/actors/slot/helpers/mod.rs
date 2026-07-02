@@ -6,16 +6,11 @@ use djinn_provider::repos::CredentialRepository;
 mod feedback;
 pub mod provider_resolution;
 
-// Re-export context-free code-context helpers directly from the canonical
-// djinn-slot implementation. The remaining items are agent-specific helpers
-// that cannot be shared without leaking host-only types.
 #[allow(unused_imports)]
 pub(crate) use djinn_slot::helpers::{
     derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
 };
 #[allow(unused_imports)]
-// Thin adapter layer: context-free functions re-exported from djinn_slot,
-// context-dependent async functions wrapped with AgentContext → SlotContext.
 pub(crate) use feedback::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
     conflict_context_for_dispatch, default_target_branch, extract_worker_context,
@@ -33,3 +28,43 @@ pub use provider_resolution::{
 pub(crate) use provider_resolution::{
     build_provider_from_resolved, build_telemetry_meta_with_attribution, resolved_needs_base_url,
 };
+
+/// Agent-compatible wrapper around the canonical djinn-slot code graph context helper.
+pub(crate) async fn build_role_code_graph_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    task_paths: &[String],
+) -> Option<String> {
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::helpers::build_role_code_graph_context(
+        role_name,
+        task,
+        &slot_ctx,
+        project_path,
+        task_paths,
+    )
+    .await
+}
+
+/// Agent-compatible wrapper around the canonical djinn-slot reviewer diff helper.
+pub(crate) async fn build_reviewer_diff_context(
+    role_name: &str,
+    task: &Task,
+    app_state: &AgentContext,
+    project_path: &str,
+    from_sha: Option<&str>,
+    to_sha: Option<&str>,
+) -> Option<String> {
+    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
+    djinn_slot::helpers::build_reviewer_diff_context(
+        role_name,
+        task,
+        &slot_ctx,
+        project_path,
+        from_sha,
+        to_sha,
+    )
+    .await
+}

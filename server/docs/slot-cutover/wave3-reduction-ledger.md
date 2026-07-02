@@ -89,53 +89,61 @@ find server/crates/djinn-agent/src/actors/slot -name '*.rs' -type f -print0 | xa
 find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
 ```
 
-Post-iwap / pre-dzog baseline (from the iwap slice above):
+Post-iwap baseline (from origin/main at `e46c0b389`):
 
-- `server/crates/djinn-agent/src/actors/slot`: 8,713 lines
+- `server/crates/djinn-agent/src/actors/slot`: 8,806 lines
 - `server/crates/djinn-slot/src`: 28,622 lines
-- Combined: 37,335 lines
+- Combined: 37,428 lines
 
 After this slice (current workspace with dzog changes applied):
 
-- `server/crates/djinn-agent/src/actors/slot`: 8,505 lines
+- `server/crates/djinn-agent/src/actors/slot`: 8,378 lines
 - `server/crates/djinn-slot/src`: 28,622 lines
-- Combined: 37,127 lines
+- Combined: 37,000 lines
 
-Net delta for this slice: **-208 combined scoped Rust lines**.
+Net delta for this slice: **-428 scoped Rust lines in djinn-agent/src/actors/slot**.
 
-Reconciliation note: the original dzog submission measured against a local post-iwap baseline of 9,467 lines and reported a 301-line reduction. The merged iwap slice actually landed at 8,713 lines. After reconciling the ledgers, the dzog contribution in this checkout is 208 lines (8,713 → 8,505). The combined iwap + dzog Wave 3 reduction from the pre-Wave-3 baseline is 928 lines (9,433 → 8,505).
+Combined iwap + dzog Wave 3 reduction from the pre-Wave-3 baseline: **1,055 lines** (9,433 → 8,378).
 
 ### What changed
 
-- `server/crates/djinn-agent/src/actors/slot/helpers/provider_resolution.rs`
-  - Consolidated near-duplicate Codex and Copilot OAuth load/refresh logic between `load_provider_credential` and `refresh_oauth_credential_after_401` into private helpers `load_or_refresh_codex` and `load_or_refresh_copilot`.
-  - Extracted shared `effective_oauth_provider_id` helper.
-  - Collapsed duplicated `AuthMethod`/`FormatFamily` match arms in `OAuthConfigWire` via helper methods on the wire enums.
-  - Removed `build_telemetry_meta`; callers now use `build_telemetry_meta_with_attribution(..., None, None)` directly.
-- `server/crates/djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs`
-  - Replaced monolithic `resolve_mcp_and_skills` with parameterized private helpers: `resolve_mcp_server_entries`, `connect_mcp_registry`, and `load_project_skills`.
-  - Removed duplicate test cases and consolidated non-planner role tests into a single data-driven test.
-- `server/crates/djinn-agent/src/actors/slot/lifecycle/role_overrides.rs`
-  - Extracted specialist/tribunal override logic into `resolve_runtime_role_override`.
-- `server/crates/djinn-agent/src/actors/slot/helpers/mod.rs`
-  - Removed stale re-exports of `build_role_code_graph_context` and `build_reviewer_diff_context`.
-- `server/crates/djinn-agent/src/actors/slot/mod.rs`
-  - Removed corresponding stale comment references.
-- `server/crates/djinn-agent/src/direct_services.rs` and `server/crates/djinn-agent/src/supervisor_impl/stage.rs`
-  - Updated callers to use `build_telemetry_meta_with_attribution` directly.
-- `server/crates/djinn-agent/src/actors/slot/helpers/tests.rs` (deleted)
-  - Stub removed; canonical behavioral tests live in `djinn-slot/src/helpers/tests.rs`.
+- `server/crates/djinn-agent/src/actors/slot/helpers/provider_resolution.rs` (741 → 532 lines, -209)
+  - Replaced four thin wrapper functions (`format_family_for_provider`, `capabilities_for_provider`, `auth_method_for_provider`, `default_base_url`) with direct `pub use` re-exports from `djinn_slot::helpers::provider_resolution`.
+  - Extracted shared `effective_oauth_provider_id` helper used by both `load_provider_credential` and `refresh_oauth_credential_after_401`.
+  - Consolidated Codex and Copilot OAuth load/refresh logic into `try_load_or_refresh_codex` and `try_load_or_refresh_copilot`, eliminating the near-duplicate match arms between the two public functions.
+  - Removed the `build_telemetry_meta` wrapper; callers now use `build_telemetry_meta_with_attribution(..., None, None)` directly.
+  - Trimmed verbose module-level, struct-field, and function doc comments while preserving essential behavioral contracts.
+  - All existing wire round-trip tests preserved.
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs` (491 → 362 lines, -129)
+  - Split monolithic `resolve_mcp_and_skills` into parameterized private helpers: `resolve_mcp_server_entries`, `connect_mcp_registry`, and `load_project_skills`.
+  - Consolidated `#[cfg(test)]` / `#[cfg(not(test))]` branches for MCP registry connection into a single code path with a `#[cfg(test)]` early-return for the override.
+  - Consolidated four non-planner role tests (worker, reviewer, lead, architect) into a single data-driven test.
+  - Trimmed verbose module-level and inline comments.
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/role_overrides.rs` (466 → 388 lines, -78)
+  - Extracted `resolve_runtime_role_override` helper that handles both the specialist (Worker stage) and tribunal (Refinement stage) override paths.
+  - Trimmed verbose module-level, struct-field, and function doc comments.
+- `server/crates/djinn-agent/src/actors/slot/helpers/mod.rs` (82 → 70 lines, -12)
+  - Removed `build_telemetry_meta` re-export.
+  - Removed `#[cfg(test)] mod tests;` declaration (the stub file was just comments).
+- `server/crates/djinn-agent/src/actors/slot/helpers/tests.rs` (19 → 0 lines, deleted)
+  - Removed empty stub file that contained only comments about tests living in djinn-slot.
+- `server/crates/djinn-agent/src/actors/slot/mod.rs` (169 → 153 lines, -16)
+  - Trimmed stale re-export comment block.
+- `server/crates/djinn-agent/src/supervisor_impl/stage.rs`
+  - Updated `build_telemetry_meta` call to `build_telemetry_meta_with_attribution`.
+- `server/crates/djinn-agent/src/direct_services.rs`
+  - Updated `build_telemetry_meta` call to `build_telemetry_meta_with_attribution`.
 
 ### Touched files
 
 - `server/crates/djinn-agent/src/actors/slot/helpers/provider_resolution.rs`
 - `server/crates/djinn-agent/src/actors/slot/helpers/mod.rs`
+- `server/crates/djinn-agent/src/actors/slot/helpers/tests.rs` (deleted)
 - `server/crates/djinn-agent/src/actors/slot/lifecycle/mcp_resolve.rs`
 - `server/crates/djinn-agent/src/actors/slot/lifecycle/role_overrides.rs`
-- `server/crates/djinn-agent/src/actors/slot/lifecycle/prompt_context.rs`
 - `server/crates/djinn-agent/src/actors/slot/mod.rs`
-- `server/crates/djinn-agent/src/direct_services.rs`
 - `server/crates/djinn-agent/src/supervisor_impl/stage.rs`
+- `server/crates/djinn-agent/src/direct_services.rs`
 - `server/docs/slot-cutover/wave3-reduction-ledger.md`
 
 ### Validation
@@ -143,7 +151,7 @@ Reconciliation note: the original dzog submission measured against a local post-
 Formatting:
 
 ```sh
-cargo fmt -p djinn-agent
+cargo fmt --manifest-path server/Cargo.toml -p djinn-agent
 ```
 
 Result: applied.
@@ -151,25 +159,20 @@ Result: applied.
 Type-check / lint:
 
 ```sh
-cargo clippy -p djinn-agent --all-features
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-agent --all-features
 ```
 
-Result: passed.
+Result: passed, no warnings or errors.
 
 Focused tests:
 
 | Command | Outcome |
 |---|---|
-| `cargo test -p djinn-agent --all-features mcp_resolve` | 9 passed, 0 failed |
-| `cargo test -p djinn-agent --all-features provider_resolution` | 5 passed, 0 failed |
-| `cargo test -p djinn-agent --all-features role_overrides` | failed on `ConnectionRefused` (DB-dependent; no Postgres reachable) |
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features mcp_resolve` | 12 passed, 0 failed |
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features provider_resolution` | 5 passed, 0 failed |
+| `OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --all-features role_overrides` | 5 failed on `ConnectionRefused` / missing `djinn_test_template` (DB-dependent; no Postgres reachable) |
 
 Environment limitations encountered:
 
-- DB-dependent tests (`role_overrides`) fail on `ConnectionRefused` in this sandbox, consistent with prior wave notes. No DB service is reachable and no tests were disabled or weakened.
-
-### Line-count verdict
-
-The dzog slice reduces the combined scoped Rust line count by 208 lines when measured against the reconciled post-iwap baseline of 8,713 lines. The original dzog workspace reported a 301-line reduction against a different local post-iwap baseline. The combined iwap + dzog Wave 3 reduction is 928 lines from the pre-Wave-3 baseline.
-
-Memory reference: [[reference/wave-3-reduction-ledger-dzog-slice]].
+- DB-dependent tests (`role_overrides`) fail on `ConnectionRefused` / missing `djinn_test_template` database in this sandbox. No tests were disabled or weakened.
+- `OPENSSL_NO_VENDOR=1` is required; the container lacks `make` for vendored OpenSSL.

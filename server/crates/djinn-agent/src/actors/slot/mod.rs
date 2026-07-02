@@ -98,11 +98,9 @@ mod commands;
 pub(crate) mod finalize_handlers;
 
 // HOST-ONLY: Provider resolution, feedback, and code-context helpers.
-// `pub` surface: ProviderCredential, auth_method_for_provider,
-// capabilities_for_provider, default_base_url, format_family_for_provider,
-// load_provider_credential, parse_model_id, OAuthConfigWire, etc.
-// `pub(crate)` surface: conflict_context_for_dispatch, extract_worker_context,
-// format_command_details, initial_user_message_for_task, load_task, etc.
+// `pub` surface: ProviderCredential, OAuthConfigWire, load/refresh helpers.
+// `pub(crate)` surface: build_role_code_graph_context,
+// conflict_context_for_dispatch, extract_worker_context, etc.
 // Used by: server chat handler, system_message, agent-worker, supervisor_impl.
 pub mod helpers;
 
@@ -148,21 +146,8 @@ mod supervisor_runner;
 // ═══════════════════════════════════════════════════════════════════════════
 // PRESERVED FACADE: Wildcard re-exports (actor, pool, helpers)
 // ═══════════════════════════════════════════════════════════════════════════
-// These `pub use *` re-exports preserve the public surface that external
-// callers depend on.  Key symbols: SlotActor, SlotHandle, TestLifecycleRunner
-// (from actor); SlotPoolHandle, ModelPoolStatus, PoolError, PoolMessage,
-// PoolStatus, RunningTaskInfo, SlotFactory (from pool); ProviderCredential,
-// auth_method_for_provider, capabilities_for_provider, default_base_url,
-// format_family_for_provider, load_provider_credential, parse_model_id,
-// OAuthConfigWire, refresh_oauth_credential_after_401 (from helpers).
-// MIGRATION CANDIDATE: `djinn-agent-worker/src/worker_services.rs` could
-// migrate helper imports to `djinn_slot::helpers::*` when available.
 
 pub use actor::*;
 pub use commands::{SlotCommand, SlotError};
 pub use helpers::*;
 pub use pool::*;
-
-// Slot behavior tests live canonically in `djinn-slot/src/`. Agent-local tests
-// remain in host-only modules (helpers/lifecycle/finalize/pool/actor) where they
-// exercise AgentContext facade wiring rather than duplicate slot behavior.

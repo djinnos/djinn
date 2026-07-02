@@ -1,8 +1,6 @@
 use super::*;
 
-// Pure provider identification helpers live canonically in `djinn-slot`. Keep
-// them visible through this module's public facade so callers don't need to
-// import both crates.
+// Pure provider identification helpers live canonically in `djinn-slot`.
 pub use djinn_slot::helpers::provider_resolution::{
     auth_method_for_provider, capabilities_for_provider, default_base_url,
     format_family_for_provider, parse_model_id,
@@ -17,8 +15,9 @@ pub enum ProviderCredential {
 }
 
 impl ProviderCredential {
-    /// Stamp the resolved per-role model onto an OAuth-derived config. No-op for
-    /// API-key credentials; the worker stamps those from the spec's per-role model.
+    /// Stamp the resolved per-role model onto an OAuth-derived config.
+    /// No-op for API-key credentials; the worker stamps those from the
+    /// spec's per-role model.
     pub fn with_model_id(mut self, model_id: &str) -> Self {
         if let ProviderCredential::OAuthConfig(cfg) = &mut self {
             cfg.model_id = model_id.to_string();
@@ -59,8 +58,7 @@ pub struct OAuthConfigWire {
     pub session_affinity_key: Option<String>,
     pub provider_headers: std::collections::HashMap<String, String>,
     pub capabilities: OAuthCapabilitiesWire,
-    /// Optional reasoning-effort tier; `#[serde(default)]` preserves legacy blobs
-    /// that predate this field.
+    /// Optional reasoning-effort tier; `#[serde(default)]` preserves legacy blobs.
     #[serde(default)]
     pub reasoning_effort: Option<djinn_provider::provider::ReasoningEffort>,
 }
@@ -72,61 +70,12 @@ pub enum OAuthAuthMethodWire {
     NoAuth,
 }
 
-impl OAuthAuthMethodWire {
-    fn from_auth_method(auth: &djinn_provider::provider::AuthMethod) -> Self {
-        use djinn_provider::provider::AuthMethod;
-        match auth {
-            AuthMethod::BearerToken(t) => OAuthAuthMethodWire::BearerToken(t.clone()),
-            AuthMethod::ApiKeyHeader { header, key } => OAuthAuthMethodWire::ApiKeyHeader {
-                header: header.clone(),
-                key: key.clone(),
-            },
-            AuthMethod::NoAuth => OAuthAuthMethodWire::NoAuth,
-        }
-    }
-
-    fn into_auth_method(self) -> djinn_provider::provider::AuthMethod {
-        use djinn_provider::provider::AuthMethod;
-        match self {
-            OAuthAuthMethodWire::BearerToken(t) => AuthMethod::BearerToken(t),
-            OAuthAuthMethodWire::ApiKeyHeader { header, key } => {
-                AuthMethod::ApiKeyHeader { header, key }
-            }
-            OAuthAuthMethodWire::NoAuth => AuthMethod::NoAuth,
-        }
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum OAuthFormatFamilyWire {
     OpenAI,
     OpenAIResponses,
     Anthropic,
     Google,
-}
-
-impl OAuthFormatFamilyWire {
-    fn from_format_family(family: djinn_provider::provider::FormatFamily) -> Self {
-        match family {
-            djinn_provider::provider::FormatFamily::OpenAI => OAuthFormatFamilyWire::OpenAI,
-            djinn_provider::provider::FormatFamily::OpenAIResponses => {
-                OAuthFormatFamilyWire::OpenAIResponses
-            }
-            djinn_provider::provider::FormatFamily::Anthropic => OAuthFormatFamilyWire::Anthropic,
-            djinn_provider::provider::FormatFamily::Google => OAuthFormatFamilyWire::Google,
-        }
-    }
-
-    fn into_format_family(self) -> djinn_provider::provider::FormatFamily {
-        match self {
-            OAuthFormatFamilyWire::OpenAI => djinn_provider::provider::FormatFamily::OpenAI,
-            OAuthFormatFamilyWire::OpenAIResponses => {
-                djinn_provider::provider::FormatFamily::OpenAIResponses
-            }
-            OAuthFormatFamilyWire::Anthropic => djinn_provider::provider::FormatFamily::Anthropic,
-            OAuthFormatFamilyWire::Google => djinn_provider::provider::FormatFamily::Google,
-        }
-    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -138,10 +87,25 @@ pub struct OAuthCapabilitiesWire {
 impl OAuthConfigWire {
     /// Build a wire mirror from a live provider config.
     pub fn from_provider_config(cfg: &djinn_provider::provider::ProviderConfig) -> Self {
+        use djinn_provider::provider::{AuthMethod, FormatFamily};
+        let auth = match &cfg.auth {
+            AuthMethod::BearerToken(t) => OAuthAuthMethodWire::BearerToken(t.clone()),
+            AuthMethod::ApiKeyHeader { header, key } => OAuthAuthMethodWire::ApiKeyHeader {
+                header: header.clone(),
+                key: key.clone(),
+            },
+            AuthMethod::NoAuth => OAuthAuthMethodWire::NoAuth,
+        };
+        let format_family = match cfg.format_family {
+            FormatFamily::OpenAI => OAuthFormatFamilyWire::OpenAI,
+            FormatFamily::OpenAIResponses => OAuthFormatFamilyWire::OpenAIResponses,
+            FormatFamily::Anthropic => OAuthFormatFamilyWire::Anthropic,
+            FormatFamily::Google => OAuthFormatFamilyWire::Google,
+        };
         Self {
             base_url: cfg.base_url.clone(),
-            auth: OAuthAuthMethodWire::from_auth_method(&cfg.auth),
-            format_family: OAuthFormatFamilyWire::from_format_family(cfg.format_family),
+            auth,
+            format_family,
             model_id: cfg.model_id.clone(),
             context_window: cfg.context_window,
             session_affinity_key: cfg.session_affinity_key.clone(),
@@ -154,13 +118,30 @@ impl OAuthConfigWire {
         }
     }
 
-    /// Reconstitute a live provider config from the wire mirror.
+    /// Reconstitute a live [`djinn_provider::provider::ProviderConfig`] from
+    /// the wire mirror. Used by `djinn-agent-worker` to rebuild OAuth configs
+    /// shipped over the Secret mount.
     pub fn to_provider_config(self) -> djinn_provider::provider::ProviderConfig {
-        use djinn_provider::provider::ProviderCapabilities;
-        djinn_provider::provider::ProviderConfig {
+        use djinn_provider::provider::{
+            AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig,
+        };
+        let auth = match self.auth {
+            OAuthAuthMethodWire::BearerToken(t) => AuthMethod::BearerToken(t),
+            OAuthAuthMethodWire::ApiKeyHeader { header, key } => {
+                AuthMethod::ApiKeyHeader { header, key }
+            }
+            OAuthAuthMethodWire::NoAuth => AuthMethod::NoAuth,
+        };
+        let format_family = match self.format_family {
+            OAuthFormatFamilyWire::OpenAI => FormatFamily::OpenAI,
+            OAuthFormatFamilyWire::OpenAIResponses => FormatFamily::OpenAIResponses,
+            OAuthFormatFamilyWire::Anthropic => FormatFamily::Anthropic,
+            OAuthFormatFamilyWire::Google => FormatFamily::Google,
+        };
+        ProviderConfig {
             base_url: self.base_url,
-            auth: self.auth.into_auth_method(),
-            format_family: self.format_family.into_format_family(),
+            auth,
+            format_family,
             model_id: self.model_id,
             context_window: self.context_window,
             telemetry: None,
@@ -176,18 +157,12 @@ impl OAuthConfigWire {
 }
 
 /// Serializes codex OAuth token refresh process-wide. Codex/OpenAI rotate the
-/// refresh token on every use (single-use), so concurrent task-run dispatches
-/// hitting an expired token would each POST the SAME refresh_token — the first
-/// rotates it and the rest get `invalid_grant`; OpenAI then invalidates the
-/// whole token family on reuse, poisoning the credential until a manual
-/// reconnect. Holding this lock across [reload → check → refresh → save] makes
-/// losers reuse the winner's freshly-saved token instead of racing a second
-/// refresh. (Process-local: correct for the single-replica VPS; on a
-/// multi-replica deploy a Postgres advisory lock would close the cross-replica
-/// window — tracked as a follow-up.)
+/// refresh token on every use (single-use), so concurrent dispatches racing an
+/// expired token would each POST the SAME refresh_token — the first rotates it
+/// and the rest get `invalid_grant`.
 static CODEX_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Resolve a provider id to the effective OAuth provider id used for token lookup.
+/// Resolve the effective OAuth provider ID for a given provider.
 fn effective_oauth_provider_id(provider_id: &str) -> &str {
     match provider_id {
         "chatgpt_codex" | "githubcopilot" => provider_id,
@@ -195,57 +170,67 @@ fn effective_oauth_provider_id(provider_id: &str) -> &str {
     }
 }
 
-/// Load a valid Codex OAuth config, refreshing under the process-wide lock if
-/// the stored token has expired. Returns `None` when no token is stored or
-/// refresh fails.
-async fn load_or_refresh_codex(
+/// Try to load or refresh a Codex OAuth credential. Returns `Some` when
+/// tokens are fresh (or were successfully refreshed), `None` otherwise.
+async fn try_load_or_refresh_codex(
     credential_repo: &CredentialRepository,
-) -> Option<djinn_provider::provider::ProviderConfig> {
+) -> Option<ProviderCredential> {
     let tokens = crate::oauth::codex::CodexTokens::load_from_db(credential_repo).await?;
     if !tokens.is_expired() {
-        return Some(crate::oauth::codex_provider_config(&tokens));
+        return Some(ProviderCredential::OAuthConfig(Box::new(
+            crate::oauth::codex_provider_config(&tokens),
+        )));
     }
+    // Expired → refresh under single-flight lock. Double-check after
+    // acquiring: a peer may have already refreshed while we waited.
     let _guard = CODEX_REFRESH_LOCK.lock().await;
     let current = crate::oauth::codex::CodexTokens::load_from_db(credential_repo)
         .await
         .unwrap_or(tokens);
     if !current.is_expired() {
-        return Some(crate::oauth::codex_provider_config(&current));
+        return Some(ProviderCredential::OAuthConfig(Box::new(
+            crate::oauth::codex_provider_config(&current),
+        )));
     }
     crate::oauth::codex::refresh_cached_token(&current, credential_repo)
         .await
-        .map(|refreshed| crate::oauth::codex_provider_config(&refreshed))
         .ok()
+        .map(|r| ProviderCredential::OAuthConfig(Box::new(crate::oauth::codex_provider_config(&r))))
 }
 
-/// Load a valid Copilot OAuth config, refreshing if the stored token has
-/// expired. Returns `None` when no token is stored or refresh fails.
-async fn load_or_refresh_copilot(
+/// Try to load or refresh a Copilot OAuth credential.
+async fn try_load_or_refresh_copilot(
     credential_repo: &CredentialRepository,
-) -> Option<djinn_provider::provider::ProviderConfig> {
+) -> Option<ProviderCredential> {
     let tokens = crate::oauth::copilot::CopilotTokens::load_from_db(credential_repo).await?;
     if !tokens.is_expired() {
-        return Some(crate::oauth::copilot_provider_config(&tokens));
+        return Some(ProviderCredential::OAuthConfig(Box::new(
+            crate::oauth::copilot_provider_config(&tokens),
+        )));
     }
     crate::oauth::copilot::refresh_copilot_token(&tokens, credential_repo)
         .await
-        .map(|refreshed| crate::oauth::copilot_provider_config(&refreshed))
         .ok()
+        .map(|r| {
+            ProviderCredential::OAuthConfig(Box::new(crate::oauth::copilot_provider_config(&r)))
+        })
 }
 
-/// Attempt a host-side silent OAuth token refresh after a mid-run 401. Returns
-/// `true` when the token is now live (or a peer already refreshed it), and
-/// `false` for non-OAuth providers or failed refresh.
+/// Attempt a host-side silent OAuth token refresh after a mid-run 401.
+/// Returns `true` when the model is OAuth-backed and the token is now live.
+/// Returns `false` for non-OAuth providers and for a refresh that itself fails.
 pub async fn refresh_oauth_credential_after_401(model_id: &str, app_state: &AgentContext) -> bool {
     let Ok((provider_id, _model_name)) = parse_model_id(model_id) else {
         return false;
     };
-    let effective_oauth_id = effective_oauth_provider_id(&provider_id);
+    let effective_id = effective_oauth_provider_id(&provider_id);
     let credential_repo =
         CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    match effective_oauth_id {
-        "chatgpt_codex" => load_or_refresh_codex(&credential_repo).await.is_some(),
-        "githubcopilot" => load_or_refresh_copilot(&credential_repo).await.is_some(),
+    match effective_id {
+        "chatgpt_codex" => try_load_or_refresh_codex(&credential_repo).await.is_some(),
+        "githubcopilot" => try_load_or_refresh_copilot(&credential_repo)
+            .await
+            .is_some(),
         _ => false,
     }
 }
@@ -254,18 +239,23 @@ pub async fn load_provider_credential(
     provider_id: &str,
     app_state: &AgentContext,
 ) -> anyhow::Result<ProviderCredential> {
-    // 1. Try OAuth tokens first for OAuth-capable providers.
-    // Also resolve merged children: e.g. "openai" → "chatgpt_codex".
-    let effective_oauth_id = effective_oauth_provider_id(provider_id);
+    let effective_id = effective_oauth_provider_id(provider_id);
     let credential_repo =
         CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let oauth_config = match effective_oauth_id {
-        "chatgpt_codex" => load_or_refresh_codex(&credential_repo).await,
-        "githubcopilot" => load_or_refresh_copilot(&credential_repo).await,
-        _ => None,
-    };
-    if let Some(cfg) = oauth_config {
-        return Ok(ProviderCredential::OAuthConfig(Box::new(cfg)));
+
+    // 1. Try OAuth tokens first for OAuth-capable providers.
+    match effective_id {
+        "chatgpt_codex" => {
+            if let Some(cred) = try_load_or_refresh_codex(&credential_repo).await {
+                return Ok(cred);
+            }
+        }
+        "githubcopilot" => {
+            if let Some(cred) = try_load_or_refresh_copilot(&credential_repo).await {
+                return Ok(cred);
+            }
+        }
+        _ => {}
     }
 
     // 2. Fall back to credential vault (DB).
@@ -306,16 +296,8 @@ pub(crate) fn build_telemetry_meta_with_attribution(
     }
 }
 
-/// Build an [`djinn_provider::provider::LlmProvider`] from a resolved model +
-/// credential. Single home for the OAuth-vs-API-key construction shared by the
-/// per-stage worker session ([`crate::supervisor_impl::stage`]), host-side
-/// `invoke_llm` ([`crate::direct_services`]), and post-session memory
-/// extraction ([`crate::actors::slot::llm_extraction`]). Callers differ only in
-/// the inputs threaded here — `context_window`, `telemetry`,
-/// `session_affinity_key`, and the (async-resolved) provider `base_url` — so
-/// those stay caller-supplied. `base_url` is unused for OAuth configs (they
-/// carry their own); callers can skip the lookup and pass `String::new()`.
-/// Returns `None` when no credential was resolved.
+/// Build an [`LlmProvider`] from a resolved model + credential.
+/// `base_url` is unused for OAuth configs (they carry their own).
 pub(crate) fn build_provider_from_resolved(
     resolved: crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential,
     context_window: u32,
@@ -332,7 +314,6 @@ pub(crate) fn build_provider_from_resolved(
             Some(djinn_provider::provider::create_provider(*cfg))
         }
         Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
-            // Computed before the move of `session_affinity_key` into the config.
             let provider_headers = provider_headers_for(
                 &resolved.catalog_provider_id,
                 session_affinity_key.as_deref(),
@@ -359,18 +340,8 @@ pub(crate) fn build_provider_from_resolved(
     }
 }
 
-/// Provider-specific outbound HTTP headers applied to every request for a
-/// resolved API-key provider.
-///
-/// OpenCode Zen (`opencode`) identifies its first-party CLI via these headers.
-/// The Zen gateway uses them for metrics and session-sticky provider routing —
-/// `x-opencode-session` pins a session to one upstream backend — and strips them
-/// before forwarding to the real provider; for free models the rate limit is
-/// per-IP, not per-header (see opencode `routes/zen/util/handler.ts`). Matching
-/// the real CLI's shape keeps us off the anonymous path and gives stable sticky
-/// routing. Values mirror `session/llm/request.ts`: client `cli`, User-Agent
-/// `opencode/<version>`, and the session id in `x-opencode-session`. Every other
-/// provider gets no extra headers, so these only ever reach the Zen endpoint.
+/// Provider-specific outbound HTTP headers for resolved API-key providers
+/// (e.g. OpenCode Zen session-sticky routing).
 fn provider_headers_for(
     provider_id: &str,
     session_key: Option<&str>,
@@ -388,7 +359,7 @@ fn provider_headers_for(
 }
 
 /// True when a resolved credential needs an API base URL (API-key providers);
-/// OAuth configs carry their own, so callers can skip the async lookup.
+/// OAuth configs carry their own.
 pub(crate) fn resolved_needs_base_url(
     resolved: &crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential,
 ) -> bool {
@@ -431,8 +402,8 @@ mod tests {
         }
     }
 
-    /// 7mhn: `Some(ReasoningEffort::Medium)` survives the
-    /// `OAuthConfigWire` host→Secret→worker round-trip exactly.
+    /// `Some(ReasoningEffort::Medium)` survives the `OAuthConfigWire`
+    /// host→Secret→worker round-trip exactly.
     #[test]
     fn oauth_wire_round_trip_preserves_some_medium() {
         let original = sample_oauth_config(Some(ReasoningEffort::Medium));
@@ -453,13 +424,10 @@ mod tests {
             original.session_affinity_key
         );
         assert_eq!(reconstructed.provider_headers, original.provider_headers);
-        // `telemetry` is intentionally dropped on the wire (per-call metadata
-        // the worker rebuilds locally).
         assert!(reconstructed.telemetry.is_none());
     }
 
-    /// 7mhn: a host-resolved `None` (e.g. Codex/OpenAI Responses) round-trips
-    /// cleanly so the policy's "preserve None" outcome is observable.
+    /// A host-resolved `None` (e.g. Codex/OpenAI Responses) round-trips cleanly.
     #[test]
     fn oauth_wire_round_trip_preserves_none() {
         let original = sample_oauth_config(None);
@@ -471,11 +439,7 @@ mod tests {
         assert_eq!(reconstructed.reasoning_effort, None);
     }
 
-    /// 7mhn: a legacy OAuth JSON blob shipped before the
-    /// `reasoning_effort` field existed must still deserialize and reconstruct
-    /// with `reasoning_effort: None` (the pre-policy safe default). The
-    /// `#[serde(default)]` annotation on the wire field is what makes this
-    /// possible.
+    /// A legacy OAuth JSON blob without `reasoning_effort` deserializes to `None`.
     #[test]
     fn oauth_wire_legacy_blob_without_field_deserializes_to_none() {
         let legacy = r#"{
@@ -496,11 +460,7 @@ mod tests {
         assert_eq!(reconstructed.model_id, "gpt-5.1-codex");
     }
 
-    /// 7mhn: the JSON wire token for `Some(Medium)` is the literal `"medium"`
-    /// (the upstream enum derives `Serialize`/`Deserialize` with
-    /// `rename_all = "lowercase"`), so the policy output is visible in the
-    /// Secret blob and easily greppable in `kubectl describe`/`oc get secret`
-    /// dumps.
+    /// JSON wire token for `Some(Medium)` is the literal `"medium"`.
     #[test]
     fn oauth_wire_serializes_some_medium_as_lowercase_token() {
         let original = sample_oauth_config(Some(ReasoningEffort::Medium));
@@ -511,7 +471,6 @@ mod tests {
             Value::String("medium".to_string())
         );
 
-        // The other tier tokens must round-trip with their lowercase spelling.
         for (tier, token) in [
             (ReasoningEffort::Minimal, "minimal"),
             (ReasoningEffort::Low, "low"),
@@ -524,33 +483,12 @@ mod tests {
         }
     }
 
-    /// 7mhn acceptance criteria: Codex/gpt-5.x OpenAI Responses request
-    /// rendering is unchanged or byte-equivalent under the shared policy.
-    ///
-    /// The capability-driven policy from 5dej explicitly returns `None` for
-    /// `FormatFamily::OpenAIResponses` (including `gpt-5.1-codex`), so a
-    /// host-resolved `ProviderConfig` always lands with `reasoning_effort:
-    /// None` for Codex. The OpenAI Responses request builder already renders
-    /// that `None` as `reasoning.effort = "medium"` (its pre-B5 default), and
-    /// the byte-equivalence of the request body across the wire is guarded by
-    /// the upstream `test_default_policy_preserves_openai_responses_request_bytes`
-    /// test in `djinn-provider`.
-    ///
-    /// This test is the host-side wire contract: the wire round-trip must
-    /// preserve the host's `None` so the worker's reconstructed
-    /// `ProviderConfig` is identical to the host's, and the request body
-    /// rendered from the reconstructed config matches the host's. We also
-    /// assert the shared policy keeps `gpt-5.1-codex` at `None` (so a future
-    /// change to the policy cannot silently turn on Responses reasoning for
-    /// Codex without breaking this guard).
+    /// Codex/gpt-5.x OpenAI Responses request rendering is byte-equivalent
+    /// under the shared policy when round-tripped through the wire mirror.
     #[test]
     fn oauth_wire_codex_openai_responses_request_rendering_is_byte_equivalent() {
         use djinn_provider::provider::default_reasoning_effort_for_model;
 
-        // (a) The shared capability-driven policy must keep Codex at `None`:
-        // this is the load-bearing reason the request body is byte-equivalent
-        // across the wire. The wire cannot make Codex byte-different from the
-        // host's `None` baseline if the wire is the only seam.
         let policy_for_codex = default_reasoning_effort_for_model(
             true,
             FormatFamily::OpenAIResponses,
@@ -558,21 +496,15 @@ mod tests {
         );
         assert_eq!(
             policy_for_codex, None,
-            "shared policy must keep Codex/gpt-5.1-codex reasoning_effort at None; \
-             otherwise Codex request bodies would change under the policy"
+            "shared policy must keep Codex/gpt-5.1-codex reasoning_effort at None"
         );
 
-        // (b) A host-resolved `ProviderConfig` for Codex has `None`
-        // (per the policy above). The OAuth wire round-trip must preserve
-        // that `None` exactly so the worker's reconstructed config is
-        // byte-equivalent to the host's.
         let mut host_config = sample_oauth_config(None);
         host_config.base_url = "https://api.openai.com".to_string();
         host_config.format_family = FormatFamily::OpenAIResponses;
         host_config.model_id = "gpt-5.1-codex".to_string();
         host_config.context_window = 400_000;
 
-        // Sanity: the host config starts at `None` (per the policy).
         assert_eq!(host_config.reasoning_effort, None);
 
         let wire = OAuthConfigWire::from_provider_config(&host_config);
@@ -580,8 +512,6 @@ mod tests {
         let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
         let reconstructed = decoded.to_provider_config();
 
-        // (c) Byte-equivalence at the wire seam: the reconstructed
-        // `ProviderConfig` matches the host's for every wire-surviving field.
         assert_eq!(reconstructed.reasoning_effort, host_config.reasoning_effort);
         assert_eq!(reconstructed.reasoning_effort, None);
         assert_eq!(reconstructed.format_family, host_config.format_family);
@@ -597,10 +527,6 @@ mod tests {
             reconstructed.capabilities.max_tokens_default,
             host_config.capabilities.max_tokens_default
         );
-
-        // `telemetry` is intentionally dropped on the wire (per-call metadata
-        // the worker rebuilds locally); the worker overrides it before
-        // constructing the concrete provider client.
         assert!(reconstructed.telemetry.is_none());
     }
 }
