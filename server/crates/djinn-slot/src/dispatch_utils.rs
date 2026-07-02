@@ -127,27 +127,78 @@ pub fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) ->
 
 // ─── Async helpers ──────────────────────────────────────────────────────────
 
+/// Default pre-session liveness deadline: how long stage init has to reach the
+/// first reply-loop session/turn before the run is failed fast.
+///
+/// Overridable via `DJINN_PRESESSION_DEADLINE_SECS` (0 / unparseable → default).
+pub fn pre_session_deadline() -> std::time::Duration {
+    const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
+    let secs = std::env::var("DJINN_PRESESSION_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(PRE_SESSION_DEADLINE_SECS_DEFAULT);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Initial step label used before the worker emits its first stage marker.
+pub const PRE_SESSION_INITIAL_STEP: &str = "run_create";
+
+/// Typed error surfaced when stage init never reaches the first reply-loop turn
+/// within the pre-session liveness deadline.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "pre-session stage-init deadline exceeded: no session / first provider turn after \
+     {elapsed_secs}s (hung at step '{step}')"
+)]
+pub struct PreSessionTimeout {
+    pub step: String,
+    pub elapsed_secs: u64,
+}
+
+/// Outcome of awaiting the worker's report stream.
+#[derive(Debug)]
+pub enum ReportAwait {
+    Report(Option<TaskRunReport>),
+    PreSessionTimeout(PreSessionTimeout),
+}
+
 /// Drain a [`BiStream`] until we see the terminal [`StreamEvent::Report`]
-/// frame, returning the [`TaskRunReport`] it carries.
+/// frame, returning the [`TaskRunReport`] it carries.  Enforces a pre-session
+/// liveness deadline: if no session row exists and no first-turn marker has been
+/// observed by the deadline, returns [`ReportAwait::PreSessionTimeout`] so the
+/// caller can fail fast and redispatch.
 ///
 /// Returns:
 /// - `Ok(Some(report))` — the worker emitted its terminal report.
 /// - `Ok(None)` — the channel closed or the `kill` token fired before any report.
-pub async fn await_report_from_stream(
+pub async fn await_report_from_stream<F>(
     mut stream: BiStream,
     kill: &CancellationToken,
-    session_id: &str,
+    task_run_id: &str,
     task_id: &str,
-) -> anyhow::Result<Option<TaskRunReport>> {
+    deadline: std::time::Duration,
+    mut exists_session: F,
+) -> anyhow::Result<ReportAwait>
+where
+    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+{
+    let started = tokio::time::Instant::now();
+    let sleep = tokio::time::sleep(deadline);
+    tokio::pin!(sleep);
+
+    let mut last_step = PRE_SESSION_INITIAL_STEP.to_string();
+    let mut session_reached = false;
+
     loop {
         tokio::select! {
             biased;
             _ = kill.cancelled() => {
-                let rpc_span = supervisor_rpc_span("kill", session_id, task_id);
+                let rpc_span = supervisor_rpc_span("kill", task_run_id, task_id);
                 async move {
                     tracing::debug!(
                         op = "kill",
-                        session_id = %session_id,
+                        session_id = %task_run_id,
                         task_id = %task_id,
                         "supervisor dispatch: kill fired while awaiting terminal report; \
                          proceeding to teardown"
@@ -155,30 +206,59 @@ pub async fn await_report_from_stream(
                 }
                 .instrument(rpc_span)
                 .await;
-                return Ok(None);
+                return Ok(ReportAwait::Report(None));
+            }
+            _ = &mut sleep, if !session_reached => {
+                if exists_session().await {
+                    session_reached = true;
+                    continue;
+                }
+                let elapsed_secs = started.elapsed().as_secs();
+                tracing::warn!(
+                    task_id = %task_id,
+                    task_run_id = %task_run_id,
+                    stage_step = %last_step,
+                    elapsed_secs,
+                    "supervisor dispatch: pre-session liveness deadline breached before first turn"
+                );
+                return Ok(ReportAwait::PreSessionTimeout(PreSessionTimeout {
+                    step: last_step.clone(),
+                    elapsed_secs,
+                }));
             }
             frame = stream.events_rx.recv() => {
                 match frame {
                     Some(StreamEvent::Report(report)) => {
-                        let rpc_span = supervisor_rpc_span("terminal_report", session_id, task_id);
+                        let rpc_span = supervisor_rpc_span("terminal_report", task_run_id, task_id);
                         let report_task_run_id = report.task_run_id.clone();
                         async move {
                             tracing::info!(
                                 event = "supervisor.rpc.terminal_report",
                                 op = "terminal_report",
-                                session_id = %session_id,
+                                session_id = %task_run_id,
                                 task_id = %task_id,
                                 task_run_id = %report_task_run_id,
                             );
                         }
                         .instrument(rpc_span)
                         .await;
-                        return Ok(Some(report));
+                        return Ok(ReportAwait::Report(Some(report)));
                     }
-                    Some(other) => {
-                        tracing::trace!(event = ?other, "supervisor dispatch: dropping non-terminal frame");
+                    Some(StreamEvent::StageStep { step }) => {
+                        if step == djinn_runtime::STAGE_STEP_FIRST_TURN {
+                            session_reached = true;
+                        }
+                        last_step = step;
                     }
-                    None => return Ok(None),
+                    Some(
+                        StreamEvent::AssistantDelta { .. }
+                        | StreamEvent::ToolCall { .. }
+                        | StreamEvent::FinalizePayload { .. }
+                        | StreamEvent::StageOutcome { .. },
+                    ) => {
+                        session_reached = true;
+                    }
+                    None => return Ok(ReportAwait::Report(None)),
                 }
             }
         }
@@ -198,6 +278,14 @@ mod tests {
             outcome,
             stages_completed: stages,
         }
+    }
+
+    fn never_exists() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        Box::pin(async { false })
+    }
+
+    fn always_exists() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        Box::pin(async { true })
     }
 
     #[test]
@@ -402,10 +490,21 @@ mod tests {
             .await
             .expect("send report");
 
-        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
-            .await
-            .expect("await ok");
-        assert_eq!(got.expect("some report").task_run_id, "id-B");
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-id-b",
+            "task-id-b",
+            std::time::Duration::from_secs(60),
+            never_exists,
+        )
+        .await
+        .expect("await ok");
+        let report = match got {
+            ReportAwait::Report(Some(r)) => r,
+            other => panic!("expected report, got {other:?}"),
+        };
+        assert_eq!(report.task_run_id, "id-B");
     }
 
     #[tokio::test]
@@ -428,10 +527,21 @@ mod tests {
             .await
             .unwrap();
 
-        let got = await_report_from_stream(bistream, &kill, "session-id-b", "task-id-b")
-            .await
-            .expect("await ok");
-        assert_eq!(got.expect("some report").task_run_id, "id-B");
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-id-b",
+            "task-id-b",
+            std::time::Duration::from_secs(60),
+            never_exists,
+        )
+        .await
+        .expect("await ok");
+        let report = match got {
+            ReportAwait::Report(Some(r)) => r,
+            other => panic!("expected report, got {other:?}"),
+        };
+        assert_eq!(report.task_run_id, "id-B");
     }
 
     #[tokio::test]
@@ -439,10 +549,20 @@ mod tests {
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         kill.cancel();
-        let got = await_report_from_stream(bistream, &kill, "session-kill", "task-kill")
-            .await
-            .expect("await ok");
-        assert!(got.is_none());
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-kill",
+            "task-kill",
+            std::time::Duration::from_secs(60),
+            never_exists,
+        )
+        .await
+        .expect("await ok");
+        match got {
+            ReportAwait::Report(None) => {}
+            other => panic!("expected Report(None), got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -450,9 +570,79 @@ mod tests {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         drop(events_tx);
-        let got = await_report_from_stream(bistream, &kill, "session-closed", "task-closed")
-            .await
-            .expect("await ok");
-        assert!(got.is_none());
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-closed",
+            "task-closed",
+            std::time::Duration::from_secs(60),
+            never_exists,
+        )
+        .await
+        .expect("await ok");
+        match got {
+            ReportAwait::Report(None) => {}
+            other => panic!("expected Report(None), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn await_report_breaches_presession_deadline_when_no_session() {
+        let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-presession",
+            "task-presession",
+            std::time::Duration::from_millis(10),
+            never_exists,
+        )
+        .await
+        .expect("await ok");
+        match got {
+            ReportAwait::PreSessionTimeout(t) => {
+                assert_eq!(t.step, PRE_SESSION_INITIAL_STEP);
+            }
+            other => panic!("expected pre-session timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn await_report_disarms_presession_deadline_once_session_exists() {
+        let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
+        let kill = CancellationToken::new();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = events_tx
+                .send(StreamEvent::StageStep {
+                    step: "reply_loop".into(),
+                })
+                .await;
+            let _ = events_tx
+                .send(StreamEvent::Report(report(
+                    "id-B",
+                    vec![RoleKind::Worker],
+                    TaskRunOutcome::Closed {
+                        reason: "done".into(),
+                    },
+                )))
+                .await;
+        });
+
+        let got = await_report_from_stream(
+            bistream,
+            &kill,
+            "session-presession",
+            "task-presession",
+            std::time::Duration::from_millis(20),
+            always_exists,
+        )
+        .await
+        .expect("await ok");
+        match got {
+            ReportAwait::Report(Some(r)) => assert_eq!(r.task_run_id, "id-B"),
+            other => panic!("expected report, got {other:?}"),
+        }
     }
 }

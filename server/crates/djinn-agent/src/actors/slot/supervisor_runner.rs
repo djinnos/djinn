@@ -33,7 +33,7 @@ use super::helpers::{
 
 // ─── Host dispatch entry point ──────────────────────────────────────────────
 
-/// Host-side dispatch entry point — called from
+/// Host-side dispatch logic — called from
 /// [`host_callbacks::AgentDispatchCallbacks::run_task_dispatch`].
 ///
 /// Delegates the full lifecycle to the canonical
@@ -47,9 +47,9 @@ pub(super) async fn dispatch_task_runtime(
     kill: CancellationToken,
     pause: CancellationToken,
 ) -> anyhow::Result<()> {
-    let ctx = AgentDispatchContext { app_state };
+    let ctx = Arc::new(AgentDispatchContext { app_state });
     djinn_slot::dispatch_orchestrator::dispatch_task_runtime(
-        &ctx,
+        ctx,
         task_id,
         project_path,
         model_id,
@@ -328,6 +328,73 @@ impl djinn_slot::dispatch_orchestrator::TaskDispatchContext for AgentDispatchCon
                 "supervisor: failed to mark credential revoked after 401"
             ),
         }
+    }
+
+    async fn exists_session_for_task_run(&self, task_run_id: &str) -> bool {
+        let repo =
+            SessionRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone());
+        match repo.exists_for_task_run(task_run_id).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                tracing::warn!(
+                    task_run_id = %task_run_id,
+                    error = %e,
+                    "supervisor dispatch: exists_for_task_run DB check failed; disarming watchdog"
+                );
+                true
+            }
+        }
+    }
+
+    async fn handle_pre_session_timeout(
+        &self,
+        task_id: &str,
+        task_short_id: &str,
+        task_run_id: &str,
+        model_id: &str,
+        owner: Option<&str>,
+        timeout: &djinn_slot::dispatch_utils::PreSessionTimeout,
+    ) {
+        let step = &timeout.step;
+        let elapsed_secs = timeout.elapsed_secs;
+        tracing::error!(
+            task_id = %task_short_id,
+            task_run_id = %task_run_id,
+            %model_id,
+            stage_step = %step,
+            elapsed_secs,
+            "supervisor dispatch: pre-session stage-init deadline exceeded before first \
+             provider turn; failing run fast"
+        );
+        self.app_state
+            .health_tracker
+            .record_stall(owner, model_id, true);
+        self.app_state.health_tracker.note_task_provider_failure(
+            task_id,
+            djinn_provider::catalog::health::TaskFailureSignal {
+                throttle: true,
+                retry_after_ms: None,
+            },
+        );
+        let repo = TaskRepository::new(self.app_state.db.clone(), self.app_state.event_bus.clone());
+        let _ = repo
+            .log_activity(
+                Some(task_id),
+                "agent-supervisor",
+                "system",
+                "stage_init_timeout",
+                &serde_json::json!({
+                    "body": format!(
+                        "Stage init hung at step '{step}' — no session / first provider \
+                         turn within {elapsed_secs}s (pre-session liveness deadline). \
+                         Tore down the Job and failed over off model {model_id}."
+                    ),
+                    "stage_step": step,
+                    "elapsed_secs": elapsed_secs,
+                })
+                .to_string(),
+            )
+            .await;
     }
 
     async fn log_agent_activity(

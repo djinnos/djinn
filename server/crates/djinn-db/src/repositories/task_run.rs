@@ -138,9 +138,12 @@ impl TaskRunRepository {
         }
         self.db.ensure_initialized().await?;
 
+        // Both live states (`starting` pre-session, `running` post-session)
+        // are reapable: a run wedged in stage-init before its first session
+        // must be flipped terminal too, not just a `running` one.
         let row: Option<String> = sqlx::query_scalar!(
             "SELECT id FROM task_runs
-             WHERE task_id = $1 AND status = 'running' AND ended_at IS NULL
+             WHERE task_id = $1 AND status IN ('starting', 'running') AND ended_at IS NULL
              ORDER BY started_at DESC LIMIT 1",
             task_id
         )
@@ -168,7 +171,7 @@ impl TaskRunRepository {
 
         let ids: Vec<String> = sqlx::query_scalar!(
             "SELECT id FROM task_runs
-             WHERE status = 'running'
+             WHERE status IN ('starting', 'running')
                AND ended_at IS NULL
                AND started_at < $1",
             stale_threshold_iso
@@ -201,6 +204,59 @@ impl TaskRunRepository {
         Ok(row.flatten())
     }
 
+    /// Latest live `starting` (pre-session) run for a task, if any.
+    ///
+    /// A run holds `starting` from dispatch until its first reply-loop session
+    /// is created (which flips it to `running`). `task_show`/`task_list` surface
+    /// this as the task's active state so the UI renders the real "starting"
+    /// status instead of inferring a "setting up" pseudo-status from a missing
+    /// session.
+    pub async fn latest_starting_for_task(&self, task_id: &str) -> Result<Option<TaskRunRecord>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            TaskRunRecord,
+            r#"SELECT id, project_id, task_id, trigger_type,
+                status AS "status!", started_at, ended_at,
+                workspace_path, mirror_ref
+             FROM task_runs
+             WHERE task_id = $1 AND status = 'starting' AND ended_at IS NULL
+             ORDER BY started_at DESC LIMIT 1"#,
+            task_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Batch variant of [`latest_starting_for_task`]: the latest live
+    /// `starting` run per task id, keyed by task id. Tasks with no starting run
+    /// are absent from the map. Used by `task_list` to avoid an N+1 query.
+    pub async fn latest_starting_by_tasks(
+        &self,
+        task_ids: &[&str],
+    ) -> Result<std::collections::HashMap<String, TaskRunRecord>> {
+        if task_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        self.db.ensure_initialized().await?;
+        let owned: Vec<String> = task_ids.iter().map(|s| (*s).to_string()).collect();
+        // DISTINCT ON (task_id) with the ORDER BY picks the newest starting run
+        // for each task in one pass.
+        let rows = sqlx::query_as!(
+            TaskRunRecord,
+            r#"SELECT DISTINCT ON (task_id)
+                id, project_id, task_id, trigger_type,
+                status AS "status!", started_at, ended_at,
+                workspace_path, mirror_ref
+             FROM task_runs
+             WHERE task_id = ANY($1) AND status = 'starting' AND ended_at IS NULL
+             ORDER BY task_id, started_at DESC"#,
+            &owned
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.task_id.clone(), r)).collect())
+    }
+
     /// Return IDs of task-runs that are still `running` with `ended_at IS NULL`.
     ///
     /// Used by the coordinator's cargo-target-run-dir sweep to build the set
@@ -208,7 +264,7 @@ impl TaskRunRepository {
     pub async fn running_ids(&self) -> Result<Vec<String>> {
         self.db.ensure_initialized().await?;
         Ok(sqlx::query_scalar(
-            "SELECT id FROM task_runs WHERE status = 'running' AND ended_at IS NULL",
+            "SELECT id FROM task_runs WHERE status IN ('starting', 'running') AND ended_at IS NULL",
         )
         .fetch_all(self.db.pool())
         .await?)

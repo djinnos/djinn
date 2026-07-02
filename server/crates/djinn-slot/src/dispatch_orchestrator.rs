@@ -12,6 +12,7 @@
 //! `djinn-agent` implements that trait for [`AgentContext`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -23,10 +24,10 @@ use djinn_runtime::{
 };
 
 use crate::dispatch_utils::{
-    await_report_from_stream, is_budget_park_report, loop_guard_kind_label,
-    loop_guard_planner_intervention_reason, provider_failure_class_for_report,
-    report_to_terminal_status, resume_flow, select_terminal_report, supervisor_rpc_span,
-    terminal_report_feeds_model_success,
+    PreSessionTimeout, ReportAwait, await_report_from_stream, is_budget_park_report,
+    loop_guard_kind_label, loop_guard_planner_intervention_reason, pre_session_deadline,
+    provider_failure_class_for_report, report_to_terminal_status, resume_flow,
+    select_terminal_report, supervisor_rpc_span, terminal_report_feeds_model_success,
 };
 
 // ─── Host-specific dispatch context ─────────────────────────────────────────
@@ -88,7 +89,7 @@ pub trait TaskDispatchContext: Send + Sync + 'static {
         task: &djinn_core::models::Task,
         spec: &TaskRunSpec,
         kill: &CancellationToken,
-    ) -> anyhow::Result<std::sync::Arc<dyn SessionRuntime>>;
+    ) -> anyhow::Result<Arc<dyn SessionRuntime>>;
 
     /// Resolve read-only multi-repo sources from the task's epic.
     async fn resolve_read_sources(&self, epic_id: Option<&str>) -> Vec<String>;
@@ -111,6 +112,31 @@ pub trait TaskDispatchContext: Send + Sync + 'static {
 
     /// Persist and surface a credential revocation after a 401.
     async fn surface_credential_revocation(&self, owner: Option<&str>, model_id: &str);
+
+    // ── Pre-session liveness ──────────────────────────────────────────────
+
+    /// Check whether a session row already exists for the given task run.
+    ///
+    /// Used by the pre-session liveness deadline as an authoritative DB
+    /// backstop: a session that was created without the host seeing a stream
+    /// marker still disarms the deadline.
+    async fn exists_session_for_task_run(&self, task_run_id: &str) -> bool;
+
+    /// Handle a pre-session stage-init deadline breach.
+    ///
+    /// The host should record health signals, log a task activity entry, and
+    /// perform any other host-specific failure-fast bookkeeping. The canonical
+    /// orchestrator has already reaped the orphan `task_runs` row as `Failed`
+    /// and torn down the runtime before calling this hook.
+    async fn handle_pre_session_timeout(
+        &self,
+        task_id: &str,
+        task_short_id: &str,
+        task_run_id: &str,
+        model_id: &str,
+        owner: Option<&str>,
+        timeout: &PreSessionTimeout,
+    );
 
     // ── Post-dispatch operations ──────────────────────────────────────────
 
@@ -184,7 +210,7 @@ pub trait CoordinatorOps: Send + Sync {
 /// All host-specific operations are delegated to the [`TaskDispatchContext`]
 /// trait.
 pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
-    ctx: &C,
+    ctx: Arc<C>,
     task_id: String,
     _project_path: String,
     model_id: String,
@@ -269,6 +295,28 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
         commit_author_email,
     };
 
+    // ── Announce dispatch live (pre-session UI tracking) ──────────────────
+    {
+        let agent_type = spec
+            .flow
+            .role_sequence()
+            .first()
+            .map(|role| role.as_str())
+            .unwrap_or("worker");
+        ctx.log_agent_activity(
+            &spec.task_id,
+            agent_type,
+            "system",
+            "session_dispatched",
+            &serde_json::json!({
+                "model_id": model_id,
+                "task_run_id": spec.task_run_id,
+            })
+            .to_string(),
+        )
+        .await;
+    }
+
     // ── Resolve per-role provider credentials ─────────────────────────────
     let creator_scope = created_by_user_id.clone();
     let credentials = ctx
@@ -331,11 +379,26 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
     );
 
     let mut infra_death: Option<String> = None;
-    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
+    let mut presession_timeout: Option<PreSessionTimeout> = None;
+    let task_run_id_for_exists = spec.task_run_id.clone();
+    let ctx_for_exists = Arc::clone(&ctx);
+    let exists = move || -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+        let task_run_id = task_run_id_for_exists.clone();
+        let ctx = Arc::clone(&ctx_for_exists);
+        Box::pin(async move { ctx.exists_session_for_task_run(&task_run_id).await })
+    };
+    let report_result: anyhow::Result<ReportAwait> = match bistream_result {
         Ok(bistream) => {
             tokio::select! {
                 biased;
-                res = await_report_from_stream(bistream, &kill, &spec.task_run_id, &spec.task_id) => res,
+                res = await_report_from_stream(
+                    bistream,
+                    &kill,
+                    &spec.task_run_id,
+                    &spec.task_id,
+                    pre_session_deadline(),
+                    exists,
+                ) => res,
                 reason = runtime.watch_infra_death(&handle) => {
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -344,11 +407,23 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
                          (OOM / eviction / Job failure); finalizing run as interrupted"
                     );
                     infra_death = Some(reason);
-                    Ok(None)
+                    Ok(ReportAwait::Report(None))
                 }
             }
         }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
+    };
+
+    // Normalize the report stream outcome so downstream code can pattern-match
+    // on a uniform type. Pre-session timeouts are handled as a fast-fail path
+    // after teardown.
+    let report_result: anyhow::Result<Option<TaskRunReport>> = match report_result {
+        Ok(ReportAwait::Report(report)) => Ok(report),
+        Ok(ReportAwait::PreSessionTimeout(timeout)) => {
+            presession_timeout = Some(timeout);
+            Ok(None)
+        }
+        Err(e) => Err(e),
     };
 
     // Stop the cancel watcher regardless of success path.
@@ -358,12 +433,16 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
     let teardown = runtime.teardown(handle).await;
 
     // Best-effort: stamp orphaned `task_runs` row.
-    let reap_status = teardown
-        .as_ref()
-        .ok()
-        .map(report_to_terminal_status)
-        .unwrap_or(TaskRunStatus::Interrupted);
-    reap_orphan_task_run(ctx, &task.id, reap_status).await;
+    let reap_status = if presession_timeout.is_some() {
+        TaskRunStatus::Failed
+    } else {
+        teardown
+            .as_ref()
+            .ok()
+            .map(report_to_terminal_status)
+            .unwrap_or(TaskRunStatus::Interrupted)
+    };
+    reap_orphan_task_run(ctx.as_ref(), &task.id, reap_status).await;
 
     // Best-effort: teardown of terminal task-run's private Cargo target dir.
     ctx.teardown_cargo_target_run_dir(&spec.task_run_id).await;
@@ -392,6 +471,21 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
             %model_id,
             "supervisor dispatch: worker handshake timed out; recorded stall + failover"
         );
+    }
+
+    // Pre-session stage-init deadline breached: fail fast after the runtime is
+    // torn down and the orphan task_run row is reaped as Failed.
+    if let Some(timeout) = presession_timeout.as_ref() {
+        ctx.handle_pre_session_timeout(
+            &task.id,
+            &task.short_id,
+            &spec.task_run_id,
+            &model_id,
+            creator_scope.as_deref(),
+            timeout,
+        )
+        .await;
+        return Err(anyhow::Error::new(timeout.clone()));
     }
 
     // Infra death → finalize orphaned running session row.
@@ -424,7 +518,7 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
             );
 
             // Persist loop guard activity.
-            persist_loop_guard_activity(ctx, &task.id, &report).await;
+            persist_loop_guard_activity(ctx.as_ref(), &task.id, &report).await;
 
             // Feed the model circuit-breaker on a productive run.
             if terminal_report_feeds_model_success(&report) {

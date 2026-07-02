@@ -95,6 +95,11 @@ pub enum WorkerEvent {
     /// connection's event stream looking for this variant to extract the
     /// real terminal report instead of synthesising one from Job status.
     TerminalReport(TaskRunReport),
+    /// Coarse stage-init progress marker (see
+    /// [`crate::StreamEvent::StageStep`]). Appended last to preserve the
+    /// wire layout of the earlier variants. Emitted while the run is setting
+    /// up so the host can name the step a pre-session hang is stuck on.
+    StageStep { step: String },
 }
 
 /// Write `payload` as a length-prefixed bincode frame.
