@@ -333,6 +333,15 @@ pub struct EvidenceLifecycleMetadata {
     /// `None` for the other phases.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub failure_reason: Option<String>,
+    /// `proposal_debate_trail.id` of the valid `evidence_findings` row that
+    /// satisfied the linked spike. Present only for `received`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub findings_debate_entry_id: Option<String>,
+    /// Stored structured findings payload from the valid `evidence_findings`
+    /// row. Present only for `received` so restart/resume code can find the
+    /// exact handoff row without repeating fuzzy lookup.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub findings_metadata_json: Option<String>,
 }
 
 impl EvidenceLifecycleMetadata {
@@ -352,6 +361,8 @@ impl EvidenceLifecycleMetadata {
             round,
             against_revision_seq,
             failure_reason: None,
+            findings_debate_entry_id: None,
+            findings_metadata_json: None,
         }
     }
 
@@ -363,6 +374,28 @@ impl EvidenceLifecycleMetadata {
         round: i32,
         against_revision_seq: i32,
     ) -> Self {
+        Self::received_with_findings(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+            None,
+            None,
+        )
+    }
+
+    /// Build the metadata for `refinement_evidence_received`, including the
+    /// exact valid findings row that caused receipt classification.
+    pub fn received_with_findings(
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        findings_debate_entry_id: Option<&str>,
+        findings_metadata_json: Option<&str>,
+    ) -> Self {
         Self {
             phase: "received".to_owned(),
             proposal_id: proposal_id.to_owned(),
@@ -371,6 +404,8 @@ impl EvidenceLifecycleMetadata {
             round,
             against_revision_seq,
             failure_reason: None,
+            findings_debate_entry_id: findings_debate_entry_id.map(str::to_owned),
+            findings_metadata_json: findings_metadata_json.map(str::to_owned),
         }
     }
 
@@ -391,6 +426,8 @@ impl EvidenceLifecycleMetadata {
             round,
             against_revision_seq,
             failure_reason: Some(failure_reason.to_owned()),
+            findings_debate_entry_id: None,
+            findings_metadata_json: None,
         }
     }
 
@@ -437,6 +474,24 @@ pub struct CurrentEvidenceFindings {
     pub debate_entry_body: String,
     pub findings_metadata_json: String,
     pub findings: EvidenceFindings,
+}
+
+/// Result of classifying and persisting a terminal linked evidence spike.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalLinkedEvidenceSpikeOutcome {
+    /// The spike completed successfully and valid current findings were found;
+    /// a `refinement_evidence_received` lifecycle event was written.
+    EvidenceReceived,
+    /// The spike terminated unsuccessfully, or completed without valid current
+    /// findings; a `refinement_evidence_failed` lifecycle event was written.
+    EvidenceFailed { reason: String },
+    /// A matching receipt/failure event already existed, so no duplicate row
+    /// was written.
+    AlreadyRecorded { event_kind: String },
+    /// The proposal is no longer linked to the supplied spike.
+    NotLinked,
+    /// The supplied task status is not terminal; callers should wait.
+    NotTerminal,
 }
 
 /// Cap status for needs-evidence demands in the current refinement run.
@@ -1461,6 +1516,38 @@ impl ProposalRepository {
     }
 
     /// Convenience wrapper for `record_refinement_lifecycle` that writes a
+    /// `refinement_evidence_received` row carrying the exact valid findings
+    /// debate-entry reference returned by `current_evidence_findings_for_linked_spike`.
+    pub async fn record_evidence_received_with_findings(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        judge_task_id: &str,
+        round: i32,
+        against_revision_seq: i32,
+        findings_debate_entry_id: &str,
+        findings_metadata_json: &str,
+    ) -> Result<serde_json::Value> {
+        let meta = EvidenceLifecycleMetadata::received_with_findings(
+            proposal_id,
+            spike_task_id,
+            judge_task_id,
+            round,
+            against_revision_seq,
+            Some(findings_debate_entry_id),
+            Some(findings_metadata_json),
+        );
+        let value = meta.to_event_metadata();
+        self.record_refinement_lifecycle(
+            proposal_id,
+            evidence_lifecycle_kind::EVIDENCE_RECEIVED,
+            Some(&value),
+        )
+        .await?;
+        Ok(value)
+    }
+
+    /// Convenience wrapper for `record_refinement_lifecycle` that writes a
     /// `refinement_evidence_failed` row with the structured metadata,
     /// including the failure reason.
     pub async fn record_evidence_failed(
@@ -2214,6 +2301,121 @@ impl ProposalRepository {
         }))
     }
 
+    /// Classify a terminal linked evidence spike and persist exactly one receipt
+    /// or failure lifecycle event for the current evidence cycle.
+    ///
+    /// Success is intentionally narrow: the linked spike task must be terminal
+    /// with `status = "closed"` and `close_reason = "completed"`, and the
+    /// canonical current-findings lookup must return valid findings for the
+    /// proposal's current linked spike/round/revision. Every other terminal
+    /// state, including completed-without-findings, records failure and leaves
+    /// `linked_spike_task_id` / `needs_evidence_claim` untouched for downstream
+    /// recovery/resolution code.
+    pub async fn persist_terminal_linked_spike_evidence_lifecycle(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+        spike_task_status: &str,
+        spike_task_close_reason: Option<&str>,
+    ) -> Result<TerminalLinkedEvidenceSpikeOutcome> {
+        self.db.ensure_initialized().await?;
+
+        let Some(proposal) = self.get(proposal_id).await? else {
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked);
+        };
+        if proposal.linked_spike_task_id.as_deref() != Some(spike_task_id) {
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked);
+        }
+
+        let (judge_task_id, round, against_revision_seq) =
+            match NeedsEvidenceClaim::parse_stored(proposal.needs_evidence_claim.as_deref()) {
+                Ok(Some(claim)) => (
+                    claim.created_by_task_id,
+                    claim.round,
+                    claim.against_revision_seq,
+                ),
+                Ok(None) | Err(_) => (String::new(), 0, 0),
+            };
+
+        if let Some(existing) = self
+            .existing_evidence_terminal_lifecycle_event(proposal_id, spike_task_id)
+            .await?
+        {
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded {
+                event_kind: existing,
+            });
+        }
+
+        if !evidence_spike_task_is_terminal(spike_task_status) {
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::NotTerminal);
+        }
+
+        if evidence_spike_task_completed_successfully(spike_task_status, spike_task_close_reason) {
+            if let Some(findings) = self
+                .current_evidence_findings_for_linked_spike(proposal_id, spike_task_id)
+                .await?
+            {
+                self.record_evidence_received_with_findings(
+                    proposal_id,
+                    spike_task_id,
+                    &judge_task_id,
+                    findings.round,
+                    findings.against_revision_seq,
+                    &findings.debate_entry_id,
+                    &findings.findings_metadata_json,
+                )
+                .await?;
+                return Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived);
+            }
+
+            let reason = "missing_valid_findings".to_owned();
+            self.record_evidence_failed(
+                proposal_id,
+                spike_task_id,
+                &judge_task_id,
+                round,
+                against_revision_seq,
+                &reason,
+            )
+            .await?;
+            return Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason });
+        }
+
+        let reason = evidence_spike_failure_reason(spike_task_status, spike_task_close_reason);
+        self.record_evidence_failed(
+            proposal_id,
+            spike_task_id,
+            &judge_task_id,
+            round,
+            against_revision_seq,
+            &reason,
+        )
+        .await?;
+        Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason })
+    }
+
+    async fn existing_evidence_terminal_lifecycle_event(
+        &self,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) -> Result<Option<String>> {
+        for revision in self.revisions(proposal_id).await?.iter().rev() {
+            if revision.event_kind != evidence_lifecycle_kind::EVIDENCE_RECEIVED
+                && revision.event_kind != evidence_lifecycle_kind::EVIDENCE_FAILED
+            {
+                continue;
+            }
+            if let Ok(Some(meta)) =
+                EvidenceLifecycleMetadata::parse_event_metadata(revision.event_metadata.as_deref())
+                && meta.proposal_id == proposal_id
+                && meta.spike_task_id == spike_task_id
+            {
+                return Ok(Some(revision.event_kind.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Freeze or un-freeze a build. Frozen builds stay `building` but their
     /// epics' tasks are held out of dispatch (see `build_ready_where`).
     pub async fn set_frozen(&self, proposal_id: &str, frozen: bool) -> Result<Proposal> {
@@ -2907,6 +3109,43 @@ impl ProposalRepository {
         .await?;
         Ok(count > 0)
     }
+}
+
+fn evidence_spike_task_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "closed" | "failed" | "cancelled" | "canceled" | "done" | "rejected" | "archived"
+    )
+}
+
+fn evidence_spike_task_completed_successfully(status: &str, close_reason: Option<&str>) -> bool {
+    status == "closed" && close_reason == Some(djinn_core::models::task::CLOSE_REASON_COMPLETED)
+}
+
+fn evidence_spike_failure_reason(status: &str, close_reason: Option<&str>) -> String {
+    let raw = close_reason.unwrap_or(status).trim();
+    match raw {
+        "force_closed" | "force_close" => "spike_force_closed".to_owned(),
+        "cancelled" | "canceled" => "spike_cancelled".to_owned(),
+        "failed" | "error" | "errored" => "spike_errored".to_owned(),
+        "" => "spike_unsuccessful".to_owned(),
+        other => format!(
+            "spike_unsuccessful_{}",
+            sanitize_evidence_failure_reason(other)
+        ),
+    }
+}
+
+fn sanitize_evidence_failure_reason(raw: &str) -> String {
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').to_owned()
 }
 
 // ── Short ID helpers ─────────────────────────────────────────────────────────
@@ -6162,6 +6401,282 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    fn count_evidence_lifecycle_events(revisions: &[ProposalRevision], kind: &str) -> usize {
+        revisions
+            .iter()
+            .filter(|rev| rev.event_kind == kind)
+            .count()
+    }
+
+    async fn setup_linked_evidence_spike(
+        db: &Database,
+        repo: &ProposalRepository,
+        title: &str,
+    ) -> (Proposal, String, NeedsEvidenceClaim) {
+        let p = repo.create(create_input(title)).await.unwrap();
+        let proj = insert_project(db, &format!("svc-terminal-{}", uuid::Uuid::now_v7())).await;
+        let epic = insert_epic(db, &proj, "te01").await;
+        let spike_task_id = insert_task(db, &proj, &epic, "te-task").await;
+        let claim = sample_needs_evidence_claim(2, 3);
+        repo.set_structured_needs_evidence_spike(&p.id, &spike_task_id, &claim)
+            .await
+            .unwrap();
+        (
+            repo.get(&p.id).await.unwrap().unwrap(),
+            spike_task_id,
+            claim,
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_linked_spike_success_with_findings_records_received_once() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (p, spike_task_id, claim) =
+            setup_linked_evidence_spike(&db, &repo, "Terminal Success").await;
+        let findings = sample_evidence_findings("terminal success");
+        let findings_value = serde_json::to_value(&findings).unwrap();
+        let entry = repo
+            .add_debate_trail_entry(ProposalDebateTrailCreateInput {
+                proposal_id: &p.id,
+                kind: "evidence_findings",
+                body: "valid terminal findings",
+                blocking: false,
+                agent_role: "spike",
+                author_kind: "agent",
+                author_model: None,
+                source_task_id: Some(&spike_task_id),
+                against_revision_seq: claim.against_revision_seq,
+                round: claim.round,
+                body_metadata: Some(&findings_value),
+            })
+            .await
+            .unwrap();
+
+        let outcome = repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &p.id,
+                &spike_task_id,
+                "closed",
+                Some("completed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived
+        );
+
+        let repeated = repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &p.id,
+                &spike_task_id,
+                "closed",
+                Some("completed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            repeated,
+            TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded {
+                event_kind: evidence_lifecycle_kind::EVIDENCE_RECEIVED.to_owned()
+            }
+        );
+
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(
+            count_evidence_lifecycle_events(&revisions, evidence_lifecycle_kind::EVIDENCE_RECEIVED),
+            1
+        );
+        assert_eq!(
+            count_evidence_lifecycle_events(&revisions, evidence_lifecycle_kind::EVIDENCE_FAILED),
+            0
+        );
+        let received = revisions
+            .iter()
+            .find(|rev| rev.event_kind == evidence_lifecycle_kind::EVIDENCE_RECEIVED)
+            .unwrap();
+        let meta =
+            EvidenceLifecycleMetadata::parse_event_metadata(received.event_metadata.as_deref())
+                .unwrap()
+                .unwrap();
+        assert_eq!(meta.proposal_id, p.id);
+        assert_eq!(meta.spike_task_id, spike_task_id);
+        assert_eq!(meta.round, claim.round);
+        assert_eq!(meta.against_revision_seq, claim.against_revision_seq);
+        assert_eq!(
+            meta.findings_debate_entry_id.as_deref(),
+            Some(entry.id.as_str())
+        );
+        assert_eq!(
+            meta.findings_metadata_json.as_deref(),
+            entry.body_metadata.as_deref()
+        );
+        let still_linked = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task_id.as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_linked_spike_failed_records_failed_and_keeps_link() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (p, spike_task_id, _claim) =
+            setup_linked_evidence_spike(&db, &repo, "Terminal Failed").await;
+
+        let outcome = repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &p.id,
+                &spike_task_id,
+                "closed",
+                Some("failed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed {
+                reason: "spike_errored".to_owned()
+            }
+        );
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(
+            count_evidence_lifecycle_events(&revisions, evidence_lifecycle_kind::EVIDENCE_FAILED),
+            1
+        );
+        let still_linked = repo.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(
+            still_linked.linked_spike_task_id.as_deref(),
+            Some(spike_task_id.as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_linked_spike_cancelled_or_force_closed_records_failed_once() {
+        for (status, close_reason, expected) in [
+            ("cancelled", Some("cancelled"), "spike_cancelled"),
+            ("closed", Some("force_closed"), "spike_force_closed"),
+        ] {
+            let db = test_db();
+            let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+            let (p, spike_task_id, _claim) =
+                setup_linked_evidence_spike(&db, &repo, "Terminal Cancel").await;
+
+            let outcome = repo
+                .persist_terminal_linked_spike_evidence_lifecycle(
+                    &p.id,
+                    &spike_task_id,
+                    status,
+                    close_reason,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed {
+                    reason: expected.to_owned()
+                }
+            );
+            let repeated = repo
+                .persist_terminal_linked_spike_evidence_lifecycle(
+                    &p.id,
+                    &spike_task_id,
+                    status,
+                    close_reason,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                repeated,
+                TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { .. }
+            ));
+            let revisions = repo.revisions(&p.id).await.unwrap();
+            assert_eq!(
+                count_evidence_lifecycle_events(
+                    &revisions,
+                    evidence_lifecycle_kind::EVIDENCE_FAILED
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_linked_spike_completed_without_findings_records_failed() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (p, spike_task_id, _claim) =
+            setup_linked_evidence_spike(&db, &repo, "No Findings").await;
+
+        let outcome = repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &p.id,
+                &spike_task_id,
+                "closed",
+                Some("completed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed {
+                reason: "missing_valid_findings".to_owned()
+            }
+        );
+        let revisions = repo.revisions(&p.id).await.unwrap();
+        assert_eq!(
+            count_evidence_lifecycle_events(&revisions, evidence_lifecycle_kind::EVIDENCE_FAILED),
+            1
+        );
+        assert_eq!(
+            count_evidence_lifecycle_events(&revisions, evidence_lifecycle_kind::EVIDENCE_RECEIVED),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_linked_spike_completed_with_malformed_findings_records_failed() {
+        let db = test_db();
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let (p, spike_task_id, claim) =
+            setup_linked_evidence_spike(&db, &repo, "Malformed Findings").await;
+        let malformed = serde_json::json!({
+            "answer":"",
+            "evidence":[],
+            "code_paths_inspected":[],
+            "confidence":0.7,
+            "residual_risks":[],
+            "recommendation_for_advocate":""
+        });
+        insert_raw_evidence_findings_entry(
+            &db,
+            &p.id,
+            &spike_task_id,
+            claim.round,
+            claim.against_revision_seq,
+            Some(&malformed),
+        )
+        .await;
+
+        let outcome = repo
+            .persist_terminal_linked_spike_evidence_lifecycle(
+                &p.id,
+                &spike_task_id,
+                "closed",
+                Some("completed"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed {
+                reason: "missing_valid_findings".to_owned()
+            }
         );
     }
 
