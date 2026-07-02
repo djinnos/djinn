@@ -379,6 +379,16 @@ impl SupervisorServices for RpcServices {
         &self.cancel
     }
 
+    async fn report_stage_step(&self, step: &'static str) -> Result<(), String> {
+        // Ship the marker out-of-band on the shared frame channel; the host's
+        // reader_loop lowers it to a `StreamEvent::StageStep`. Best-effort —
+        // a dropped writer just means the connection is already gone.
+        self.emit_event(djinn_runtime::WorkerEvent::StageStep {
+            step: step.to_string(),
+        })
+        .await
+    }
+
     async fn load_task(&self, task_id: String) -> Result<Task, String> {
         match self
             .roundtrip(ServiceRpcRequest::LoadTask { task_id })
