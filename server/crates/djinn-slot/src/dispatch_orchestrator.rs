@@ -18,15 +18,15 @@ use tracing::Instrument;
 
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
 use djinn_runtime::{
-    ProviderFailureClass, ResolvedCredentials, SessionRuntime,
-    TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    ProviderFailureClass, ResolvedCredentials, SessionRuntime, TaskRunOutcome, TaskRunReport,
+    TaskRunSpec,
 };
 
 use crate::dispatch_utils::{
     await_report_from_stream, is_budget_park_report, loop_guard_kind_label,
     loop_guard_planner_intervention_reason, provider_failure_class_for_report,
-    report_to_terminal_status, resume_flow, select_terminal_report,
-    supervisor_rpc_span, terminal_report_feeds_model_success,
+    report_to_terminal_status, resume_flow, select_terminal_report, supervisor_rpc_span,
+    terminal_report_feeds_model_success,
 };
 
 // ─── Host-specific dispatch context ─────────────────────────────────────────
@@ -35,168 +35,97 @@ use crate::dispatch_utils::{
 ///
 /// `djinn-agent` implements this for [`AgentContext`], wiring through
 /// `TaskRepository`, `MirrorManager`, `HealthTracker`, runtime construction,
-/// credential resolution, and coordinator integration.
+/// credential resolution, and coordinator integration. The async-trait shape
+/// keeps the agent adapter compact: the reusable sequencing lives below, while
+/// the host implementation supplies only the data/side-effect callbacks.
+#[async_trait::async_trait]
 pub trait TaskDispatchContext: Send + Sync + 'static {
     /// Resolve the task row by id.
-    fn load_task<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<djinn_core::models::Task>> + Send + 'a>,
-    >;
+    async fn load_task(&self, task_id: &str) -> anyhow::Result<djinn_core::models::Task>;
 
     /// Resolve `(has_conflict, has_review_response)` for the task.
-    fn resolve_dispatch_context<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = (bool, bool)> + Send + 'a>,
-    >;
+    async fn resolve_dispatch_context(&self, task_id: &str) -> (bool, bool);
 
     /// Resolve the default target (base) branch for the project.
-    fn resolve_base_branch<'a>(
-        &'a self,
-        project_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = String> + Send + 'a>,
-    >;
+    async fn resolve_base_branch(&self, project_id: &str) -> String;
 
     /// Pick the supervisor flow for a task given dispatch context.
-    fn resolve_flow(&self, task: &djinn_core::models::Task, has_conflict: bool, has_review_response: bool)
-        -> djinn_runtime::SupervisorFlow;
+    fn resolve_flow(
+        &self,
+        task: &djinn_core::models::Task,
+        has_conflict: bool,
+        has_review_response: bool,
+    ) -> djinn_runtime::SupervisorFlow;
 
     /// Resolve per-role model id overrides.
-    fn resolve_model_id_per_role<'a>(
-        &'a self,
-        project_id: &'a str,
+    async fn resolve_model_id_per_role(
+        &self,
+        project_id: &str,
         flow: djinn_runtime::SupervisorFlow,
-        default_model_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = HashMap<djinn_runtime::RoleKind, String>>
-                + Send
-                + 'a,
-        >,
-    >;
+        default_model_id: &str,
+    ) -> HashMap<djinn_runtime::RoleKind, String>;
 
     /// Check whether the worker's output is durable on the mirror task_branch.
-    /// Returns `false` when the mirror is absent, the check fails, or it times
-    /// out (>10 s).
-    fn check_worker_output_durability<'a>(
-        &'a self,
-        project_id: &'a str,
-        task_branch: &'a str,
-        base_branch: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+    /// Returns `false` when the mirror is absent, the check fails, or it times out (>10 s).
+    async fn check_worker_output_durability(
+        &self,
+        project_id: &str,
+        task_branch: &str,
+        base_branch: &str,
+    ) -> bool;
 
     /// Resolve per-role provider credentials for the dispatch spec.
-    fn resolve_credentials<'a>(
-        &'a self,
-        spec: &'a TaskRunSpec,
-        default_model_id: &'a str,
+    async fn resolve_credentials(
+        &self,
+        spec: &TaskRunSpec,
+        default_model_id: &str,
         creator_user_id: Option<String>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = anyhow::Result<ResolvedCredentials>>
-                + Send
-                + 'a,
-        >,
-    >;
+    ) -> anyhow::Result<ResolvedCredentials>;
 
     /// Construct the `SessionRuntime` for the dispatch (Kubernetes or Test).
-    fn construct_runtime<'a>(
-        &'a self,
-        task: &'a djinn_core::models::Task,
-        spec: &'a TaskRunSpec,
-        kill: &'a CancellationToken,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = anyhow::Result<std::sync::Arc<dyn SessionRuntime>>,
-                > + Send
-                + 'a,
-        >,
-    >;
+    async fn construct_runtime(
+        &self,
+        task: &djinn_core::models::Task,
+        spec: &TaskRunSpec,
+        kill: &CancellationToken,
+    ) -> anyhow::Result<std::sync::Arc<dyn SessionRuntime>>;
 
     /// Resolve read-only multi-repo sources from the task's epic.
-    fn resolve_read_sources<'a>(
-        &'a self,
-        epic_id: Option<&'a str>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Vec<String>> + Send + 'a>,
-    >;
+    async fn resolve_read_sources(&self, epic_id: Option<&str>) -> Vec<String>;
 
     /// Resolve private-dependency credentials (github owner, install token).
-    fn resolve_private_deps<'a>(
-        &'a self,
-        project_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = (Option<String>, Option<String>),
-                > + Send
-                + 'a,
-        >,
-    >;
+    async fn resolve_private_deps(&self, project_id: &str) -> (Option<String>, Option<String>);
 
     /// Resolve the task creator's user id.
-    fn resolve_creator_user_id<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>,
-    >;
+    async fn resolve_creator_user_id(&self, task_id: &str) -> Option<String>;
 
     /// Resolve the commit-author identity (name, email) for a task creator.
-    fn resolve_commit_author<'a>(
-        &'a self,
-        creator_user_id: Option<&'a str>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = (Option<String>, Option<String>),
-                > + Send
-                + 'a,
-        >,
-    >;
+    async fn resolve_commit_author(
+        &self,
+        creator_user_id: Option<&str>,
+    ) -> (Option<String>, Option<String>);
 
     /// Try a host-side silent OAuth credential refresh after a 401.
     /// Returns `true` if the credential was refreshed successfully.
-    fn try_refresh_oauth_after_401<'a>(
-        &'a self,
-        model_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+    async fn try_refresh_oauth_after_401(&self, model_id: &str) -> bool;
 
     /// Persist and surface a credential revocation after a 401.
-    fn surface_credential_revocation<'a>(
-        &'a self,
-        owner: Option<&'a str>,
-        model_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn surface_credential_revocation(&self, owner: Option<&str>, model_id: &str);
 
     // ── Post-dispatch operations ──────────────────────────────────────────
 
     /// Log an activity entry for the task.
-    fn log_agent_activity<'a>(
-        &'a self,
-        task_id: &'a str,
-        agent_type: &'a str,
-        actor: &'a str,
-        event_type: &'a str,
-        payload: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn log_agent_activity(
+        &self,
+        task_id: &str,
+        agent_type: &str,
+        actor: &str,
+        event_type: &str,
+        payload: &str,
+    );
 
     /// Get a coordinator handle for post-dispatch interactions.
-    fn get_coordinator<'a>(
-        &'a self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Option<Box<dyn CoordinatorOps>>,
-                > + Send
-                + 'a,
-        >,
-    >;
+    async fn get_coordinator(&self) -> Option<Box<dyn CoordinatorOps>>;
 
     /// Record a model health success.
     fn record_model_success(&self, owner: Option<&str>, model_id: &str);
@@ -216,30 +145,16 @@ pub trait TaskDispatchContext: Send + Sync + 'static {
     );
 
     /// Finalize any orphaned `running` session rows for a task after infra death.
-    fn interrupt_running_sessions<'a>(
-        &'a self,
-        task_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn interrupt_running_sessions(&self, task_id: &str);
 
     /// Best-effort teardown of a terminal task-run's private Cargo target dir.
-    fn teardown_cargo_target_run_dir<'a>(
-        &'a self,
-        task_run_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn teardown_cargo_target_run_dir(&self, task_run_id: &str);
 
     /// Fire-and-forget post-session knowledge extraction.
-    fn trigger_session_extraction(
-        &self,
-        task_id: String,
-        task_run_id: String,
-    );
+    fn trigger_session_extraction(&self, task_id: String, task_run_id: String);
 
     /// Best-effort reap of an orphaned `task_runs` row still in `running` status.
-    fn reap_orphan_task_run<'a>(
-        &'a self,
-        task_id: &'a str,
-        terminal_status: TaskRunStatus,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+    async fn reap_orphan_task_run(&self, task_id: &str, terminal_status: TaskRunStatus);
 }
 
 /// Opaque coordinator operations needed post-dispatch.
@@ -314,8 +229,7 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
         TaskRunTrigger::ConflictRetry
     } else if matches!(
         flow,
-        djinn_runtime::SupervisorFlow::ReviewResponse
-            | djinn_runtime::SupervisorFlow::ReviewResume
+        djinn_runtime::SupervisorFlow::ReviewResponse | djinn_runtime::SupervisorFlow::ReviewResume
     ) {
         TaskRunTrigger::ReviewResponse
     } else {
@@ -330,12 +244,9 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
     // ── Build the spec ────────────────────────────────────────────────────
     let task_run_id = uuid::Uuid::now_v7().to_string();
 
-    let read_source_project_ids = ctx
-        .resolve_read_sources(task.epic_id.as_deref())
-        .await;
+    let read_source_project_ids = ctx.resolve_read_sources(task.epic_id.as_deref()).await;
 
-    let (github_owner, github_install_token) =
-        ctx.resolve_private_deps(&task.project_id).await;
+    let (github_owner, github_install_token) = ctx.resolve_private_deps(&task.project_id).await;
 
     let created_by_user_id = ctx.resolve_creator_user_id(&task.id).await;
     let (commit_author_name, commit_author_email) = ctx
@@ -394,8 +305,7 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
                     task_id = %cancel_task_id,
                     model_id = %cancel_model_id,
                 );
-                let rpc_span =
-                    supervisor_rpc_span("kill", &cancel_session_id, &cancel_task_id);
+                let rpc_span = supervisor_rpc_span("kill", &cancel_session_id, &cancel_task_id);
                 async move {
                     tracing::info!(
                         event = "supervisor.rpc.cancel",
@@ -538,11 +448,8 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
                             (true, None)
                         } else {
                             ctx.record_model_stall(creator_scope.as_deref(), &model_id, true);
-                            ctx.surface_credential_revocation(
-                                creator_scope.as_deref(),
-                                &model_id,
-                            )
-                            .await;
+                            ctx.surface_credential_revocation(creator_scope.as_deref(), &model_id)
+                                .await;
                             (true, None)
                         }
                     }
@@ -551,22 +458,20 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
             }
 
             // Budget-park dispatch state clear.
-            if is_budget_park_report(&report) {
-                if let Some(coordinator) = ctx.get_coordinator().await {
-                    if let Err(e) = coordinator
-                        .clear_planned_dispatch_completion(
-                            &task.id,
-                            "budget_park_planned_completion_clear",
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "supervisor dispatch: failed to clear budget-park dispatch state"
-                        );
-                    }
-                }
+            if is_budget_park_report(&report)
+                && let Some(coordinator) = ctx.get_coordinator().await
+                && let Err(e) = coordinator
+                    .clear_planned_dispatch_completion(
+                        &task.id,
+                        "budget_park_planned_completion_clear",
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "supervisor dispatch: failed to clear budget-park dispatch state"
+                );
             }
 
             // Loop guard → planner intervention.
@@ -598,30 +503,26 @@ pub async fn dispatch_task_runtime<C: TaskDispatchContext>(
                     session_id = %session_id,
                     "supervisor dispatch: loop guard tripped; routing to Planner intervention"
                 );
-                if let Some(coordinator) = ctx.get_coordinator().await {
-                    if let Err(e) = coordinator
+                if let Some(coordinator) = ctx.get_coordinator().await
+                    && let Err(e) = coordinator
                         .route_loop_guard_planner_intervention(
                             &task.id,
                             loop_guard_intervention_role,
                             &reason,
                         )
                         .await
-                    {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            error = %e,
-                            "supervisor dispatch: failed to enqueue loop-guard Planner intervention"
-                        );
-                    }
+                {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "supervisor dispatch: failed to enqueue loop-guard Planner intervention"
+                    );
                 }
             }
 
             // Post-session knowledge extraction.
             if !report.stages_completed.is_empty() {
-                ctx.trigger_session_extraction(
-                    task.id.clone(),
-                    report.task_run_id.clone(),
-                );
+                ctx.trigger_session_extraction(task.id.clone(), report.task_run_id.clone());
             }
             Ok(())
         }
