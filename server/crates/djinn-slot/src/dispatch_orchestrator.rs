@@ -254,7 +254,7 @@ pub trait CoordinatorOps: Send + Sync {
     async fn route_loop_guard_planner_intervention(
         &self,
         task_id: &str,
-        role: &str,
+        role: &'static str,
         reason: &str,
     ) -> anyhow::Result<()>;
 }
