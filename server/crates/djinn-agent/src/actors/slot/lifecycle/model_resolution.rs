@@ -186,6 +186,85 @@ pub(crate) async fn resolve_role_model_preference(
     None
 }
 
+/// Attempt model rotation for a resume dispatch.
+///
+/// When `metadata` indicates a prior session with a recorded `previous_model`
+/// that terminated for a rotation-worthy cause (no-progress checkpoint,
+/// auto-submit deadline, alternate checkpoint ref, or repeated verify loop),
+/// attempts to select a different model from the connected provider catalog.
+///
+/// Returns the rotated model ID, or `current_model_id` unchanged when:
+/// - no resume metadata is present,
+/// - no `previous_model` was recorded,
+/// - the selection reason does not map to a rotation-worthy termination cause,
+/// - no alternate model is available, or
+/// - credentials for the alternate are missing.
+///
+/// Emits a structured `model_rotation` lifecycle-step event via
+/// [`emit_rotation_event`] so observability sees every rotation attempt.
+pub(crate) async fn attempt_resume_model_rotation(
+    task_id: &str,
+    current_model_id: &str,
+    metadata: Option<&djinn_runtime::ResumeLifecycleMetadata>,
+    app_state: &AgentContext,
+) -> String {
+    let Some(metadata) = metadata else {
+        return current_model_id.to_string();
+    };
+
+    let prev_model = match &metadata.previous_model {
+        Some(m) if !m.trim().is_empty() => m.as_str(),
+        _ => return current_model_id.to_string(),
+    };
+
+    let cause = match metadata.selection_reason {
+        Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint) => {
+            RotationTerminationCause::NoProgress
+        }
+        Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted) => {
+            RotationTerminationCause::Deadline
+        }
+        Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef) => {
+            RotationTerminationCause::Flaky
+        }
+        Some(djinn_runtime::ResumeSelectionReason::NewerTaskBranch) => {
+            RotationTerminationCause::RepeatedVerifyLoop
+        }
+        _ => return current_model_id.to_string(),
+    };
+
+    let outcome = resolve_model_with_rotation(task_id, Some(prev_model), cause, app_state).await;
+
+    // Use selected_model() to extract the model id from the outcome before
+    // the match consumes it.
+    let selected = outcome.selected_model().map(str::to_string);
+
+    match outcome {
+        ModelRotationOutcome::Rotated { cause, .. } => {
+            let model = selected.unwrap_or_else(|| current_model_id.to_string());
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %prev_model,
+                selected_model = %model,
+                cause = ?cause,
+                "model_rotation: rotated for resume dispatch"
+            );
+            model
+        }
+        ModelRotationOutcome::Fallback { reason, cause, .. } => {
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %prev_model,
+                reason = ?reason,
+                cause = ?cause,
+                "model_rotation: no alternate available for resume, retaining current model"
+            );
+            current_model_id.to_string()
+        }
+        ModelRotationOutcome::NotApplicable => current_model_id.to_string(),
+    }
+}
+
 // ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
 
 /// Termination causes that should trigger model rotation.
@@ -278,8 +357,13 @@ pub(crate) async fn resolve_model_with_rotation(
     app_state: &AgentContext,
 ) -> ModelRotationOutcome {
     let Some(previous_model) = previous_model else {
-        emit_rotation_event(task_id, &ModelRotationOutcome::NotApplicable, app_state).await;
-        return ModelRotationOutcome::NotApplicable;
+        let outcome = ModelRotationOutcome::Fallback {
+            previous_model: String::new(),
+            reason: ModelRotationFallbackReason::NoPreviousModel,
+            cause,
+        };
+        emit_rotation_event(task_id, &outcome, app_state).await;
+        return outcome;
     };
 
     if !cause.should_rotate() {

@@ -853,11 +853,11 @@ pub(crate) fn build_worker_resume_note(
     let has_submit_or_review = metadata
         .submit_or_review_id
         .as_ref()
-        .map_or(false, |id| !id.trim().is_empty());
+        .is_some_and(|id| !id.trim().is_empty());
     let has_prior_session = metadata
         .prior_session_lineage
         .as_ref()
-        .map_or(false, |s| !s.trim().is_empty());
+        .is_some_and(|s| !s.trim().is_empty());
 
     if !has_checkpoint && !has_submit_or_review && !has_prior_session {
         return None;
