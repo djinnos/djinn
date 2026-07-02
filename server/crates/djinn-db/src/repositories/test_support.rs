@@ -111,6 +111,26 @@ pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
     .expect("failed to seed project");
 }
 
+/// Overwrite a debate-trail entry's `body_metadata`, bypassing the
+/// evidence-findings validation enforced by `add_debate_trail_entry`.
+/// Recovery tests use this to fabricate legacy/corrupt rows that can no
+/// longer be written through the repository API.
+///
+/// **Not for production use.**  Panics on SQL errors.
+pub async fn override_debate_trail_body_metadata(
+    db: &Database,
+    entry_id: &str,
+    body_metadata: &serde_json::Value,
+) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE proposal_debate_trail SET body_metadata = $2 WHERE id = $1")
+        .bind(entry_id)
+        .bind(body_metadata)
+        .execute(db.pool())
+        .await
+        .expect("failed to override debate trail body_metadata");
+}
+
 /// Drop a database table if it exists.  Test-fixture helper for
 /// failure-injection tests that need to simulate a missing-table error
 /// (e.g. the coordinator reentrance `blocker_lookup_error` test).
