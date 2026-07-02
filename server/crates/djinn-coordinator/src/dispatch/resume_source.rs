@@ -1,0 +1,574 @@
+//! Pure resume-source selection for re-dispatch.
+//!
+//! This module intentionally performs no checkout, GitHub, Kubernetes, or
+//! database work. Callers translate durable lifecycle/review/checkpoint rows
+//! into [`ResumeSourceCandidate`] values, then use [`select_resume_source`] to
+//! choose the safest source in a deterministic precedence order.
+
+use serde::{Deserialize, Serialize};
+
+use crate::{ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason};
+
+/// Resume source classes, ordered by [`source_precedence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeSourceKind {
+    /// Accepted auto-submit/review state from the normal submission path.
+    AutoSubmit,
+    /// A safety-scanned checkpoint commit on the task branch.
+    TaskBranchCheckpoint,
+    /// A safety-scanned checkpoint commit on an alternate checkpoint ref.
+    AlternateCheckpointRef,
+    /// Clean task branch fallback when no prior output can be resumed safely.
+    CleanTaskBranch,
+}
+
+impl ResumeSourceKind {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::AutoSubmit => 0,
+            Self::TaskBranchCheckpoint => 1,
+            Self::AlternateCheckpointRef => 2,
+            Self::CleanTaskBranch => 3,
+        }
+    }
+
+    fn selection_reason(self) -> ResumeSelectionReason {
+        match self {
+            Self::AutoSubmit => ResumeSelectionReason::AutoSubmitAccepted,
+            Self::TaskBranchCheckpoint => ResumeSelectionReason::LatestSafeCheckpoint,
+            Self::AlternateCheckpointRef => ResumeSelectionReason::AlternateCheckpointRef,
+            Self::CleanTaskBranch => ResumeSelectionReason::CleanTaskBranchFallback,
+        }
+    }
+}
+
+fn source_precedence(candidate: &ResumeSourceCandidate) -> u8 {
+    candidate.kind.precedence()
+}
+
+/// Accepted/blocked state for auto-submit candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSubmitResumeState {
+    /// A review/submission was accepted and may be used as the resume source.
+    Accepted,
+    /// Auto-submit ran but did not produce an accepted review/submission.
+    NotAccepted,
+    /// Auto-submit is blocked by policy, freshness, or review state.
+    Blocked,
+}
+
+/// Safety verdict for checkpoint candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum CheckpointSafetyVerdict {
+    /// The safety scanner accepted this checkpoint for later resume.
+    Safe,
+    /// The scanner rejected this checkpoint.
+    Unsafe {
+        /// Machine- or human-readable safety findings.
+        findings: Vec<String>,
+    },
+    /// No safety verdict was recorded; checkpoint resume must not use it.
+    Missing,
+}
+
+/// Machine-readable reason a candidate was rejected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "reason")]
+pub enum ResumeSourceSkipReason {
+    TaskIdMismatch {
+        expected: String,
+        actual: String,
+    },
+    SessionLineageMismatch {
+        expected: String,
+        actual: Option<String>,
+    },
+    AutoSubmitNotAccepted,
+    AutoSubmitBlocked,
+    CheckpointUnsafe {
+        findings: Vec<String>,
+    },
+    CheckpointSafetyMissing,
+    SourceStale {
+        age_secs: u64,
+        max_age_secs: u64,
+    },
+    MissingCheckpointSha,
+    MissingSubmitOrReviewId,
+}
+
+/// Rejected candidate plus its machine-readable reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedResumeSource {
+    pub kind: ResumeSourceKind,
+    pub target_ref: String,
+    pub checkpoint_sha: Option<String>,
+    pub submit_or_review_id: Option<String>,
+    pub reason: ResumeSourceSkipReason,
+}
+
+/// A pure candidate for resume-source selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSourceCandidate {
+    pub kind: ResumeSourceKind,
+    pub task_id: String,
+    /// Prior session or lineage identifier that produced this source.
+    pub session_lineage: Option<String>,
+    /// Commit SHA for checkpoint candidates.
+    pub checkpoint_sha: Option<String>,
+    /// Submit/review id for accepted auto-submit candidates.
+    pub submit_or_review_id: Option<String>,
+    /// Ref the future integration should check out. The selector only records it.
+    pub target_ref: String,
+    /// Auto-submit acceptance state; required only for auto-submit candidates.
+    pub auto_submit_state: Option<AutoSubmitResumeState>,
+    /// Checkpoint safety state; required only for checkpoint candidates.
+    pub checkpoint_safety: Option<CheckpointSafetyVerdict>,
+    /// Caller-computed age for freshness validation. `None` is treated as fresh.
+    pub age_secs: Option<u64>,
+}
+
+impl ResumeSourceCandidate {
+    pub fn clean_task_branch(task_id: impl Into<String>, target_ref: impl Into<String>) -> Self {
+        Self {
+            kind: ResumeSourceKind::CleanTaskBranch,
+            task_id: task_id.into(),
+            session_lineage: None,
+            checkpoint_sha: None,
+            submit_or_review_id: None,
+            target_ref: target_ref.into(),
+            auto_submit_state: None,
+            checkpoint_safety: None,
+            age_secs: None,
+        }
+    }
+}
+
+/// Chosen resume source plus every rejected candidate evaluated before it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeSourceSelection {
+    pub chosen_kind: ResumeSourceKind,
+    pub checkpoint_sha: Option<String>,
+    pub submit_or_review_id: Option<String>,
+    pub target_ref: String,
+    pub reason: ResumeSelectionReason,
+    pub skipped: Vec<RejectedResumeSource>,
+}
+
+/// Select the best resume source in deterministic precedence order:
+/// accepted auto-submit, safe task-branch checkpoint, safe alternate checkpoint
+/// ref, then clean task branch fallback.
+///
+/// Returns `None` when resume selection is disabled. This keeps the helper pure
+/// and lets current dispatch behavior remain unchanged until the integration
+/// task wires the selector into worktree setup.
+pub fn select_resume_source(
+    config: &ResumeLifecycleConfig,
+    expected_task_id: &str,
+    expected_session_lineage: Option<&str>,
+    candidates: &[ResumeSourceCandidate],
+) -> Option<ResumeSourceSelection> {
+    if !config.enabled {
+        return None;
+    }
+
+    let mut ordered: Vec<&ResumeSourceCandidate> = candidates.iter().collect();
+    ordered.sort_by_key(|candidate| {
+        (
+            source_precedence(candidate),
+            candidate.age_secs.unwrap_or(0),
+        )
+    });
+
+    let mut skipped = Vec::new();
+    for candidate in ordered {
+        match validate_candidate(
+            config,
+            expected_task_id,
+            expected_session_lineage,
+            candidate,
+        ) {
+            Ok(()) => {
+                return Some(ResumeSourceSelection {
+                    chosen_kind: candidate.kind,
+                    checkpoint_sha: candidate.checkpoint_sha.clone(),
+                    submit_or_review_id: candidate.submit_or_review_id.clone(),
+                    target_ref: candidate.target_ref.clone(),
+                    reason: candidate.kind.selection_reason(),
+                    skipped,
+                });
+            }
+            Err(reason) => skipped.push(RejectedResumeSource {
+                kind: candidate.kind,
+                target_ref: candidate.target_ref.clone(),
+                checkpoint_sha: candidate.checkpoint_sha.clone(),
+                submit_or_review_id: candidate.submit_or_review_id.clone(),
+                reason,
+            }),
+        }
+    }
+
+    None
+}
+
+fn validate_candidate(
+    config: &ResumeLifecycleConfig,
+    expected_task_id: &str,
+    expected_session_lineage: Option<&str>,
+    candidate: &ResumeSourceCandidate,
+) -> Result<(), ResumeSourceSkipReason> {
+    if candidate.task_id != expected_task_id {
+        return Err(ResumeSourceSkipReason::TaskIdMismatch {
+            expected: expected_task_id.to_owned(),
+            actual: candidate.task_id.clone(),
+        });
+    }
+
+    if candidate.kind != ResumeSourceKind::CleanTaskBranch {
+        if let Some(expected) = expected_session_lineage {
+            if candidate.session_lineage.as_deref() != Some(expected) {
+                return Err(ResumeSourceSkipReason::SessionLineageMismatch {
+                    expected: expected.to_owned(),
+                    actual: candidate.session_lineage.clone(),
+                });
+            }
+        }
+    }
+
+    if let Some(max_age_secs) = config.max_checkpoint_age_secs {
+        if let Some(age_secs) = candidate.age_secs {
+            if age_secs > max_age_secs {
+                return Err(ResumeSourceSkipReason::SourceStale {
+                    age_secs,
+                    max_age_secs,
+                });
+            }
+        }
+    }
+
+    match candidate.kind {
+        ResumeSourceKind::AutoSubmit => validate_auto_submit(candidate),
+        ResumeSourceKind::TaskBranchCheckpoint | ResumeSourceKind::AlternateCheckpointRef => {
+            validate_checkpoint(candidate)
+        }
+        ResumeSourceKind::CleanTaskBranch => Ok(()),
+    }
+}
+
+fn validate_auto_submit(candidate: &ResumeSourceCandidate) -> Result<(), ResumeSourceSkipReason> {
+    match candidate.auto_submit_state {
+        Some(AutoSubmitResumeState::Accepted) => {
+            if candidate.submit_or_review_id.is_some() {
+                Ok(())
+            } else {
+                Err(ResumeSourceSkipReason::MissingSubmitOrReviewId)
+            }
+        }
+        Some(AutoSubmitResumeState::Blocked) => Err(ResumeSourceSkipReason::AutoSubmitBlocked),
+        Some(AutoSubmitResumeState::NotAccepted) | None => {
+            Err(ResumeSourceSkipReason::AutoSubmitNotAccepted)
+        }
+    }
+}
+
+fn validate_checkpoint(candidate: &ResumeSourceCandidate) -> Result<(), ResumeSourceSkipReason> {
+    if candidate.checkpoint_sha.is_none() {
+        return Err(ResumeSourceSkipReason::MissingCheckpointSha);
+    }
+
+    match &candidate.checkpoint_safety {
+        Some(CheckpointSafetyVerdict::Safe) => Ok(()),
+        Some(CheckpointSafetyVerdict::Unsafe { findings }) => {
+            Err(ResumeSourceSkipReason::CheckpointUnsafe {
+                findings: findings.clone(),
+            })
+        }
+        Some(CheckpointSafetyVerdict::Missing) | None => {
+            Err(ResumeSourceSkipReason::CheckpointSafetyMissing)
+        }
+    }
+}
+
+/// Convert a pure selection into passive lifecycle metadata. This records all
+/// integration-relevant fields without performing checkout/worktree mutation.
+pub fn selection_to_metadata(selection: &ResumeSourceSelection) -> ResumeLifecycleMetadata {
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "source_kind".to_string(),
+        serde_json::json!(selection.chosen_kind),
+    );
+    extra.insert(
+        "target_ref".to_string(),
+        serde_json::json!(selection.target_ref),
+    );
+    if let Some(id) = &selection.submit_or_review_id {
+        extra.insert("submit_or_review_id".to_string(), serde_json::json!(id));
+    }
+    extra.insert("skipped".to_string(), serde_json::json!(selection.skipped));
+
+    ResumeLifecycleMetadata {
+        considered: true,
+        checkpoint_id: None,
+        commit_sha: selection.checkpoint_sha.clone(),
+        selection_reason: Some(selection.reason),
+        extra,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TASK: &str = "task-1";
+    const LINEAGE: &str = "session-1";
+    const TASK_REF: &str = "refs/heads/task/task-1";
+
+    fn config() -> ResumeLifecycleConfig {
+        ResumeLifecycleConfig {
+            enabled: true,
+            prefer_checkpoint: true,
+            max_checkpoint_age_secs: Some(300),
+        }
+    }
+
+    fn auto_submit(state: AutoSubmitResumeState) -> ResumeSourceCandidate {
+        ResumeSourceCandidate {
+            kind: ResumeSourceKind::AutoSubmit,
+            task_id: TASK.to_owned(),
+            session_lineage: Some(LINEAGE.to_owned()),
+            checkpoint_sha: None,
+            submit_or_review_id: if state == AutoSubmitResumeState::Accepted {
+                Some("review-1".to_owned())
+            } else {
+                None
+            },
+            target_ref: TASK_REF.to_owned(),
+            auto_submit_state: Some(state),
+            checkpoint_safety: None,
+            age_secs: Some(10),
+        }
+    }
+
+    fn checkpoint(
+        kind: ResumeSourceKind,
+        sha: &str,
+        safety: CheckpointSafetyVerdict,
+    ) -> ResumeSourceCandidate {
+        ResumeSourceCandidate {
+            kind,
+            task_id: TASK.to_owned(),
+            session_lineage: Some(LINEAGE.to_owned()),
+            checkpoint_sha: Some(sha.to_owned()),
+            submit_or_review_id: None,
+            target_ref: if kind == ResumeSourceKind::AlternateCheckpointRef {
+                "refs/djinn/checkpoints/task-1/session-1".to_owned()
+            } else {
+                TASK_REF.to_owned()
+            },
+            auto_submit_state: None,
+            checkpoint_safety: Some(safety),
+            age_secs: Some(20),
+        }
+    }
+
+    fn clean() -> ResumeSourceCandidate {
+        ResumeSourceCandidate::clean_task_branch(TASK, TASK_REF)
+    }
+
+    fn select(candidates: Vec<ResumeSourceCandidate>) -> ResumeSourceSelection {
+        select_resume_source(&config(), TASK, Some(LINEAGE), &candidates).expect("selection")
+    }
+
+    #[test]
+    fn accepted_auto_submit_wins_over_safe_checkpoint() {
+        let selection = select(vec![
+            checkpoint(
+                ResumeSourceKind::TaskBranchCheckpoint,
+                "abc123",
+                CheckpointSafetyVerdict::Safe,
+            ),
+            auto_submit(AutoSubmitResumeState::Accepted),
+            clean(),
+        ]);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::AutoSubmit);
+        assert_eq!(selection.submit_or_review_id.as_deref(), Some("review-1"));
+        assert_eq!(selection.target_ref, TASK_REF);
+        assert!(selection.skipped.is_empty());
+    }
+
+    #[test]
+    fn safe_task_branch_checkpoint_resumes_when_auto_submit_not_accepted() {
+        let selection = select(vec![
+            auto_submit(AutoSubmitResumeState::NotAccepted),
+            checkpoint(
+                ResumeSourceKind::TaskBranchCheckpoint,
+                "abc123",
+                CheckpointSafetyVerdict::Safe,
+            ),
+            clean(),
+        ]);
+
+        assert_eq!(
+            selection.chosen_kind,
+            ResumeSourceKind::TaskBranchCheckpoint
+        );
+        assert_eq!(selection.checkpoint_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            selection.reason,
+            ResumeSelectionReason::LatestSafeCheckpoint
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(
+            selection.skipped[0].reason,
+            ResumeSourceSkipReason::AutoSubmitNotAccepted
+        );
+    }
+
+    #[test]
+    fn unsafe_checkpoint_is_skipped_for_clean_fallback() {
+        let selection = select(vec![
+            checkpoint(
+                ResumeSourceKind::TaskBranchCheckpoint,
+                "bad123",
+                CheckpointSafetyVerdict::Unsafe {
+                    findings: vec!["secret detected".to_owned()],
+                },
+            ),
+            clean(),
+        ]);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::CleanTaskBranch);
+        assert_eq!(
+            selection.reason,
+            ResumeSelectionReason::CleanTaskBranchFallback
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(
+            selection.skipped[0].reason,
+            ResumeSourceSkipReason::CheckpointUnsafe {
+                findings: vec!["secret detected".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn mismatched_task_id_or_lineage_are_skipped() {
+        let mut wrong_task = checkpoint(
+            ResumeSourceKind::TaskBranchCheckpoint,
+            "abc123",
+            CheckpointSafetyVerdict::Safe,
+        );
+        wrong_task.task_id = "other-task".to_owned();
+        let mut wrong_lineage = checkpoint(
+            ResumeSourceKind::AlternateCheckpointRef,
+            "def456",
+            CheckpointSafetyVerdict::Safe,
+        );
+        wrong_lineage.session_lineage = Some("other-session".to_owned());
+
+        let selection = select(vec![wrong_task, wrong_lineage, clean()]);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::CleanTaskBranch);
+        assert_eq!(selection.skipped.len(), 2);
+        assert!(matches!(
+            selection.skipped[0].reason,
+            ResumeSourceSkipReason::TaskIdMismatch { .. }
+        ));
+        assert!(matches!(
+            selection.skipped[1].reason,
+            ResumeSourceSkipReason::SessionLineageMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn alternate_checkpoint_ref_resumes_after_task_branch_checkpoint_rejected() {
+        let selection = select(vec![
+            checkpoint(
+                ResumeSourceKind::TaskBranchCheckpoint,
+                "stale",
+                CheckpointSafetyVerdict::Missing,
+            ),
+            checkpoint(
+                ResumeSourceKind::AlternateCheckpointRef,
+                "alt456",
+                CheckpointSafetyVerdict::Safe,
+            ),
+            clean(),
+        ]);
+
+        assert_eq!(
+            selection.chosen_kind,
+            ResumeSourceKind::AlternateCheckpointRef
+        );
+        assert_eq!(selection.checkpoint_sha.as_deref(), Some("alt456"));
+        assert_eq!(
+            selection.reason,
+            ResumeSelectionReason::AlternateCheckpointRef
+        );
+        assert_eq!(selection.skipped.len(), 1);
+        assert_eq!(
+            selection.skipped[0].reason,
+            ResumeSourceSkipReason::CheckpointSafetyMissing
+        );
+    }
+
+    #[test]
+    fn stale_or_missing_safety_checkpoint_candidates_are_skipped() {
+        let mut stale = checkpoint(
+            ResumeSourceKind::TaskBranchCheckpoint,
+            "old",
+            CheckpointSafetyVerdict::Safe,
+        );
+        stale.age_secs = Some(301);
+        let missing_safety = checkpoint(
+            ResumeSourceKind::AlternateCheckpointRef,
+            "no-scan",
+            CheckpointSafetyVerdict::Missing,
+        );
+
+        let selection = select(vec![stale, missing_safety, clean()]);
+
+        assert_eq!(selection.chosen_kind, ResumeSourceKind::CleanTaskBranch);
+        assert_eq!(selection.skipped.len(), 2);
+        assert_eq!(
+            selection.skipped[0].reason,
+            ResumeSourceSkipReason::SourceStale {
+                age_secs: 301,
+                max_age_secs: 300,
+            }
+        );
+        assert_eq!(
+            selection.skipped[1].reason,
+            ResumeSourceSkipReason::CheckpointSafetyMissing
+        );
+    }
+
+    #[test]
+    fn clean_fallback_output_records_machine_readable_metadata() {
+        let selection = select(vec![auto_submit(AutoSubmitResumeState::Blocked), clean()]);
+        let metadata = selection_to_metadata(&selection);
+
+        assert!(metadata.considered);
+        assert_eq!(
+            metadata.selection_reason,
+            Some(ResumeSelectionReason::CleanTaskBranchFallback)
+        );
+        assert_eq!(
+            metadata.extra["source_kind"],
+            serde_json::json!("clean_task_branch")
+        );
+        assert_eq!(metadata.extra["target_ref"], serde_json::json!(TASK_REF));
+        assert!(metadata.extra["skipped"].is_array());
+    }
+
+    #[test]
+    fn disabled_config_returns_none_without_fallback_metadata() {
+        let disabled = ResumeLifecycleConfig::default();
+        let selection = select_resume_source(&disabled, TASK, Some(LINEAGE), &[clean()]);
+        assert!(selection.is_none());
+    }
+}

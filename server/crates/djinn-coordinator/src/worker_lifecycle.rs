@@ -652,7 +652,10 @@ pub struct ResumeLifecycleConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResumeSelectionReason {
+    AutoSubmitAccepted,
     LatestSafeCheckpoint,
+    AlternateCheckpointRef,
+    CleanTaskBranchFallback,
     NewerTaskBranch,
     CheckpointMissing,
     CheckpointUnsafe,

@@ -1,5 +1,6 @@
 mod admission;
 mod outcome;
+pub(crate) mod resume_source;
 mod retry;
 pub(crate) mod session_recovery;
 mod task_dispatch;
