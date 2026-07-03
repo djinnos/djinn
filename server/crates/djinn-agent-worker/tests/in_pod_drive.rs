@@ -467,6 +467,7 @@ async fn worker_drives_real_supervisor_in_pod() {
         commit_author_name: None,
         commit_author_email: None,
         resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
     };
     let spec_path: PathBuf = cfg_dir.path().join("spec.bin");
     write_bin(&spec_path, &spec);
