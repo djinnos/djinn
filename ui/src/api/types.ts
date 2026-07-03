@@ -146,6 +146,24 @@ export interface ProposalRefinementStatus {
   judge_summary?: string | null;
   /** Pre-refinement baseline revision sequence (diff baseline). */
   snapshot_revision_seq?: number | null;
+  /**
+   * Top-level evidence lifecycle state derived from durable proposal
+   * fields, lifecycle events, and linked-spike task status. Lets the UI
+   * distinguish Active, AwaitingEvidence, EvidenceFailed, PausedOrFrozen,
+   * and Terminal without inspecting individual sub-fields.
+   */
+  evidence_lifecycle_state?:
+    | "active"
+    | "awaiting_evidence"
+    | "evidence_received"
+    | "evidence_failed"
+    | "paused_or_frozen"
+    | "terminal";
+  /**
+   * When the proposal is parked for a needs-evidence spike, this contains
+   * the claim and spike task reference. `null` when not parked.
+   */
+  needs_evidence?: NeedsEvidenceStatus | null;
 }
 
 /**
@@ -170,6 +188,33 @@ export interface NeedsEvidenceStatus {
   spike_short_id: string;
   /** Current status of the spike task. */
   spike_status: string;
+  /**
+   * Current evidence lifecycle phase (awaiting, received, or failed).
+   * Derived from persisted `proposal_revisions` lifecycle events.
+   * `null` when no lifecycle event has been recorded yet.
+   */
+  evidence_phase?: "awaiting_evidence" | "evidence_received" | "evidence_failed" | null;
+  /**
+   * For `evidence_failed`, the failure reason (`spike_cancelled`,
+   * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
+   * `null` for other phases.
+   */
+  failure_reason?: string | null;
+  /**
+   * The feasibility question the spike must answer (from the structured
+   * claim). `null` when `claim` is a legacy plain string.
+   */
+  question?: string | null;
+  /** Debate round when the demand was issued. */
+  round?: number | null;
+  /** What in the spec is unknown/unverified. */
+  spec_unknown_anchor?: string | null;
+  /** The subsystem or module under investigation. */
+  target_subsystem?: string | null;
+  /** Proposal revision sequence the demand targets. */
+  against_revision_seq?: number | null;
+  /** The Judge task id that issued the demand. */
+  created_by_task_id?: string | null;
 }
 
 /**
