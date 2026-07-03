@@ -69,6 +69,8 @@ mod llm_extraction_tests;
 mod reply_loop_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+#[cfg(test)]
+mod finalize_handlers_tests;
 
 // ─── Public re-exports ──────────────────────────────────────────────────────
 

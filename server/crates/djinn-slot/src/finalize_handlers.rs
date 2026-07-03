@@ -174,12 +174,9 @@ async fn handle_submit_work(
                 .await;
             }
             Err(()) => {
-                emit_fingerprint_unavailable_event(
-                    task_id,
-                    &metadata.task_run_id,
-                    "compute_error",
-                    app_state,
-                );
+                // resolve_auto_submit_diff_fingerprint already emitted a reason-specific
+                // `submission_fingerprint_unavailable` event for the unavailable/no-diff
+                // paths; avoid double-emitting a misleading `compute_error` here.
                 return persist_auto_submit_review_metadata(
                     metadata,
                     app_state,
