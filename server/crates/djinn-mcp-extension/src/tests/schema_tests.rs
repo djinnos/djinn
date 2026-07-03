@@ -842,7 +842,8 @@ fn snapshot_judge_tool_schemas() {
 
 #[test]
 fn evidence_spike_schema_includes_read_only_investigation_tools() {
-    let names = schema_names(tool_schemas_evidence_spike());
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
     let expected = [
         "read",
         "code_search",
@@ -856,7 +857,7 @@ fn evidence_spike_schema_includes_read_only_investigation_tools() {
     ];
     for tool in expected {
         assert!(
-            names.iter().any(|n| n == tool),
+            names.contains(&tool),
             "evidence_spike schema should include {tool}"
         );
     }
@@ -864,7 +865,8 @@ fn evidence_spike_schema_includes_read_only_investigation_tools() {
 
 #[test]
 fn evidence_spike_schema_includes_read_only_inspection_tools() {
-    let names = schema_names(tool_schemas_evidence_spike());
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
     let expected = [
         "task_show",
         "task_list",
@@ -884,7 +886,7 @@ fn evidence_spike_schema_includes_read_only_inspection_tools() {
     ];
     for tool in expected {
         assert!(
-            names.iter().any(|n| n == tool),
+            names.contains(&tool),
             "evidence_spike schema should include {tool}"
         );
     }
@@ -892,16 +894,18 @@ fn evidence_spike_schema_includes_read_only_inspection_tools() {
 
 #[test]
 fn evidence_spike_schema_includes_submit_work_terminal() {
-    let names = schema_names(tool_schemas_evidence_spike());
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
     assert!(
-        names.iter().any(|n| n == "submit_work"),
+        names.contains(&"submit_work"),
         "evidence_spike schema should include submit_work as the terminal finalize tool"
     );
 }
 
 #[test]
 fn evidence_spike_schema_excludes_mutation_and_destructive_tools() {
-    let names = schema_names(tool_schemas_evidence_spike());
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
     let blocked = [
         "shell",
         "write",
@@ -937,7 +941,7 @@ fn evidence_spike_schema_excludes_mutation_and_destructive_tools() {
     ];
     for tool in blocked {
         assert!(
-            !names.iter().any(|n| n == tool),
+            !names.contains(&tool),
             "evidence_spike schema must NOT include {tool}"
         );
     }

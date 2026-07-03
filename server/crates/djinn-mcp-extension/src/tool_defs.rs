@@ -742,10 +742,26 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
     tool_values.push(serialize_tool(tool_output_view(), read_only()));
     tool_values.push(serialize_tool(tool_output_grep(), read_only()));
-    // Read-only task/epic/proposal/memory inspection tools.
-    for value in shared_schemas::shared_lead_tool_schemas() {
-        tool_values.push(value);
-    }
+    // Read-only epic inspection tools. Individually constructed — NOT via
+    // `shared_lead_tool_schemas()` which includes mutation tools
+    // (task_create, task_update, epic_update, epic_close).
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_tasks(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_blockers_list(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_blocked_list(),
+        read_only(),
+    ));
+    // Read-only proposal/debate inspection tools.
     tool_values.push(serialize_tool(
         shared_schemas::tool_proposal_show(),
         read_only(),
@@ -754,6 +770,8 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
         shared_schemas::tool_proposal_debate_list(),
         read_only(),
     ));
+    // Note: memory_read, memory_search, memory_list are already included
+    // via shared_base_tool_schemas() above — not duplicated here.
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_build_context(),
         read_only(),
@@ -772,18 +790,6 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     ));
     tool_values.push(serialize_tool(
         shared_schemas::tool_memory_orphans(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_read(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_search(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_list(),
         read_only(),
     ));
     // Terminal finalize path: evidence spikes are still Architect spike runs.
