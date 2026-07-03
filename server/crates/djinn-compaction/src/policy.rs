@@ -2,10 +2,18 @@ use djinn_provider::message::{Conversation, Message, Role};
 use djinn_provider::provider::LlmProvider;
 
 use super::prompts::{
-    CompactionContext, last_user_text, rebuild_full_compaction_messages,
+    CompactionContext, extract_prior_summary, last_user_text, rebuild_full_compaction_messages,
     rebuild_partial_compaction_messages,
 };
 use super::summarizer::{do_compact, do_partial_compact, is_context_error_message};
+
+/// Find the indices of a compaction summary anchor pair in `messages`.
+///
+/// Returns `(summary_idx, continuation_idx)` if present — the user message
+/// containing the summary and the immediately following assistant continuation.
+fn find_summary_anchor_pair(messages: &[Message]) -> Option<(usize, usize)> {
+    extract_prior_summary(messages).map(|(_, si, ci)| (si, ci))
+}
 
 /// Fraction of the context window at which compaction is triggered.
 pub(crate) const COMPACTION_THRESHOLD: f64 = 0.8;
@@ -388,15 +396,46 @@ fn drop_oldest_message_groups(messages: &mut Vec<Message>, fraction: f64) {
         0
     };
 
+    // Detect a compaction summary anchor pair to preserve during drops.
+    let anchor = find_summary_anchor_pair(&messages[start..]).map(|(a, b)| (a + start, b + start));
+
     let droppable = messages.len().saturating_sub(start);
     if droppable == 0 {
         return;
     }
 
-    let groups = droppable / 2;
+    // Exclude anchor from the droppable count so it doesn't inflate drop budget.
+    let anchor_len = anchor.map(|(a, b)| b - a + 1).unwrap_or(0);
+    let droppable_excl_anchor = droppable.saturating_sub(anchor_len);
+    if droppable_excl_anchor == 0 {
+        return;
+    }
+
+    let groups = droppable_excl_anchor / 2;
     let groups_to_drop = ((groups as f64 * fraction).ceil() as usize).max(1);
-    let messages_to_drop = (groups_to_drop * 2).min(droppable);
-    messages.drain(start..start + messages_to_drop);
+    let remaining = (groups_to_drop * 2).min(droppable_excl_anchor);
+
+    if let Some((anchor_start, anchor_end)) = anchor {
+        // Drain in phases, skipping the anchor range.
+        let pre_anchor_count = anchor_start - start;
+        let phase1 = remaining.min(pre_anchor_count);
+        if phase1 > 0 {
+            messages.drain(start..start + phase1);
+        }
+        let still_needed = remaining - phase1;
+        if still_needed > 0 {
+            // After draining phase1, the anchor shifted left by phase1.
+            let new_anchor_end = anchor_end - phase1;
+            let post_start = new_anchor_end + 1;
+            let available_after = messages.len().saturating_sub(post_start);
+            let phase2 = still_needed.min(available_after);
+            if phase2 > 0 {
+                messages.drain(post_start..post_start + phase2);
+            }
+        }
+    } else {
+        messages.drain(start..start + remaining);
+    }
 }
 
 async fn partial_compact(
@@ -522,10 +561,25 @@ pub(crate) fn deterministic_compact(messages: &[Message], max_chars: usize) -> V
     }
 
     let (system_msg, rest, available) = deterministic_budget_setup(messages, max_chars);
+
+    // Detect a compaction summary anchor pair to preserve.
+    let anchor = find_summary_anchor_pair(rest);
+
     let mut state = deterministic_select_recent_tail(rest, available);
     deterministic_close_tool_pairs(rest, &mut state);
-    deterministic_prune_over_budget(rest, &mut state, available);
-    deterministic_assemble_result(system_msg, rest, &state)
+
+    // Force-include the anchor in the kept set so it survives pruning.
+    if let Some((a, b)) = anchor {
+        for &idx in &[a, b] {
+            if !state.kept_set.contains(&idx) {
+                state.accumulated += estimate_message_chars(&rest[idx]);
+                state.kept_set.insert(idx);
+            }
+        }
+    }
+
+    deterministic_prune_over_budget(rest, &mut state, available, anchor);
+    deterministic_assemble_result(system_msg, rest, &state, anchor.is_some())
 }
 
 /// Budget setup: extract the system message and compute the available character
@@ -627,52 +681,68 @@ fn deterministic_close_tool_pairs(rest: &[Message], state: &mut DetCompactState)
 /// Budget pruning: when the accumulated kept messages exceed the available
 /// budget, remove the oldest entries (together with their pair partner when
 /// the next entry forms a consecutive pair) until we fit or only two entries
-/// remain.
+/// remain. When `anchor` is `Some((a, b))`, those indices are never pruned.
 fn deterministic_prune_over_budget(
     rest: &[Message],
     state: &mut DetCompactState,
     available: usize,
+    anchor: Option<(usize, usize)>,
 ) {
     if state.accumulated <= available {
         return;
     }
 
+    let protected: std::collections::HashSet<usize> = match anchor {
+        Some((a, b)) => [a, b].into_iter().collect(),
+        None => std::collections::HashSet::new(),
+    };
+
     let mut sorted: Vec<usize> = state.kept_set.iter().copied().collect();
     sorted.sort();
     while state.accumulated > available && sorted.len() > 2 {
-        let oldest = sorted.remove(0);
+        // Find the oldest non-protected entry.
+        let remove_pos = match sorted.iter().position(|idx| !protected.contains(idx)) {
+            Some(p) => p,
+            None => break,
+        };
+
+        let oldest = sorted.remove(remove_pos);
         state.accumulated = state
             .accumulated
             .saturating_sub(estimate_message_chars(&rest[oldest]));
         state.kept_set.remove(&oldest);
-        if !sorted.is_empty() {
-            let partner = sorted[0];
-            let is_pair = (rest[oldest].role == Role::Assistant
-                && rest[partner].role == Role::User)
-                || (rest[oldest].role == Role::User && rest[partner].role == Role::Assistant);
-            if is_pair {
-                state.accumulated = state
-                    .accumulated
-                    .saturating_sub(estimate_message_chars(&rest[partner]));
-                state.kept_set.remove(&partner);
-                sorted.remove(0);
+        if remove_pos < sorted.len() {
+            let partner = sorted[remove_pos];
+            if !protected.contains(&partner) {
+                let is_pair = (rest[oldest].role == Role::Assistant
+                    && rest[partner].role == Role::User)
+                    || (rest[oldest].role == Role::User && rest[partner].role == Role::Assistant);
+                if is_pair {
+                    state.accumulated = state
+                        .accumulated
+                        .saturating_sub(estimate_message_chars(&rest[partner]));
+                    state.kept_set.remove(&partner);
+                    sorted.remove(remove_pos);
+                }
             }
         }
     }
 }
 
 /// Final result assembly: prepend the system message, insert a compacted-notice
-/// when messages were trimmed, and append the kept messages in order.
+/// when messages were trimmed (unless a prior-summary anchor provides the
+/// context instead), and append the kept messages in order.
 fn deterministic_assemble_result(
     system_msg: Message,
     rest: &[Message],
     state: &DetCompactState,
+    has_anchor: bool,
 ) -> Vec<Message> {
     let mut kept_indices: Vec<usize> = state.kept_set.iter().copied().collect();
     kept_indices.sort();
 
     let mut result = vec![system_msg];
-    if kept_indices.len() < rest.len() {
+    if kept_indices.len() < rest.len() && !has_anchor {
         let trimmed_count = rest.len() - kept_indices.len();
         result.push(Message::user(format!(
             "[Context compacted: {trimmed_count} earlier messages were trimmed to fit the context window. \
