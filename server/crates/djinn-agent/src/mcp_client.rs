@@ -29,12 +29,60 @@ use djinn_provider::repos::CredentialRepository;
 static PLACEHOLDER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_]+)\}").expect("valid MCP placeholder regex"));
 
-/// Format an MCP-namespaced tool name: `mcp__{server}__{tool}`.
+/// Maximum length of the advertised provider-facing MCP namespaced tool name,
+/// including the `mcp__` prefix and both `__` separators.
+pub const MCP_NAMESPACED_NAME_MAX_LEN: usize = 64;
+
+/// Format a provider-facing MCP-namespaced tool name: `mcp__{server}__{tool}`.
 ///
-/// This prevents collisions between servers and makes provenance visible
-/// in traces, Langfuse, and the LLM's tool-call output.
+/// Sanitizes both `server_name` and `tool_name` to `[A-Za-z0-9_-]` and bounds the
+/// final name to [`MCP_NAMESPACED_NAME_MAX_LEN`] characters. If truncation is
+/// required, the function preserves a deterministic prefix from each segment plus
+/// the separators, so the advertised name remains readable and stable.
+///
+/// This is the name seen by the provider API; the remote server's original tool
+/// name is preserved in `namespaced_to_original` and used at dispatch time.
 pub fn mcp_namespaced_name(server_name: &str, tool_name: &str) -> String {
-    format!("mcp__{server_name}__{tool_name}")
+    let prefix = "mcp__";
+    let separator = "__";
+    let server = sanitize_mcp_name_segment(server_name);
+    let tool = sanitize_mcp_name_segment(tool_name);
+    let name = format!("{prefix}{server}{separator}{tool}");
+    if name.len() <= MCP_NAMESPACED_NAME_MAX_LEN {
+        return name;
+    }
+    truncate_mcp_namespaced_name(prefix, separator, &server, &tool)
+}
+
+fn sanitize_mcp_name_segment(segment: &str) -> String {
+    if segment.is_empty() {
+        return "_".to_string();
+    }
+    segment
+        .chars()
+        .map(|c| if is_mcp_name_safe_char(c) { c } else { '_' })
+        .collect()
+}
+
+fn is_mcp_name_safe_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+fn truncate_mcp_namespaced_name(
+    prefix: &str,
+    separator: &str,
+    server: &str,
+    tool: &str,
+) -> String {
+    let budget = MCP_NAMESPACED_NAME_MAX_LEN.saturating_sub(prefix.len() + separator.len());
+    // Allocate at least one character for each segment so neither is erased.
+    let server_len = server.len().min(budget.saturating_sub(1));
+    let remaining = budget.saturating_sub(server_len);
+    let tool_len = tool.len().min(remaining.max(1));
+
+    let server_prefix = &server[..server_len];
+    let tool_prefix = &tool[..tool_len];
+    format!("{prefix}{server_prefix}{separator}{tool_prefix}")
 }
 
 fn external_tool_schema_json(
@@ -370,8 +418,10 @@ pub async fn connect_and_discover(
                         tracing::warn!(
                             task_id = %task_short_id,
                             server = %name,
-                            tool = %namespaced,
-                            "Duplicate MCP tool name; later server wins"
+                            namespaced_tool = %namespaced,
+                            original_tool = %original_name,
+                            prior_server = %tool_to_server.get(&namespaced).unwrap_or(&"unknown".to_string()),
+                            "Sanitized MCP tool name collides with an existing name; later server wins"
                         );
                     }
 
@@ -562,6 +612,79 @@ mod tests {
     }
 
     #[test]
+    fn namespaced_name_matches_expected_format() {
+        let name = mcp_namespaced_name("My Server", "tool.name!");
+        assert!(name.starts_with("mcp__"));
+        assert!(name.len() <= MCP_NAMESPACED_NAME_MAX_LEN);
+        assert_regex_match(&name);
+    }
+
+    #[test]
+    fn namespaced_name_sanitizes_invalid_characters() {
+        assert_eq!(
+            mcp_namespaced_name("server@foo", "tool/bar.baz"),
+            "mcp__server_foo__tool_bar_baz"
+        );
+        assert_eq!(mcp_namespaced_name("a b", "c"), "mcp__a_b__c");
+        assert_eq!(mcp_namespaced_name("a", "b c"), "mcp__a__b_c");
+    }
+
+    #[test]
+    fn namespaced_name_preserves_alphanumeric_underscore_dash() {
+        assert_eq!(
+            mcp_namespaced_name("A-z_0-9", "tool-1_2"),
+            "mcp__A-z_0-9__tool-1_2"
+        );
+    }
+
+    #[test]
+    fn namespaced_name_handles_empty_segments() {
+        assert_eq!(mcp_namespaced_name("", "tool"), "mcp_____tool");
+        assert_eq!(mcp_namespaced_name("server", ""), "mcp__server___");
+    }
+
+    #[test]
+    fn namespaced_name_truncates_overlong_names() {
+        let server = "a".repeat(100);
+        let tool = "b".repeat(100);
+        let name = mcp_namespaced_name(&server, &tool);
+        assert!(name.starts_with("mcp__"));
+        assert!(name.ends_with("__b"));
+        assert_eq!(name.len(), MCP_NAMESPACED_NAME_MAX_LEN);
+        assert_regex_match(&name);
+    }
+
+    #[test]
+    fn namespaced_name_truncation_is_deterministic() {
+        let server = "x".repeat(200);
+        let tool = "y".repeat(200);
+        let first = mcp_namespaced_name(&server, &tool);
+        let second = mcp_namespaced_name(&server, &tool);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn namespaced_name_truncation_preserves_both_segments() {
+        let server = "server".repeat(20);
+        let tool = "tool".repeat(30);
+        let name = mcp_namespaced_name(&server, &tool);
+        assert!(name.starts_with("mcp__serverserver"));
+        assert!(name.contains("__t"));
+        assert_eq!(name.len(), MCP_NAMESPACED_NAME_MAX_LEN);
+    }
+
+    fn assert_regex_match(name: &str) {
+        let re = regex::Regex::new(&format!(
+            "^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$"
+        ))
+        .expect("valid regex");
+        assert!(
+            re.is_match(name),
+            "name `{name}` does not match the expected pattern"
+        );
+    }
+
+    #[test]
     fn call_tool_result_text_content() {
         use rmcp::model::Content;
 
@@ -697,6 +820,36 @@ mod tests {
         assert_eq!(schema["idempotent"], false);
         assert_eq!(schema["openWorld"], false);
         assert_eq!(schema["concurrent_safe"], false);
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_to_original_tool_name() {
+        let original_tool = "remote/tool.name";
+        let advertised = mcp_namespaced_name("my-server", original_tool);
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(advertised.clone(), "my-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(advertised.clone(), original_tool.to_string());
+
+        let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let received_clone = received.clone();
+        let registry = McpToolRegistry {
+            tool_to_server,
+            namespaced_to_original,
+            peers: HashMap::new(),
+            tool_schemas: Vec::new(),
+            test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
+                let received = received_clone.clone();
+                Box::pin(async move {
+                    *received.lock().unwrap() = Some(original_tool.to_string());
+                    Ok(serde_json::json!({ "tool": original_tool }))
+                })
+            })),
+        };
+
+        let result = registry.call_tool(&advertised, None).await;
+        assert!(result.is_ok());
+        assert_eq!(received.lock().unwrap().as_deref(), Some(original_tool));
     }
 
     #[tokio::test]
