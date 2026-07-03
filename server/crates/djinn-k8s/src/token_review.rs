@@ -7,13 +7,13 @@
 //! `authenticated: true` plus the token's user identity and audiences.
 //!
 //! PR 1 only lands the typed shell. PR 2 flips the TCP listener over to
-//! calling [`review_token`] on the first frame of every connection.
+//! calling [`TokenReviewer::review`] on the first frame of every connection.
 
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::api::{Api, PostParams};
 use thiserror::Error;
 
-/// Outcome of a [`review_token`] call.
+/// Outcome of a token review call.
 #[derive(Debug, Clone)]
 pub struct TokenReviewResult {
     /// Whether the cluster authenticated the token.
@@ -35,6 +35,39 @@ pub enum TokenReviewError {
     Kube(#[from] kube::Error),
 }
 
+/// Owner-crate wrapper around a Kubernetes client that performs token review.
+///
+/// Non-owner crates should use this type instead of directly holding or
+/// constructing `kube::Client` for token-review validation.
+#[derive(Clone, Debug)]
+pub struct TokenReviewer {
+    client: kube::Client,
+    audience: String,
+}
+
+impl TokenReviewer {
+    /// Build a reviewer from an existing kube client and expected token audience.
+    pub fn new(client: kube::Client, audience: impl Into<String>) -> Self {
+        Self {
+            client,
+            audience: audience.into(),
+        }
+    }
+
+    /// Build a reviewer using the default Kubernetes client (in-cluster config
+    /// or kubeconfig) for the current process.
+    pub async fn try_default(audience: impl Into<String>) -> Result<Self, TokenReviewError> {
+        let client = kube::Client::try_default().await?;
+        Ok(Self::new(client, audience))
+    }
+
+    /// POST the presented token at the `TokenReview` endpoint and return the
+    /// decoded result.
+    pub async fn review(&self, token: &str) -> Result<TokenReviewResult, TokenReviewError> {
+        review_token(&self.client, token, &self.audience).await
+    }
+}
+
 /// POST a `TokenReview` for `token` with the expected `audience` and return
 /// a decoded [`TokenReviewResult`].
 ///
@@ -43,6 +76,10 @@ pub enum TokenReviewError {
 /// server rejects the connection if `authenticated` is false or if the
 /// task-run id embedded in the following `AuthHello` frame does not match
 /// the user the token belongs to.
+///
+/// Prefer [`TokenReviewer`] for owner-crate construction; this function is
+/// exposed for callers that already own a `kube::Client` and only need the
+/// review operation.
 pub async fn review_token(
     client: &kube::Client,
     token: &str,
