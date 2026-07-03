@@ -1263,7 +1263,7 @@ async fn make_task_with_reopen_count(
             0,
             "",
             Some("open"),
-            None,
+            Some(r#"[{"title":"fixture acceptance criterion"}]"#),
         )
         .await
         .unwrap();

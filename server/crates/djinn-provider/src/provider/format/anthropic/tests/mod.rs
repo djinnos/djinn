@@ -90,6 +90,7 @@ pub(super) fn test_anthropic_config() -> ProviderConfig {
             max_tokens_default: Some(64_000),
         },
         reasoning_effort: None,
+        tool_schema_compat: None,
     }
 }
 

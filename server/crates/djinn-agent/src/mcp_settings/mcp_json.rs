@@ -15,6 +15,7 @@ struct McpJsonConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct McpServerEntry {
     url: Option<String>,
     command: Option<String>,
@@ -24,6 +25,10 @@ struct McpServerEntry {
     env: HashMap<String, String>,
     #[serde(default)]
     headers: HashMap<String, String>,
+    #[serde(default = "McpServerConfig::default_startup_timeout_ms")]
+    startup_timeout_ms: u64,
+    #[serde(default = "McpServerConfig::default_request_timeout_ms")]
+    request_timeout_ms: u64,
 }
 
 impl From<McpServerEntry> for McpServerConfig {
@@ -34,6 +39,8 @@ impl From<McpServerEntry> for McpServerConfig {
             args: entry.args,
             env: entry.env,
             headers: entry.headers,
+            startup_timeout_ms: entry.startup_timeout_ms,
+            request_timeout_ms: entry.request_timeout_ms,
         }
     }
 }
@@ -229,6 +236,73 @@ mod tests {
             server.headers.get("Authorization").map(String::as_str),
             Some("Bearer token")
         );
+        assert_eq!(server.startup_timeout_ms, 30_000);
+        assert_eq!(server.request_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn parses_root_mcp_json_without_timeout_fields() {
+        let dir = tempdir_in_tmp();
+        write_file(
+            &dir,
+            "mcp.json",
+            r#"{
+                "mcpServers": {
+                    "legacy": {"url": "https://example.com/mcp"}
+                }
+            }"#,
+        );
+
+        let registry = load_mcp_server_registry(dir.path());
+        let server = registry.get("legacy").expect("server in registry");
+        assert_eq!(server.startup_timeout_ms, 30_000);
+        assert_eq!(server.request_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn parses_cursor_mcp_json_with_timeout_overrides() {
+        let dir = tempdir_in_tmp();
+        write_file(
+            &dir,
+            ".cursor/mcp.json",
+            r#"{
+                "mcpServers": {
+                    "custom": {
+                        "url": "https://cursor.example/mcp",
+                        "startupTimeoutMs": 5000,
+                        "requestTimeoutMs": 60000
+                    }
+                }
+            }"#,
+        );
+
+        let registry = load_mcp_server_registry(dir.path());
+        let server = registry.get("custom").expect("server in registry");
+        assert_eq!(server.startup_timeout_ms, 5_000);
+        assert_eq!(server.request_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn parses_opencode_mcp_json_with_timeout_overrides() {
+        let dir = tempdir_in_tmp();
+        write_file(
+            &dir,
+            ".opencode/mcp.json",
+            r#"{
+                "mcpServers": {
+                    "custom": {
+                        "command": "npx",
+                        "startupTimeoutMs": 10000,
+                        "requestTimeoutMs": 90000
+                    }
+                }
+            }"#,
+        );
+
+        let registry = load_mcp_server_registry(dir.path());
+        let server = registry.get("custom").expect("server in registry");
+        assert_eq!(server.startup_timeout_ms, 10_000);
+        assert_eq!(server.request_timeout_ms, 90_000);
     }
 
     #[test]

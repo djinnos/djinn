@@ -75,6 +75,57 @@ describe("AnnotatedCode", () => {
     expect(screen.queryByText(/could not be parsed/i)).not.toBeInTheDocument();
   });
 
+  it("renders code from the `code` expression attribute when authored self-closing (no children)", () => {
+    // Regression: agents author `<AnnotatedCode code={`…`} />` (the block
+    // catalog's `code` field — code with `<`/`{` cannot sit in children), and
+    // the renderer read children only, so the block rendered empty.
+    render(
+      <AnnotatedCode
+        id="c6"
+        attributes={{
+          language: "rust",
+          code: "`pub struct Config {\n    pub url: Option<String>,\n}`",
+        }}
+      >
+        {""}
+      </AnnotatedCode>,
+    );
+    expect(screen.getByText(/pub struct Config/)).toBeInTheDocument();
+    // The template-literal delimiters are stripped, not rendered.
+    expect(screen.queryByText(/^`/)).not.toBeInTheDocument();
+  });
+
+  it("resolves annotations against attribute-sourced code lines", () => {
+    render(
+      <AnnotatedCode
+        id="c7"
+        attributes={{
+          language: "ts",
+          code: "`const a = 1;\nconst b = 2;\nreturn a + b;`",
+          annotations: JSON.stringify([
+            { line: "3", note: "the sum is returned here" },
+          ]),
+        }}
+      >
+        {""}
+      </AnnotatedCode>,
+    );
+    expect(screen.getByText("Line 3")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("the sum is returned here").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("prefers the `code` attribute over children when both are present", () => {
+    render(
+      <AnnotatedCode id="c8" attributes={{ lang: "ts", code: '"from attr"' }}>
+        {"from children"}
+      </AnnotatedCode>,
+    );
+    expect(screen.getByText(/from attr/)).toBeInTheDocument();
+    expect(screen.queryByText(/from children/)).not.toBeInTheDocument();
+  });
+
   it("clips the code surface vertically so overflow-x never promotes a stray vertical scrollbar", () => {
     // Regression: the surface used only `overflow-x-auto` in its expanded
     // state, which the browser promotes the *other* axis to `auto`, rendering a
