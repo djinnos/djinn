@@ -79,6 +79,25 @@ flowchart LR
 - NEVER emit an empty `<Diagram>`. If you cannot express a concrete diagram,
   use prose or a list instead.
 
+## Code blocks
+
+Put the code in the `code` attribute as a template-literal expression — NOT
+between the tags. Real code contains `<` and `{`, which the MDX parser rejects
+as malformed JSX when it appears in block children:
+
+```
+<AnnotatedCode id="handler" language="rust" filename="src/handler.rs" code={`fn handle(req: Request) -> Option<Response> {
+    respond(req)
+}`} annotations={[{"line":"1","note":"Entry point."}]} />
+```
+
+- `annotations` is strict JSON (double quotes only); `line` is a single line
+  (`"3"`) or a range (`"3-5"`).
+- The code inside the template literal must not itself contain backticks or
+  unbalanced `{` / `}` — for such snippets, simplify or trim the excerpt.
+- Only trivially simple snippets with no `<` or braces (e.g. a shell command)
+  may be authored as children between `<AnnotatedCode>` … `</AnnotatedCode>`.
+
 ## Bare `<` / `>` backtick constraint
 
 When you write literal angle brackets in markdown — for example `<div>`,

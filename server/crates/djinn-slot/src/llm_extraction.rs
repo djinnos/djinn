@@ -2108,6 +2108,7 @@ mod tests {
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
             reasoning_effort: Some(ReasoningEffort::High),
+            tool_schema_compat: None,
         });
         // Exact downgrade logic from the call site.
         let provider: Box<dyn LlmProvider> =

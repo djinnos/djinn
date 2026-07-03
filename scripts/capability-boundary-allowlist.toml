@@ -275,8 +275,88 @@ capability = "http"
 # Header-only reqwest imports (not HTTP client construction)
 [[entries]]
 capability = "http"
-	path = "server/crates/djinn-agent/src/mcp_client.rs"
-	matcher = "reqwest::{"
-	owner = "team/agent"
-	rationale = "Pre-existing reqwest::header destructured import for MCP client headers; not HTTP client construction."
-	cleanup_issue = "epic/fztz"
+path = "server/crates/djinn-agent/src/mcp_client.rs"
+matcher = "reqwest::{"
+owner = "team/agent"
+rationale = "Pre-existing reqwest::header destructured import for MCP client headers; not HTTP client construction."
+cleanup_issue = "epic/fztz"
+
+# ── Baseline k8s capability allowlist entries ──────────────────────────────
+# These entries pre-allowlist existing Kubernetes client/object access outside
+# djinn-k8s/ so the guard runs cleanly today.  They will be cleaned up as crates
+# migrate to djinn-k8s (tracked by epic fztz).
+
+# djinn-agent
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-agent/src/runtime_bridge.rs"
+matcher = "kube::"
+owner = "team/agent"
+rationale = "Pre-existing kube::Client usage for token review validation; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+# djinn-image-controller
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/src/watcher.rs"
+matcher = "kube::"
+owner = "team/image-controller"
+rationale = "Pre-existing kube client/watcher usage for image build watching; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/src/watcher.rs"
+matcher = "k8s_openapi"
+owner = "team/image-controller"
+rationale = "Pre-existing k8s_openapi type usage for image build watching; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/src/controller.rs"
+matcher = "kube::"
+owner = "team/image-controller"
+rationale = "Pre-existing kube::Client/api usage in image controller; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/src/controller.rs"
+matcher = "k8s_openapi"
+owner = "team/image-controller"
+rationale = "Pre-existing k8s_openapi type usage in image controller; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/src/build_job.rs"
+matcher = "k8s_openapi"
+owner = "team/image-controller"
+rationale = "Pre-existing k8s_openapi type usage for building image controller jobs; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/tests/unit.rs"
+matcher = "kube::"
+owner = "team/image-controller"
+rationale = "Pre-existing kube runtime watcher usage in image controller tests; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+path = "server/crates/djinn-image-controller/tests/unit.rs"
+matcher = "k8s_openapi"
+owner = "team/image-controller"
+rationale = "Pre-existing k8s_openapi type usage in image controller tests; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
+
+# server
+[[entries]]
+capability = "k8s"
+path = "server/src/server/state/mod.rs"
+matcher = "kube::"
+owner = "team/server"
+rationale = "Pre-existing kube::Client construction for image controller, graph warmer, and RPC token review wiring; to be migrated to djinn-k8s."
+cleanup_issue = "epic/fztz"
