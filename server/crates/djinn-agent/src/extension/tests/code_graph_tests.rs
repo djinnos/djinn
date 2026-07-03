@@ -23,6 +23,7 @@ async fn code_graph_tool(
         None,
         None,
         None,
+        None,
     )
     .await
 }

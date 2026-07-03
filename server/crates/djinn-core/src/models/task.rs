@@ -319,6 +319,28 @@ pub struct Task {
     pub unresolved_blocker_count: i64,
 }
 
+// ── Evidence-spike detection ──────────────────────────────────────────────────
+
+/// Label stamped on evidence-spike tasks by the Judge demand-evidence tool
+/// (`proposal_refinement_demand_evidence` in epic `6tjy`).
+pub const EVIDENCE_SPIKE_LABEL: &str = "refinement-evidence";
+
+/// Companion read-only marker stamped alongside [`EVIDENCE_SPIKE_LABEL`].
+pub const EVIDENCE_SPIKE_READ_ONLY_LABEL: &str = "read-only";
+
+/// Returns `true` when `labels` (a JSON-array string) carries both the
+/// `refinement-evidence` and `read-only` markers that identify an
+/// evidence-spike task created by the Judge demand-evidence path.
+///
+/// This is the canonical detection point for the evidence-spike runtime
+/// profile.  The function is intentionally strict: both labels must be
+/// present.  A task that carries only one marker (or has malformed JSON)
+/// is **not** treated as an evidence spike — callers that need fail-closed
+/// behavior should treat `false` as "deny mutation access".
+pub fn is_evidence_spike(labels: &str) -> bool {
+    labels.contains(EVIDENCE_SPIKE_LABEL) && labels.contains(EVIDENCE_SPIKE_READ_ONLY_LABEL)
+}
+
 /// A single entry in the task activity log (audit trail + comments).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "sqlx", derive(sqlx::FromRow))]
@@ -1488,5 +1510,47 @@ mod tests {
         let parsed: TaskPrCiSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, snapshot);
         assert!(json.contains("\"ci_status\":\"pending\""));
+    }
+
+    // ── Evidence-spike detection tests ──────────────────────────────────────
+
+    #[test]
+    fn is_evidence_spike_with_both_labels() {
+        // The exact labels stamped by proposal_refinement_demand_evidence (6tjy).
+        let labels = r#"["refinement-evidence","read-only","proposal:p1"]"#;
+        assert!(is_evidence_spike(labels));
+    }
+
+    #[test]
+    fn is_evidence_spike_requires_both_markers() {
+        // Only refinement-evidence → not enough.
+        assert!(!is_evidence_spike(r#"["refinement-evidence"]"#));
+        // Only read-only → not enough (this label appears on non-spike tasks too).
+        assert!(!is_evidence_spike(r#"["read-only"]"#));
+    }
+
+    #[test]
+    fn is_evidence_spike_with_extra_labels() {
+        // Extra labels don't break detection.
+        let labels = r#"["refinement-evidence","read-only","proposal:abc","priority:high"]"#;
+        assert!(is_evidence_spike(labels));
+    }
+
+    #[test]
+    fn is_evidence_spike_empty_labels_is_false() {
+        assert!(!is_evidence_spike("[]"));
+    }
+
+    #[test]
+    fn is_evidence_spike_malformed_json_is_false() {
+        // Malformed JSON should fail closed (return false).
+        assert!(!is_evidence_spike("not json"));
+        assert!(!is_evidence_spike(""));
+    }
+
+    #[test]
+    fn is_evidence_spike_normal_task_labels_is_false() {
+        assert!(!is_evidence_spike(r#"["bug","priority:high"]"#));
+        assert!(!is_evidence_spike(r#"["human-review-hold"]"#));
     }
 }

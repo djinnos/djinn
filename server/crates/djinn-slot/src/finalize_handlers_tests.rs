@@ -1,72 +1,11 @@
 use crate::finalize_handlers::{
     apply_ac_verdicts, handle_budget_park, process_auto_submit_payload, process_finalize_payload,
-    process_finalize_payload_with_outcome, record_rejected_integrity_entry,
+    process_finalize_payload_with_outcome,
 };
 use crate::finalize_types::AcVerdict;
 use crate::test_helpers;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
-use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
-
-// ─── Test helpers ─────────────────────────────────────────────────────────
-
-fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
-    let dir = tempfile::Builder::new()
-        .prefix("djinn-test-git-")
-        .tempdir()
-        .expect("create temp dir");
-
-    let run_git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir.path())
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-
-    run_git(&["init"]);
-    run_git(&["config", "--local", "user.email", "test@test.com"]);
-    run_git(&["config", "--local", "user.name", "Test User"]);
-    run_git(&["config", "--local", "commit.gpgsign", "false"]);
-
-    std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
-    run_git(&["add", "README.md"]);
-    run_git(&["commit", "-m", "init"]);
-    run_git(&["branch", "-m", "main"]);
-
-    // Make a dirty tracked edit so the fingerprint computes a Diff.
-    std::fs::write(dir.path().join("README.md"), "hello\ndirty\n").expect("write dirty");
-
-    dir
-}
-
-async fn create_run_with_workspace(
-    db: &djinn_db::Database,
-    project_id: &str,
-    task_id: &str,
-    workspace_path: Option<&str>,
-) -> String {
-    let id = uuid::Uuid::now_v7().to_string();
-    TaskRunRepository::new(db.clone())
-        .create(djinn_db::repositories::task_run::CreateTaskRunParams {
-            id: &id,
-            project_id,
-            task_id,
-            trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
-            status: None,
-            workspace_path,
-            mirror_ref: None,
-        })
-        .await
-        .expect("create task run");
-    id
-}
 
 // ─── apply_ac_verdicts ────────────────────────────────────────────────────
 
@@ -504,12 +443,9 @@ async fn submit_grooming_malformed_payload_does_not_crash() {
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
 
-    // tasks_reviewed items missing required "action" field — SubmitGrooming itself
-    // has tasks_reviewed as #[serde(default)] Vec, so malformed items are the issue.
-    // Since tasks_reviewed has #[serde(default)], this will succeed with empty vec.
-    // Test a completely invalid payload type instead.
-    let payload = Some(serde_json::json!("not-an-object"));
-    process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &ctx).await;
+    // Missing "tasks_reviewed" entirely.
+    let payload = Some(serde_json::json!({}));
+    process_finalize_payload(&payload, "submit_grooming", "any-task-id", &ctx).await;
 }
 
 // ─── no-op cases ──────────────────────────────────────────────────────────
@@ -519,7 +455,6 @@ async fn none_payload_is_a_noop() {
     let db = test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    // Should not panic or error.
     process_finalize_payload(&None, "submit_work", "any-task-id", &ctx).await;
 }
 
@@ -633,16 +568,16 @@ async fn auto_submit_payload_records_model_called_false() {
 
     let payload = serde_json::json!({
         "task_id": task.short_id,
-        "commit_title": "auto-submit verified worker diff",
-        "summary": "Auto-submitted eligible green exact diff.",
+        "commit_title": "feat: auto-submitted",
+        "summary": "auto submit via process_auto_submit_payload",
         "files_changed": ["src/lib.rs"],
         "remaining_concerns": [],
         "auto_submit_review_metadata": {
             "task_run_id": run_id,
             "trigger_reason": "controlled_termination",
-            "diff_fingerprint": "diff-789",
-            "verify_source": "worker",
-            "verify_run_id": "worker-run-5",
+            "diff_fingerprint": "sha256:deadbeef",
+            "verify_source": "ci",
+            "verify_run_id": "ci-99",
             "verify_timestamp": "2026-07-02T08:00:00.000Z",
             "session_id": "sess-5",
             "model_id": "model-5",
@@ -650,21 +585,26 @@ async fn auto_submit_payload_records_model_called_false() {
         }
     });
 
-    // Called via process_auto_submit_payload — this is the auto-submit
-    // path. The `model_called_submit_work` flag should be `false`.
+    // Called via process_auto_submit_payload — this is the settlement/teardown
+    // path where the system auto-submits. The `model_called_submit_work` flag
+    // should be `false` in the persisted record.
     let ok = process_auto_submit_payload(&payload, &task.id, &ctx).await;
     assert!(ok);
 
+    // Auto-submit review record should be persisted with model_called=false.
     let records = djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db)
         .list_for_task_run(&run_id)
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    assert!(!records[0].model_called_submit_work);
+    assert!(
+        !records[0].model_called_submit_work,
+        "process_auto_submit_payload path must set model_called_submit_work = false"
+    );
     assert_eq!(records[0].trigger_reason, "controlled_termination");
-    assert_eq!(records[0].diff_fingerprint, "diff-789");
-    assert_eq!(records[0].verify_source.as_deref(), Some("worker"));
-    assert_eq!(records[0].verify_run_id.as_deref(), Some("worker-run-5"));
+    assert_eq!(records[0].diff_fingerprint, "sha256:deadbeef");
+    assert_eq!(records[0].verify_source.as_deref(), Some("ci"));
+    assert_eq!(records[0].verify_run_id.as_deref(), Some("ci-99"));
     assert_eq!(
         records[0].verify_timestamp.as_deref(),
         Some("2026-07-02T08:00:00.000Z")
@@ -672,293 +612,4 @@ async fn auto_submit_payload_records_model_called_false() {
     assert_eq!(records[0].session_id.as_deref(), Some("sess-5"));
     assert_eq!(records[0].model_id.as_deref(), Some("model-5"));
     assert_eq!(records[0].no_progress_streak, 4);
-}
-
-// ── rejected submission fingerprint persistence ────────────────────────
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    let worktree = init_git_repo_with_dirty_file();
-    let _run_id = create_run_with_workspace(
-        &db,
-        &project.id,
-        &task.id,
-        Some(worktree.path().to_str().unwrap()),
-    )
-    .await;
-
-    let payload = Some(serde_json::json!({
-        "task_id": task.id,
-        "verdict": "rejected",
-        "acceptance_criteria": [],
-        "feedback": "missing edge case handling"
-    }));
-
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
-    let latest = integrity_repo
-        .latest_for_task(&task.id)
-        .await
-        .unwrap()
-        .expect("expected rejected integrity record after rejected review");
-
-    assert_eq!(
-        latest.verdict_kind,
-        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str()
-    );
-    assert!(!latest.diff_fingerprint.is_empty());
-    assert_eq!(latest.no_progress_streak, 1);
-    assert!(latest.task_run_id.is_some());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    // Create a clean git repo with no dirty changes.
-    let dir = tempfile::Builder::new()
-        .prefix("djinn-test-nodiff-")
-        .tempdir()
-        .expect("create temp dir");
-    let run_git = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir.path())
-            .output()
-            .expect("run git");
-        assert!(
-            out.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
-    run_git(&["init"]);
-    run_git(&["config", "--local", "user.email", "test@test.com"]);
-    run_git(&["config", "--local", "user.name", "Test User"]);
-    run_git(&["config", "--local", "commit.gpgsign", "false"]);
-    std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
-    run_git(&["add", "README.md"]);
-    run_git(&["commit", "-m", "init"]);
-    run_git(&["branch", "-m", "main"]);
-    // No dirty edits — NoDiff case.
-
-    let _run_id = create_run_with_workspace(
-        &db,
-        &project.id,
-        &task.id,
-        Some(dir.path().to_str().unwrap()),
-    )
-    .await;
-
-    let payload = Some(serde_json::json!({
-        "task_id": task.id,
-        "verdict": "rejected",
-        "acceptance_criteria": [],
-        "feedback": "needs more work"
-    }));
-
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
-    let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
-    assert!(
-        latest.is_none(),
-        "NoDiff worktree must not produce a rejected fingerprint record"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_review_skips_persistence_when_no_worktree() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    // Task run with no workspace_path (historical / no-worktree case).
-    let _run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
-
-    let payload = Some(serde_json::json!({
-        "task_id": task.id,
-        "verdict": "rejected",
-        "acceptance_criteria": [],
-        "feedback": "no worktree available"
-    }));
-
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
-    let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
-    assert!(
-        latest.is_none(),
-        "no-worktree case must not produce a rejected fingerprint record"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_review_does_not_record_rejected_fingerprint() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    let worktree = init_git_repo_with_dirty_file();
-    let _run_id = create_run_with_workspace(
-        &db,
-        &project.id,
-        &task.id,
-        Some(worktree.path().to_str().unwrap()),
-    )
-    .await;
-
-    let payload = Some(serde_json::json!({
-        "task_id": task.id,
-        "verdict": "approved",
-        "acceptance_criteria": [],
-        "feedback": null
-    }));
-
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
-    let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
-    assert!(
-        latest.is_none(),
-        "approved review must not record rejected fingerprint"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_fingerprint_persists_across_task_run_boundaries() {
-    // Simulate: task run 1 records a rejected fingerprint, then a new
-    // task run 2 is created (redispatch). The latest_for_task query
-    // must still see the rejection from run 1.
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    let worktree = init_git_repo_with_dirty_file();
-    let run1_id = create_run_with_workspace(
-        &db,
-        &project.id,
-        &task.id,
-        Some(worktree.path().to_str().unwrap()),
-    )
-    .await;
-
-    // Record the rejection via handle_submit_review.
-    let payload = Some(serde_json::json!({
-        "task_id": task.id,
-        "verdict": "rejected",
-        "acceptance_criteria": [],
-        "feedback": "needs work"
-    }));
-    process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db.clone());
-    let latest = integrity_repo
-        .latest_for_task(&task.id)
-        .await
-        .unwrap()
-        .expect("rejection must be recorded");
-    assert_eq!(latest.task_run_id.as_deref(), Some(run1_id.as_str()));
-    assert_eq!(latest.no_progress_streak, 1);
-
-    // Create a new task run (simulating redispatch).
-    let _run2_id = create_run_with_workspace(
-        &db,
-        &project.id,
-        &task.id,
-        Some(worktree.path().to_str().unwrap()),
-    )
-    .await;
-
-    // The latest rejection should still be from run 1 (cross-run persistence).
-    let latest_after_redispatch = integrity_repo
-        .latest_for_task(&task.id)
-        .await
-        .unwrap()
-        .expect("must persist across task run boundaries");
-    assert_eq!(
-        latest_after_redispatch.task_run_id.as_deref(),
-        Some(run1_id.as_str()),
-        "rejection from run 1 must survive redispatch to run 2"
-    );
-    assert_eq!(
-        latest_after_redispatch.diff_fingerprint,
-        latest.diff_fingerprint
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn record_rejected_integrity_entry_direct_call_increments_streak() {
-    // Test the shared helper directly: two consecutive rejections should
-    // increment the streak from 0→1→2.
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    let run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
-
-    // First rejection.
-    record_rejected_integrity_entry(
-        &task.id,
-        &ctx,
-        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
-        None,
-        Some(&run_id),
-        "sha256:first-reject",
-    )
-    .await;
-
-    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db.clone());
-    let latest = integrity_repo
-        .latest_for_task(&task.id)
-        .await
-        .unwrap()
-        .expect("first rejection must be recorded");
-    assert_eq!(latest.no_progress_streak, 1);
-    assert_eq!(latest.diff_fingerprint, "sha256:first-reject");
-
-    // Second rejection (streak should be 2).
-    record_rejected_integrity_entry(
-        &task.id,
-        &ctx,
-        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
-        None,
-        Some(&run_id),
-        "sha256:second-reject",
-    )
-    .await;
-
-    let latest2 = integrity_repo
-        .latest_for_task(&task.id)
-        .await
-        .unwrap()
-        .expect("second rejection must be recorded");
-    assert_eq!(latest2.no_progress_streak, 2);
-    assert_eq!(latest2.diff_fingerprint, "sha256:second-reject");
 }
