@@ -9,6 +9,7 @@ use super::loop_guard::{LoopGuardError, LoopGuardKind};
 use super::persistence::serialize_llm_input;
 use super::turn::{ReplyLoopContext, WindDownReason, run_reply_loop};
 use crate::finalize_handlers::handle_budget_park;
+use crate::finalize_handlers::record_rejected_integrity_entry;
 use crate::helpers::extract_worker_context;
 use crate::output_parser::ParsedAgentOutput;
 use crate::test_helpers;
@@ -2547,5 +2548,486 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "apply_patch:45"))),
         "the original assistant tool call is preserved (context of what it was doing)"
+    );
+}
+
+// ── Worker submit_work no-progress integrity gate tests ────────────────────
+
+/// Helper: create a git repo with a committed initial file and a dirty
+/// tracked edit so `compute_submission_diff_fingerprint` returns a `Diff`.
+fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("djinn-test-integrity-gate-")
+        .tempdir()
+        .expect("create temp dir");
+
+    let run_git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "--local", "user.email", "test@test.com"]);
+    run_git(&["config", "--local", "user.name", "Test User"]);
+    run_git(&["config", "--local", "commit.gpgsign", "false"]);
+
+    std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "init"]);
+    run_git(&["branch", "-m", "main"]);
+
+    // Make a dirty tracked edit so the fingerprint computes a Diff.
+    std::fs::write(dir.path().join("README.md"), "hello\ndirty\n").expect("write dirty");
+
+    dir
+}
+
+/// When a worker calls `submit_work` and the current worktree fingerprint
+/// matches the latest rejected fingerprint, the guard intercepts and returns
+/// a corrective tool result. The session continues without setting
+/// `finalize_payload` or `finalize_tool_name`.
+#[tokio::test]
+async fn first_no_progress_submit_intercepted_returns_corrective_and_continues() {
+    let worktree = init_git_repo_with_dirty_file();
+    let worktree_path = worktree.path().to_path_buf();
+
+    // Compute the fingerprint so we can record it as rejected.
+    let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
+        .await
+        .expect("compute fingerprint");
+    let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+
+    // Record a rejected fingerprint for this task.
+    record_rejected_integrity_entry(
+        &task_id,
+        &slot_ctx,
+        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        None,
+        None,
+        &fingerprint,
+    )
+    .await;
+
+    // Script: turn 1 returns submit_work (guard intercepts), then turns 2-4
+    // are text-only which the nudge loop absorbs before returning an error.
+    // The important thing is that the guard intercepted on turn 1.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "submit-1",
+            "submit_work",
+            serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+            100,
+        ),
+        // Turn 2: model responds to the corrective message with text-only.
+        MockResponse::text_only("I'll make changes and resubmit.", 100),
+    ]);
+
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    // The loop may terminate with a nudge-loop error (text-only turns without
+    // finalize). That's expected — the guard intercepted the finalize and the
+    // model never retried with a changed fingerprint. The key assertions are
+    // about the guard behavior, not the loop termination status.
+    let _ = result;
+
+    // The guard intercepted: finalize_payload and finalize_tool_name must not be set.
+    assert!(
+        output.finalize_payload.is_none(),
+        "finalize_payload must be None when the guard intercepts; got: {:?}",
+        output.finalize_payload
+    );
+    assert!(
+        output.finalize_tool_name.is_none(),
+        "finalize_tool_name must be None when the guard intercepts; got: {:?}",
+        output.finalize_tool_name
+    );
+
+    // The corrective tool result must be in the conversation.
+    let has_corrective = conv.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, is_error, content }
+                if tool_use_id == "submit-1"
+                    && *is_error
+                    && content.iter().any(|c| matches!(c, ContentBlock::Text { text }
+                        if text.contains("identical to the latest rejected submission"))))
+        })
+    });
+    assert!(
+        has_corrective,
+        "conversation must contain a corrective tool result for submit_work; \
+         messages: {:?}",
+        conv.messages
+    );
+
+    // Both mock responses were consumed (guard + text-only final).
+    assert_eq!(provider.remaining(), 0);
+}
+
+/// When no rejected fingerprint exists for the task, the guard skips
+/// comparison (no-comparison historical path) and the finalize proceeds
+/// normally.
+#[tokio::test]
+async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
+    let worktree = init_git_repo_with_dirty_file();
+    let worktree_path = worktree.path().to_path_buf();
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+
+    // No rejected fingerprint recorded — the guard should skip comparison.
+
+    let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
+        "submit-1",
+        "submit_work",
+        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        100,
+    )]);
+
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+
+    // No rejected fingerprint → guard skipped → finalize proceeds normally.
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize_payload must be set when no rejected fingerprint exists; got None"
+    );
+    assert_eq!(
+        output.finalize_tool_name.as_deref(),
+        Some("submit_work"),
+        "finalize_tool_name must be submit_work"
+    );
+}
+
+/// When `role_name` is not "worker", the guard does not activate and the
+/// finalize proceeds normally even if a matching rejected fingerprint exists.
+#[tokio::test]
+async fn non_worker_role_bypasses_guard() {
+    let worktree = init_git_repo_with_dirty_file();
+    let worktree_path = worktree.path().to_path_buf();
+
+    let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
+        .await
+        .expect("compute fingerprint");
+    let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+
+    // Record a rejected fingerprint — but the guard should not check it
+    // because role_name is "planner", not "worker".
+    record_rejected_integrity_entry(
+        &task_id,
+        &slot_ctx,
+        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        None,
+        None,
+        &fingerprint,
+    )
+    .await;
+
+    let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
+        "submit-1",
+        "submit_work",
+        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        100,
+    )]);
+
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a planner."));
+    conv.push(Message::user("Plan the task."));
+
+    let (result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "planner",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+
+    // Non-worker role → guard bypassed → finalize proceeds.
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize_payload must be set for non-worker role; got None"
+    );
+    assert_eq!(
+        output.finalize_tool_name.as_deref(),
+        Some("submit_work"),
+        "finalize_tool_name must be submit_work for non-worker role"
+    );
+}
+
+/// When the current fingerprint differs from the latest rejected fingerprint,
+/// the guard allows the submission to proceed and finalize is accepted.
+#[tokio::test]
+async fn different_fingerprint_allows_finalize() {
+    let worktree = init_git_repo_with_dirty_file();
+    let worktree_path = worktree.path().to_path_buf();
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+
+    // Record a rejected fingerprint that is DIFFERENT from the current worktree.
+    record_rejected_integrity_entry(
+        &task_id,
+        &slot_ctx,
+        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        None,
+        None,
+        "sha256:completely-different-fingerprint",
+    )
+    .await;
+
+    let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
+        "submit-1",
+        "submit_work",
+        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        100,
+    )]);
+
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+
+    // Different fingerprint → guard allows → finalize proceeds.
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize_payload must be set when fingerprints differ; got None"
+    );
+    assert_eq!(
+        output.finalize_tool_name.as_deref(),
+        Some("submit_work"),
+        "finalize_tool_name must be submit_work"
+    );
+}
+
+/// When the worktree has no diff (empty submission), the guard's fingerprint
+/// computation returns NoDiff and skips comparison. The existing empty-diff
+/// safeguards remain intact and the finalize proceeds (those safeguards
+/// handle empty diffs separately).
+#[tokio::test]
+async fn empty_worktree_skips_guard_and_allows_finalize() {
+    // Create a git repo WITHOUT dirty changes — the fingerprint will be NoDiff.
+    let dir = tempfile::Builder::new()
+        .prefix("djinn-test-nodiff-guard-")
+        .tempdir()
+        .expect("create temp dir");
+
+    let run_git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "--local", "user.email", "test@test.com"]);
+    run_git(&["config", "--local", "user.name", "Test User"]);
+    run_git(&["config", "--local", "commit.gpgsign", "false"]);
+    std::fs::write(dir.path().join("README.md"), "hello\n").expect("write");
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "-m", "init"]);
+    run_git(&["branch", "-m", "main"]);
+    // No dirty edits — NoDiff.
+
+    let worktree_path = dir.path().to_path_buf();
+
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+
+    // Record a rejected fingerprint — but the guard should skip because
+    // the current worktree is NoDiff.
+    record_rejected_integrity_entry(
+        &task_id,
+        &slot_ctx,
+        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        None,
+        None,
+        "sha256:some-fingerprint",
+    )
+    .await;
+
+    let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
+        "submit-1",
+        "submit_work",
+        serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+        100,
+    )]);
+
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+
+    let (result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    assert!(result.is_ok(), "expected ok, got: {result:?}");
+
+    // NoDiff → guard skipped comparison → finalize proceeds (existing
+    // empty-diff safeguards handle empty submissions separately).
+    assert!(
+        output.finalize_payload.is_some(),
+        "finalize_payload must be set when worktree is NoDiff; got None"
+    );
+    assert_eq!(
+        output.finalize_tool_name.as_deref(),
+        Some("submit_work"),
+        "finalize_tool_name must be submit_work"
     );
 }
