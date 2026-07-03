@@ -33,11 +33,6 @@ static PLACEHOLDER_RE: LazyLock<Regex> =
 /// including the `mcp__` prefix and both `__` separators.
 pub const MCP_NAMESPACED_NAME_MAX_LEN: usize = 64;
 
-/// Valid characters for sanitized segments of an MCP namespaced name.
-///
-/// Matches the grammar `[A-Za-z0-9_-]`.
-const MCP_NAME_SAFE_CHARS: &str = "A-Za-z0-9_-";
-
 /// Format a provider-facing MCP-namespaced tool name: `mcp__{server}__{tool}`.
 ///
 /// Sanitizes both `server_name` and `tool_name` to `[A-Za-z0-9_-]` and bounds the
