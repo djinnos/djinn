@@ -102,7 +102,7 @@ function isEvidenceFailed(
 ): boolean {
   if (lifecycle === "evidence_failed") return true;
   if (!evidence) return false;
-  if (evidence.evidence_phase === "failed") return true;
+  if (evidence.evidence_phase === "evidence_failed") return true;
   if (evidence.failure_reason) return true;
   // Terminal spike statuses without received evidence count as failed.
   if (
