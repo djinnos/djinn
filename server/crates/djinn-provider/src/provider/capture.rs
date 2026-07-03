@@ -155,6 +155,7 @@ impl AnthropicSseCaptureConfig {
                 max_tokens_default: Some(self.max_tokens),
             },
             reasoning_effort: self.reasoning_effort,
+            tool_schema_compat: None,
         }
     }
 }

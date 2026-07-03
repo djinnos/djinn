@@ -78,7 +78,7 @@ fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> 
     s
 }
 
-/// Inputs for [`build_prompt_context`].
+/// Inputs for [`assemble_prompt_context`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) struct PromptContextInputs<'a> {
     pub task: &'a Task,
@@ -101,8 +101,7 @@ pub(crate) struct PromptContextInputs<'a> {
     pub worker_resume_note: Option<&'a str>,
 }
 
-/// Format conflicting files from merge-conflict metadata as a `- <path>`
-/// markdown list. Returns `None` when there is no conflict context.
+/// Format conflicting files as a `- <path>` markdown list.
 fn format_conflict_files(conflict_ctx: Option<&MergeConflictMetadata>) -> Option<String> {
     conflict_ctx.map(|m| {
         m.conflicting_files
@@ -120,9 +119,7 @@ fn format_activity_text(
 ) -> Option<String> {
     match activity_entries {
         Some(entries) if !entries.is_empty() => {
-            // Last N high-signal comments (lead, reviewer, verification)
             let feedback = recent_feedback(entries, max_feedback);
-            // Count comments by role for the summary line
             let mut counts: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
             for e in entries {
@@ -338,8 +335,6 @@ async fn load_epic_context(
     Some(ctx_lines.join("\n"))
 }
 
-/// Load the knowledge-context block from scope-matched memory notes.
-///
 /// Load knowledge context from scope-matched notes. Returns None on error/empty.
 async fn load_knowledge_context(
     task: &Task,
@@ -393,20 +388,11 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity_entries = task_repo.list_activity(&task.id).await.ok();
     let activity_text = format_activity_text(&activity_entries, 3);
-    // Extract worker submission summary/concerns from the activity log so the
-    // reviewer can see why certain changes were made.
     let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
     let epic_context =
         load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state).await;
     let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
-    // Generate a promoted BLOCKING directive when the durable CI gate snapshot
-    // says the current PR head is failing required CI and a remediation baseline
-    // exists. Deliberately separate from ordinary activity-log prose and deduped
-    // by construction (derived from durable state, not from activity replay).
     let ci_blocking_directive = build_ci_blocking_directive(task);
-    // PR E2: auto-include `code_graph context` for worker / reviewer roles
-    // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
-    // task-scope-path inference already used by the knowledge context block.
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
     let code_graph_context = build_role_code_graph_context(
         runtime_role.config().name,
@@ -416,13 +402,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         &task_paths_for_code_graph,
     )
     .await;
-    // PR E3: auto-include `code_graph detect_changes` summary for the
-    // reviewer role. Resolves base/head SHAs by running `git merge-base
-    // <target> HEAD` and `git rev-parse HEAD` against the task worktree
-    // — the reviewer's worktree is the post-image of the task branch, so
-    // HEAD is the head SHA. The merge target is the project's configured
-    // target branch (defaulting to "main"). Failures resolving the SHAs
-    // are non-fatal: we just skip injection.
     let reviewer_diff_context = {
         let role_name = runtime_role.config().name;
         if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
@@ -520,9 +499,9 @@ fn build_ci_blocking_directive(task: &Task) -> Option<String> {
         None => String::new(),
     };
     Some(format!(
-        "**PR:** #{pr_number}\n\
-         **Failing head SHA:** `{head_sha}`\n\
-         **Blocking checks:** {checks_display}\n\
+        "**PR:** #{pr_number}\\\n\
+         **Failing head SHA:** `{head_sha}`\\\n\
+         **Blocking checks:** {checks_display}\\\n\
          {fingerprint_line}\
          **Remediation baseline SHA:** `{base_sha}`\n\n\
          > REQUIRED CI is failing on the current PR head. You MUST fix the \
@@ -599,10 +578,6 @@ pub(crate) fn build_worker_resume_note(
     if !metadata.considered {
         return None;
     }
-    // CleanTaskBranchFallback with no checkpoint SHA or submit/review id
-    // means there is nothing to resume from — the dispatch starts fresh.
-    // We check this after the considered flag so a clean fallback that
-    // still carries prior session lineage (for observability) can appear.
     let has_checkpoint = metadata.commit_sha.is_some();
     let has_submit_or_review = metadata
         .submit_or_review_id
@@ -621,7 +596,6 @@ pub(crate) fn build_worker_resume_note(
     {
         parts.push(format!("prior session `{session}`"));
     }
-    // Checkpoint SHA or submit/review ID (whichever is present).
     if let Some(sha) = &metadata.commit_sha
         && !sha.trim().is_empty()
     {
@@ -642,7 +616,6 @@ pub(crate) fn build_worker_resume_note(
     if let Some(summary) = &metadata.last_durable_progress_summary
         && !summary.trim().is_empty()
     {
-        // Truncate long summaries to keep the note concise (one line).
         let truncated = if summary.len() > 120 {
             format!("{}…", &summary[..117])
         } else {
@@ -664,7 +637,7 @@ pub(crate) fn build_worker_resume_note(
     ))
 }
 
-/// Map a [`ResumeSelectionReason`] to a human-readable termination label for the resume note.
+/// Map a [`ResumeSelectionReason`] to a human-readable termination label.
 fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static str {
     use djinn_runtime::ResumeSelectionReason as R;
     match reason {

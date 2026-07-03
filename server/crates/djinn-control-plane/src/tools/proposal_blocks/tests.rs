@@ -30,6 +30,14 @@ fn registry_contains_v1_blocks() {
             .is_some_and(|d| d.contains("unified diff")),
         "diff block must advertise unified-diff authoring guidance"
     );
+    // The annotated-code block documents its `code`-attribute authoring format
+    // (code with `<`/`{` cannot sit in children; the renderer reads the attr).
+    assert!(
+        registry["annotated-code"]
+            .description
+            .is_some_and(|d| d.contains("code={") && d.contains("annotations")),
+        "annotated-code block must advertise its code-attribute authoring format"
+    );
     // The tabs block documents its JSON-array `tabs` authoring format.
     assert_eq!(registry["tabs"].fields["tabs"].field_type, "string");
     assert!(

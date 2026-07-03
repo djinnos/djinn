@@ -43,6 +43,7 @@ pub fn codex_provider_config(tokens: &codex::CodexTokens) -> ProviderConfig {
         provider_headers,
         capabilities: ProviderCapabilities::default(),
         reasoning_effort: None,
+        tool_schema_compat: None,
     }
 }
 
@@ -59,5 +60,6 @@ pub fn copilot_provider_config(tokens: &copilot::CopilotTokens) -> ProviderConfi
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
         reasoning_effort: None,
+        tool_schema_compat: None,
     }
 }

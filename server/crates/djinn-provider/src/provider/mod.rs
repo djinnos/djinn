@@ -255,6 +255,11 @@ pub struct ProviderConfig {
     /// Anthropic `thinking` block, no Google `thinkingConfig`). `Some(tier)`
     /// opts the request into per-format reasoning control.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Tool-schema compatibility quirk applied to tool definitions before
+    /// sending them to this provider.  `None` is the identity state: native
+    /// providers (OpenAI, Anthropic, etc.) receive tool schemas verbatim.
+    /// `Some(compat)` activates the corresponding schema-projection rules.
+    pub tool_schema_compat: Option<ToolSchemaCompat>,
 }
 
 /// Metadata attached to each provider call for OTel tracing.
@@ -281,6 +286,31 @@ pub enum AuthMethod {
     ApiKeyHeader { header: String, key: String },
     /// No authentication (e.g. local models, Google API-key-in-URL).
     NoAuth,
+}
+
+/// Tool-schema compatibility quirks that alter JSON Schema projection before
+/// sending tool definitions to a provider.
+///
+/// Each variant selects a set of schema-rewriting rules applied during
+/// request building.  `None` on [`ProviderConfig::tool_schema_compat`] is the
+/// identity state: native providers (OpenAI, Anthropic, etc.) receive tool
+/// schemas verbatim.
+///
+/// Downstream projection logic consumes these variants to strip unsupported
+/// keywords, collapse tuple schemas, coerce enums, etc.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolSchemaCompat {
+    /// Moonshot / Kimi API compatibility.  Strips `$ref` sibling keywords,
+    /// collapses `prefixItems` / `tuple` schemas, and removes
+    /// `unevaluatedItems`.
+    Moonshot,
+    /// Google Gemini `generateContent` compatibility.  Applies a keyword
+    /// whitelist, coerces `enum` to single-element `type: "string"`,
+    /// filters `required`, handles `nullable`, and removes unsupported keys.
+    Gemini,
+    /// OpenAI-family object-shape enforcement.  Deeply enforces `object`
+    /// `properties`, flattens top-level `anyOf`, and strips `null` variants.
+    OpenAi,
 }
 
 /// Wire format family — determines request/response serialization.
@@ -432,6 +462,7 @@ mod reasoning_effort_override_tests {
             // Start from a STRONG tier so a regression that fails to override
             // (or that lowers the wrong field) is visible.
             reasoning_effort: Some(ReasoningEffort::High),
+            tool_schema_compat: None,
         }
     }
 
@@ -545,5 +576,23 @@ mod reasoning_effort_override_tests {
                 .is_none(),
             "config-less provider yields no override so the caller keeps the original"
         );
+    }
+
+    /// Every native/no-quirk fixture starts with `tool_schema_compat: None`
+    /// so identity behavior is preserved until a resolver sets it.
+    #[test]
+    fn native_configs_default_to_no_tool_schema_compat() {
+        for family in [
+            FormatFamily::OpenAI,
+            FormatFamily::OpenAIResponses,
+            FormatFamily::Anthropic,
+            FormatFamily::Google,
+        ] {
+            let cfg = config_for(family);
+            assert_eq!(
+                cfg.tool_schema_compat, None,
+                "{family:?}: native config must default to tool_schema_compat = None"
+            );
+        }
     }
 }
