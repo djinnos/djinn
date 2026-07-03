@@ -684,7 +684,7 @@ impl CoordinatorActor {
     pub(super) async fn close_refinement_task(&self, task_id: &str, reason: &str) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus);
-        if let Err(e) = task_repo
+        let result = task_repo
             .transition(
                 task_id,
                 TransitionAction::ForceClose,
@@ -694,17 +694,8 @@ impl CoordinatorActor {
                 None,
             )
             .await
-        {
-            if is_already_closed_refinement_close_error(&e) {
-                // Idempotent no-op: the task was already closed — nothing to do.
-                return;
-            }
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "Failed to close completed refinement task"
-            );
-        }
+            .map(|_| ());
+        handle_close_refinement_task_result(task_id, result);
     }
 
     /// Resolve the project path for the slot pool dispatch.
@@ -950,6 +941,26 @@ impl CoordinatorActor {
     }
 }
 
+/// Classify and handle the result of a `close_refinement_task` transition.
+///
+/// The already-closed case (`"task is already closed"`) is treated as an
+/// idempotent no-op — no warning is emitted.  All other errors (other
+/// [`djinn_db::Error::InvalidTransition`] messages and repository/internal
+/// failures) surface as a `WARN` so operators can investigate.
+fn handle_close_refinement_task_result(task_id: &str, result: Result<(), djinn_db::Error>) {
+    if let Err(e) = result {
+        if is_already_closed_refinement_close_error(&e) {
+            // Idempotent no-op: the task was already closed — nothing to do.
+            return;
+        }
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "Failed to close completed refinement task"
+        );
+    }
+}
+
 /// Returns `true` when the repository error indicates the task was already closed
 /// at the time `ForceClose` was attempted. This is the only idempotent close case
 /// — all other [`djinn_db::Error::InvalidTransition`] messages remain real failures
@@ -985,4 +996,47 @@ mod tests {
         let error = djinn_db::Error::Internal("something broke".to_owned());
         assert!(!is_already_closed_refinement_close_error(&error));
     }
+
+    // ---- handle_close_refinement_task_result regression tests ----
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn close_already_closed_emits_no_warning() {
+        let already_closed =
+            djinn_db::Error::InvalidTransition("task is already closed".to_owned());
+        handle_close_refinement_task_result("task/abc", Err(already_closed));
+
+        assert!(
+            !logs_contain("Failed to close completed refinement task"),
+            "already-closed close should not emit a warning"
+        );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn close_other_invalid_transition_emits_warning() {
+        let other =
+            djinn_db::Error::InvalidTransition("release is only valid from in_progress".to_owned());
+        handle_close_refinement_task_result("task/xyz", Err(other));
+
+        assert!(
+            logs_contain("Failed to close completed refinement task"),
+            "non-idempotent InvalidTransition must still warn"
+        );
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn close_internal_error_emits_warning() {
+        let internal = djinn_db::Error::Internal("database connection lost".to_owned());
+        handle_close_refinement_task_result("task/123", Err(internal));
+
+        assert!(
+            logs_contain("Failed to close completed refinement task"),
+            "internal/repository errors must still warn"
+        );
+    }
+
+    // `logs_contain` is injected by the `#[tracing_test::traced_test]` macro
+    // into each test function scope; no module-level helper is needed.
 }
