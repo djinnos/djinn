@@ -27,7 +27,9 @@ const PIPELINE = [
     n: "03",
     name: "Build",
     status: { label: "agents running", tone: "warn" },
-    body: "Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated Kubernetes Job, in a per-project devcontainer, using the models you configured: per user, per project, per role.",
+    body: (
+      <>Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated <code className="tick">Kubernetes Job</code>, in a per-project <code className="tick">devcontainer</code>, using the models you configured: per user, per project, per role.</>
+    ),
     log: [
       ["$", "kubectl get jobs -n djinn"],
       [" ", "djinn-taskrun-9f2c   Running    api: add usage rollup"],
@@ -50,7 +52,9 @@ const CRITERIA = [
   },
   {
     title: "Your cloud",
-    body: "Self-hosted on any Kubernetes; a single VPS running k3s is enough. One Helm chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.",
+    body: (
+      <>Self-hosted on any Kubernetes; a single VPS running <code className="tick">k3s</code> is enough. One <code className="tick">Helm</code> chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.</>
+    ),
   },
   {
     title: "Your models",
@@ -58,7 +62,9 @@ const CRITERIA = [
   },
   {
     title: "Parallel by default",
-    body: "Every task runs as an isolated Kubernetes Job in its own git workspace. The coordinator dispatches by priority and dependency order, capped per user and per model.",
+    body: (
+      <>Every task runs as an isolated <code className="tick">Kubernetes Job</code> in its own <code className="tick">git</code> workspace. The coordinator dispatches by priority and dependency order, capped per user and per model.</>
+    ),
   },
   {
     title: "Multi-project, multi-user",
@@ -115,7 +121,7 @@ export default function Home() {
       <main className="relative">
 
         {/* ——— Hero: the proposal header ——— */}
-        <section className="relative px-6 pt-36 pb-24 md:pt-48 overflow-hidden">
+        <section className="relative px-6 pt-32 pb-24 md:pt-44 overflow-hidden">
           <div className="absolute inset-0 blueprint -z-10" />
 
           <div className="max-w-4xl mx-auto">
@@ -133,7 +139,7 @@ export default function Home() {
 
             <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-semibold tracking-tight leading-[1.04] mb-8">
               From proposal<br />
-              to <em className="stroke-under not-italic md:italic">pull request.</em>
+              to <em className="stroke-under italic">pull request.</em>
             </h1>
 
             <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl leading-relaxed mb-10">
@@ -141,16 +147,17 @@ export default function Home() {
               on your cluster, with your models, behind your review.
             </p>
 
-            {/* Sign-off row */}
+            {/* Sign-off chips, markdown checkboxes inside */}
             <div className="rise rise-4 flex flex-wrap gap-2.5 mb-12">
               <span className="chip text-status-pass">
-                <Check className="w-3 h-3" /> signed off — product
+                <span className="select-none" aria-hidden>[x]</span> signed off · product
               </span>
               <span className="chip text-status-pass">
-                <Check className="w-3 h-3" /> signed off — engineering
+                <span className="select-none" aria-hidden>[x]</span> signed off · engineering
               </span>
               <span className="chip text-status-warn">
-                <span className="dot dot-pulse bg-status-warn" /> building — djinn
+                <span className="select-none" aria-hidden>[ ]</span> building · djinn
+                <span className="dot dot-pulse bg-status-warn" />
               </span>
             </div>
 
@@ -194,7 +201,7 @@ export default function Home() {
               <div className="space-y-14">
                 {PIPELINE.map((stage) => (
                   <div key={stage.n} className="relative sm:pl-20">
-                    <div className="rail-node hidden sm:flex absolute left-0 top-0 w-10 h-10 rounded-lg items-center justify-center text-xs text-text-secondary">
+                    <div className="rail-node hidden sm:flex absolute left-0 top-0 w-10 h-10 rounded-lg items-center justify-center text-xs text-brand-purple">
                       {stage.n}
                     </div>
 
@@ -271,8 +278,8 @@ export default function Home() {
             <div className="grid sm:grid-cols-2 gap-x-12 gap-y-10">
               {CRITERIA.map((c, i) => (
                 <div key={i} className="flex gap-4">
-                  <span className="font-mono text-status-pass text-sm pt-1 select-none" aria-hidden>
-                    [x]
+                  <span className="font-mono text-status-pass text-sm pt-1 select-none whitespace-nowrap" aria-hidden>
+                    - [x]
                   </span>
                   <div>
                     <h3 className="font-semibold text-lg mb-1.5">{c.title}</h3>
@@ -341,7 +348,7 @@ export default function Home() {
                   ["tracing_built_in", "every agent session already streams to Langfuse; next, rolled up into answers a lead can act on."],
                 ].map(([k, v], i) => (
                   <div key={i} className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-4">
-                    <span className="text-status-warn shrink-0 w-44">[ ] {k}</span>
+                    <span className="text-status-warn shrink-0 w-56 whitespace-nowrap">[ ] {k}</span>
                     <span className="text-text-secondary font-sans text-[15px]">{v}</span>
                   </div>
                 ))}

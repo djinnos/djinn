@@ -122,6 +122,18 @@ body {
   50% { opacity: 0.55; box-shadow: 0 0 0 5px transparent; }
 }
 
+/* Inline code, rendered-markdown style */
+code.tick {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--color-text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--color-border-faint);
+  border-radius: 5px;
+  padding: 0.08em 0.4em;
+  white-space: nowrap;
+}
+
 /* Window frame around screenshots */
 .window {
   border: 1px solid var(--color-border);
@@ -174,8 +186,8 @@ body {
   background: linear-gradient(
     to bottom,
     transparent,
-    var(--color-border) 8%,
-    var(--color-border) 92%,
+    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 8%,
+    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 92%,
     transparent
   );
   width: 1px;
