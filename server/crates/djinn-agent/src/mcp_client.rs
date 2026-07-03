@@ -114,6 +114,8 @@ struct ResolvedMcpServerConfig {
     args: Vec<String>,
     env: HashMap<String, String>,
     headers: HashMap<String, String>,
+    startup_timeout_ms: u64,
+    request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +125,7 @@ enum McpTransportKind {
     Unsupported,
 }
 
+#[allow(dead_code)]
 impl ResolvedMcpServerConfig {
     fn transport_kind(&self) -> McpTransportKind {
         if self.url.is_some() {
@@ -132,6 +135,14 @@ impl ResolvedMcpServerConfig {
         } else {
             McpTransportKind::Unsupported
         }
+    }
+
+    fn startup_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.startup_timeout_ms)
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.request_timeout_ms)
     }
 }
 
@@ -430,6 +441,8 @@ async fn resolve_server_config(
             &format!("server `{server_name}` header"),
         )
         .await?,
+        startup_timeout_ms: config.startup_timeout_ms,
+        request_timeout_ms: config.request_timeout_ms,
     })
 }
 
@@ -752,6 +765,7 @@ mod tests {
                 "Authorization".to_string(),
                 "Bearer ${TEST_TOKEN}".to_string(),
             )]),
+            ..Default::default()
         };
 
         let resolved = resolve_server_config("example", &config, &app_state)
@@ -772,6 +786,8 @@ mod tests {
             resolved.headers.get("Authorization").map(String::as_str),
             Some("Bearer credential-secret")
         );
+        assert_eq!(resolved.startup_timeout_ms, 30_000);
+        assert_eq!(resolved.request_timeout_ms, 120_000);
 
         unsafe { std::env::remove_var(&unique) };
     }
@@ -785,6 +801,7 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             headers: HashMap::new(),
+            ..Default::default()
         };
 
         let error = resolve_server_config("example", &config, &app_state)
@@ -807,6 +824,7 @@ mod tests {
                 "Authorization".to_string(),
                 "Bearer ${MISSING_HEADER_TOKEN}".to_string(),
             )]),
+            ..Default::default()
         };
 
         let error = resolve_server_config("example", &config, &app_state)
@@ -825,6 +843,8 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             headers: HashMap::new(),
+            startup_timeout_ms: 30_000,
+            request_timeout_ms: 120_000,
         };
         let stdio = ResolvedMcpServerConfig {
             url: None,
@@ -832,6 +852,8 @@ mod tests {
             args: vec!["--stdio".to_string()],
             env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
             headers: HashMap::new(),
+            startup_timeout_ms: 30_000,
+            request_timeout_ms: 120_000,
         };
         let unsupported = ResolvedMcpServerConfig {
             url: None,
@@ -839,6 +861,8 @@ mod tests {
             args: Vec::new(),
             env: HashMap::new(),
             headers: HashMap::new(),
+            startup_timeout_ms: 30_000,
+            request_timeout_ms: 120_000,
         };
 
         assert_eq!(http.transport_kind(), McpTransportKind::Http);
@@ -895,6 +919,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         )];
         let result = connect_and_discover("test", "worker", &servers, &app_state).await;
@@ -912,6 +937,7 @@ mod tests {
                 args: vec!["--unused".to_string()],
                 env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
                 headers: HashMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
+                ..Default::default()
             },
         )];
 
@@ -930,6 +956,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         )];
         let result = connect_and_discover("test", "worker", &servers, &app_state).await;
@@ -947,6 +974,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         )];
 
