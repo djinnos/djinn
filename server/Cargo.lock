@@ -1310,6 +1310,7 @@ dependencies = [
  "bincode",
  "djinn-core",
  "djinn-db",
+ "djinn-git",
  "djinn-memory",
  "djinn-stack",
  "futures",

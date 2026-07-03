@@ -464,3 +464,60 @@ pub async fn rebase_with_retry(path: &Path, upstream: &str) -> Result<(), GitErr
     }
     Ok(())
 }
+
+// ─── Borrowed-cwd helpers ────────────────────────────────────────────────────
+//
+// These are the same as `run_git_command[_with_timeout]` but take `&Path` so
+// callers that already hold a borrow (e.g. a `Path` extracted from a project
+// root, an `IndexTreeHandle`'s `&Path` field) don't have to clone a `PathBuf`
+// just to satisfy the original signature.  They exist specifically to keep
+// `djinn-graph` (and other callers in fztz Wave 1) on the djinn-git owner
+// crate without forcing every call site to take a `PathBuf` by value.
+//
+// Both helpers apply the same `safe.directory=*` env injection and
+// process-priority lowering as `run_git_command`.  The `&Path`→`PathBuf`
+// step is just `to_path_buf()` and does not change filesystem semantics.
+
+/// Like [`run_git_command`] but takes `&Path` so callers holding a borrow
+/// don't need to clone a `PathBuf`.
+pub async fn run_git_command_in(cwd: &Path, args: Vec<String>) -> Result<CommandOutput, GitError> {
+    run_git_command(cwd.to_path_buf(), args).await
+}
+
+/// Like [`run_git_command_with_timeout`] but takes `&Path`.
+pub async fn run_git_command_with_timeout_in(
+    cwd: &Path,
+    args: Vec<String>,
+    timeout: std::time::Duration,
+) -> Result<CommandOutput, GitError> {
+    run_git_command_with_timeout(cwd.to_path_buf(), args, timeout).await
+}
+
+/// `git rev-parse HEAD` against `repo_root`. Returns the trimmed SHA on
+/// stdout. Used by callers that want the HEAD commit SHA without having to
+/// manually parse `CommandOutput`.
+pub async fn head_commit_sha(repo_root: &Path) -> Result<String, GitError> {
+    let out = run_git_command(
+        repo_root.to_path_buf(),
+        vec!["rev-parse".into(), "HEAD".into()],
+    )
+    .await?;
+    Ok(out.stdout.trim().to_string())
+}
+
+/// `git rev-list --count <range>` against `repo_root`. Returns the parsed
+/// count. Used by callers that want the number of commits in a range without
+/// manually parsing `CommandOutput`.
+///
+/// Errors out if git exits non-zero OR stdout isn't a valid u64.
+pub async fn rev_list_count(repo_root: &Path, range: &str) -> Result<u64, GitError> {
+    let out = run_git_command(
+        repo_root.to_path_buf(),
+        vec!["rev-list".into(), "--count".into(), range.to_string()],
+    )
+    .await?;
+    out.stdout
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| GitError::Other(anyhow::anyhow!("rev-list count not a u64: {e}")))
+}

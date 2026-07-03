@@ -1359,21 +1359,8 @@ pub async fn load_canonical_graph_only<C: WarmContext>(
 }
 
 async fn count_commits_since(project_root: &Path, pinned_commit: &str) -> Option<u64> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(project_root)
-        .args([
-            "rev-list",
-            "--count",
-            &format!("{pinned_commit}..origin/main"),
-        ])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    raw.trim().parse::<u64>().ok()
+    let range = format!("{pinned_commit}..origin/main");
+    djinn_git::rev_list_count(project_root, &range).await.ok()
 }
 
 /// Consult the persisted `projects.stack` JSON and translate the detected
@@ -1670,14 +1657,7 @@ mod tests {
         let run = |args: &[&str]| {
             let pr = project_root.clone();
             let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            async move {
-                tokio::process::Command::new("git")
-                    .current_dir(&pr)
-                    .args(&args)
-                    .output()
-                    .await
-                    .unwrap()
-            }
+            async move { djinn_git::run_git_command_in(&pr, args).await.unwrap() }
         };
         run(&["init", "-q", "-b", "main"]).await;
         run(&["config", "user.email", "t@t"]).await;
@@ -2337,13 +2317,9 @@ edition = "2024"
             .await
             .expect("create project");
 
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
+        let head_sha = djinn_git::head_commit_sha(&project_root)
             .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+            .expect("resolve HEAD commit");
 
         let graph = build_test_graph_fixture();
         let blob = bincode::serialize(&graph.to_artifact()).expect("serialize fixture graph");
@@ -2382,13 +2358,9 @@ edition = "2024"
             .await
             .expect("create project");
 
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
+        let head_sha = djinn_git::head_commit_sha(&project_root)
             .await
-            .unwrap();
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+            .expect("resolve HEAD commit");
 
         let garbage = b"this is definitely not a bincoded RepoDependencyGraph";
         RepoGraphCacheRepository::new(db.clone())
@@ -2794,13 +2766,9 @@ edition = "2024"
             .expect("create project");
 
         // Resolve HEAD commit SHA from the tempdir git repo.
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
             .await
-            .unwrap();
-        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+            .expect("resolve HEAD commit");
 
         // Seed the DB cache with a fixture graph artifact — simulates
         // the output of a full (cold) pipeline run.
@@ -2960,24 +2928,29 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
         )
         .await
         .expect("write src/lib.rs");
-        let commit_output = tokio::process::Command::new("git")
-            .args(["add", "Cargo.toml", "src/lib.rs"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .expect("git add rust fixture");
+        let commit_output = djinn_git::run_git_command_in(
+            &project_root,
+            vec!["add".into(), "Cargo.toml".into(), "src/lib.rs".into()],
+        )
+        .await
+        .expect("git add rust fixture");
         assert!(
-            commit_output.status.success(),
+            commit_output.code == 0,
             "git add rust fixture failed: {commit_output:?}"
         );
-        let commit_output = tokio::process::Command::new("git")
-            .args(["commit", "-q", "-m", "add rust fixture"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .expect("git commit rust fixture");
+        let commit_output = djinn_git::run_git_command_in(
+            &project_root,
+            vec![
+                "commit".into(),
+                "-q".into(),
+                "-m".into(),
+                "add rust fixture".into(),
+            ],
+        )
+        .await
+        .expect("git commit rust fixture");
         assert!(
-            commit_output.status.success(),
+            commit_output.code == 0,
             "git commit rust fixture failed: {commit_output:?}"
         );
 
@@ -3007,17 +2980,9 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
         .await;
         assert!(result.is_ok(), "in-memory warm failed: {result:?}");
 
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
             .await
             .expect("resolve HEAD commit");
-        assert!(
-            head_out.status.success(),
-            "git rev-parse failed: {head_out:?}"
-        );
-        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
         let cold_blob = cache_repo
             .get(&project.id, &commit_sha)
             .await
@@ -3106,24 +3071,29 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
         )
         .await
         .expect("write src/lib.rs");
-        let commit_output = tokio::process::Command::new("git")
-            .args(["add", "Cargo.toml", "src/lib.rs"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .expect("git add rust fixture");
+        let commit_output = djinn_git::run_git_command_in(
+            &project_root,
+            vec!["add".into(), "Cargo.toml".into(), "src/lib.rs".into()],
+        )
+        .await
+        .expect("git add rust fixture");
         assert!(
-            commit_output.status.success(),
+            commit_output.code == 0,
             "git add rust fixture failed: {commit_output:?}"
         );
-        let commit_output = tokio::process::Command::new("git")
-            .args(["commit", "-q", "-m", "add rust fixture"])
-            .current_dir(&project_root)
-            .output()
-            .await
-            .expect("git commit rust fixture");
+        let commit_output = djinn_git::run_git_command_in(
+            &project_root,
+            vec![
+                "commit".into(),
+                "-q".into(),
+                "-m".into(),
+                "add rust fixture".into(),
+            ],
+        )
+        .await
+        .expect("git commit rust fixture");
         assert!(
-            commit_output.status.success(),
+            commit_output.code == 0,
             "git commit rust fixture failed: {commit_output:?}"
         );
 
@@ -3161,17 +3131,9 @@ cp "$DJINN_TEST_SCIP_FIXTURE" "$out"
         .await;
         assert!(result.is_ok(), "cold warm failed: {result:?}");
 
-        let head_out = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&project_root)
-            .output()
+        let commit_sha = djinn_git::head_commit_sha(&project_root)
             .await
             .expect("resolve HEAD commit");
-        assert!(
-            head_out.status.success(),
-            "git rev-parse failed: {head_out:?}"
-        );
-        let commit_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
         let cold_blob = cache_repo
             .get(&project.id, &commit_sha)
             .await

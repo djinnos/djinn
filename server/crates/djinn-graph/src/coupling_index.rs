@@ -18,8 +18,8 @@ use djinn_db::{
     CommitFileChange, CommitFileChangeRepository, CouplingPairEvent, Database,
     derive_pair_events_into,
 };
+use djinn_git::CommandOutput;
 use thiserror::Error;
-use tokio::process::Command;
 
 const GIT_LOG_TIMEOUT: Duration = Duration::from_secs(120);
 const BATCH_SIZE: usize = 500;
@@ -235,37 +235,36 @@ pub async fn ingest_new_commits(
 }
 
 async fn git_head(project_root: &Path) -> Result<String, IngestError> {
-    let output = tokio::time::timeout(
-        GIT_LOG_TIMEOUT,
-        Command::new("git")
-            .current_dir(project_root)
-            .args(["rev-parse", "HEAD"])
-            .output(),
-    )
-    .await
-    .map_err(|_| IngestError::Timeout(GIT_LOG_TIMEOUT))??;
-    if !output.status.success() {
-        return Err(IngestError::GitFailed {
-            status: format!("{}", output.status),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
+    match tokio::time::timeout(GIT_LOG_TIMEOUT, djinn_git::head_commit_sha(project_root)).await {
+        Ok(Ok(sha)) => Ok(sha),
+        Ok(Err(djinn_git::GitError::CommandFailed { code, stderr, .. })) => {
+            Err(IngestError::GitFailed {
+                status: code.to_string(),
+                stderr,
+            })
+        }
+        Ok(Err(djinn_git::GitError::Io(io_err))) => Err(IngestError::Spawn(io_err)),
+        Ok(Err(other)) => Err(IngestError::Parse(format!("git rev-parse: {other}"))),
+        Err(_elapsed) => Err(IngestError::Timeout(GIT_LOG_TIMEOUT)),
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 async fn cursor_is_reachable(project_root: &Path, sha: &str) -> bool {
-    let Ok(Ok(output)) = tokio::time::timeout(
+    let owned: Vec<String> = vec![
+        "merge-base".into(),
+        "--is-ancestor".into(),
+        sha.to_string(),
+        "HEAD".into(),
+    ];
+    let Ok(Ok(out)) = tokio::time::timeout(
         GIT_LOG_TIMEOUT,
-        Command::new("git")
-            .current_dir(project_root)
-            .args(["merge-base", "--is-ancestor", sha, "HEAD"])
-            .output(),
+        djinn_git::run_git_command_in(project_root, owned),
     )
     .await
     else {
         return false;
     };
-    output.status.success()
+    out.code == 0
 }
 
 /// Targeted fetch for the saved cursor SHA so a shallow warm-Pod clone can
@@ -308,16 +307,13 @@ async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
     // missing remote errors with "fatal: 'origin' does not appear to be
     // a git repository" — not catastrophic, but we want this helper to
     // be a clean best-effort.
+    let probe: Vec<String> = vec!["config".into(), "--get".into(), "remote.origin.url".into()];
     let has_origin = tokio::fs::metadata(project_root.join(".git/config"))
         .await
         .is_ok()
         && {
-            let probe = Command::new("git")
-                .current_dir(project_root)
-                .args(["config", "--get", "remote.origin.url"])
-                .output()
-                .await;
-            matches!(probe, Ok(o) if o.status.success())
+            let probe_out = djinn_git::run_git_command_in(project_root, probe).await;
+            matches!(probe_out, Ok(o) if o.code == 0)
         };
     if !has_origin {
         return false;
@@ -327,17 +323,15 @@ async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
     // shallow boundary back to the root; `git fetch origin <ref>` only
     // fetches <ref> and leaves parents unreachable. See the doc comment on
     // this fn for the full reasoning.
+    let owned: Vec<String> = vec!["fetch".into(), "--unshallow".into()];
     let fetch = tokio::time::timeout(
         GIT_LOG_TIMEOUT,
-        Command::new("git")
-            .current_dir(project_root)
-            .args(["fetch", "--unshallow"])
-            .output(),
+        djinn_git::run_git_command_in(project_root, owned),
     )
     .await;
 
-    let result = match fetch {
-        Ok(Ok(r)) => r,
+    let out = match fetch {
+        Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             tracing::warn!(
                 project_root = %project_root.display(),
@@ -356,8 +350,8 @@ async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
             return false;
         }
     };
-    if !result.status.success() {
-        let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    if out.code != 0 {
+        let stderr = out.stderr.trim().to_string();
         // `--unshallow` can fail when the original clone wasn't shallow
         // ("fatal: --unshallow on a complete repository does not make
         // sense") or when the remote is unreachable. We log at warn and
@@ -420,22 +414,20 @@ async fn run_git_log(project_root: &Path, range: &str) -> Result<(String, bool),
             project_root = %project_root.display(),
             "coupling_index: shallow clone detected; attempting `git fetch --unshallow` before walk"
         );
+        let owned: Vec<String> = vec!["fetch".into(), "--unshallow".into()];
         let fetch = tokio::time::timeout(
             GIT_LOG_TIMEOUT,
-            Command::new("git")
-                .current_dir(project_root)
-                .args(["fetch", "--unshallow"])
-                .output(),
+            djinn_git::run_git_command_in(project_root, owned),
         )
         .await;
         match fetch {
-            Ok(Ok(result)) if result.status.success() => {
+            Ok(Ok(out)) if out.code == 0 => {
                 unshallowed = true;
             }
-            Ok(Ok(result)) => {
+            Ok(Ok(out)) => {
                 tracing::warn!(
                     project_root = %project_root.display(),
-                    stderr = %String::from_utf8_lossy(&result.stderr).trim(),
+                    stderr = %out.stderr.trim(),
                     "coupling_index: `git fetch --unshallow` non-zero; ingesting visible history only"
                 );
             }
@@ -478,42 +470,46 @@ async fn run_git_log_once(project_root: &Path, range: &str) -> Result<String, In
     // `-M` / `-C`: surface renames and copies with a similarity score.
     // `--date-order`: stabilise output ordering across git versions.
     let pretty = format!("{COMMIT_SENTINEL}%H|%cI|%aE");
-    let args = [
-        "log",
-        "--no-merges",
-        "--name-status",
-        "--numstat",
-        "-M",
-        "-C",
-        "--date-order",
-        "--pretty=format:",
-    ];
-    // Build the command incrementally so we can append `--pretty=` and
-    // the range without a format-string allocation in the happy path.
-    let mut cmd = Command::new("git");
-    cmd.current_dir(project_root);
-    cmd.arg(args[0]);
-    for arg in &args[1..args.len() - 1] {
-        cmd.arg(arg);
-    }
-    cmd.arg(format!("--pretty=format:{pretty}"));
-    cmd.arg(range);
+    // Build the args vector incrementally so we can append the range
+    // without a format-string allocation in the happy path.
+    //
+    // NB: `--pretty=format:<fmt>` is a SINGLE argv element to git — the
+    // `format:` token names the format and the rest of the string is the
+    // format body. Splitting it across two argv elements would cause git
+    // to interpret `--pretty=format:` as an empty format specifier and
+    // treat the format body as a positional argument.
+    let mut args: Vec<String> = Vec::with_capacity(10);
+    args.push("log".into());
+    args.push("--no-merges".into());
+    args.push("--name-status".into());
+    args.push("--numstat".into());
+    args.push("-M".into());
+    args.push("-C".into());
+    args.push("--date-order".into());
+    args.push(format!("--pretty=format:{pretty}"));
+    args.push(range.to_string());
 
-    let output = tokio::time::timeout(GIT_LOG_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| IngestError::Timeout(GIT_LOG_TIMEOUT))??;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        // `git log cursor..HEAD` on a repo that has zero new commits
-        // exits 0 with empty output. A hard error here means the range
-        // is bad (e.g. cursor unreachable) — bubble it so the caller
-        // can log it.
-        return Err(IngestError::GitFailed {
-            status: format!("{}", output.status),
-            stderr,
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let outcome = tokio::time::timeout(
+        GIT_LOG_TIMEOUT,
+        djinn_git::run_git_command_in(project_root, args),
+    )
+    .await;
+
+    let CommandOutput { stdout, .. } = match outcome {
+        Ok(Ok(out)) => out,
+        Ok(Err(djinn_git::GitError::Io(io_err))) => return Err(IngestError::Spawn(io_err)),
+        Ok(Err(djinn_git::GitError::CommandFailed { code, stderr, .. })) => {
+            return Err(IngestError::GitFailed {
+                status: code.to_string(),
+                stderr,
+            });
+        }
+        Ok(Err(other)) => {
+            return Err(IngestError::Parse(format!("git log failed: {other}")));
+        }
+        Err(_elapsed) => return Err(IngestError::Timeout(GIT_LOG_TIMEOUT)),
+    };
+    Ok(stdout)
 }
 
 /// Parsed view over `git log --name-status --numstat` output.
@@ -817,17 +813,11 @@ mod tests {
         let root = tmp.path().to_path_buf();
 
         async fn run(root: &std::path::Path, args: &[&str]) {
-            let out = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let out = djinn_git::run_git_command_in(root, owned)
                 .await
                 .expect("git");
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            assert!(out.code == 0, "git {args:?} failed: {}", out.stderr);
         }
         run(&root, &["init", "-q", "-b", "main"]).await;
         run(&root, &["config", "user.email", "t@t"]).await;
@@ -886,22 +876,20 @@ mod tests {
             .await
             .expect("upstream dir");
 
-        async fn git(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-            Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
+        async fn git(root: &std::path::Path, args: &[&str]) -> djinn_git::CommandOutput {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            djinn_git::run_git_command_in(root, owned)
                 .await
                 .expect("git")
         }
 
-        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> djinn_git::CommandOutput {
             let out = git(root, args).await;
             assert!(
-                out.status.success(),
+                out.code == 0,
                 "git {args:?} failed in {}: {}",
                 root.display(),
-                String::from_utf8_lossy(&out.stderr)
+                out.stderr
             );
             out
         }
@@ -919,14 +907,16 @@ mod tests {
             git_assert(&upstream, &["add", "."]).await;
             git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
         }
-        let cursor =
-            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~3"]).await.stdout)
-                .trim()
-                .to_owned();
-        let head =
-            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD"]).await.stdout)
-                .trim()
-                .to_owned();
+        let cursor = git_assert(&upstream, &["rev-parse", "HEAD~3"])
+            .await
+            .stdout
+            .trim()
+            .to_owned();
+        let head = git_assert(&upstream, &["rev-parse", "HEAD"])
+            .await
+            .stdout
+            .trim()
+            .to_owned();
         assert_ne!(cursor, head, "test fixture: cursor should differ from HEAD");
 
         // Fresh `--depth 1 --single-branch` clone — mirrors the warm-Pod
@@ -973,14 +963,12 @@ mod tests {
             !cursor_is_reachable(&shallow, &cursor).await,
             "fetching only the cursor object must not make it a walkable ancestor of HEAD"
         );
-        let head_count_after_broken_fetch = String::from_utf8_lossy(
-            &git(
-                &shallow,
-                &["rev-list", "--count", &format!("{cursor}..HEAD")],
-            )
-            .await
-            .stdout,
+        let head_count_after_broken_fetch = git(
+            &shallow,
+            &["rev-list", "--count", &format!("{cursor}..HEAD")],
         )
+        .await
+        .stdout
         .trim()
         .to_owned();
         assert_eq!(
@@ -1004,14 +992,12 @@ mod tests {
             cursor_is_reachable(&shallow, &cursor).await,
             "cursor must be reachable after --unshallow"
         );
-        let head_count_after_unshallow = String::from_utf8_lossy(
-            &git(
-                &shallow,
-                &["rev-list", "--count", &format!("{cursor}..HEAD")],
-            )
-            .await
-            .stdout,
+        let head_count_after_unshallow = git(
+            &shallow,
+            &["rev-list", "--count", &format!("{cursor}..HEAD")],
         )
+        .await
+        .stdout
         .trim()
         .to_owned();
         assert_eq!(
@@ -1039,18 +1025,16 @@ mod tests {
             .await
             .expect("upstream dir");
 
-        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-            let out = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> djinn_git::CommandOutput {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let out = djinn_git::run_git_command_in(root, owned)
                 .await
                 .expect("git");
             assert!(
-                out.status.success(),
+                out.code == 0,
                 "git {args:?} failed in {}: {}",
                 root.display(),
-                String::from_utf8_lossy(&out.stderr)
+                out.stderr
             );
             out
         }
@@ -1067,10 +1051,11 @@ mod tests {
             git_assert(&upstream, &["add", "."]).await;
             git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
         }
-        let cursor =
-            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~2"]).await.stdout)
-                .trim()
-                .to_owned();
+        let cursor = git_assert(&upstream, &["rev-parse", "HEAD~2"])
+            .await
+            .stdout
+            .trim()
+            .to_owned();
 
         // Fresh shallow clone. `--no-local` is required because `git clone
         // file://...` defaults to a local fast-path that ignores `--depth`,
@@ -1121,7 +1106,8 @@ mod tests {
             &["rev-list", "--count", &format!("{cursor}..HEAD")],
         )
         .await;
-        let count: usize = String::from_utf8_lossy(&log_output.stdout)
+        let count: usize = log_output
+            .stdout
             .trim()
             .parse()
             .expect("rev-list count parses");
@@ -1162,18 +1148,16 @@ mod tests {
             .await
             .expect("upstream dir");
 
-        async fn git_assert(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-            let out = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
+        async fn git_assert(root: &std::path::Path, args: &[&str]) -> djinn_git::CommandOutput {
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let out = djinn_git::run_git_command_in(root, owned)
                 .await
                 .expect("git");
             assert!(
-                out.status.success(),
+                out.code == 0,
                 "git {args:?} failed in {}: {}",
                 root.display(),
-                String::from_utf8_lossy(&out.stderr)
+                out.stderr
             );
             out
         }
@@ -1190,14 +1174,16 @@ mod tests {
             git_assert(&upstream, &["commit", "-q", "-m", &format!("commit {i}")]).await;
         }
         // Cursor = commit 7. New commits = 8, 9, 10 → 3 commits of delta.
-        let cursor =
-            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD~3"]).await.stdout)
-                .trim()
-                .to_owned();
-        let head =
-            String::from_utf8_lossy(&git_assert(&upstream, &["rev-parse", "HEAD"]).await.stdout)
-                .trim()
-                .to_owned();
+        let cursor = git_assert(&upstream, &["rev-parse", "HEAD~3"])
+            .await
+            .stdout
+            .trim()
+            .to_owned();
+        let head = git_assert(&upstream, &["rev-parse", "HEAD"])
+            .await
+            .stdout
+            .trim()
+            .to_owned();
         assert_ne!(cursor, head, "test fixture: cursor should differ from HEAD");
 
         // Fresh `--depth 5 --single-branch` clone. With 10 upstream commits
@@ -1261,7 +1247,8 @@ mod tests {
         // in the shallow clone. This proves no full-history re-ingest occurs.
         let delta_output =
             git_assert(&clone, &["rev-list", "--count", &format!("{cursor}..HEAD")]).await;
-        let delta_count: usize = String::from_utf8_lossy(&delta_output.stdout)
+        let delta_count: usize = delta_output
+            .stdout
             .trim()
             .parse()
             .expect("rev-list count parses");
@@ -1274,7 +1261,8 @@ mod tests {
         // The visible history (5 commits in the shallow clone) is strictly
         // greater than the delta — proving the walk is incremental, not full.
         let visible_output = git_assert(&clone, &["rev-list", "--count", "HEAD"]).await;
-        let visible_count: usize = String::from_utf8_lossy(&visible_output.stdout)
+        let visible_count: usize = visible_output
+            .stdout
             .trim()
             .parse()
             .expect("rev-list count parses");
@@ -1287,7 +1275,8 @@ mod tests {
         // If the cursor equals HEAD (no new commits), the walk is a no-op.
         let no_op_output =
             git_assert(&clone, &["rev-list", "--count", &format!("{head}..HEAD")]).await;
-        let no_op_count: usize = String::from_utf8_lossy(&no_op_output.stdout)
+        let no_op_count: usize = no_op_output
+            .stdout
             .trim()
             .parse()
             .expect("rev-list count parses");
