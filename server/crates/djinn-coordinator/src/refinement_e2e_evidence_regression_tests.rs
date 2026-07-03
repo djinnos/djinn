@@ -28,11 +28,9 @@
 // djinn:allow-oversize
 
 use crate::refinement::RefinementPhase;
-use crate::refinement_dispatch::{
-    refinement_cap_tests::{
-        TEST_MODEL, build_refinement_actor, seed_refinement_fixture, seed_refinement_state,
-        spawn_test_pool,
-    },
+use crate::refinement_dispatch::refinement_cap_tests::{
+    TEST_MODEL, build_refinement_actor, seed_refinement_fixture, seed_refinement_state,
+    spawn_test_pool,
 };
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::NeedsEvidenceClaim;
@@ -189,7 +187,9 @@ async fn open_linked_spike_parks_normal_and_redispatch_paths() {
         .record_needs_evidence();
 
     // Normal dispatch path.
-    actor.dispatch_next_refinement_phase(&fixture.proposal_id).await;
+    actor
+        .dispatch_next_refinement_phase(&fixture.proposal_id)
+        .await;
 
     // Re-drive path: simulate a tick while the spike is still open.
     actor.drive_active_refinements().await;
@@ -298,9 +298,17 @@ async fn valid_evidence_completion_clears_link_and_resumes_advocate_with_finding
         .await
         .expect("read advocate task")
         .expect("advocate task exists");
-    assert!(advocate_task.description.contains("Evidence findings received"));
+    assert!(
+        advocate_task
+            .description
+            .contains("Evidence findings received")
+    );
     assert!(advocate_task.description.contains("FINDINGS-BODY-E2E"));
-    assert!(advocate_task.description.contains("FINDINGS-ANSWER-E2E valid"));
+    assert!(
+        advocate_task
+            .description
+            .contains("FINDINGS-ANSWER-E2E valid")
+    );
 }
 
 // ── AC#3: missing/malformed findings and failed spikes block resume ──────────
@@ -478,9 +486,11 @@ async fn freeze_precedence_after_receipt_records_but_does_not_resume() {
         .revisions(&fixture.proposal_id)
         .await
         .expect("read lifecycle");
-    assert!(lifecycle
-        .iter()
-        .any(|r| r.event_kind == "refinement_evidence_received"));
+    assert!(
+        lifecycle
+            .iter()
+            .any(|r| r.event_kind == "refinement_evidence_received")
+    );
 
     // But no automatic resume while frozen.
     assert!(actor.refinement_sessions.is_empty());
@@ -853,6 +863,9 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
     actor.drive_active_refinements().await;
 
     let advocate_count = count_refinement_tasks(&task_repo, &fixture.project_id, "advocate").await;
-    assert_eq!(advocate_count, 1, "only the pre-existing Advocate task exists");
+    assert_eq!(
+        advocate_count, 1,
+        "only the pre-existing Advocate task exists"
+    );
     assert!(actor.refinement_sessions.is_empty());
 }

@@ -19,21 +19,21 @@ use tokio_util::sync::CancellationToken;
 
 /// The model used for refinement dispatch in `#[cfg(test)]` builds
 /// (hardcoded by `resolve_dispatch_models_for_role`).
-pub(super) const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
+pub(crate) const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
 
 // ── Fixture ──────────────────────────────────────────────────────────
 
-pub(super) struct RefinementFixture {
+pub(crate) struct RefinementFixture {
     #[allow(dead_code)]
     db: djinn_db::Database,
-    pub(super) project_id: String,
-    pub(super) user_id: String,
-    pub(super) proposal_id: String,
+    pub(crate) project_id: String,
+    pub(crate) user_id: String,
+    pub(crate) proposal_id: String,
 }
 
 /// Create a project, user, and proposal (with a project target) ready
 /// for refinement dispatch.
-pub(super) async fn seed_refinement_fixture(db: &djinn_db::Database) -> RefinementFixture {
+pub(crate) async fn seed_refinement_fixture(db: &djinn_db::Database) -> RefinementFixture {
     let event_bus = EventBus::noop();
     let project = crate::test_helpers::create_test_project(db).await;
     let user = UserRepository::new(db.clone())
@@ -81,7 +81,7 @@ pub(super) async fn seed_refinement_fixture(db: &djinn_db::Database) -> Refineme
 // ── Actor construction ───────────────────────────────────────────────
 
 /// Build a `CoordinatorActor` wired to the given pool and DB.
-pub(super) fn build_refinement_actor(
+pub(crate) fn build_refinement_actor(
     db: &djinn_db::Database,
     events_tx: &tokio::sync::broadcast::Sender<DjinnEventEnvelope>,
     pool: djinn_slot::SlotPoolHandle,
@@ -155,7 +155,7 @@ pub(super) fn build_refinement_actor(
 }
 
 /// Create a slot pool with the test model configured.
-pub(super) fn spawn_test_pool(
+pub(crate) fn spawn_test_pool(
     db: &djinn_db::Database,
     max_slots: u32,
 ) -> djinn_slot::SlotPoolHandle {
@@ -178,7 +178,7 @@ pub(super) fn spawn_test_pool(
 }
 
 /// Seed a `RefinementLoopState` in the actor's `active_refinements` map.
-pub(super) fn seed_refinement_state(
+pub(crate) fn seed_refinement_state(
     actor: &mut CoordinatorActor,
     proposal_id: &str,
     attributed_user_id: Option<String>,
