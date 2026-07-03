@@ -1,4 +1,6 @@
 use rmcp::model::Tool as RmcpTool;
+use std::collections::BTreeSet;
+
 use rmcp::object;
 
 use crate::shared_schemas::{self, ToolSafetyAnnotations};
@@ -993,4 +995,27 @@ pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
     ));
 
     tool_values
+}
+
+/// Canonical allowlist of tool names permitted in the evidence-spike
+/// read-only profile.
+///
+/// Derived from [`tool_schemas_evidence_spike`] to guarantee the allowlist
+/// and the schema surface cannot drift.  Callers that need to gate dispatch
+/// at runtime (fail-closed) should use this set rather than re-parsing
+/// schemas.
+///
+/// This is the single source of truth for the evidence-spike allowlist;
+/// schema generation and dispatch enforcement both reference this function
+/// so they cannot drift apart.
+pub fn evidence_spike_tool_names() -> BTreeSet<String> {
+    tool_schemas_evidence_spike()
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .collect()
 }
