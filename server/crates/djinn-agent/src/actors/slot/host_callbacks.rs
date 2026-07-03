@@ -1,7 +1,3 @@
-// Host callbacks for the djinn-slot dispatch/reply-loop pathway.
-// `AgentDispatchCallbacks` wraps AgentContext so `dispatch_task_runtime` can be
-// invoked from `SlotHostCallbacks::run_task_dispatch`.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,56 +5,44 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::AgentContext;
+
+use super::adapter::build_slot_context;
 use djinn_supervisor::SupervisorServices;
 
-/// Build a dispatch-pathway [`djinn_slot::host::SlotContext`] from an
-/// [`AgentContext`]. Most `SlotHostCallbacks` methods are stubs — the host
-/// dispatch path uses `AgentContext` directly for MCP, prompts, credentials.
+/// Build a dispatch-pathway [`djinn_slot::host::SlotContext`] from an [`AgentContext`].
 pub(crate) fn agent_to_dispatch_slot_context(
     agent: &AgentContext,
 ) -> djinn_slot::host::SlotContext {
-    djinn_slot::host::SlotContext {
-        db: agent.db.clone(),
-        event_bus: agent.event_bus.clone(),
-        catalog: agent.catalog.clone(),
-        health_tracker: agent.health_tracker.clone(),
-        background_work_tasks: agent.background_work_tasks.clone(),
-        active_tasks: agent.active_tasks.clone(),
-        default_project_id: agent.default_project_id.clone(),
-        working_root: agent.working_root.clone(),
-        coordinator_trigger: None,
-        runtime_ops: agent.runtime_ops.clone(),
-        repo_graph_ops: agent.repo_graph_ops.clone(),
-        clock: Arc::new(djinn_core::clock::SystemClock::new()),
-        callbacks: Arc::new(AgentDispatchCallbacks {
+    build_slot_context(
+        agent,
+        Arc::new(AgentDispatchCallbacks {
             agent: agent.clone(),
             services: None,
         }),
-        tool_dispatcher: None,
-    }
+        None,
+    )
 }
 
 /// Build a reply-loop [`djinn_slot::host::SlotContext`] that routes liveness
 /// and token-flush heartbeats through the live [`SupervisorServices`] handle.
-/// Without this the coordinator's stall poller false-kills idle worker sessions.
 pub(crate) fn agent_to_reply_loop_slot_context(
     agent: &AgentContext,
     services: &dyn SupervisorServices,
 ) -> djinn_slot::host::SlotContext {
-    let mut ctx = agent_to_dispatch_slot_context(agent);
     // SAFETY: the reply loop awaits every callback future before returning.
     let services_static = unsafe {
         std::mem::transmute::<&dyn SupervisorServices, &'static dyn SupervisorServices>(services)
     };
-    ctx.callbacks = Arc::new(AgentDispatchCallbacks {
-        agent: agent.clone(),
-        services: Some(services_static),
-    });
-    ctx
+    build_slot_context(
+        agent,
+        Arc::new(AgentDispatchCallbacks {
+            agent: agent.clone(),
+            services: Some(services_static),
+        }),
+        None,
+    )
 }
 
-/// `SlotHostCallbacks` impl for the agent host. `services` is `Some` only on
-/// the reply-loop path; dispatch-path heartbeats are inert stubs.
 struct AgentDispatchCallbacks {
     agent: AgentContext,
     services: Option<&'static dyn SupervisorServices>,

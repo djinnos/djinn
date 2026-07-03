@@ -3,7 +3,11 @@
 // non-extraction operations no-op while resolving credentials through the
 // normal AgentContext-backed loader.
 
+use std::sync::Arc;
+
 use crate::context::AgentContext;
+
+use super::adapter::build_slot_context;
 
 struct ExtractionCallbacks(AgentContext);
 
@@ -146,22 +150,11 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
 /// Convert `AgentContext` → `SlotContext` for extraction backfill and lifecycle
 /// adapters that need a `SlotContext` with extraction-compatible host callbacks.
 pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
-    djinn_slot::host::SlotContext {
-        db: agent.db.clone(),
-        event_bus: agent.event_bus.clone(),
-        catalog: agent.catalog.clone(),
-        health_tracker: agent.health_tracker.clone(),
-        background_work_tasks: agent.background_work_tasks.clone(),
-        active_tasks: agent.active_tasks.clone(),
-        default_project_id: agent.default_project_id.clone(),
-        working_root: agent.working_root.clone(),
-        coordinator_trigger: None,
-        runtime_ops: agent.runtime_ops.clone(),
-        repo_graph_ops: agent.repo_graph_ops.clone(),
-        clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
-        callbacks: std::sync::Arc::new(ExtractionCallbacks(agent.clone())),
-        tool_dispatcher: None,
-    }
+    build_slot_context(
+        agent,
+        Arc::new(ExtractionCallbacks(agent.clone())),
+        None,
+    )
 }
 
 /// One-shot recovery sweep that backfills post-session knowledge extraction

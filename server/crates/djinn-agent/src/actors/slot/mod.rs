@@ -19,6 +19,7 @@ mod actor; // HOST-ONLY: slot actor + handle
 mod commands; // THIN SHIM: SlotCommand/SlotError re-export
 pub(crate) mod finalize_handlers; // THIN SHIM: finalize handler adapters
 pub mod helpers; // HOST-ONLY: provider resolution, feedback, code-context
+pub(crate) mod adapter; // SHARED: AgentContext → SlotContext construction helpers
 pub(crate) mod host_callbacks; // HOST-ONLY: dispatch callback adapter
 pub(crate) mod lifecycle; // HOST-ONLY: per-stage lifecycle helpers
 mod pool; // HOST-ONLY: slot pool, handle, factory

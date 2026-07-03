@@ -1,29 +1,16 @@
 // ─── hfhw cutover: finalize_handlers delegated to djinn-slot ────────────
 //
-// The canonical finalize handler implementations now live in
-// `djinn_slot::finalize_handlers`.  This module re-exports the finalize
-// types and `apply_ac_verdicts` pure function, and provides thin
-// `AgentContext → SlotContext` adapter wrappers for the two async entry
-// points (`process_finalize_payload`, `handle_budget_park`) so existing
-// agent-side callers continue to compile without changes.
+// Re-exports canonical finalize types and wraps the two async entry points
+// with `AgentContext → SlotContext` adapter glue.
 
-// Re-export finalize types from djinn-slot so `AcVerdict` resolves through the
-// agent module path for the test module below.  These types are byte-identical
-// to the old `crate::roles::finalize` definitions.
 #[cfg(test)]
 pub(crate) use djinn_slot::finalize_types::AcVerdict;
-
-// Re-export the pure `apply_ac_verdicts` function from djinn-slot for tests.
 #[cfg(test)]
 pub(crate) use djinn_slot::finalize_handlers::apply_ac_verdicts;
 
 use crate::context::AgentContext;
 
-/// Agent-compatible wrapper around
-/// `djinn_slot::finalize_handlers::process_finalize_payload`.
-///
-/// Converts `AgentContext` → `SlotContext` and delegates to the canonical
-/// djinn-slot implementation.
+/// Agent-compatible wrapper around `djinn_slot::finalize_handlers::process_finalize_payload`.
 pub(crate) async fn process_finalize_payload(
     payload: &Option<serde_json::Value>,
     finalize_tool_name: &str,
@@ -40,11 +27,7 @@ pub(crate) async fn process_finalize_payload(
     .await;
 }
 
-/// Agent-compatible wrapper around
-/// `djinn_slot::finalize_handlers::handle_budget_park`.
-///
-/// Converts `AgentContext` → `SlotContext` and delegates to the canonical
-/// djinn-slot implementation.
+/// Agent-compatible wrapper around `djinn_slot::finalize_handlers::handle_budget_park`.
 pub(crate) async fn handle_budget_park(
     summary: &str,
     details: &str,
