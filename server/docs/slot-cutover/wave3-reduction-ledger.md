@@ -258,6 +258,10 @@ Environment limitations:
 
 Task: `019f23f1-9ab9-7ff0-ae20-a63a8cdb4951` — Compile-prove slot facade cleanup and finalize Wave 3 reduction proof.
 
+### Rejection fix (round 2)
+
+The initial submission (commit `e33c9e8be`) was rejected because deleting `djinn-agent/src/actors/slot/llm_extraction.rs` broke `djinn-provider` test compilation: `completion.rs:605` contained `include_str!("../../djinn-agent/src/actors/slot/llm_extraction.rs")` in the `production_memory_resolver_does_not_list_all_credentials` guard test. This was fixed by pointing the `include_str!()` to the canonical `djinn-slot/src/llm_extraction.rs`. Additionally, a thin `lifecycle/retry.rs` re-export shim was eliminated (single consumer updated to import directly from `djinn_slot`), and stale doc references to the deleted `memory_enrichment` agent module were updated to canonical `djinn_slot` paths.
+
 ### Line-count proof
 
 ```sh
@@ -273,11 +277,11 @@ Post-ggwy baseline (this workspace HEAD, after all prior slices merged):
 
 After this slice:
 
-- `server/crates/djinn-agent/src/actors/slot`: 8,377 lines
+- `server/crates/djinn-agent/src/actors/slot`: 8,370 lines
 - `server/crates/djinn-slot/src`: 29,075 lines
-- Combined: 37,452 lines
+- Combined: 37,445 lines
 
-Net delta: **-286 combined scoped Rust lines**.
+Net delta: **-293 combined scoped Rust lines**.
 
 ### Caller review and compatibility export audit
 
@@ -323,13 +327,43 @@ Net delta: **-286 combined scoped Rust lines**.
   - Removed `mod memory_enrichment;` and `pub(crate) mod llm_extraction;` declarations.
   - All `pub use` re-exports preserved unchanged.
 
+- **Deleted** `server/crates/djinn-agent/src/actors/slot/lifecycle/retry.rs` (6 → 0 lines)
+  - Thin re-export shim for `djinn_slot::lifecycle::retry::{is_database_locked, retry_task_transition_on_locked}`.
+  - Single consumer (`teardown.rs`) updated to import directly from `djinn_slot`.
+  - `pub(crate) mod retry;` declaration removed from `lifecycle.rs`.
+
+- `server/crates/djinn-agent/src/actors/slot/lifecycle.rs` (18 → 17 lines, -1)
+  - Removed `pub(crate) mod retry;` declaration.
+
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/teardown.rs`
+  - Changed `use super::retry::retry_task_transition_on_locked` to `use djinn_slot::lifecycle::retry::retry_task_transition_on_locked`.
+
+- `server/crates/djinn-provider/src/completion.rs`
+  - Fixed `include_str!("../../djinn-agent/src/actors/slot/llm_extraction.rs")` → `include_str!("../../djinn-slot/src/llm_extraction.rs")` in `production_memory_resolver_does_not_list_all_credentials` test. The original agent-side file was deleted in this slice; the canonical source is now `djinn-slot/src/llm_extraction.rs`.
+
+- `server/crates/djinn-control-plane/src/bridge/memory_enrichment_bridge.rs`
+  - Updated doc references from `djinn_agent::actors::slot::memory_enrichment::*` to `djinn_slot::memory_enrichment::*` (canonical path).
+
+- `server/crates/djinn-control-plane/src/state.rs`
+  - Updated doc reference from `djinn_agent::actors::slot::memory_enrichment` to `djinn_slot::memory_enrichment` (canonical path).
+
+- `server/crates/djinn-control-plane/src/tools/memory_tools/run_enrichment.rs`
+  - Updated doc reference from `djinn_agent::actors::slot::memory_enrichment` to `djinn_slot::memory_enrichment` (canonical path).
+
 ### Touched files
 
 - `server/crates/djinn-agent/src/actors/slot/memory_enrichment.rs` (deleted)
 - `server/crates/djinn-agent/src/actors/slot/llm_extraction.rs` (deleted)
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/retry.rs` (deleted)
 - `server/crates/djinn-agent/src/actors/slot/session_extraction.rs`
 - `server/crates/djinn-agent/src/actors/slot/host_callbacks.rs`
 - `server/crates/djinn-agent/src/actors/slot/mod.rs`
+- `server/crates/djinn-agent/src/actors/slot/lifecycle.rs`
+- `server/crates/djinn-agent/src/actors/slot/lifecycle/teardown.rs`
+- `server/crates/djinn-provider/src/completion.rs`
+- `server/crates/djinn-control-plane/src/bridge/memory_enrichment_bridge.rs`
+- `server/crates/djinn-control-plane/src/state.rs`
+- `server/crates/djinn-control-plane/src/tools/memory_tools/run_enrichment.rs`
 - `server/docs/slot-cutover/wave3-reduction-ledger.md`
 
 ### Validation
@@ -337,7 +371,7 @@ Net delta: **-286 combined scoped Rust lines**.
 Formatting:
 
 ```sh
-cargo fmt --manifest-path server/Cargo.toml -p djinn-agent
+cargo fmt --manifest-path server/Cargo.toml -p djinn-agent -p djinn-provider -p djinn-control-plane
 ```
 
 Result: applied.
@@ -350,6 +384,14 @@ OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-agen
 
 Result: passed, no warnings or errors.
 
+Provider crate tests compilation (includes the fixed `include_str!` guard):
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-provider --tests -- -D warnings
+```
+
+Result: passed — the `production_memory_resolver_does_not_list_all_credentials` test compiles and runs.
+
 Control-plane tests compilation:
 
 ```sh
@@ -358,6 +400,30 @@ OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-cont
 
 Result: passed — all facade consumers (`execution_tools.rs`) compile clean.
 
+Worker binary compilation:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-agent-worker
+```
+
+Result: passed — only pre-existing `needless_borrow` warnings (unrelated to this task).
+
+Focused provider guard test:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-provider --lib production_memory_resolver_does_not_list_all_credentials
+```
+
+Result: 1 passed, 0 failed.
+
+Focused rotation tests (pure, exercises the `djinn_slot::lifecycle::retry` re-export path):
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --lib lifecycle::model_resolution::rotation_tests
+```
+
+Result: 4 passed, 0 failed.
+
 Focused session-extraction tests:
 
 ```sh
@@ -365,6 +431,14 @@ OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent 
 ```
 
 Result: 0 passed, 4 failed — all failures are `djinn_test_template` does not exist (DB environment limitation). Tests compile and execute; they fail at DB fixture setup. No tests were disabled or weakened.
+
+Focused supervisor-runner tests:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-agent --lib supervisor_runner::tests
+```
+
+Result: 14 passed, 1 failed (DB environment limitation — `djinn_test_template` not available).
 
 Environment limitations:
 
@@ -389,8 +463,8 @@ find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | 
 | After iwap (lifecycle prompt tests) | 8,713 | 28,622 | 37,335 |
 | After dzog (provider/MCP helpers) | 8,378 | 28,622 | 37,000 |
 | After ggwy (supervisor-runner) | 8,632 | 28,622 | 37,254 |
-| After z6fl (facade cleanup) | 8,377 | 29,075 | 37,452 |
-| **Total Wave 3 reduction** | **-1,056** | **+453** | **-603** |
+| After z6fl (facade cleanup) | 8,370 | 29,075 | 37,445 |
+| **Total Wave 3 reduction** | **-1,063** | **+453** | **-610** |
 
 ### Per-task deltas
 
@@ -399,23 +473,23 @@ find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | 
 | iwap | Lifecycle prompt-context and CI directive test scaffolding | -720 |
 | dzog | Provider and MCP resolution helper parameterization | -428 |
 | ggwy | Supervisor-runner host wiring overlap | -522 |
-| z6fl | Facade cleanup and reduction proof | -286 |
-| **Sum** | | **-1,956** |
+| z6fl | Facade cleanup and reduction proof | -293 |
+| **Sum** | | **-1,963** |
 
-**Note:** The per-task deltas sum exceeds the measured total because each task measures from its own baseline commit and upstream `djinn-slot` changes between tasks added +453 lines to `djinn_slot/src` (28,622 → 29,075). The net measured reduction from the original ttlg baseline to the final state is **603 combined lines**.
+**Note:** The per-task deltas sum exceeds the measured total because each task measures from its own baseline commit and upstream `djinn-slot` changes between tasks added +453 lines to `djinn_slot/src` (28,622 → 29,075). The net measured reduction from the original ttlg baseline to the final state is **610 combined lines**.
 
 ### Remaining shortfall to 30,312 target
 
-- Final combined count: **37,452** lines
+- Final combined count: **37,445** lines
 - Target: **≤ 30,312** lines
-- Remaining shortfall: **7,140** lines
-- Shortfall closed by Wave 3: **603** lines (from 38,055)
+- Remaining shortfall: **7,133** lines
+- Shortfall closed by Wave 3: **610** lines (from 38,055)
 
 ### Why the gap cannot be closed with safe shim removal
 
-The remaining 37,452 combined lines break down as:
+The remaining 37,445 combined lines break down as:
 
-- `djinn-agent/src/actors/slot`: 8,377 lines — primarily host-only `AgentContext`→`SlotContext` adapter code (`supervisor_runner.rs` 1,862, `session_extraction.rs` 221, `host_callbacks.rs` 193, `provider_resolution.rs` 532, lifecycle helpers 2,500+, pool/actor/handle 300+, reply_loop 243, tests 1,000+). These cannot be removed without an equivalent canonical host contract.
+- `djinn-agent/src/actors/slot`: 8,370 lines — primarily host-only `AgentContext`→`SlotContext` adapter code (`supervisor_runner.rs` 1,862, `session_extraction.rs` 221, `host_callbacks.rs` 193, `provider_resolution.rs` 532, lifecycle helpers 2,500+, pool/actor/handle 300+, reply_loop 243, tests 1,000+). These cannot be removed without an equivalent canonical host contract.
 - `djinn-slot/src`: 29,075 lines — the canonical slot crate that grew during the extraction (lifecycle, helpers, supervisor_runner, reply_loop, pool, tests). This is the intended destination.
 
 The impact-map spike (`ac78`) and this wave confirm that safe non-destructive cleanup of the agent facade can yield ~2k lines. Closing the remaining ~7k gap would require either: (a) moving host-only dispatch/credential/lifecycle behavior into a new canonical `djinn-slot` host contract (architect-level redesign), or (b) amending the 15k line-count criterion to account for the canonical `djinn-slot` growth that was the intended destination of the extraction.
