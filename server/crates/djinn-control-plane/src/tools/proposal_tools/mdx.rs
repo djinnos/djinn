@@ -9,6 +9,13 @@
 //! in-pod agent dispatch path (`djinn-mcp-extension`), so both paths validate
 //! selectors and resulting MDX identically and produce byte-identical
 //! revisions.
+//!
+//! Native-skill provenance: `ProposalBlockPatchParams` carries
+//! `native_skill_name` and `native_skill_version` fields that are persisted in
+//! revision event_metadata. These fields are block-patch infrastructure (the
+//! block patch is the surface through which native skills produce targeted
+//! revisions), so they remain here rather than in a separate native-skill
+//! module.
 
 use rmcp::schemars;
 use serde::Deserialize;
