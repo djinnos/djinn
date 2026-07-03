@@ -1,0 +1,35 @@
+# Capability-boundary allowlist.
+#
+# Each [[entries]] block grants a narrow, auditable exemption for a specific
+# capability usage in a specific file.  Entries must be exact: reviewers should
+# be able to see exactly why a file+matcher is exempt.
+#
+# Schema:
+#   capability      = "git" | "http" | "k8s"
+#   path            = exact file path (e.g. "server/crates/foo/src/bar.rs");
+#                     broad globs like "server/crates/**" are forbidden except
+#                     narrow synthetic fixture globs used by self-tests.
+#   matcher         = exact substring matched by the detector (e.g. "git2::").
+#   owner           = team or individual responsible for the cleanup.
+#   rationale       = short justification for the exemption.
+#   expires         = ISO-8601 date after which the exemption is stale; OR
+#   cleanup_issue    = link to a tracking issue for the cleanup.
+#
+# At least one of "expires" or "cleanup_issue" must be present.
+
+
+[[entries]]
+capability = "git"
+path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
+matcher = "git2::"
+owner = "team/capability-guard-self-test"
+rationale = "Synthetic allowlist fixture for the shared guard self-test."
+expires = "2099-12-31"
+
+[[entries]]
+capability = "git"
+path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
+matcher = "git2::"
+owner = "team/capability-guard-self-test"
+rationale = "Synthetic allowlist fixture for the shared guard self-test."
+expires = "2099-12-31"
