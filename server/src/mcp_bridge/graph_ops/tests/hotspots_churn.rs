@@ -1,7 +1,5 @@
-use super::*;
 use crate::mcp_bridge::graph_ops::RepoGraphBridge;
 use djinn_control_plane::bridge::ProjectCtx;
-use djinn_control_plane::test_support::McpTestHarness;
 use djinn_db::CommitFileChangeRepository;
 use djinn_graph::canonical_graph::{
     CachedGraph, GRAPH_CACHE, derive_graph_caches, normalize_graph_query_paths,
@@ -30,26 +28,25 @@ const HOTSPOTS_TEST_CLONE_PATH: &str = "/workspace/hotspots-test-repo";
 /// it owns a symbol referenced by both other files. `hot.rs` and
 /// `cold.rs` own symbols with only inbound references.
 fn hotspots_test_graph() -> RepoDependencyGraph {
-    let mk_symbol =
-        |symbol: &str, display_name: &str, file_path: &str| RepoGraphNode {
-            id: RepoNodeKey::Symbol(symbol.to_string()),
-            kind: RepoGraphNodeKind::Symbol,
-            display_name: display_name.to_string(),
-            language: Some("rust".to_string()),
-            file_path: Some(PathBuf::from(file_path)),
-            symbol: Some(symbol.to_string()),
-            symbol_kind: Some(djinn_graph::scip_parser::ScipSymbolKind::Function),
-            is_external: false,
-            visibility: Some(ScipVisibility::Public),
-            signature: None,
-            documentation: vec![],
-            signature_parts: None,
-            is_test: false,
-            complexity: None,
-            workspace: None,
-            route_framework: None,
-            route_handler_symbol: None,
-        };
+    let mk_symbol = |symbol: &str, display_name: &str, file_path: &str| RepoGraphNode {
+        id: RepoNodeKey::Symbol(symbol.to_string()),
+        kind: RepoGraphNodeKind::Symbol,
+        display_name: display_name.to_string(),
+        language: Some("rust".to_string()),
+        file_path: Some(PathBuf::from(file_path)),
+        symbol: Some(symbol.to_string()),
+        symbol_kind: Some(djinn_graph::scip_parser::ScipSymbolKind::Function),
+        is_external: false,
+        visibility: Some(ScipVisibility::Public),
+        signature: None,
+        documentation: vec![],
+        signature_parts: None,
+        is_test: false,
+        complexity: None,
+        workspace: None,
+        route_framework: None,
+        route_handler_symbol: None,
+    };
     let mk_file = |file_path: &str| RepoGraphNode {
         id: RepoNodeKey::File(PathBuf::from(file_path)),
         kind: RepoGraphNodeKind::File,
@@ -106,6 +103,9 @@ fn hotspots_test_graph() -> RepoDependencyGraph {
             kind: RepoGraphEdgeKind::SymbolReference,
             weight: 1.0,
             evidence_count: 1,
+            confidence: 0.95,
+            reason: None,
+            step: None,
         },
         RepoGraphArtifactEdge {
             source: 5,
@@ -113,6 +113,9 @@ fn hotspots_test_graph() -> RepoDependencyGraph {
             kind: RepoGraphEdgeKind::SymbolReference,
             weight: 1.0,
             evidence_count: 1,
+            confidence: 0.95,
+            reason: None,
+            step: None,
         },
     ];
     RepoDependencyGraph::from_artifact(&RepoGraphArtifact {
@@ -128,8 +131,7 @@ fn hotspots_test_graph() -> RepoDependencyGraph {
 }
 
 async fn install_hotspots_cached_graph(graph: RepoDependencyGraph) {
-    let (_project_root, index_tree_path) =
-        normalize_graph_query_paths(HOTSPOTS_TEST_CLONE_PATH);
+    let (_project_root, index_tree_path) = normalize_graph_query_paths(HOTSPOTS_TEST_CLONE_PATH);
     let (pagerank, sccs, layout_positions, _) =
         derive_graph_caches(&graph, Path::new("/var/tmp/djinn-hotspots-test"));
     let mut cache = GRAPH_CACHE.write().await;
@@ -208,10 +210,10 @@ async fn setup_hotspots_fixtures(db: &djinn_db::Database) {
 #[tokio::test(flavor = "current_thread")]
 async fn hotspots_returns_db_churn_counts_and_excludes_out_of_window() {
     let _guard = HOTSPOTS_TEST_LOCK.lock().await;
-    let harness = McpTestHarness::new().await;
-    setup_hotspots_fixtures(harness.db()).await;
+    let state = crate::test_helpers::test_app_state_in_memory().await;
+    setup_hotspots_fixtures(state.db()).await;
 
-    let bridge = RepoGraphBridge::new(harness.state().clone());
+    let bridge = RepoGraphBridge::new(state.clone());
     let result = bridge
         .hotspots(&hotspots_ctx(), 30, None, 10)
         .await
@@ -225,7 +227,7 @@ async fn hotspots_returns_db_churn_counts_and_excludes_out_of_window() {
 
     // Exactly the two churned files should be returned (churn-led semantics).
     let files: Vec<String> = result.iter().map(|e| e.file.clone()).collect();
-    assert_eq!(files, vec!["src/central.rs", "src/hot.rs"]);
+    assert_eq!(files, vec!["src/hot.rs", "src/central.rs"]);
 
     let hot = result.iter().find(|e| e.file == "src/hot.rs").unwrap();
     let central = result.iter().find(|e| e.file == "src/central.rs").unwrap();
@@ -237,9 +239,10 @@ async fn hotspots_returns_db_churn_counts_and_excludes_out_of_window() {
     );
 
     // Sort order: composite_score descending, then file-path tie-break.
-    // central.rs has higher centrality (referenced by hot and cold),
-    // so centrality * 1 > centrality * 3 for hot.rs is expected because
-    // the central file's summed PageRank dominates the churn multiplier.
+    // central.rs has higher centrality (central_fn is referenced by both
+    // hot_fn and cold_fn), but composite_score = churn * centrality and
+    // hot.rs's 3x churn multiplier on base PageRank outweighs central.rs's
+    // single-commit boosted PageRank, so hot.rs sorts first.
     assert!(
         result[0].composite_score >= result[1].composite_score,
         "result should be sorted by composite_score descending: {result:?}"
@@ -250,8 +253,12 @@ async fn hotspots_returns_db_churn_counts_and_excludes_out_of_window() {
             "file-path tie-break should be ascending: {result:?}"
         );
     }
-    assert_eq!(result[0].file, "src/central.rs");
-    assert_eq!(result[1].file, "src/hot.rs");
+    assert!(
+        central.centrality > hot.centrality,
+        "central.rs should have the higher per-file centrality: {result:?}"
+    );
+    assert_eq!(result[0].file, "src/hot.rs");
+    assert_eq!(result[1].file, "src/central.rs");
 
     // Churn-led semantics: no centrality-only entries.
     assert_eq!(result.len(), 2);
@@ -260,34 +267,37 @@ async fn hotspots_returns_db_churn_counts_and_excludes_out_of_window() {
 #[tokio::test(flavor = "current_thread")]
 async fn hotspots_file_glob_excludes_all_churned_files_returns_empty() {
     let _guard = HOTSPOTS_TEST_LOCK.lock().await;
-    let harness = McpTestHarness::new().await;
-    setup_hotspots_fixtures(harness.db()).await;
+    let state = crate::test_helpers::test_app_state_in_memory().await;
+    setup_hotspots_fixtures(state.db()).await;
 
-    let bridge = RepoGraphBridge::new(harness.state().clone());
+    let bridge = RepoGraphBridge::new(state.clone());
     let result = bridge
         .hotspots(&hotspots_ctx(), 30, Some("src/nowhere/**"), 10)
         .await
         .expect("hotspots should return Ok when glob filters every churned file");
 
-    assert!(result.is_empty(), "glob excluding all churned files should yield []: {result:?}");
+    assert!(
+        result.is_empty(),
+        "glob excluding all churned files should yield []: {result:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn hotspots_churn_led_no_db_row_returns_empty() {
     let _guard = HOTSPOTS_TEST_LOCK.lock().await;
-    let harness = McpTestHarness::new().await;
+    let state = crate::test_helpers::test_app_state_in_memory().await;
     install_hotspots_cached_graph(hotspots_test_graph()).await;
 
     // Seed churn only for src/hot.rs; src/cold.rs exists in the graph
     // but has no DB row and must not be returned as a centrality-only
     // hotspot.
-    let repo = CommitFileChangeRepository::new(harness.db().clone());
+    let repo = CommitFileChangeRepository::new(state.db().clone());
     let at = days_ago(1);
     repo.upsert_batch(&[commit_row("src/hot.rs", "hotsha1", &at)])
         .await
         .expect("seed one churn row");
 
-    let bridge = RepoGraphBridge::new(harness.state().clone());
+    let bridge = RepoGraphBridge::new(state.clone());
     let result = bridge
         .hotspots(&hotspots_ctx(), 30, None, 10)
         .await
