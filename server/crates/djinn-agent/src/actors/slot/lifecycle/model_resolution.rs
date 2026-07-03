@@ -186,6 +186,19 @@ pub(crate) async fn resolve_role_model_preference(
     None
 }
 
+pub(crate) fn map_resume_selection_reason_to_rotation_cause(
+    reason: Option<djinn_runtime::ResumeSelectionReason>,
+) -> Option<RotationTerminationCause> {
+    use djinn_runtime::ResumeSelectionReason as R;
+    match reason {
+        Some(R::LatestSafeCheckpoint) => Some(RotationTerminationCause::NoProgress),
+        Some(R::AutoSubmitAccepted) => Some(RotationTerminationCause::Deadline),
+        Some(R::AlternateCheckpointRef) => Some(RotationTerminationCause::Flaky),
+        Some(R::NewerTaskBranch) => Some(RotationTerminationCause::RepeatedVerifyLoop),
+        _ => None,
+    }
+}
+
 /// Attempt model rotation for a resume dispatch.
 ///
 /// When `metadata` indicates a prior session with a recorded `previous_model`
@@ -217,19 +230,8 @@ pub(crate) async fn attempt_resume_model_rotation(
         _ => return current_model_id.to_string(),
     };
 
-    let cause = match metadata.selection_reason {
-        Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint) => {
-            RotationTerminationCause::NoProgress
-        }
-        Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted) => {
-            RotationTerminationCause::Deadline
-        }
-        Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef) => {
-            RotationTerminationCause::Flaky
-        }
-        Some(djinn_runtime::ResumeSelectionReason::NewerTaskBranch) => {
-            RotationTerminationCause::RepeatedVerifyLoop
-        }
+    let cause = match map_resume_selection_reason_to_rotation_cause(metadata.selection_reason) {
+        Some(cause) => cause,
         _ => return current_model_id.to_string(),
     };
 
@@ -526,6 +528,35 @@ async fn emit_rotation_event(
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+
+    #[test]
+    fn maps_resume_reason_to_rotation_cause() {
+        use djinn_runtime::ResumeSelectionReason as R;
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(Some(R::LatestSafeCheckpoint)),
+            Some(RotationTerminationCause::NoProgress)
+        );
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(Some(R::AutoSubmitAccepted)),
+            Some(RotationTerminationCause::Deadline)
+        );
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(Some(R::AlternateCheckpointRef)),
+            Some(RotationTerminationCause::Flaky)
+        );
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(Some(R::NewerTaskBranch)),
+            Some(RotationTerminationCause::RepeatedVerifyLoop)
+        );
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(None),
+            None
+        );
+        assert_eq!(
+            map_resume_selection_reason_to_rotation_cause(Some(R::CleanTaskBranchFallback)),
+            None
+        );
+    }
 
     #[test]
     fn rotation_cause_should_rotate() {
