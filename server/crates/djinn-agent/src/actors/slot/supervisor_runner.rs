@@ -212,7 +212,6 @@ pub(super) async fn dispatch_task_runtime(
         &model_id,
         &app_state,
         &kill,
-        runtime_kind,
     )
     .await?;
 
@@ -669,7 +668,6 @@ async fn execute_runtime_report_phase(
     model_id: &str,
     app_state: &AgentContext,
     kill: &CancellationToken,
-    runtime_kind: RuntimeKind,
 ) -> anyhow::Result<RuntimeExecutionOutcome> {
     let handle = prepare_runtime(runtime.as_ref(), spec, credentials).await?;
     let cancel_task = spawn_runtime_cancel_watcher(
@@ -681,16 +679,9 @@ async fn execute_runtime_report_phase(
         spec.task_run_id.clone(),
     );
 
-    let await_outcome = attach_and_await_terminal_report(
-        runtime.clone(),
-        &handle,
-        app_state,
-        spec,
-        task,
-        kill,
-        runtime_kind,
-    )
-    .await;
+    let await_outcome =
+        attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
+            .await;
 
     abort_runtime_cancel_watcher(cancel_task).await;
 
@@ -770,7 +761,6 @@ async fn attach_and_await_terminal_report(
     spec: &TaskRunSpec,
     task: &Task,
     kill: &CancellationToken,
-    runtime_kind: RuntimeKind,
 ) -> TerminalReportAwaitOutcome {
     // Consume the worker's terminal report off the BiStream. For BOTH runtimes
     // `attach_stdio` bridges the worker's RPC events — including the final
@@ -788,14 +778,7 @@ async fn attach_and_await_terminal_report(
     let mut presession_timeout = None;
     let report_result = match bistream_result {
         Ok(bistream) => match await_terminal_report_or_infra_death(
-            runtime,
-            handle,
-            bistream,
-            app_state,
-            spec,
-            task,
-            kill,
-            runtime_kind,
+            runtime, handle, bistream, app_state, spec, task, kill,
         )
         .await
         {
@@ -835,7 +818,6 @@ async fn await_terminal_report_or_infra_death(
     spec: &TaskRunSpec,
     task: &Task,
     kill: &CancellationToken,
-    runtime_kind: RuntimeKind,
 ) -> anyhow::Result<TerminalReportSelection> {
     tokio::select! {
         biased;
@@ -856,7 +838,7 @@ async fn await_terminal_report_or_infra_death(
             tracing::warn!(
                 task_id = %task.short_id,
                 %reason,
-                runtime = ?runtime_kind,
+                runtime = ?runtime_kind(),
                 "supervisor dispatch: worker infra died before terminal report \
                  (OOM / eviction / Job failure); finalizing run as interrupted"
             );
