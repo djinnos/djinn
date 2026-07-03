@@ -7,9 +7,14 @@ use djinn_db::repositories::proposal::{
 impl CoordinatorActor {
     /// Startup recovery pass for terminal linked evidence spikes that may have
     /// closed while the coordinator was down. Delegates lifecycle classification,
-    /// findings validation, and idempotency to the repository primitive; does not
-    /// clear evidence links or resume tribunal work.
-    pub(super) async fn recover_terminal_linked_spike_evidence(&self) {
+    /// findings validation, and idempotency to the repository primitive.
+    ///
+    /// When the spike closed with valid findings (`EvidenceReceived`) or the
+    /// lifecycle was already recorded by a prior pass (`AlreadyRecorded`), the
+    /// recovery clears the durable evidence link/claim and resumes the in-memory
+    /// refinement loop so the next Advocate can dispatch. For failed spikes the
+    /// proposal remains blocked — no link clearing or automatic resume.
+    pub(super) async fn recover_terminal_linked_spike_evidence(&mut self) {
         let repo = ProposalRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
@@ -55,20 +60,20 @@ impl CoordinatorActor {
                 )
                 .await
             {
-                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => tracing::info!(
-                    proposal_id = %proposal_id,
-                    spike_task_id = %spike_task_id,
-                    outcome = "EvidenceReceived",
-                    "CoordinatorActor: recorded linked evidence spike receipt"
-                ),
-                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => {
+                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => {
                     tracing::info!(
                         proposal_id = %proposal_id,
                         spike_task_id = %spike_task_id,
-                        reason = %reason,
-                        outcome = "EvidenceFailed",
-                        "CoordinatorActor: recorded linked evidence spike failure"
-                    )
+                        outcome = "EvidenceReceived",
+                        "CoordinatorActor: recorded linked evidence spike receipt"
+                    );
+                    // Clear the durable evidence block and resume the
+                    // in-memory refinement loop (if one exists). The resume
+                    // helper is idempotent — clearing an already-cleared link
+                    // is safe, and dispatch only proceeds when the lifecycle
+                    // state and loop phase are correct.
+                    self.resume_refinement_after_evidence_received(proposal_id, spike_task_id)
+                        .await;
                 }
                 Ok(TerminalLinkedEvidenceSpikeOutcome::AlreadyRecorded { event_kind }) => {
                     tracing::debug!(
@@ -78,6 +83,27 @@ impl CoordinatorActor {
                         outcome = "AlreadyRecorded",
                         "CoordinatorActor: linked evidence spike terminal lifecycle already recorded"
                     );
+                    // The lifecycle event was already recorded (e.g. by the
+                    // event-driven path during startup). Still call resume
+                    // so that the link/claim is cleared if a prior pass
+                    // crashed between recording the lifecycle and clearing,
+                    // and the in-memory loop phase is advanced.  The resume
+                    // helper is idempotent: link clearing is an unconditional
+                    // NULL UPDATE, loop phase update is idempotent, and
+                    // dispatch only proceeds when the loop phase permits it.
+                    self.resume_refinement_after_evidence_received(proposal_id, spike_task_id)
+                        .await;
+                }
+                Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        spike_task_id = %spike_task_id,
+                        reason = %reason,
+                        outcome = "EvidenceFailed",
+                        "CoordinatorActor: recorded linked evidence spike failure"
+                    );
+                    // Evidence failed — the proposal remains blocked. No
+                    // link clearing or automatic resume.
                 }
                 Ok(TerminalLinkedEvidenceSpikeOutcome::NotLinked) => tracing::debug!(
                     proposal_id = %proposal_id,
