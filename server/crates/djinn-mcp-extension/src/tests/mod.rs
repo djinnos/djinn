@@ -1,4 +1,5 @@
 mod boundary_tests;
+mod evidence_spike_regression_tests;
 mod fuzzy_tests;
 mod helpers_tests;
 mod lsp_schema_tests;
