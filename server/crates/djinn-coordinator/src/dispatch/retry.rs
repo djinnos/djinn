@@ -9,6 +9,22 @@ fn record_task_parked_metric() {
     djinn_telemetry::task::increment_parked();
 }
 
+fn record_task_parked_metric_with_breakdown(
+    quality_strikes: i64,
+    merge_conflict_reopens: i64,
+    superseded_reopens: i64,
+    raw_reopen_count: i64,
+) {
+    djinn_telemetry::task::increment_parked_with_labels(
+        &[
+            ("quality_strikes", quality_strikes.to_string()),
+            ("merge_conflict_reopens", merge_conflict_reopens.to_string()),
+            ("superseded_reopens", superseded_reopens.to_string()),
+            ("raw_reopen_count", raw_reopen_count.to_string()),
+        ],
+    );
+}
+
 /// Which kind of remediation task to create for a stuck source task.
 ///
 /// Both kinds create a `Planner remediation [<short_id>]: <title>` review task
