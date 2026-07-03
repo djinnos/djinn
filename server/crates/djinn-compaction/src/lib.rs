@@ -2,9 +2,15 @@
 //!
 //! When the accumulated input token count reaches 80% of the model's context
 //! window, `compact_conversation` summarises the conversation via the LLM and
-//! replaces the in-memory `Conversation` with a compact representation. The
-//! original messages are persisted to the `session_messages` table before the
-//! replacement so nothing is lost.
+//! replaces the in-memory `Conversation` with a compact representation.
+//!
+//! **Durability boundary.** This crate only owns the in-memory replacement of
+//! the conversation with the compacted form. Persisting the original messages
+//! and projecting the compacted conversation back onto disk is the
+//! responsibility of upstream callers (the chat / worker reply loops that
+//! invoke `compact_conversation`) and the durable boundary storage owned by
+//! sibling epics. Callers should not assume that simply running compaction
+//! here guarantees the original history survives.
 
 mod policy;
 mod prompts;
