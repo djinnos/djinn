@@ -1174,6 +1174,7 @@ mod stop_build_tests {
 }
 
 // Graduation readiness tests — extracted to `graduation_readiness_tests.rs`
-// to meet the 1500-line file-size guard.
+// to meet the 1500-line file-size guard. These tests cover `proposal_graduate`
+// and its readiness guardrails, so they are paired with the lifecycle concern.
 #[cfg(test)]
 include!("graduation_readiness_tests.rs");
