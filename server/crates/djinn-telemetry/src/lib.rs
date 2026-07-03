@@ -137,8 +137,35 @@ pub mod task {
     }
 
     /// Increment the parked-task counter when the coordinator records a terminal task park.
+    ///
+    /// This is a compatibility wrapper that emits the counter with zero-valued
+    /// strike-class labels. Prefer [`increment_parked_labeled`] when the caller
+    /// has access to the reopen ledger class breakdown.
     pub fn increment_parked() {
-        metrics::counter!(super::TASKS_PARKED_TOTAL).increment(1);
+        increment_parked_labeled(0, 0, 0, 0);
+    }
+
+    /// Increment the parked-task counter with strike-class breakdown labels.
+    ///
+    /// Labels:
+    /// - `quality_strikes` — quality reopen count (review_rejected + merge_queue_failed + other)
+    /// - `merge_conflict_reopens` — merge-conflict reopens excluded from quality strikes
+    /// - `superseded_reopens` — superseded reopens excluded from quality strikes
+    /// - `raw_reopen_count` — total raw reopen count from the task record
+    pub fn increment_parked_labeled(
+        quality_strikes: i64,
+        merge_conflict_reopens: i64,
+        superseded_reopens: i64,
+        raw_reopen_count: i64,
+    ) {
+        metrics::counter!(
+            super::TASKS_PARKED_TOTAL,
+            "quality_strikes" => quality_strikes.to_string(),
+            "merge_conflict_reopens" => merge_conflict_reopens.to_string(),
+            "superseded_reopens" => superseded_reopens.to_string(),
+            "raw_reopen_count" => raw_reopen_count.to_string(),
+        )
+        .increment(1);
     }
 }
 
@@ -789,6 +816,14 @@ mod tests {
             .unwrap_or_else(|| panic!("missing unlabelled sample {metric} in:\n{rendered}"))
     }
 
+    /// Like [`rendered_sample`] but parses the trailing numeric value.
+    fn labeled_sample_value(rendered: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+        let line = rendered_sample(rendered, metric, labels);
+        line.rsplit_once(' ')
+            .and_then(|(_, v)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("labeled sample should end with a number: {line}"))
+    }
+
     #[test]
     fn init_is_idempotent_and_registers_dispatch_labels() {
         let _guard = test_guard();
@@ -909,6 +944,7 @@ mod tests {
         });
         assert_sync_unit(task::increment_reopen);
         assert_sync_unit(task::increment_parked);
+        assert_sync_unit(|| task::increment_parked_labeled(2, 1, 0, 5));
         assert_sync_unit(|| pr_poller::set_tracked(0));
         assert_sync_unit(pr_poller::increment_merge_failure);
         assert_sync_unit(breaker::increment_trip);
@@ -1200,9 +1236,19 @@ mod tests {
         let _guard = test_guard();
         init().unwrap();
 
+        // Prime the parked counter so the "before" snapshot contains the
+        // labeled metric line.
+        task::increment_parked();
+
         let before = render().unwrap();
         let reopens_before = unlabelled_sample_value(&before, TASK_REOPENS_TOTAL);
-        let parked_before = unlabelled_sample_value(&before, TASKS_PARKED_TOTAL);
+        let parked_labels = &[
+            ("quality_strikes", "0"),
+            ("merge_conflict_reopens", "0"),
+            ("superseded_reopens", "0"),
+            ("raw_reopen_count", "0"),
+        ];
+        let parked_before = labeled_sample_value(&before, TASKS_PARKED_TOTAL, parked_labels);
         let merge_failures_before = unlabelled_sample_value(&before, MERGE_FAILURES_TOTAL);
 
         task::increment_reopen();
@@ -1216,7 +1262,7 @@ mod tests {
             reopens_before + 1.0
         );
         assert_eq!(
-            unlabelled_sample_value(&rendered, TASKS_PARKED_TOTAL),
+            labeled_sample_value(&rendered, TASKS_PARKED_TOTAL, parked_labels),
             parked_before + 1.0
         );
         assert_eq!(unlabelled_sample_value(&rendered, PR_POLLER_TRACKED), 2.0);
@@ -1224,6 +1270,27 @@ mod tests {
             unlabelled_sample_value(&rendered, MERGE_FAILURES_TOTAL),
             merge_failures_before + 1.0
         );
+    }
+
+    #[test]
+    fn parked_labeled_metric_renders_breakdown_labels() {
+        let _guard = test_guard();
+        init().unwrap();
+
+        task::increment_parked_labeled(3, 1, 2, 7);
+
+        let rendered = render().unwrap();
+        let value = labeled_sample_value(
+            &rendered,
+            TASKS_PARKED_TOTAL,
+            &[
+                ("quality_strikes", "3"),
+                ("merge_conflict_reopens", "1"),
+                ("superseded_reopens", "2"),
+                ("raw_reopen_count", "7"),
+            ],
+        );
+        assert_eq!(value, 1.0);
     }
 
     // ── cargo_target_seed telemetry tests ───────────────────────────
