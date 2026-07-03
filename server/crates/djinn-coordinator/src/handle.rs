@@ -354,6 +354,30 @@ impl CoordinatorTrigger for CoordinatorHandle {
     fn try_trigger_dispatch(&self) {
         self.try_trigger_dispatch();
     }
+
+    fn try_route_no_progress_intervention(&self, task_id: &str, reason: &str) {
+        match self
+            .sender
+            .try_send(CoordinatorMessage::RouteLoopGuardPlannerIntervention {
+                source_task_id: task_id.to_owned(),
+                role: "worker",
+                reason: reason.to_owned(),
+            }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(
+                    task_id,
+                    "coordinator no_progress_submission intervention skipped: channel busy"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::error!(
+                    task_id,
+                    "coordinator no_progress_submission intervention failed: channel closed"
+                );
+            }
+        }
+    }
 }
 
 fn should_log_try_trigger_dispatch_failure(last_log_secs: &AtomicU64) -> bool {
