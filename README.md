@@ -192,47 +192,13 @@ install phase by phase with verification checkpoints, and hands you a working
 URL. `helm upgrade --install` handles fresh installs and upgrades alike —
 migrations run automatically in the server's migrate initContainer.
 
-## Features
+## Beyond the pipeline
 
-### 📋 Proposals: specs, not prompts
-
-Work starts as a written, reviewable spec with acceptance criteria, targeting one project or many. Feedback threads, revision history, and stale-aware sign-offs give product and engineering a shared artifact to argue about *before* tokens are spent. Graduate it to build; freeze or abort mid-build to rework the spec and go again.
-
-### ⚡ Parallel execution
-
-Each task-run is an isolated Kubernetes Job in its own workspace. Run many agents at once across many repos; scale by adding nodes, not terminal tabs.
-
-### 📁 Multi-project
-
-Microservices, monorepos, many repositories — Djinn manages them all. Each project gets its own devcontainer image (built from auto-detected stack), task board, code graph, and knowledge base. A single proposal can drive changes across several of them.
-
-### 🔀 Your models, mixed & matched
-
-Djinn owns its own agent loop and talks to providers directly: Anthropic, OpenAI, Google, Fireworks, ChatGPT/Codex and GitHub Copilot (OAuth), Vertex AI, Bedrock, Azure OpenAI, plus any OpenAI-compatible endpoint from the models.dev catalog. Use one model for coding, another for reviews, another for research — configured per user, per project, and per role.
-
-### 🧠 Persistent memory
-
-Decisions, patterns, and architectural rules live in a searchable, DB-backed knowledge base of linked notes (`[[wikilinks]]`). Agents extract what they learn from each task and carry it into the next. Hybrid lexical + semantic search keeps the right context in front of every agent.
-
-### 🔍 Code intelligence
-
-A per-project **code graph** built from SCIP indexers across 8 languages powers impact analysis, dependency cycles, coupling hubs, dead-symbol detection, and complexity metrics (cognitive + cyclomatic). Agents query it over MCP; you explore it visually in the UI.
-
-### 👥 Multi-user
-
-Self-hosted for your whole team. Each user logs in via GitHub, brings their own provider credentials (encrypted at rest, with org-shared fallback), and has private chat — over a shared board. Every task runs under a real user with their model limits. Admins can manage users and act on their behalf.
-
-### ✅ Built-in review
-
-AI reviewers check each task against the proposal's acceptance criteria. You review the finished work and decide when to merge.
-
-## What's next: see where the tokens go
-
-AI engineering spend is opaque almost everywhere; Djinn's pipeline makes it attributable. Because every session belongs to a task, every task to an epic, and every epic to a proposal under a real user, we're building the visibility layer on top:
-
-- **Spend attribution** — tokens and cost per proposal, per project, per model, per user, per role.
-- **Value delivered** — proposals shipped, PRs merged, rework loops, review pass rates: cost next to outcome, not in a separate billing console.
-- **Tracing built in** — every agent session already streams to [Langfuse](https://langfuse.com); the next step is rolling those traces up into answers a team lead can act on.
+- **Multi-project** — microservices, monorepos, many repositories. Each project gets its own devcontainer image (auto-detected stack), task board, code graph, and knowledge base; one proposal can drive changes across several.
+- **Your models, mixed & matched** — Anthropic, OpenAI, Google, Vertex, Bedrock, Azure, Fireworks, ChatGPT/Codex and Copilot via OAuth, plus any OpenAI-compatible endpoint from the models.dev catalog. One model for coding, another for review — per user, per project, per role.
+- **Persistent memory** — a searchable, DB-backed knowledge base of linked notes. Agents extract what they learn from each task and carry it into the next.
+- **Code intelligence** — a per-project code graph (SCIP, 8 languages): impact analysis, dependency cycles, coupling hubs, dead symbols, complexity. Queryable over MCP, explorable in the UI.
+- **Multi-user** — GitHub login, per-user encrypted provider credentials with org-shared fallback, private chat over a shared board, per-user concurrency caps, admin role.
 
 ## Connect your tools
 
@@ -287,20 +253,7 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 ## Development
 
-The Rust workspace lives in `server/` (binary `djinn-server` plus ~16 crates under `server/crates/`); the web client is in `ui/` (React + Vite + TypeScript, pnpm). The UI is compiled into the server binary via `rust-embed`, and the TypeScript MCP types are generated from the server's live tool schemas (`pnpm --dir ui mcp:types`).
-
-Tests run against a dedicated throwaway Postgres (not the dev cluster), started via Docker Compose on `:5433`:
-
-```bash
-docker compose up -d postgres-test   # test-only Postgres
-make test                            # djinn-db tests
-make test-all                        # whole workspace (cargo nextest)
-make sqlx-check                      # fail if the offline sqlx cache is stale
-```
-
-The workspace `.cargo/config.toml` defaults `DATABASE_URL` and `DJINN_TEST_DATABASE_URL` to the `:5433` instance. `make test-all` rebuilds the `djinn_test_template` database and then mirrors the merge-queue/full-suite nextest command: `cd server && cargo nextest run --workspace --all-targets --all-features --profile ci`. The PR-time fast gate is intentionally cheaper (`cargo nextest ... --no-run` plus clippy); DB-backed test execution runs in the merge queue/manual workflow.
-
-The lifecycle/concurrency regressions for the vjs6 incidents (dispatch-cap races, slot-pool lifecycle event races, `execution_kill_task` kill/cancel settlement, and reopen/intervention chaos) are part of that unfiltered `profile ci` full-suite path and must remain enabled. They use in-process TestRuntime/template-Postgres or in-memory helpers, not kind/k8s; stripped-down worker pods without Postgres/template setup may be unable to run them locally. See [`docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md`](docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md) for the focused filters and rationale.
+Rust workspace in `server/`, React UI in `ui/`, embedded into the server binary. `tilt up` is the whole dev loop ([Quick start](#quick-start-local)); workspace layout, test setup, and CI notes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Community
 
