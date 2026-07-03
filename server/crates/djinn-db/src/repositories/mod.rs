@@ -21,6 +21,7 @@ pub mod repo_graph_cache;
 pub mod service;
 pub mod session;
 pub mod session_auth;
+pub mod session_compaction_boundary;
 pub mod session_message;
 pub mod settings;
 pub mod task;
