@@ -950,3 +950,171 @@ fn checked_in_mcp_snapshot_includes_dispatch_pause_tools_with_strict_schemas() {
         );
     }
 }
+
+// ── Evidence lifecycle payload regression (hoh3 / tlon) ─────────────────────
+//
+// Focused schema-surface assertions that the checked-in MCP snapshot AND the
+// live `all_tool_schemas()` include the distinct AwaitingEvidence /
+// EvidenceFailed payload shape on `proposal_refinement_status`.  The broad
+// byte-equality `mcp_tools_schema` insta snapshot already pins the full surface
+// line-for-line; these focused tests give a clear, local failure message if a
+// future change silently drops the evidence discriminator fields, narrows the
+// enum, or removes the structured-claim sub-fields.
+
+/// Collect all string `const` values from a JSON-Schema `oneOf`/`anyOf` enum
+/// node.  Returns an empty set when the node is not an enum-style schema.
+fn collect_enum_consts(schema: &Value) -> std::collections::BTreeSet<String> {
+    let mut consts = std::collections::BTreeSet::new();
+    let arrays = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array);
+    if let Some(arr) = arrays {
+        for variant in arr {
+            if let Some(c) = variant.get("const").and_then(Value::as_str) {
+                consts.insert(c.to_string());
+            }
+        }
+    }
+    consts
+}
+
+/// Assert the evidence-lifecycle $defs shape on a schema's output_schema.
+/// Used for both the live schema and the checked-in snapshot so a drift in
+/// either direction is caught.
+fn assert_evidence_lifecycle_payload_shape(schema: &Value, context: &str) {
+    let defs = schema
+        .get("$defs")
+        .unwrap_or_else(|| panic!("{context}: output_schema missing $defs"));
+
+    // EvidenceLifecycleState enum must include all six discriminators.
+    let state_defs = defs
+        .get("EvidenceLifecycleState")
+        .unwrap_or_else(|| panic!("{context}: $defs missing EvidenceLifecycleState definition"));
+    let state_consts = collect_enum_consts(state_defs);
+    for variant in [
+        "active",
+        "awaiting_evidence",
+        "evidence_received",
+        "evidence_failed",
+        "paused_or_frozen",
+        "terminal",
+    ] {
+        assert!(
+            state_consts.contains(variant),
+            "{context}: EvidenceLifecycleState must include `{variant}` variant, \
+             got {state_consts:?}"
+        );
+    }
+
+    // EvidenceLifecyclePhase enum must include the three inner phases.
+    let phase_defs = defs
+        .get("EvidenceLifecyclePhase")
+        .unwrap_or_else(|| panic!("{context}: $defs missing EvidenceLifecyclePhase definition"));
+    let phase_consts = collect_enum_consts(phase_defs);
+    for variant in ["awaiting_evidence", "evidence_received", "evidence_failed"] {
+        assert!(
+            phase_consts.contains(variant),
+            "{context}: EvidenceLifecyclePhase must include `{variant}` variant, \
+             got {phase_consts:?}"
+        );
+    }
+
+    // NeedsEvidenceStatus must carry the structured-claim + spike-id fields.
+    let ne_defs = defs
+        .get("NeedsEvidenceStatus")
+        .unwrap_or_else(|| panic!("{context}: $defs missing NeedsEvidenceStatus definition"));
+    let ne_props = ne_defs
+        .get("properties")
+        .unwrap_or_else(|| panic!("{context}: NeedsEvidenceStatus missing properties"));
+    for field in [
+        "claim",
+        "spike_task_id",
+        "spike_short_id",
+        "spike_status",
+        "evidence_phase",
+        "failure_reason",
+    ] {
+        assert!(
+            ne_props.get(field).is_some(),
+            "{context}: NeedsEvidenceStatus missing required field `{field}`"
+        );
+    }
+
+    // Structured-claim fields (added by h2az) must be present.
+    for field in [
+        "question",
+        "target_subsystem",
+        "spec_unknown_anchor",
+        "insufficient_in_session_research",
+        "expected_findings",
+    ] {
+        assert!(
+            ne_props.get(field).is_some(),
+            "{context}: NeedsEvidenceStatus missing structured-claim field `{field}`"
+        );
+    }
+
+    // The status model itself must surface evidence_lifecycle_state and
+    // needs_evidence so consumers can use the discriminator without inspecting
+    // sub-fields.  These live inside the ProposalRefinementStatusModel $def.
+    let status_model = defs
+        .get("ProposalRefinementStatusModel")
+        .unwrap_or_else(|| {
+            panic!("{context}: $defs missing ProposalRefinementStatusModel definition")
+        });
+    let status_props = status_model
+        .get("properties")
+        .unwrap_or_else(|| panic!("{context}: ProposalRefinementStatusModel missing properties"));
+    assert!(
+        status_props.get("evidence_lifecycle_state").is_some(),
+        "{context}: status model missing evidence_lifecycle_state discriminator"
+    );
+    assert!(
+        status_props.get("needs_evidence").is_some(),
+        "{context}: status model missing needs_evidence field"
+    );
+}
+
+/// Live schema assertion: `proposal_refinement_status` output schema carries
+/// the distinct AwaitingEvidence / EvidenceFailed payload shape.
+#[tokio::test]
+async fn proposal_refinement_status_schema_includes_evidence_lifecycle_payload() {
+    let state = AppState::new(test_helpers::create_test_db(), CancellationToken::new());
+    let mcp = djinn_control_plane::server::DjinnMcpServer::new(state.mcp_state());
+    let tools = mcp.all_tool_schemas();
+
+    let status_tool = tools
+        .iter()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some("proposal_refinement_status"))
+        .expect("proposal_refinement_status schema");
+    let output = status_tool
+        .get("outputSchema")
+        .expect("proposal_refinement_status outputSchema");
+
+    assert_evidence_lifecycle_payload_shape(output, "live proposal_refinement_status");
+}
+
+/// Checked-in snapshot assertion: the committed MCP snapshot carries the same
+/// payload shape, so a regeneration or hand-edit cannot silently drop the
+/// evidence discriminator fields.
+#[test]
+fn checked_in_mcp_snapshot_includes_evidence_lifecycle_payload() {
+    let snapshot =
+        include_str!("snapshots/djinn_server__server__tests__tool_schemas__mcp_tools_schema.snap");
+    let json_body = snapshot
+        .splitn(3, "---\n")
+        .nth(2)
+        .expect("insta snapshot body after metadata header");
+    let tools: Vec<Value> = serde_json::from_str(json_body).expect("MCP schema snapshot is JSON");
+
+    let status_tool = tools
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some("proposal_refinement_status"))
+        .unwrap_or_else(|| panic!("checked-in snapshot is missing proposal_refinement_status"));
+    let output = status_tool
+        .get("output_schema")
+        .expect("snapshot proposal_refinement_status output_schema");
+
+    assert_evidence_lifecycle_payload_shape(output, "snapshot proposal_refinement_status");
+}

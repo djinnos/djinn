@@ -172,6 +172,8 @@ impl CoordinatorActor {
                 commit_author_name: None,
                 commit_author_email: None,
                 resume_lifecycle_metadata: None,
+                // PR-open-only flow: not an evidence spike.
+                is_evidence_spike: false,
             };
             // E6 Part B: proactively rebase the (approved) task branch onto its
             // current target before the PR-open push, so the PR opens/updates on

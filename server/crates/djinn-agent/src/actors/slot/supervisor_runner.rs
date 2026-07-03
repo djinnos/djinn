@@ -646,6 +646,7 @@ struct TaskRunSpecInputs {
     commit_author_email: Option<String>,
     resume_lifecycle_metadata: Option<ResumeLifecycleMetadata>,
     created_by_user_id: Option<String>,
+    is_evidence_spike: bool,
 }
 
 impl TaskRunSpecInputs {
@@ -703,6 +704,8 @@ impl TaskRunSpecInputs {
 
         let task_run_id = uuid::Uuid::now_v7().to_string();
 
+        let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
+
         Self {
             task_run_id,
             task_id: task.id.clone(),
@@ -719,6 +722,7 @@ impl TaskRunSpecInputs {
             commit_author_email,
             resume_lifecycle_metadata,
             created_by_user_id,
+            is_evidence_spike,
         }
     }
 }
@@ -740,6 +744,7 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
             commit_author_name: inputs.commit_author_name,
             commit_author_email: inputs.commit_author_email,
             resume_lifecycle_metadata: inputs.resume_lifecycle_metadata,
+            is_evidence_spike: inputs.is_evidence_spike,
         }
     }
 }

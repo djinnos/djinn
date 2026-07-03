@@ -469,6 +469,52 @@ async fn evidence_spike_allows_code_graph_in_local_fallback() {
     }
 }
 
+// ── Final findings handoff: submit_work must not be blocked ──────────────
+// AC#1 requires that the final findings handoff path still works for
+// evidence-spike sessions. submit_work is the only allowed mutation-capable
+// finalize tool, and it must reach the dispatch arm without being blocked
+// by the evidence-spike allowlist gate.
+
+#[tokio::test]
+async fn evidence_spike_allows_submit_work_findings_handoff() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db, CancellationToken::new());
+    let services = crate::test_helpers::test_services();
+    let tmp = crate::test_helpers::test_tempdir("djinn-ev-fallback-submit-");
+    let schemas = evidence_spike_schemas();
+
+    // submit_work should reach the dispatch arm (not be blocked by the
+    // allowlist).  It will likely fail with a task-resolution error because
+    // no real task exists in the test DB, which is fine — the important
+    // thing is it's NOT rejected as "not in the allowed schema list".
+    let result = dispatch_tool_call(
+        &state,
+        &services,
+        &make_tool_call(
+            "submit_work",
+            Some(
+                serde_json::json!({"task_id": "fake-task", "commit_title": "findings", "summary": "evidence findings"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        ),
+        tmp.path(),
+        Some(&schemas),
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    if let Err(ref e) = result {
+        assert!(
+            !e.contains("not in the allowed schema list"),
+            "submit_work must not be blocked by evidence-spike allowlist (findings handoff path), got: {e}"
+        );
+    }
+}
+
 // ── Dynamic MCP registry tools: must be rejected under evidence-spike ────
 
 #[tokio::test]
