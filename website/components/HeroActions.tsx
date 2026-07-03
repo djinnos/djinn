@@ -2,7 +2,7 @@ import { Github, ArrowRight } from "lucide-react";
 
 export default function HeroActions() {
   return (
-    <div className="flex flex-col items-center lg:items-start gap-5">
+    <div className="flex flex-col items-center gap-5">
       <div className="flex flex-col sm:flex-row gap-3 justify-center items-center">
         <a
           href="https://github.com/djinnos/djinn#deploy-kubernetes--a-single-vps-counts"

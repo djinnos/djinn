@@ -124,30 +124,31 @@ export default function Home() {
         <section className="relative px-6 pt-32 pb-24 md:pt-44 overflow-hidden">
           <div className="absolute inset-0 blueprint -z-10" />
 
-          <div className="max-w-6xl mx-auto grid lg:grid-cols-2 gap-14 lg:gap-16 items-center">
-            {/* Left: the proposal */}
-            <div>
-              {/* Proposal frontmatter */}
-              <div className="rise rise-1 font-mono text-xs text-text-muted leading-loose mb-8">
+          <div className="max-w-4xl mx-auto text-center">
+            {/* Proposal frontmatter */}
+            <div className="rise rise-1 mb-9">
+              <div className="inline-block text-left font-mono text-xs text-text-muted leading-loose">
                 <div aria-hidden>---</div>
                 <div>proposal: <span className="text-brand-purple">#0001</span></div>
                 <div>targets: <span className="text-text-secondary">all_of_your_repos</span></div>
                 <div>status: <span className="text-status-pass">signed_off</span></div>
                 <div aria-hidden>---</div>
               </div>
+            </div>
 
-              <h1 className="rise rise-2 font-display text-5xl md:text-6xl xl:text-7xl font-light tracking-tight leading-[1.06] mb-8">
-                From proposal<br />
-                to <em className="stroke-under italic">pull request.</em>
-              </h1>
+            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-light tracking-tight leading-[1.04] mb-8">
+              From proposal<br />
+              to <em className="stroke-under italic">pull request.</em>
+            </h1>
 
-              <p className="rise rise-3 text-lg md:text-xl text-text-secondary leading-relaxed mb-8">
-                Your team proposes and approves the work. AI agents build it,
-                on your cluster, with your models, behind your review.
-              </p>
+            <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl mx-auto leading-relaxed mb-9">
+              Your team proposes and approves the work. AI agents build it,
+              on your cluster, with your models, behind your review.
+            </p>
 
-              {/* Sign-off task list */}
-              <div className="rise rise-4 font-mono text-xs space-y-2.5 mb-10">
+            {/* Sign-off task list */}
+            <div className="rise rise-4 mb-11">
+              <div className="inline-block text-left font-mono text-xs space-y-2.5">
                 <div>
                   <span className="text-status-pass">- [x]</span>{" "}
                   <span className="text-text-secondary">signed off · product</span>
@@ -162,29 +163,29 @@ export default function Home() {
                   <span className="dot dot-pulse bg-status-warn" />
                 </div>
               </div>
-
-              <div className="rise rise-5 flex justify-start">
-                <HeroActions />
-              </div>
             </div>
 
-            {/* Right: the first-look demo */}
-            <div className="rise rise-5 window">
-              <div className="window-bar">
-                <span className="dot bg-accent-coral/70" />
-                <span className="dot bg-status-warn/70" />
-                <span className="dot bg-status-pass/70" />
-                <span className="ml-3">djinn — first look · demo</span>
-              </div>
-              <div className="aspect-video">
-                <iframe
-                  src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
-                  title="Djinn — first look demo"
-                  className="w-full h-full"
-                  allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                  allowFullScreen
-                />
-              </div>
+            <div className="rise rise-5 flex justify-center">
+              <HeroActions />
+            </div>
+          </div>
+
+          {/* Demo video as a window */}
+          <div className="rise rise-5 mt-20 max-w-5xl mx-auto window">
+            <div className="window-bar">
+              <span className="dot bg-accent-coral/70" />
+              <span className="dot bg-status-warn/70" />
+              <span className="dot bg-status-pass/70" />
+              <span className="ml-3">djinn — first look · demo</span>
+            </div>
+            <div className="aspect-video">
+              <iframe
+                src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
+                title="Djinn — first look demo"
+                className="w-full h-full"
+                allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+              />
             </div>
           </div>
         </section>
