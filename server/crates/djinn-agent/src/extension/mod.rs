@@ -19,10 +19,11 @@ pub(crate) use djinn_mcp_extension::tool_defs;
 // `tool_defs_code_graph` items are re-exported through `tool_defs`.
 
 // Re-export the public API so external callers see the same paths as before.
+#[allow(unused_imports)] // evidence_spike_tool_names is for downstream callers
 pub(crate) use djinn_mcp_extension::tool_defs::{
-    tool_schemas_adversary, tool_schemas_advocate, tool_schemas_architect,
-    tool_schemas_evidence_spike, tool_schemas_judge, tool_schemas_lead, tool_schemas_planner,
-    tool_schemas_reviewer, tool_schemas_worker,
+    evidence_spike_tool_names, tool_schemas_adversary, tool_schemas_advocate,
+    tool_schemas_architect, tool_schemas_evidence_spike, tool_schemas_judge, tool_schemas_lead,
+    tool_schemas_planner, tool_schemas_reviewer, tool_schemas_worker,
 };
 
 // Façade: re-export the public surface of `djinn-mcp-extension` so that
