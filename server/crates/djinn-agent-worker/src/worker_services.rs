@@ -168,6 +168,7 @@ pub(crate) fn build_provider_config_from_serializable(
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
                 reasoning_effort,
+                tool_schema_compat: None,
             })
         }
         SerializableCredential::OAuthConfig { config_json } => {
@@ -580,6 +581,7 @@ mod tests {
                 max_tokens_default: Some(64_000),
             },
             reasoning_effort: Some(ReasoningEffort::High),
+            tool_schema_compat: None,
         };
         let wire = OAuthConfigWire::from_provider_config(&cfg);
         let cred = SerializableCredential::OAuthConfig {

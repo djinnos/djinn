@@ -150,6 +150,7 @@ impl OAuthConfigWire {
                 max_tokens_default: self.capabilities.max_tokens_default,
             },
             reasoning_effort: self.reasoning_effort,
+            tool_schema_compat: None,
         }
     }
 }
@@ -327,6 +328,7 @@ pub(crate) fn build_provider_from_resolved(
                     provider_headers,
                     capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
                     reasoning_effort: None,
+                    tool_schema_compat: None,
                 },
             ))
         }
@@ -390,6 +392,7 @@ mod tests {
                 max_tokens_default: Some(64_000),
             },
             reasoning_effort: reasoning,
+            tool_schema_compat: None,
         }
     }
     /// OAuth wire round-trip preserves reasoning_effort and core fields for both Some and None.

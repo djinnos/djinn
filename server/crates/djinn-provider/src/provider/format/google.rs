@@ -316,6 +316,7 @@ mod tests {
             provider_headers: Default::default(),
             capabilities: ProviderCapabilities::default(),
             reasoning_effort: None,
+            tool_schema_compat: None,
         }
     }
 
