@@ -14,6 +14,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+mod hotspots_churn;
+
 /// Serialize tests that mutate `DJINN_CODE_GRAPH_AMBIGUITY` against
 /// every other test that calls `resolve_node` — cargo runs tests in
 /// parallel, so an env var set in one test would otherwise race with
