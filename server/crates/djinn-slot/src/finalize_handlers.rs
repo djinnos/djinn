@@ -3,12 +3,14 @@ use crate::finalize_types::{
     SubmitWork,
 };
 use crate::host::SlotContext;
+use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::TaskRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::{
     AutoSubmitReviewRepository, CreateAutoSubmitReviewParams, RecordTaskRejectedSubmissionParams,
     TaskRejectedSubmissionIntegrityRepository,
 };
+use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -157,16 +159,190 @@ async fn handle_submit_work(
     }
 
     if let Some(metadata) = metadata {
-        return persist_auto_submit_review_metadata(
-            metadata,
-            app_state,
-            model_called_submit_work,
-            task_id,
-        )
-        .await;
+        match resolve_auto_submit_diff_fingerprint(task_id, &metadata, app_state).await {
+            Ok(fingerprint) => {
+                let mut metadata = metadata;
+                if let Some(fingerprint) = fingerprint {
+                    metadata.diff_fingerprint = fingerprint;
+                } else {
+                    metadata.diff_fingerprint.clear();
+                }
+                return persist_auto_submit_review_metadata(
+                    metadata,
+                    app_state,
+                    model_called_submit_work,
+                    task_id,
+                )
+                .await;
+            }
+            Err(()) => {
+                // resolve_auto_submit_diff_fingerprint already emitted a reason-specific
+                // `submission_fingerprint_unavailable` event for the unavailable/no-diff
+                // paths; avoid double-emitting a misleading `compute_error` here.
+                return persist_auto_submit_review_metadata(
+                    metadata,
+                    app_state,
+                    model_called_submit_work,
+                    task_id,
+                )
+                .await;
+            }
+        }
     }
 
     true
+}
+
+/// Resolve the complete submission diff fingerprint for the worktree associated with an
+/// accepted auto-submit payload. Returns `Ok(Some(digest))` when the worktree is available and
+/// has a non-empty diff, `Ok(None)` when the worktree is available but has no diff, and `Err(())`
+/// when the worktree path is unavailable or the helper fails. The caller should keep existing
+/// submit behavior safe in all error/no-diff cases and never fabricate a fingerprint.
+async fn resolve_auto_submit_diff_fingerprint(
+    task_id: &str,
+    metadata: &AutoSubmitReviewMetadataPayload,
+    app_state: &SlotContext,
+) -> Result<Option<String>, ()> {
+    let worktree_path =
+        match resolve_task_worktree_path(task_id, &metadata.task_run_id, app_state).await {
+            Some(p) => p,
+            None => {
+                emit_fingerprint_unavailable_event(
+                    task_id,
+                    &metadata.task_run_id,
+                    "workspace_unavailable",
+                    app_state,
+                );
+                return Err(());
+            }
+        };
+
+    match compute_submission_diff_fingerprint(&worktree_path).await {
+        Ok(SubmissionDiffFingerprint::Diff(digest)) => {
+            tracing::info!(
+                task_id = %task_id,
+                worktree_path = %worktree_path.display(),
+                fingerprint_len = digest.fingerprint.len(),
+                changed_paths = ?digest.changed_paths,
+                "auto-submit: computed complete submission diff fingerprint"
+            );
+            Ok(Some(digest.fingerprint))
+        }
+        Ok(SubmissionDiffFingerprint::NoDiff(no_diff)) => {
+            emit_fingerprint_unavailable_event(
+                task_id,
+                &metadata.task_run_id,
+                "no_diff",
+                app_state,
+            );
+            tracing::info!(
+                task_id = %task_id,
+                worktree_path = %worktree_path.display(),
+                merge_base = ?no_diff.merge_base,
+                "auto-submit: no diff in worktree for fingerprint"
+            );
+            Ok(None)
+        }
+        Err(e) => {
+            emit_fingerprint_unavailable_event(
+                task_id,
+                &metadata.task_run_id,
+                "compute_error",
+                app_state,
+            );
+            tracing::warn!(
+                task_id = %task_id,
+                worktree_path = %worktree_path.display(),
+                error = %e,
+                "auto-submit: failed to compute submission diff fingerprint"
+            );
+            Err(())
+        }
+    }
+}
+
+/// Resolve the task worktree path for an accepted auto-submit payload.
+///
+/// First checks the slot context `working_root` (the active task worktree),
+/// then falls back to the task run's recorded `workspace_path`.
+async fn resolve_task_worktree_path(
+    task_id: &str,
+    task_run_id: &str,
+    app_state: &SlotContext,
+) -> Option<std::path::PathBuf> {
+    if let Some(root) = app_state.working_root.as_ref() {
+        let root = root.to_path_buf();
+        if root.exists() {
+            return Some(root);
+        }
+    }
+
+    let task_run_repo =
+        djinn_db::repositories::task_run::TaskRunRepository::new(app_state.db.clone());
+    let run = match task_run_repo.get(task_run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %task_run_id,
+                "auto-submit: task_run not found for worktree lookup"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %task_run_id,
+                error = %e,
+                "auto-submit: failed to load task_run for worktree lookup"
+            );
+            return None;
+        }
+    };
+
+    let workspace_path = match run.workspace_path.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %task_run_id,
+                "auto-submit: no workspace_path available for worktree lookup"
+            );
+            return None;
+        }
+    };
+
+    let path = std::path::PathBuf::from(&workspace_path);
+    if !path.exists() {
+        tracing::warn!(
+            task_id = %task_id,
+            workspace_path = %workspace_path,
+            "auto-submit: workspace_path does not exist; skipping worktree lookup"
+        );
+        return None;
+    }
+
+    Some(path)
+}
+
+fn emit_fingerprint_unavailable_event(
+    task_id: &str,
+    task_run_id: &str,
+    reason: &str,
+    ctx: &SlotContext,
+) {
+    ctx.event_bus.send(DjinnEventEnvelope {
+        entity_type: "verify",
+        action: "submission_fingerprint_unavailable",
+        payload: serde_json::json!({
+            "task_id": task_id,
+            "task_run_id": task_run_id,
+            "reason": reason.to_string(),
+        }),
+        id: Some(task_id.to_string()),
+        project_id: None,
+        from_sync: false,
+    });
 }
 
 async fn persist_auto_submit_review_metadata(
@@ -658,7 +834,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
 
-    // ── apply_ac_verdicts ────────────────────────────────────────────────────
+    // ─── apply_ac_verdicts ────────────────────────────────────────────────────
 
     #[test]
     fn apply_ac_verdicts_sets_met_flags_from_payload() {
@@ -706,7 +882,7 @@ mod tests {
         assert_eq!(parsed[0]["met"], false);
     }
 
-    // ── process_finalize_payload: submit_work ────────────────────────────────
+    // ─── process_finalize_payload: submit_work ────────────────────────────────
 
     #[tokio::test]
     async fn budget_park_logs_extractor_compatible_work_submitted() {
@@ -848,7 +1024,7 @@ mod tests {
         process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
     }
 
-    // ── process_finalize_payload: submit_review ──────────────────────────────
+    // ─── process_finalize_payload: submit_review ──────────────────────────────
 
     #[tokio::test]
     async fn submit_review_atomically_sets_ac_from_criteria_array() {
@@ -937,7 +1113,7 @@ mod tests {
         process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
     }
 
-    // ── process_finalize_payload: submit_decision ────────────────────────────
+    // ─── process_finalize_payload: submit_decision ────────────────────────────
 
     #[tokio::test]
     async fn submit_decision_logs_decision_activity() {
@@ -990,7 +1166,7 @@ mod tests {
         process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
     }
 
-    // ── process_finalize_payload: submit_grooming ────────────────────────────
+    // ─── process_finalize_payload: submit_grooming ────────────────────────────
 
     #[tokio::test]
     async fn submit_grooming_logs_per_task_activity_entries() {
@@ -1131,7 +1307,7 @@ mod tests {
         process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &ctx).await;
     }
 
-    // ── no-op cases ──────────────────────────────────────────────────────────
+    // ─── no-op cases ──────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn none_payload_is_a_noop() {
@@ -1155,7 +1331,7 @@ mod tests {
         process_finalize_payload(&payload, "submit_unknown", "any-task-id", &ctx).await;
     }
 
-    // ── auto-submit review metadata persistence ────────────────────────────
+    // ─── auto-submit review metadata persistence ────────────────────────────
 
     #[tokio::test]
     async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
@@ -1210,7 +1386,7 @@ mod tests {
         assert!(ok);
 
         // work_submitted activity should be logged.
-        let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let task_repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = task_repo.list_activity(&task.id).await.unwrap();
         assert!(entries.iter().any(|e| e.event_type == "work_submitted"));
 

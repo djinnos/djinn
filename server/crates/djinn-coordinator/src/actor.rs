@@ -680,7 +680,9 @@ impl CoordinatorActor {
         // Recover any linked evidence spikes that reached a terminal task
         // state while the coordinator was down, so missed closed-task events are
         // persisted durably. Delegates classification/idempotency to the
-        // repository primitive and does not clear links or resume tribunal work.
+        // repository primitive.  For successful findings the durable evidence
+        // link/claim is cleared and the in-memory refinement loop is advanced;
+        // for failed spikes the proposal remains blocked.
         self.recover_terminal_linked_spike_evidence().await;
 
         loop {
