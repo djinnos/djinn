@@ -16,7 +16,7 @@ pointed at managed equivalents. Everything is just different `values`.
 
 | You have | Guide | What you get |
 |----------|-------|--------------|
-| A laptop, want to try it | [Quick start (local)](../../README.md#quick-start-local) | Full stack in kind via `tilt up`, built from source |
+| A laptop, want to hack on Djinn | [Local stack (Tilt + kind)](../DEVELOPMENT.md#local-stack-tilt--kind) | Full stack in kind via `tilt up`, built from source |
 | A VPS (or want to rent one) | **[Single VPS with k3s](vps.md)** | Everything bundled on one box: Postgres, Qdrant, in-cluster registry, TLS via Let's Encrypt |
 | A managed / production cluster | **[Managed Kubernetes (EKS / GKE / AKS)](kubernetes.md)** | External Postgres (RDS / Cloud SQL), managed registry (ECR / GAR / ACR), cloud identity, GitOps |
 | An AI agent with a shell | **[AI-assisted install](AGENT.md)** | Paste one prompt; the agent interviews you and runs the deploy |

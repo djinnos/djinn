@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://youtu.be/f-S3ju-GjCs"><strong>Demo video</strong></a> ·
-  <a href="#quick-start-local"><strong>Quick start</strong></a> ·
+  <a href="#how-it-works"><strong>How it works</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#deploy"><strong>Deploy</strong></a> ·
   <a href="https://djinnai.io"><strong>Website</strong></a>
@@ -63,13 +63,13 @@ The `djinn-server` control plane is the single source of truth: the web UI, Clau
   it            sign off       parallel        rejects loop back
 ```
 
-1. **Propose** — Anyone writes a proposal: a problem, a goal, acceptance criteria. Proposals are global, collaborative specs that can target any number of projects. Use the editor, or open a proposal-scoped chat and let Djinn draft and refine the spec with you.
-2. **Review & sign off** — The team leaves feedback on the spec; the author (or Djinn) addresses it revision by revision. Reviewers sign off, and sign-offs go stale if the spec changes after, so approval always means *this* version.
-3. **Build** — Graduating a proposal turns it into epics and tasks. The coordinator dispatches ready tasks by priority and dependency order, gated by each user's per-model concurrency limit. Each task-run executes in its own Kubernetes Job, in a per-project devcontainer image, with an isolated git workspace. Changed your mind mid-build? Freeze or abort, edit the spec, re-sign, re-graduate.
-4. **AI review** — A reviewer agent checks the work against the proposal's acceptance criteria; rejected work loops back for another pass.
-5. **Pull request** — Approved work is pushed and a PR is opened via your GitHub App. You review, you merge.
+1. **Propose** — anyone writes a spec: a problem, a goal, acceptance criteria. In the editor, or by letting Djinn draft it with you in chat.
+2. **Review & sign off** — feedback lands revision by revision; sign-offs go stale if the spec changes after, so approval always means *this* version.
+3. **Build** — graduation decomposes the proposal into epics and tasks, dispatched by priority and dependency order, each in its own Kubernetes Job. Freeze or abort mid-build to rework the spec and go again.
+4. **AI review** — a reviewer agent checks the work against the acceptance criteria; rejections loop back.
+5. **Pull request** — approved work opens a PR via your GitHub App. You review, you merge.
 
-Prefer to skip the ceremony? Tasks and epics can also be created directly on the board: the proposal layer is governance you opt into, not a gate you can't route around.
+Prefer to skip the ceremony? Tasks and epics can also be created directly on the board — the proposal layer is governance you opt into, not a gate you can't route around.
 
 ## Architecture
 
@@ -99,59 +99,7 @@ Djinn is a Rust control plane (`djinn-server`) that acts as a Kubernetes control
    └───────────────────────────────────────────────────┘
 ```
 
-**Components**
-
-| Component | Role |
-|-----------|------|
-| `djinn-server` | Control plane: HTTP API, embedded UI, MCP endpoint, OAuth server, proposal pipeline, task coordinator, slot pool, repo mirror fetcher, per-project image controller, worker RPC listener. |
-| `djinn-agent-worker` | Runs inside each task-run pod. Drives the agent role sequence stage-by-stage against an isolated `/workspace`, streaming results back over RPC. |
-| Postgres 16 | All state — proposals, tasks, epics, sessions, notes, users, encrypted credentials, code-graph cache (JSONB throughout). |
-| Qdrant | Vector store for code-chunk and note embeddings (semantic + hybrid search). |
-| BuildKit + registry | Builds a per-project devcontainer image (from detected stack) that every task-run for that project runs in. |
-
-**Agent roles** — Each task is routed to a role based on its type:
-
-- **Architect** — read-only consultant for spikes; deep structural reasoning, no board changes.
-- **Planner** — owns planning, decomposition, and review-grooming tasks.
-- **Developer** — does the code change, commits, and pushes to the project mirror.
-- **Reviewer** — judges the work against acceptance criteria; approves or sends it back.
-- **Lead** — handles escalations and interventions.
-
-**Model routing** — Djinn runs its own LLM agent loop (no external runtime). Models are resolved per task with precedence **user → project → global**, drawn from a live [models.dev](https://models.dev) catalog. The slot pool is elastic; the sole admission control is each user's per-model concurrency cap.
-
-## Quick start (local)
-
-The full stack runs in a local [kind](https://kind.sigs.k8s.io) cluster, orchestrated by [Tilt](https://tilt.dev). One command brings up the cluster, registry, server, Postgres, Qdrant, the image pipeline, and a self-hosted Langfuse for tracing.
-
-**Prerequisites:** Docker, [kind](https://kind.sigs.k8s.io), `kubectl`, [Helm](https://helm.sh), [Tilt](https://tilt.dev), [pnpm](https://pnpm.io) (Node), and `openssl`.
-
-The image pipeline runs BuildKit rootless via user namespaces. On the host (kind inherits host sysctls):
-
-```sh
-sudo sysctl -w kernel.unprivileged_userns_clone=1
-sudo sysctl -w user.max_user_namespaces=28633   # or higher
-```
-
-Then, from the repo root:
-
-```bash
-tilt up
-```
-
-Tilt bootstraps the kind cluster (`djinn`) + a local registry, builds `djinn-server` and `djinn-agent-worker`, embeds the freshly built UI, installs the Helm chart, and port-forwards:
-
-| Port | Service |
-|------|---------|
-| `:3000` | djinn API + web UI |
-| `:8443` | worker RPC |
-| `:5432` | Postgres |
-| `:6333` / `:6334` | Qdrant (HTTP / gRPC) |
-| `:5000` | Langfuse dashboard |
-| `:9091` | MinIO console |
-
-Open the UI at **http://127.0.0.1:3000**. `tilt down` removes the Helm release but leaves the cluster up; `kind delete cluster --name djinn` tears it down completely.
-
-> The heavy build steps (`djinn-binaries`, `djinn-ui-dist`, runtime base image) are **manual** triggers in the Tilt UI — hit refresh on `djinn-binaries` to recompile after Rust changes; the server image and pod roll follow automatically.
+Each task routes to an **agent role** by type — Architect (read-only spikes), Planner, Developer, Reviewer, Lead — and Djinn runs its own LLM agent loop (no external runtime), resolving the model per task with precedence **user → project → global** from a live [models.dev](https://models.dev) catalog. The only admission control is each user's per-model concurrency cap.
 
 ## Deploy
 
@@ -191,6 +139,10 @@ The agent interviews you (VPS or existing cluster, domain, keys), runs the
 install phase by phase with verification checkpoints, and hands you a working
 URL. `helm upgrade --install` handles fresh installs and upgrades alike —
 migrations run automatically in the server's migrate initContainer.
+
+Just want a quick local test (or to hack on Djinn itself)? `tilt up` brings
+the whole stack up in a local kind cluster, built from source — see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Beyond the pipeline
 
@@ -253,7 +205,7 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 ## Development
 
-Rust workspace in `server/`, React UI in `ui/`, embedded into the server binary. `tilt up` is the whole dev loop ([Quick start](#quick-start-local)); workspace layout, test setup, and CI notes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Rust workspace in `server/`, React UI in `ui/`, embedded into the server binary. `tilt up` is the whole dev loop; the local stack, workspace layout, test setup, and CI notes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Community
 
