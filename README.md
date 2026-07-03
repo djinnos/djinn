@@ -15,7 +15,7 @@
   <a href="https://youtu.be/f-S3ju-GjCs"><strong>Demo video</strong></a> ·
   <a href="#quick-start-local"><strong>Quick start</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
-  <a href="#deploy-kubernetes"><strong>Deploy</strong></a> ·
+  <a href="#deploy"><strong>Deploy</strong></a> ·
   <a href="https://djinnai.io"><strong>Website</strong></a>
 </p>
 
@@ -153,7 +153,7 @@ Open the UI at **http://127.0.0.1:3000**. `tilt down` removes the Helm release b
 
 > The heavy build steps (`djinn-binaries`, `djinn-ui-dist`, runtime base image) are **manual** triggers in the Tilt UI — hit refresh on `djinn-binaries` to recompile after Rust changes; the server image and pod roll follow automatically.
 
-## Deploy (Kubernetes — a single VPS counts)
+## Deploy
 
 djinn is Kubernetes-native — it dispatches every agent run as a Job/Pod — so it
 needs a cluster. But **"a cluster" can be one cheap VPS**: [k3s](https://k3s.io)
@@ -170,17 +170,27 @@ helm upgrade --install djinn deploy/helm/djinn \
   -f my-values.yaml    # bundled Postgres/Qdrant/registry, ingress host, secrets
 ```
 
-The same one chart covers every environment — the only thing that changes is
-whether the backing services are bundled or managed:
+One chart covers every environment — the only thing that changes is whether the
+backing services are bundled or managed. Pick your path:
 
-- **Local** — `tilt up` brings up the whole stack in kind ([Quick start](#quick-start-local)).
-- **Single node / self-hosted / VPS** — everything bundled on a one-box k3s cluster ([guide](docs/DEPLOYMENT.md#single-node--self-hosted--vps), including the exact bundled values and a turnkey Ansible reference).
-- **Any managed or self-managed cluster (EKS / GKE / AKS / kubeadm)** — external Postgres/registry, cloud identity, GitOps.
+| Environment | Guide |
+|-------------|-------|
+| Single VPS — everything bundled, TLS via Let's Encrypt | [docs/deploy/vps.md](docs/deploy/vps.md) |
+| Managed cluster (EKS / GKE / AKS) — RDS/Cloud SQL, ECR/GAR/ACR, cloud identity, GitOps | [docs/deploy/kubernetes.md](docs/deploy/kubernetes.md) |
+| Every knob — external Postgres, registries, secrets, storage, scheduling | [docs/deploy/configuration.md](docs/deploy/configuration.md) |
+| Overview — requirements, what's bundled vs swappable, how upgrades work | [docs/deploy](docs/deploy/README.md) |
 
-`helm upgrade --install` handles fresh installs and upgrades alike — migrations
-run automatically in the server's migrate initContainer.
+**Or let your AI do it.** Paste this into Claude Code, Cursor, or any agent
+with shell access to your target machine:
 
-**→ Full guide, per-environment values, and the production/EKS overlay: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).**
+```
+Fetch https://raw.githubusercontent.com/djinnos/djinn/main/docs/deploy/AGENT.md and follow it to deploy Djinn for me.
+```
+
+The agent interviews you (VPS or existing cluster, domain, keys), runs the
+install phase by phase with verification checkpoints, and hands you a working
+URL. `helm upgrade --install` handles fresh installs and upgrades alike —
+migrations run automatically in the server's migrate initContainer.
 
 ## Features
 
@@ -270,7 +280,8 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 ## Configuration
 
-- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed correctly. Login is federated through the same App.
+- **[Configuration reference](docs/deploy/configuration.md)** — every chart knob: external Postgres (RDS/Cloud SQL), managed registries, secrets delivery, storage, task-run scheduling, Langfuse.
+- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed correctly. Login is federated through the same App — or use the one-click manifest flow on the sign-in screen.
 - **Providers** — bootstrap API keys via `secrets.providers.*`, or have each user connect their own under Settings → Models (including OAuth providers like ChatGPT/Codex and Copilot).
 - **Credential vault** — provider credentials are encrypted with AES-256-GCM using the key in `secrets.vaultKey.key`. Keep it stable across upgrades or existing credentials become undecryptable.
 
