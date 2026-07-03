@@ -2658,6 +2658,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let report = supervisor.run(spec).await.expect("supervisor run");
@@ -2727,6 +2728,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let _report = supervisor.run(spec).await.expect("supervisor run");
@@ -2886,6 +2888,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let logs = CapturedLogs::default();
@@ -2960,6 +2963,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
         let provider_report = provider_supervisor
             .run(provider_spec)
@@ -3060,6 +3064,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let logs = CapturedLogs::default();
@@ -3125,6 +3130,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
         let summary_report = summary_supervisor
             .run(summary_spec)
