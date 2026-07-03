@@ -2466,12 +2466,15 @@ mod tests {
             .await,
             0
         );
-        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(
-            still_linked.linked_spike_task_id.as_deref(),
-            Some(spike_task.id.as_str())
+        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            after_receipt.linked_spike_task_id.is_none(),
+            "linked spike must be cleared after valid evidence receipt"
         );
-        assert!(still_linked.needs_evidence_claim.is_some());
+        assert!(
+            after_receipt.needs_evidence_claim.is_none(),
+            "needs-evidence claim must be cleared after valid evidence receipt"
+        );
         assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 
@@ -2519,12 +2522,15 @@ mod tests {
             1,
             "closed task_created events should follow the same linked-spike evidence path"
         );
-        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(
-            still_linked.linked_spike_task_id.as_deref(),
-            Some(spike_task.id.as_str())
+        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            after_receipt.linked_spike_task_id.is_none(),
+            "linked spike must be cleared after valid evidence receipt via task_created event"
         );
-        assert!(still_linked.needs_evidence_claim.is_some());
+        assert!(
+            after_receipt.needs_evidence_claim.is_none(),
+            "needs-evidence claim must be cleared after valid evidence receipt via task_created event"
+        );
         assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 
