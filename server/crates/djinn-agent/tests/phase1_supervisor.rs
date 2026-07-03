@@ -258,6 +258,7 @@ async fn supervisor_clones_from_mirror_without_worktrees() {
         commit_author_name: None,
         commit_author_email: None,
         resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
     };
 
     // 6. Drive the run.  In this infrastructure-slice test we do NOT stub the
@@ -514,6 +515,7 @@ async fn supervisor_spike_runs_to_close_with_stubbed_provider() {
         commit_author_name: None,
         commit_author_email: None,
         resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
     };
 
     // 4. Drive the run — with the provider stubbed, the architect stage
@@ -754,6 +756,7 @@ async fn proactive_sync_merges_advanced_base_into_behind_task_branch() {
         commit_author_name: None,
         commit_author_email: None,
         resume_lifecycle_metadata: None,
+        is_evidence_spike: false,
     };
 
     // 5. Drive the run. The stubbed worker/reviewer may not perfectly satisfy

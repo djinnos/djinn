@@ -534,6 +534,8 @@ pub(crate) async fn execute_stage(
         runtime_role = %runtime_role.config().name,
         specialist_overrode_runtime_role,
         has_conflict_context = conflict_ctx.is_some(),
+        is_evidence_spike = spec.is_evidence_spike,
+        tool_profile = if spec.is_evidence_spike { "evidence_spike" } else { "standard" },
         workspace = %worktree_path.display(),
         "Supervisor stage: starting"
     );
@@ -820,11 +822,13 @@ pub(crate) async fn execute_stage(
     // Evidence-spike tasks (created by the Judge demand-evidence path in
     // epic 6tjy) carry the `refinement-evidence` + `read-only` labels and
     // must run under a restricted read-only/fail-closed tool profile.
-    // Detection is strict: both labels must be present.  Tasks that carry
-    // only one label (or have malformed metadata) fall through to the
-    // normal role tool surface — deny-by-default is enforced by the
-    // restricted profile itself, not by a separate deny gate.
-    let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
+    // The profile was resolved at dispatch time and propagated via
+    // `TaskRunSpec::is_evidence_spike`.  Detection is strict: both labels
+    // must be present.  Tasks that carry only one label (or have malformed
+    // metadata) fall through to the normal role tool surface —
+    // deny-by-default is enforced by the restricted profile itself, not by
+    // a separate deny gate.
+    let is_evidence_spike = spec.is_evidence_spike;
     let mut tools = if is_evidence_spike {
         crate::extension::tool_schemas_evidence_spike()
     } else {

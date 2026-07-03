@@ -281,6 +281,17 @@ pub struct TaskRunSpec {
     /// task-run lifecycle payload rather than re-querying the coordinator.
     #[serde(default)]
     pub resume_lifecycle_metadata: Option<ResumeLifecycleMetadata>,
+    /// Whether this task-run is a linked refinement evidence spike that must
+    /// run under the read-only evidence-spike tool profile.  The worker pod
+    /// reads this at stage-execution time to select
+    /// `tool_schemas_evidence_spike()` and to pass `is_evidence_spike` into
+    /// the reply-loop dispatch gate.  `false` (the `#[serde(default)]`
+    /// sentinel) means "use the normal role tool surface".
+    ///
+    /// Derived at dispatch from the task's labels (`refinement-evidence` +
+    /// `read-only`) via `djinn_core::models::task::is_evidence_spike`.
+    #[serde(default)]
+    pub is_evidence_spike: bool,
 }
 
 /// Resume-via-git lifecycle metadata selected by the coordinator at
@@ -642,6 +653,7 @@ mod tests {
             commit_author_name: Some("Ada Lovelace".to_string()),
             commit_author_email: Some("1+ada@users.noreply.github.com".to_string()),
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");
@@ -710,6 +722,7 @@ mod tests {
                 last_durable_progress_summary: Some("Implemented core feature".to_string()),
                 verification_command: Some("cargo test".to_string()),
             }),
+            is_evidence_spike: false,
         };
 
         // Bincode round-trip (the worker→host wire format).
@@ -787,6 +800,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         };
 
         let bytes = bincode::serialize(&spec).expect("serialize");
@@ -795,6 +809,43 @@ mod tests {
         assert!(
             back.resume_lifecycle_metadata.is_none(),
             "default/off dispatch must not inject a resume metadata payload"
+        );
+    }
+
+    #[test]
+    fn task_run_spec_evidence_spike_flag_roundtrips_through_bincode() {
+        let mut spec = TaskRunSpec {
+            task_run_id: "run-ev".to_string(),
+            task_id: "task-ev".to_string(),
+            project_id: "proj-1".to_string(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".to_string(),
+            task_branch: "djinn/task-ev".to_string(),
+            flow: SupervisorFlow::Spike,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: vec![],
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: true,
+        };
+
+        let bytes = bincode::serialize(&spec).expect("serialize");
+        let back: TaskRunSpec = bincode::deserialize(&bytes).expect("deserialize");
+        assert!(
+            back.is_evidence_spike,
+            "is_evidence_spike must survive bincode round-trip"
+        );
+
+        // Default value is false for normal tasks.
+        spec.is_evidence_spike = false;
+        let bytes2 = bincode::serialize(&spec).expect("serialize");
+        let back2: TaskRunSpec = bincode::deserialize(&bytes2).expect("deserialize");
+        assert!(
+            !back2.is_evidence_spike,
+            "non-evidence-spike spec must round-trip as false"
         );
     }
 
