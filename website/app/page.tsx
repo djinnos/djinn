@@ -15,19 +15,19 @@ const PIPELINE = [
     n: "01",
     name: "Propose",
     status: { label: "spec written", tone: "pass" },
-    body: "Anyone on the team writes a proposal — a problem, a goal, acceptance criteria. A living spec that can target one repo or many. Djinn helps draft and refine it in a proposal-scoped chat.",
+    body: "Anyone on the team writes a proposal: a problem, a goal, acceptance criteria. A living spec that can target one repo or many. Djinn helps draft and refine it in a proposal-scoped chat.",
   },
   {
     n: "02",
     name: "Review & sign off",
     status: { label: "2 sign-offs", tone: "pass" },
-    body: "Product and engineering leave feedback; the spec evolves revision by revision. Sign-offs go stale if it changes afterward — approval always means this exact version.",
+    body: "Product and engineering leave feedback; the spec evolves revision by revision. Sign-offs go stale if it changes afterward, so approval always means this exact version.",
   },
   {
     n: "03",
     name: "Build",
     status: { label: "agents running", tone: "warn" },
-    body: "Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated Kubernetes Job, in a per-project devcontainer, using the models you configured — per user, per project, per role.",
+    body: "Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated Kubernetes Job, in a per-project devcontainer, using the models you configured: per user, per project, per role.",
     log: [
       ["$", "kubectl get jobs -n djinn"],
       [" ", "djinn-taskrun-9f2c   Running    api: add usage rollup"],
@@ -39,22 +39,22 @@ const PIPELINE = [
     n: "04",
     name: "Merge",
     status: { label: "checks passed", tone: "pass" },
-    body: "An AI reviewer judges every result against the acceptance criteria; weak work loops back. What passes becomes a pull request — you review, you merge. Nothing ships without you.",
+    body: "An AI reviewer judges every result against the acceptance criteria; weak work loops back. What passes becomes a pull request. You review, you merge. Nothing ships without you.",
   },
 ];
 
 const CRITERIA = [
   {
     title: "Specs, not prompts",
-    body: "Feedback threads, revision history, stale-aware sign-offs. The team argues before the tokens burn — and can freeze, rework, and re-graduate mid-build.",
+    body: "Feedback threads, revision history, stale-aware sign-offs. The team argues before the tokens burn, and can freeze, rework, and re-graduate mid-build.",
   },
   {
     title: "Your cloud",
-    body: "Self-hosted on any Kubernetes — a single VPS running k3s is enough. One Helm chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.",
+    body: "Self-hosted on any Kubernetes; a single VPS running k3s is enough. One Helm chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.",
   },
   {
     title: "Your models",
-    body: "Anthropic, OpenAI, Google, Bedrock, Vertex, Azure, Copilot, Codex — or any OpenAI-compatible endpoint. One model codes, another reviews. Credentials encrypted, per user.",
+    body: "Anthropic, OpenAI, Google, Bedrock, Vertex, Azure, Copilot, Codex, or any OpenAI-compatible endpoint. One model codes, another reviews. Credentials encrypted, per user.",
   },
   {
     title: "Parallel by default",
@@ -66,7 +66,7 @@ const CRITERIA = [
   },
   {
     title: "Review built in",
-    body: "AI reviewers check each change against the proposal's acceptance criteria and send weak work back. You get a clean pull request — and the final say.",
+    body: "AI reviewers check each change against the proposal's acceptance criteria and send weak work back. You get a clean pull request, and the final say.",
   },
 ];
 
@@ -137,7 +137,7 @@ export default function Home() {
             </h1>
 
             <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl leading-relaxed mb-10">
-              Your team proposes and approves the work. AI agents build it —
+              Your team proposes and approves the work. AI agents build it,
               on your cluster, with your models, behind your review.
             </p>
 
@@ -159,19 +159,23 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Screenshot as a window */}
+          {/* Demo video as a window */}
           <div className="rise rise-5 mt-20 max-w-5xl mx-auto window">
             <div className="window-bar">
               <span className="dot bg-accent-coral/70" />
               <span className="dot bg-status-warn/70" />
               <span className="dot bg-status-pass/70" />
-              <span className="ml-3">djinn — proposals · specs in review, building, and done</span>
+              <span className="ml-3">djinn — first look · demo</span>
             </div>
-            <LightboxImage
-              src="/proposals.jpg"
-              alt="Djinn — proposals moving from draft through review and sign-off to build"
-              className="w-full"
-            />
+            <div className="aspect-video">
+              <iframe
+                src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
+                title="Djinn — first look demo"
+                className="w-full h-full"
+                allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+              />
+            </div>
           </div>
         </section>
 
@@ -231,10 +235,10 @@ export default function Home() {
         <section className="px-6 py-20 border-y border-border-faint bg-bg-surface/50">
           <div className="max-w-6xl mx-auto grid md:grid-cols-5 gap-12 items-center">
             <div className="md:col-span-3 window">
-              <div className="window-bar">fig. 01 — roadmap · epics generated from proposal #0001</div>
+              <div className="window-bar">fig. 01 — board · agents building in parallel across projects</div>
               <LightboxImage
-                src="/roadmap.jpg"
-                alt="Djinn Roadmap — epics and tasks generated from an approved proposal, with dependencies and blockers"
+                src="/kanban.jpg"
+                alt="Djinn board — AI agents working tasks in parallel across multiple projects"
                 className="w-full"
               />
             </div>
@@ -243,10 +247,11 @@ export default function Home() {
                 Approved specs become coordinated work
               </h3>
               <p className="text-text-secondary leading-relaxed">
-                When a proposal graduates, djinn plans the epic, decomposes it into
-                tasks with dependencies and blockers, and dispatches agents wave by
-                wave. Change your mind mid-build? Freeze it, rework the spec,
-                re-sign, and go again — the board reconciles.
+                When a proposal graduates, djinn plans the epics, decomposes them
+                into tasks with dependencies and blockers, and dispatches agents
+                wave by wave, in parallel, across every project the spec touches.
+                Change your mind mid-build? Freeze it, rework the spec, re-sign,
+                and go again; the board reconciles.
               </p>
             </div>
           </div>
@@ -325,14 +330,14 @@ export default function Home() {
               <p className="text-text-secondary text-lg leading-relaxed max-w-2xl mb-10">
                 AI spend is opaque almost everywhere. Djinn&apos;s pipeline makes it
                 attributable: every session belongs to a task, every task to an
-                epic, every epic to a proposal — under a real user. The visibility
-                layer comes next.
+                epic, every epic to a proposal, all under a real user. The
+                visibility layer comes next.
               </p>
 
               <div className="space-y-5 font-mono text-sm">
                 {[
-                  ["spend_attribution", "tokens and cost per proposal, project, model, user, and role — not one blind number on an invoice."],
-                  ["value_delivered", "proposals shipped, PRs merged, rework loops, review pass rates — cost next to outcome."],
+                  ["spend_attribution", "tokens and cost per proposal, project, model, user, and role, not one blind number on an invoice."],
+                  ["value_delivered", "proposals shipped, PRs merged, rework loops, review pass rates: cost next to outcome."],
                   ["tracing_built_in", "every agent session already streams to Langfuse; next, rolled up into answers a lead can act on."],
                 ].map(([k, v], i) => (
                   <div key={i} className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-4">
@@ -356,8 +361,9 @@ export default function Home() {
               Your backlog, merged.
             </h2>
             <p className="text-text-secondary text-lg mb-10 max-w-xl mx-auto">
-              Open source. One Helm chart. A single VPS with k3s is enough to start —
-              your code and credentials never leave your infrastructure.
+              Source-available and free to self-host. One Helm chart. A single VPS
+              with k3s is enough to start, and your code and credentials never
+              leave your infrastructure.
             </p>
             <HeroActions />
           </div>

@@ -7,11 +7,12 @@
 <p align="center">
   <strong>From proposal to pull request.</strong>
   <br />
-  A Kubernetes-native platform where your team proposes and approves work — and AI agents build it.
+  A Kubernetes-native platform where your team proposes and approves work, and AI agents build it.
   On your cluster, with your models, behind your review.
 </p>
 
 <p align="center">
+  <a href="https://youtu.be/f-S3ju-GjCs"><strong>Demo video</strong></a> ·
   <a href="#quick-start-local"><strong>Quick start</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#deploy-kubernetes"><strong>Deploy</strong></a> ·
@@ -20,9 +21,9 @@
 
 <br />
 
-Djinn turns ideas into reviewed, merged code through one governed pipeline. Anyone on the team writes a **proposal** — a living spec, not a chat prompt. Your product folks and engineers discuss it, leave feedback, and sign off. When it graduates, Djinn plans the work, decomposes it into epics and tasks across any number of repositories, and dispatches AI agents — each in its own isolated **Kubernetes Job** — to build it. An AI reviewer checks every result against the acceptance criteria before a pull request is opened. **Nothing ships without your approval.**
+Djinn turns ideas into reviewed, merged code through one governed pipeline. Anyone on the team writes a **proposal**: a living spec, not a chat prompt. Product and engineering discuss it, leave feedback, and sign off. When it graduates, Djinn plans the work, decomposes it into epics and tasks across any number of repositories, and dispatches AI agents to build it, each in its own isolated **Kubernetes Job**. An AI reviewer checks every result against the acceptance criteria before a pull request is opened. **Nothing ships without your approval.**
 
-The `djinn-server` control plane is the single source of truth — the web UI, Claude Code, Cursor, and any MCP client are all just consumers of the same API. And because it all runs on your cluster with your provider credentials, your code and your spend never leave your control.
+The `djinn-server` control plane is the single source of truth: the web UI, Claude Code, Cursor, and any MCP client are all consumers of the same API. And because it all runs on your cluster with your provider credentials, your code and your spend never leave your control.
 
 <br />
 
@@ -63,12 +64,12 @@ The `djinn-server` control plane is the single source of truth — the web UI, C
 ```
 
 1. **Propose** — Anyone writes a proposal: a problem, a goal, acceptance criteria. Proposals are global, collaborative specs that can target any number of projects. Use the editor, or open a proposal-scoped chat and let Djinn draft and refine the spec with you.
-2. **Review & sign off** — The team leaves feedback on the spec; the author (or Djinn) addresses it revision by revision. Reviewers sign off — sign-offs go stale if the spec changes after, so approval always means *this* version.
+2. **Review & sign off** — The team leaves feedback on the spec; the author (or Djinn) addresses it revision by revision. Reviewers sign off, and sign-offs go stale if the spec changes after, so approval always means *this* version.
 3. **Build** — Graduating a proposal turns it into epics and tasks. The coordinator dispatches ready tasks by priority and dependency order, gated by each user's per-model concurrency limit. Each task-run executes in its own Kubernetes Job, in a per-project devcontainer image, with an isolated git workspace. Changed your mind mid-build? Freeze or abort, edit the spec, re-sign, re-graduate.
 4. **AI review** — A reviewer agent checks the work against the proposal's acceptance criteria; rejected work loops back for another pass.
 5. **Pull request** — Approved work is pushed and a PR is opened via your GitHub App. You review, you merge.
 
-Prefer to skip the ceremony? Tasks and epics can also be created directly on the board — the proposal layer is governance you opt into, not a gate you can't route around.
+Prefer to skip the ceremony? Tasks and epics can also be created directly on the board: the proposal layer is governance you opt into, not a gate you can't route around.
 
 ## Architecture
 
@@ -185,7 +186,7 @@ run automatically in the server's migrate initContainer.
 
 ### 📋 Proposals: specs, not prompts
 
-Work starts as a written, reviewable spec with acceptance criteria — targeting one project or many. Feedback threads, revision history, and stale-aware sign-offs give product and engineering a shared artifact to argue about *before* tokens are spent. Graduate it to build; freeze or abort mid-build to rework the spec and go again.
+Work starts as a written, reviewable spec with acceptance criteria, targeting one project or many. Feedback threads, revision history, and stale-aware sign-offs give product and engineering a shared artifact to argue about *before* tokens are spent. Graduate it to build; freeze or abort mid-build to rework the spec and go again.
 
 ### ⚡ Parallel execution
 
@@ -217,10 +218,10 @@ AI reviewers check each task against the proposal's acceptance criteria. You rev
 
 ## What's next: see where the tokens go
 
-AI engineering spend is opaque almost everywhere — Djinn's pipeline makes it attributable. Because every session belongs to a task, every task to an epic, and every epic to a proposal under a real user, we're building the visibility layer on top:
+AI engineering spend is opaque almost everywhere; Djinn's pipeline makes it attributable. Because every session belongs to a task, every task to an epic, and every epic to a proposal under a real user, we're building the visibility layer on top:
 
 - **Spend attribution** — tokens and cost per proposal, per project, per model, per user, per role.
-- **Value delivered** — proposals shipped, PRs merged, rework loops, review pass rates — cost next to outcome, not in a separate billing console.
+- **Value delivered** — proposals shipped, PRs merged, rework loops, review pass rates: cost next to outcome, not in a separate billing console.
 - **Tracing built in** — every agent session already streams to [Langfuse](https://langfuse.com); the next step is rolling those traces up into answers a team lead can act on.
 
 ## Connect your tools
@@ -297,4 +298,4 @@ The lifecycle/concurrency regressions for the vjs6 incidents (dispatch-cap races
 
 ## License
 
-[Business Source License 1.1](LICENSE). Free to self-host and use in production — the only restriction is offering Djinn itself as a competing hosted service. Each version converts to Apache 2.0 four years after release. © 2026 Djinn AI, Inc.
+[Business Source License 1.1](LICENSE). Free to self-host and use in production: the only restriction is offering Djinn itself as a competing hosted service. Each version converts to Apache 2.0 four years after release. © 2026 Djinn AI, Inc.

@@ -21,7 +21,7 @@ export default function HeroActions() {
       </div>
 
       <div className="font-mono text-xs text-text-muted">
-        open source · runs on a single VPS (k3s) or EKS / GKE / AKS
+        free to self-host · runs on a single VPS (k3s) or EKS / GKE / AKS
       </div>
     </div>
   );
