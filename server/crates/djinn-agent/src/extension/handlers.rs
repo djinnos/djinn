@@ -169,6 +169,41 @@ where
         ));
     }
 
+    // ── Fail-closed: reject dynamic MCP registry tools when an allowlist is
+    // active.  MCP registry tools are registered at runtime from external
+    // servers and are NOT part of the evidence-spike (or any restricted)
+    // schema surface.  Without this guard, the catch-all arm below would
+    // happily dispatch an arbitrary MCP tool even though it was never
+    // vetted for the restricted profile.
+    //
+    // For normal (unrestricted) sessions, `allowed_schemas` is `None` and
+    // this block is a no-op.
+    if allowed_schemas.is_some()
+        && !matches!(
+            call.name.as_str(),
+            "request_lead"
+                | "request_planner"
+                | "task_transition"
+                | "task_delete_branch"
+                | "task_kill_session"
+                | "shell"
+                | "read"
+                | "code_search"
+                | "write"
+                | "edit"
+                | "apply_patch"
+                | "code_graph"
+                | "skill_read"
+        )
+        && let Some(registry) = mcp_registry
+        && registry.has_tool(&call.name)
+    {
+        return Err(format!(
+            "tool `{}` is a dynamic MCP registry tool and is not permitted under the active restricted profile",
+            call.name
+        ));
+    }
+
     match call.name.as_str() {
         // ── Agent-local task admin tools ─────────────────────────────────
         // These require djinn-agent internals (task_merge, knowledge_promotion)
