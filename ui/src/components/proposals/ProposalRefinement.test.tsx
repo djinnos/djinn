@@ -1006,4 +1006,89 @@ describe("ProposalRefinement", () => {
     expect(screen.queryByText("Awaiting evidence")).not.toBeInTheDocument();
     expect(screen.queryByText("Evidence failed")).not.toBeInTheDocument();
   });
+
+  it("paused_or_frozen with evidence takes precedence and suppresses auto-resume copy", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "paused_or_frozen",
+      needs_evidence: {
+        claim: "Subsystem handles backpressure",
+        spike_task_id: "uuid-spike-pause",
+        spike_short_id: "pa99",
+        spike_status: "closed",
+        evidence_phase: "evidence_received",
+        round: 2,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Badge shows Paused, not "Evidence received" or "Awaiting evidence"
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    // Manual gate copy
+    expect(
+      screen.getByText(/Refinement is paused until a manual gate is cleared/),
+    ).toBeInTheDocument();
+    // Evidence context visible
+    expect(
+      screen.getByText(/Evidence has been collected and is ready for review/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/pa99/)).toBeInTheDocument();
+    // Suppressed states — no auto-resume or running copy
+    expect(
+      screen.queryByText("Refinement in progress"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/running autonomously; you'll review/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByText("Evidence received")).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting evidence")).not.toBeInTheDocument();
+  });
+
+  it("renders evidence_failed via needs_evidence fallback when lifecycle state is absent", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 1,
+      dry_rounds: 0,
+      total_entries: 3,
+      stop_reason: null,
+      awaiting_review: false,
+      needs_evidence: {
+        claim: "Database migration is safe",
+        spike_task_id: "uuid-spike-fallback",
+        spike_short_id: "fb12",
+        spike_status: "error",
+        evidence_phase: "evidence_failed",
+        failure_reason: "spike_errored",
+        round: 1,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Detected as evidence_failed via needs_evidence fields
+    expect(screen.getAllByText("Evidence failed").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/encountered an error/)).toBeInTheDocument();
+    expect(screen.getAllByText(/fb12/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/Claim: Database migration is safe/)).toBeInTheDocument();
+    // No stale states
+    expect(screen.queryByText("Refinement in progress")).not.toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
 });

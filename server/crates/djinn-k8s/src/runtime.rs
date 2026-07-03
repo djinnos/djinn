@@ -380,6 +380,7 @@ impl SessionRuntime for KubernetesRuntime {
             &project_image_tag,
             &services,
             cargo_cache_policy.as_ref(),
+            spec.is_evidence_spike,
         );
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), ns);
         let created_job = match jobs.create(&PostParams::default(), &job).await {
@@ -1637,6 +1638,7 @@ mod tests {
             "reg.test:5000/djinn-project-proj-xyz:deadbeefcafe",
             &[],
             None,
+            false,
         );
 
         // The Secret and Job share the same resource name.
