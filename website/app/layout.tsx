@@ -31,7 +31,7 @@ export const metadata: Metadata = {
     default: "Djinn | From Proposal to Pull Request",
     template: "%s | Djinn",
   },
-  description: "Open-source, Kubernetes-native platform where your team proposes and approves work — and AI agents build it. On your cluster, with your models, behind your review.",
+  description: "Self-hosted, Kubernetes-native platform where your team proposes and approves work, and AI agents build it. On your cluster, with your models, behind your review.",
   keywords: ["AI", "developer tools", "AI coding agents", "Kubernetes", "self-hosted", "agent orchestration", "proposals", "autonomous development", "AI spend visibility"],
   authors: [{ name: "Djinn AI, Inc." }],
   creator: "Djinn AI, Inc.",
@@ -40,7 +40,7 @@ export const metadata: Metadata = {
     locale: "en_US",
     url: "https://djinnai.io",
     title: "Djinn | From Proposal to Pull Request",
-    description: "Open-source, Kubernetes-native platform where your team proposes and approves work — and AI agents build it. On your cluster, with your models, behind your review.",
+    description: "Self-hosted, Kubernetes-native platform where your team proposes and approves work, and AI agents build it. On your cluster, with your models, behind your review.",
     siteName: "Djinn",
     images: [
       {
@@ -54,7 +54,7 @@ export const metadata: Metadata = {
   twitter: {
     card: "summary_large_image",
     title: "Djinn | From Proposal to Pull Request",
-    description: "Your team proposes and approves the work. AI agents build it — on your cluster, with your models, behind your review.",
+    description: "Your team proposes and approves the work. AI agents build it, on your cluster, with your models, behind your review.",
     images: ["/kanban.jpg"],
     creator: "@djinnos",
   },
@@ -88,7 +88,7 @@ export default function RootLayout({
                 "priceCurrency": "USD",
                 "availability": "https://schema.org/InStock"
               },
-              "description": "Open-source, Kubernetes-native platform where teams propose and approve work and AI agents build it — self-hosted, bring your own models, every change behind human review.",
+              "description": "Kubernetes-native platform where teams propose and approve work and AI agents build it: self-hosted, bring your own models, every change behind human review.",
               "author": {
                 "@type": "Organization",
                 "name": "Djinn AI, Inc.",
