@@ -22,6 +22,7 @@ async fn lsp_tool(
         None,
         None,
         None,
+        None,
     )
     .await
 }
