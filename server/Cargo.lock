@@ -1086,7 +1086,6 @@ dependencies = [
  "globset",
  "hex",
  "insta",
- "kube",
  "libc",
  "regex",
  "reqwest 0.13.2",

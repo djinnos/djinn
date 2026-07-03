@@ -13,8 +13,8 @@
 //!   `djinn-runtime` cannot depend on `djinn-supervisor` (cycle).
 //!
 //! - [`K8sTokenReviewValidator`] — real
-//!   [`djinn_supervisor::TokenValidator`] wrapping
-//!   [`djinn_k8s::token_review::review_token`].  Lives here so `djinn-supervisor`
+//!   [`djinn_supervisor::TokenValidator`] wrapping the owner-crate
+//!   [`djinn_k8s::token_review::TokenReviewer`].  Lives here so `djinn-supervisor`
 //!   stays free of `kube-rs` (and `djinn-k8s` stays free of the supervisor's
 //!   wire types).
 
@@ -75,8 +75,8 @@ impl TaskRunner for SupervisorTaskRunner {
 /// Real [`TokenValidator`] for the djinn-server TCP listener.
 ///
 /// Posts the presented bearer token at the in-cluster apiserver's
-/// `authentication.k8s.io/v1/TokenReview` endpoint via
-/// [`djinn_k8s::token_review::review_token`] and accepts iff the apiserver
+/// `authentication.k8s.io/v1/TokenReview` endpoint via the owner-crate
+/// [`djinn_k8s::token_review::TokenReviewer`] and accepts iff the apiserver
 /// reports `authenticated: true`.
 ///
 /// The current impl leaves deeper identity checks (e.g. asserting that the SA
@@ -84,16 +84,13 @@ impl TaskRunner for SupervisorTaskRunner {
 /// already verifies the token's audience matches `djinn`, which is the main
 /// thing we care about in v1.
 pub struct K8sTokenReviewValidator {
-    client: kube::Client,
-    audience: String,
+    reviewer: djinn_k8s::token_review::TokenReviewer,
 }
 
 impl K8sTokenReviewValidator {
-    pub fn new(client: kube::Client, audience: impl Into<String>) -> Self {
-        Self {
-            client,
-            audience: audience.into(),
-        }
+    /// Build the validator from an already-constructed owner-crate reviewer.
+    pub fn new(reviewer: djinn_k8s::token_review::TokenReviewer) -> Self {
+        Self { reviewer }
     }
 }
 
@@ -104,7 +101,9 @@ impl TokenValidator for K8sTokenReviewValidator {
         token: &str,
         _expected_task_run_id: &str,
     ) -> Result<TokenValidation, String> {
-        let review = djinn_k8s::token_review::review_token(&self.client, token, &self.audience)
+        let review = self
+            .reviewer
+            .review(token)
             .await
             .map_err(|e| e.to_string())?;
         Ok(TokenValidation {
