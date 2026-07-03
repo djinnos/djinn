@@ -1688,7 +1688,7 @@ async fn route_planner_intervention_appends_ci_failure_sections() {
     let sections = "**Workflow:** CI\n**Failed job:** test (failure)";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, Some(sections))
+        .route_planner_intervention(&task, "worker", reason, Some(sections), task.reopen_count)
         .await;
     assert!(handled, "route_planner_intervention must handle the task");
 
@@ -1749,7 +1749,7 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
     let reason = "Internal review loop exceeded threshold.";
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", reason, None)
+        .route_planner_intervention(&task, "worker", reason, None, task.reopen_count)
         .await;
     assert!(handled, "route_planner_intervention must handle the task");
 
@@ -2239,5 +2239,334 @@ async fn planned_completion_clears_provider_failure_streak() {
     assert!(
         !actor.provider_failure_streak.contains_key(&task.id),
         "a planned completion clears the provider-error failure streak"
+    );
+}
+
+// ── Quality-strike intervention tests (886z) ────────────────────────────────
+//
+// These tests verify that `maybe_intervene_on_stuck_task` gates on
+// DB-backed `quality_reopen_count` rather than raw `task.reopen_count`,
+// and that excluded-class reopens (merge_conflict, superseded) do not
+// arm planner interventions while quality classes still trigger at the
+// configured threshold.
+
+/// Walk a task through a full review cycle with a specific rejection action.
+/// Starts from `open`, moves through the state machine to `in_task_review`,
+/// then applies the given rejection action (returning the task to `open`).
+async fn walk_review_reject_cycle(
+    repo: &TaskRepository,
+    task_id: &str,
+    action: djinn_core::models::TransitionAction,
+    reason: &str,
+) {
+    repo.transition(
+        task_id,
+        djinn_core::models::TransitionAction::Start,
+        "worker",
+        "worker",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        djinn_core::models::TransitionAction::SubmitTaskReview,
+        "worker",
+        "worker",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        djinn_core::models::TransitionAction::TaskReviewStart,
+        "reviewer",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(task_id, action, "reviewer", "reviewer", Some(reason), None)
+        .await
+        .unwrap();
+}
+
+/// Below-threshold quality reopens must NOT trigger intervention.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quality_strikes_below_threshold_does_not_intervene() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Drive quality reopens to just below the threshold.
+    for _ in 0..(REOPEN_INTERVENTION_THRESHOLD - 1) {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewReject,
+            "below threshold reject",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(t.reopen_count, REOPEN_INTERVENTION_THRESHOLD - 1);
+
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, REOPEN_INTERVENTION_THRESHOLD - 1);
+
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        !intervened,
+        "quality_strikes below threshold must not trigger intervention"
+    );
+    assert!(
+        planner_intervention_markers(&repo, &task.id)
+            .await
+            .is_empty(),
+        "no marker should be written below threshold"
+    );
+}
+
+/// At-threshold quality reopens MUST trigger intervention.
+/// Marker stores both `quality_strikes` and raw `reopen_count`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quality_strikes_at_threshold_triggers_intervention() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Drive quality reopens to the threshold.
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewReject,
+            "at threshold reject",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(t.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, REOPEN_INTERVENTION_THRESHOLD);
+
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        intervened,
+        "quality_strikes at threshold must trigger intervention"
+    );
+
+    // Marker stores both quality_strikes and reopen_count.
+    let markers = planner_intervention_markers(&repo, &task.id).await;
+    assert_eq!(markers.len(), 1, "exactly one intervention marker");
+    assert_eq!(
+        markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD,
+        "marker reopen_count = raw reopen_count"
+    );
+    assert_eq!(
+        markers[0]["quality_strikes"], REOPEN_INTERVENTION_THRESHOLD,
+        "marker quality_strikes = quality reopen count"
+    );
+}
+
+/// Excluded-class reopens (merge_conflict) do not count toward the quality
+/// threshold. Mixed quality + non-quality reopens reach intervention only
+/// when the QUALITY count crosses the threshold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn excluded_class_reopens_do_not_arm_intervention() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Phase 1: add merge_conflict reopens. These are excluded from quality
+    // count (reopen_class=merge_conflict, no raw reopen increment).
+    for _ in 0..2 {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+    }
+
+    // Merge conflicts don't increment raw reopen_count OR quality count.
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        t.reopen_count, 0,
+        "merge_conflict must not increment raw reopen_count"
+    );
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(
+        quality, 0,
+        "merge_conflict must not count toward quality_reopen_count"
+    );
+
+    // No intervention at zero quality strikes.
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        !intervened,
+        "merge_conflict reopens alone must not trigger intervention"
+    );
+
+    // Phase 2: add one quality reopen below threshold.
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        djinn_core::models::TransitionAction::TaskReviewReject,
+        "quality reject",
+    )
+    .await;
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(t.reopen_count, 1, "one quality reopen increments raw count");
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, 1, "one quality reopen counted");
+
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        !intervened,
+        "quality_strikes=1 below threshold must not trigger intervention"
+    );
+
+    // Phase 3: drive quality count to threshold.
+    for _ in 0..(REOPEN_INTERVENTION_THRESHOLD - 1) {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewReject,
+            "quality reject",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(
+        quality, REOPEN_INTERVENTION_THRESHOLD,
+        "quality count reaches threshold"
+    );
+    // Raw reopen_count equals quality count (merge_conflict doesn't increment).
+    assert_eq!(t.reopen_count, quality, "raw count = quality count here");
+
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        intervened,
+        "quality_strikes at threshold must trigger intervention despite prior merge_conflicts"
+    );
+
+    let markers = planner_intervention_markers(&repo, &task.id).await;
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        markers[0]["quality_strikes"], REOPEN_INTERVENTION_THRESHOLD,
+        "marker records quality strike count"
+    );
+    assert_eq!(
+        markers[0]["reopen_count"], REOPEN_INTERVENTION_THRESHOLD,
+        "marker records raw reopen count"
+    );
+}
+
+/// DB-backed quality_reopen_count diverges from raw reopen_count and
+/// intervention fires on the QUALITY count, not the raw count.
+///
+/// This proves that `maybe_intervene_on_stuck_task` reads from the DB
+/// and uses `quality_reopen_count` rather than `task.reopen_count`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn intervention_uses_db_quality_count_not_raw_reopen_count() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Drive 2 quality reopens (raw_count=2, quality=2).
+    for _ in 0..2 {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewReject,
+            "quality reject",
+        )
+        .await;
+    }
+
+    // Add 2 merge_conflict reopens (raw_count stays 2, quality stays 2 —
+    // merge_conflict does not increment reopen_count and is excluded from
+    // quality count).
+    for _ in 0..2 {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(t.reopen_count, 2, "raw count = 2 (merge_conflict excluded)");
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, 2, "quality count = 2");
+
+    // Below threshold: no intervention.
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(!intervened, "quality=2 below threshold must not intervene");
+
+    // Add one more quality reopen (raw=3, quality=3 = threshold).
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        djinn_core::models::TransitionAction::TaskReviewReject,
+        "final quality reject",
+    )
+    .await;
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(t.reopen_count, 3, "raw count = 3");
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, 3, "quality count = 3 = threshold");
+
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        intervened,
+        "quality=3 at threshold triggers intervention (even with merge_conflict reopens)"
+    );
+
+    // Now add more merge_conflict reopens to push raw count PAST threshold
+    // while quality stays at threshold. Another intervention should NOT fire
+    // because quality count hasn't changed and the marker already exists.
+    for _ in 0..3 {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert!(t.reopen_count > 3, "raw count now past threshold");
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(quality, 3, "quality count still at threshold");
+
+    // Marker already exists at reopen_count=3, so no re-intervention.
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        !intervened,
+        "no re-intervention when quality count hasn't changed and marker exists"
     );
 }

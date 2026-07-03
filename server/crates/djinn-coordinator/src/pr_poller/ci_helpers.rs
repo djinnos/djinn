@@ -313,8 +313,14 @@ impl CoordinatorActor {
                          all reproduction-context fetches failed; escalating generically"
                     );
                     let sections_text = ci_failure_sections.join("\n");
-                    self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
-                        .await;
+                    self.route_planner_intervention(
+                        task,
+                        "worker",
+                        &reason,
+                        Some(&sections_text),
+                        task.reopen_count,
+                    )
+                    .await;
                 }
                 SameSignatureEscalationRoute::UnreproducibleIntervention => {
                     // Every bundle is unreproducible: route to human/lead
@@ -428,8 +434,14 @@ impl CoordinatorActor {
                 failing_crates = failing_crates.join(", "),
             );
             let sections_text = ci_failure_sections.join("\n");
-            self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
-                .await;
+            self.route_planner_intervention(
+                task,
+                "worker",
+                &reason,
+                Some(&sections_text),
+                task.reopen_count,
+            )
+            .await;
             // Park the source to `open` so it is held by the blocker the
             // intervention added (not left in pr_draft/pr_review) and revivable
             // when the remediation closes.

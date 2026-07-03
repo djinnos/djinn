@@ -557,7 +557,13 @@ impl CoordinatorActor {
                             "PR poller: unreproducible required-CI check routing to lead/human intervention"
                         );
                         let handled = self
-                            .route_planner_intervention(&task, "worker", &reason, None)
+                            .route_planner_intervention(
+                                &task,
+                                "worker",
+                                &reason,
+                                None,
+                                task.reopen_count,
+                            )
                             .await;
                         if handled {
                             tracing::info!(
