@@ -19,14 +19,14 @@ use tokio_util::sync::CancellationToken;
 
 /// The model used for refinement dispatch in `#[cfg(test)]` builds
 /// (hardcoded by `resolve_dispatch_models_for_role`).
-const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
+pub(super) const TEST_MODEL: &str = DEFAULT_MODEL_ID; // "test/mock"
 
 // ── Fixture ──────────────────────────────────────────────────────────
 
 pub(super) struct RefinementFixture {
     #[allow(dead_code)]
     db: djinn_db::Database,
-    project_id: String,
+    pub(super) project_id: String,
     pub(super) user_id: String,
     pub(super) proposal_id: String,
 }
@@ -178,7 +178,7 @@ pub(super) fn spawn_test_pool(
 }
 
 /// Seed a `RefinementLoopState` in the actor's `active_refinements` map.
-fn seed_refinement_state(
+pub(super) fn seed_refinement_state(
     actor: &mut CoordinatorActor,
     proposal_id: &str,
     attributed_user_id: Option<String>,
