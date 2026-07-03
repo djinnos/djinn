@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities};
+use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ToolSchemaCompat};
 
 /// Whether a provider's credential is a personal **subscription** (a consumer
 /// coding/token plan or vendor consumer sub) or a fungible **API key**.
@@ -179,6 +179,24 @@ pub const DEFAULT_AUTH_SHAPE: AuthShape = AuthShape::Bearer;
 /// (`ProviderCapabilities::default()`): streaming on, no default max_tokens.
 pub fn default_capabilities() -> ProviderCapabilities {
     ProviderCapabilities::default()
+}
+
+/// Resolve the tool-schema compatibility quirk for a built-in provider.
+///
+/// The returned [`ToolSchemaCompat`] is carried on [`ProviderConfig`] and
+/// consumed by the shared schema-projection layer. `None` is the identity
+/// state used by native providers (OpenAI, Anthropic, etc.) that accept
+/// standard JSON Schema tool definitions without rewriting.
+///
+/// `model_id` is part of the API for future per-model handling; the current
+/// implementation resolves the quirk from the canonical provider identity.
+pub fn tool_schema_compat_for(provider_id: &str, _model_id: &str) -> Option<ToolSchemaCompat> {
+    let builtin = find_builtin_provider(provider_id)?;
+    Some(match builtin.id {
+        "kimi-for-coding" | "minimax-coding-plan" => ToolSchemaCompat::Moonshot,
+        "google" => ToolSchemaCompat::Gemini,
+        _ => return None,
+    })
 }
 
 /// All providers Djinn can use out of the box.
@@ -1133,5 +1151,37 @@ mod tests {
                 "{id} should default to api_key"
             );
         }
+    }
+
+    #[test]
+    fn tool_schema_compat_resolves_builtin_quirks_and_identity() {
+        // Kimi / Moonshot-style Anthropic-compatible endpoint.
+        assert_eq!(
+            tool_schema_compat_for("kimi-for-coding", "k2p7"),
+            Some(ToolSchemaCompat::Moonshot)
+        );
+        // MiniMax uses the same Anthropic-compatible / Moonshot quirk.
+        assert_eq!(
+            tool_schema_compat_for("minimax-coding-plan", "MiniMax-M3"),
+            Some(ToolSchemaCompat::Moonshot)
+        );
+        // Google Gemini requires its own compatibility projection.
+        assert_eq!(
+            tool_schema_compat_for("google", "gemini-2.5-pro"),
+            Some(ToolSchemaCompat::Gemini)
+        );
+        // Native providers have no quirk — identity state.
+        assert_eq!(tool_schema_compat_for("openai", "gpt-4.1-mini"), None);
+        assert_eq!(
+            tool_schema_compat_for("anthropic", "claude-3-5-haiku"),
+            None
+        );
+        // Unknown / custom providers also default to identity.
+        assert_eq!(tool_schema_compat_for("deepseek", "unknown"), None);
+        // Aliases resolve via the canonical built-in lookup.
+        assert_eq!(
+            tool_schema_compat_for("KimiForCoding", "k2p7"),
+            Some(ToolSchemaCompat::Moonshot)
+        );
     }
 }
