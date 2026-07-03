@@ -50,55 +50,16 @@ impl CoordinatorActor {
     /// Shared handler for a "CI checks failed on PR" event, used by both the
     /// `pr_draft` and `pr_review` polling paths.
     ///
-    /// Fixes the infinite CI-failure rework loop by gating the rework on five
-    /// things, in order:
+    /// Gates rework on five things (in order):
+    /// 1. **Blocking-only filter** — intersect with required status checks.
+    /// 2. **Same-CI-signature** — escalate after `SAME_CI_SIGNATURE_THRESHOLD`
+    ///    identical fingerprints (content-aware, independent of `reopen_count`).
+    /// 3. **Scope-inversion** — CI fails on crates outside the PR diff → RE-SLICE.
+    /// 4. **Diff-empty** — head has no commits ahead of base → escalate + PARK.
+    /// 5. **Cycle cap** — past `PR_CI_FAILURE_THRESHOLD` → escalate + PARK.
     ///
-    /// 1. **Blocking-only filter.** The failed check-runs are intersected with
-    ///    the PR's *required* status-check contexts, resolved via
-    ///    [`Self::resolve_required_contexts`] (GitHub's per-PR `isRequired`
-    ///    answer — branch protection, rulesets, and merge queue alike).
-    ///    Advisory/preview checks (Vercel deploys, preview-env provisioning,
-    ///    a repo's non-required `Sentinel` bot gate, etc.) are dropped: a code
-    ///    diff cannot fix that infra, so reworking on it loops forever. When no
-    ///    source can answer we fall back to a conservative name-pattern
-    ///    heuristic. If nothing blocking remains, we do **not** reopen — the
-    ///    required checks are green and the PR is fine to proceed.
-    ///
-    /// 2. **Same-CI-signature check.** A stable fingerprint is computed from the
-    ///    blocking check names and structured CI failure sections. The durable
-    ///    CI gate snapshot's `same_signature_count` is the authoritative counter
-    ///    (not activity-log entries). When the head SHA changes, the
-    ///    `record_ci_snapshot` path resets the counter via
-    ///    `reset_ci_snapshot_for_head`. When the fingerprint changes (different
-    ///    failures = progress), the counter restarts from 0. If the same
-    ///    fingerprint appears `SAME_CI_SIGNATURE_THRESHOLD` times in a row,
-    ///    we escalate to the Planner via `route_planner_intervention` faster
-    ///    than the blind cycle-count threshold, independent of `reopen_count`.
-    ///
-    /// 3. **Scope-inversion check.** The PR's actual changed files are fetched
-    ///    from GitHub and compared against the failing crates/files extracted
-    ///    from the CI failure sections. If CI fails on crates outside the PR's
-    ///    own diff, this is a decomposition error (too-narrow slice), not a worker
-    ///    bug. We route to the Planner for a RE-SLICE instead of re-dispatching
-    ///    the worker.
-    ///
-    /// 4. **Diff-empty short-circuit.** If the PR head has no commits ahead of
-    ///    base on GitHub (`ahead_by == 0`), the previous worker iteration
-    ///    produced no new diff — re-dispatching cannot change anything. We
-    ///    escalate to the Planner and PARK (hold the source on the remediation
-    ///    blocker) instead of looping.
-    ///
-    /// 5. **Cycle cap.** Each CI-failure rework records a `pr_ci_cycle` marker.
-    ///    Past `PR_CI_FAILURE_THRESHOLD` we escalate to the Planner and PARK
-    ///    rather than redispatch. Escalation is terminal — the counter is never
-    ///    reset on the reopen that re-arms the loop.
-    ///
-    /// Returns `true` when the event was *consumed* (the task was transitioned
-    /// — either reworked or parked on a remediation blocker) and the caller
-    /// should run its post-transition cache cleanup and `continue`. Returns
-    /// `false` when the
-    /// failures were all non-blocking and the caller should fall through to its
-    /// normal (CI-passed) handling.
+    /// Returns `true` when the event was consumed (task transitioned); `false`
+    /// when failures were all non-blocking (caller falls through).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn handle_ci_failure(
         &mut self,
@@ -313,8 +274,14 @@ impl CoordinatorActor {
                          all reproduction-context fetches failed; escalating generically"
                     );
                     let sections_text = ci_failure_sections.join("\n");
-                    self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
-                        .await;
+                    self.route_planner_intervention(
+                        task,
+                        "worker",
+                        &reason,
+                        Some(&sections_text),
+                        task.reopen_count,
+                    )
+                    .await;
                 }
                 SameSignatureEscalationRoute::UnreproducibleIntervention => {
                     // Every bundle is unreproducible: route to human/lead
@@ -428,8 +395,14 @@ impl CoordinatorActor {
                 failing_crates = failing_crates.join(", "),
             );
             let sections_text = ci_failure_sections.join("\n");
-            self.route_planner_intervention(task, "worker", &reason, Some(&sections_text))
-                .await;
+            self.route_planner_intervention(
+                task,
+                "worker",
+                &reason,
+                Some(&sections_text),
+                task.reopen_count,
+            )
+            .await;
             // Park the source to `open` so it is held by the blocker the
             // intervention added (not left in pr_draft/pr_review) and revivable
             // when the remediation closes.

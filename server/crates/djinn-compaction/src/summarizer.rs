@@ -135,6 +135,7 @@ async fn call_llm_for_summary(
 
     let mut stream = summary_provider.stream(conv, &[], None).await?;
     let mut summary = String::new();
+    let mut saw_done = false;
 
     while let Some(evt) = stream.next().await {
         match evt? {
@@ -143,9 +144,26 @@ async fn call_llm_for_summary(
                     summary.push_str(text);
                 }
             }
-            StreamEvent::Done => break,
+            StreamEvent::Done => {
+                saw_done = true;
+                break;
+            }
             StreamEvent::Usage(_) | StreamEvent::Thinking(_) => {}
         }
+    }
+
+    if !saw_done {
+        // The provider stream ended without ever emitting `StreamEvent::Done`.
+        // The accumulated `summary` may be a partial, truncated dump of the
+        // tail — surface that as an error so callers (`do_compact`,
+        // `do_partial_compact`, `do_compact_with_overflow_retry`) treat the
+        // summary as failed and route through their existing retry / fallback
+        // paths instead of silently accepting an incomplete compaction.
+        return Err(anyhow::anyhow!(
+            "incomplete compaction summary stream: provider stream ended before Done \
+             (stream exhausted after {} accumulated chars)",
+            summary.len()
+        ));
     }
 
     Ok(summary)
@@ -341,6 +359,123 @@ mod tests {
         assert!(
             streamed_on_downgraded.load(Ordering::SeqCst),
             "compaction summary must stream through the downgraded (Minimal) provider"
+        );
+    }
+
+    /// Fake provider whose `stream` returns a caller-supplied sequence of events —
+    /// used to exercise `call_llm_for_summary` completion semantics (Done vs.
+    /// premature stream exhaustion) without needing a real network round-trip.
+    struct ScriptedEventProvider {
+        events: Vec<StreamEvent>,
+    }
+
+    impl LlmProvider for ScriptedEventProvider {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+
+        fn with_reasoning_effort(&self, _effort: ReasoningEffort) -> Option<Box<dyn LlmProvider>> {
+            Some(Box::new(ScriptedEventProvider {
+                events: self.events.clone(),
+            }))
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _conversation: &'a Conversation,
+            _tools: &'a [Value],
+            _tool_choice: Option<ToolChoice>,
+        ) -> Pin<
+            Box<
+                dyn futures::Future<
+                        Output = anyhow::Result<
+                            Pin<
+                                Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
+                            >,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let events: Vec<anyhow::Result<StreamEvent>> =
+                    self.events.iter().cloned().map(Ok).collect();
+                let stream: Pin<Box<dyn futures::Stream<Item = _> + Send>> =
+                    Box::pin(futures::stream::iter(events));
+                Ok(stream)
+            })
+        }
+    }
+
+    /// Normal streams that emit deltas followed by `StreamEvent::Done` must
+    /// return the accumulated summary text unchanged.
+    #[tokio::test]
+    async fn call_llm_for_summary_returns_text_on_done() {
+        let provider = ScriptedEventProvider {
+            events: vec![
+                StreamEvent::Delta(ContentBlock::text("hello ")),
+                StreamEvent::Delta(ContentBlock::text("world")),
+                StreamEvent::Done,
+            ],
+        };
+
+        let mut conv = Conversation::new();
+        conv.push(Message::user("tail"));
+
+        let summary = call_llm_for_summary(&provider, &conv)
+            .await
+            .expect("stream terminated with Done must return the summary");
+        assert_eq!(summary, "hello world");
+    }
+
+    /// A stream that emits deltas but never yields `StreamEvent::Done` is an
+    /// incomplete compaction summary stream. `call_llm_for_summary` must
+    /// surface that as an error rather than silently accepting whatever deltas
+    /// happened to arrive — so the caller routes through its existing retry
+    /// / fallback path instead of treating a partial summary as authoritative.
+    #[tokio::test]
+    async fn call_llm_for_summary_errors_when_stream_ends_without_done() {
+        let provider = ScriptedEventProvider {
+            events: vec![
+                StreamEvent::Delta(ContentBlock::text("partial ")),
+                StreamEvent::Delta(ContentBlock::text("dump")),
+                // stream ends here — no `StreamEvent::Done`
+            ],
+        };
+
+        let mut conv = Conversation::new();
+        conv.push(Message::user("tail"));
+
+        let err = call_llm_for_summary(&provider, &conv)
+            .await
+            .expect_err("stream that ends without Done must not be accepted as a summary");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("incomplete compaction summary stream")
+                || msg.contains("stream ended before Done"),
+            "error must clearly identify incomplete compaction summary stream exhaustion, got: {msg}"
+        );
+    }
+
+    /// A stream that emits neither deltas nor `Done` (immediately exhausted)
+    /// must still be flagged as incomplete, so an empty-then-silent provider
+    /// cannot be misinterpreted as "no content to summarise".
+    #[tokio::test]
+    async fn call_llm_for_summary_errors_on_empty_stream_without_done() {
+        let provider = ScriptedEventProvider { events: vec![] };
+
+        let mut conv = Conversation::new();
+        conv.push(Message::user("tail"));
+
+        let err = call_llm_for_summary(&provider, &conv)
+            .await
+            .expect_err("an empty stream without Done must be treated as incomplete");
+
+        assert!(
+            err.to_string()
+                .contains("incomplete compaction summary stream"),
+            "expected incomplete-stream error, got: {err}"
         );
     }
 
