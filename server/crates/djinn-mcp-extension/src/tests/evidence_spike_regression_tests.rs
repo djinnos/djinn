@@ -440,3 +440,92 @@ fn normal_dispatch_unaffected_when_no_allowlist() {
         );
     }
 }
+
+#[test]
+fn evidence_spike_profile_matches_demand_evidence_contract_requirements() {
+    // The demand-evidence contract (`proposal_refinement_demand_evidence`)
+    // stamps labels `refinement-evidence` + `read-only` and creates a linked
+    // Architect-routed evidence spike. This regression test asserts that the
+    // profile selected for that contract (the evidence-spike profile) is
+    // read-only while preserving investigation capability.
+    let schemas = tool_schemas_evidence_spike();
+    let allowed_names = evidence_spike_tool_names();
+
+    // Required read/search/proposal/memory inspection tools must remain
+    // routable so the spike can actually produce findings.
+    let required_read = [
+        "read",
+        "code_search",
+        "code_graph",
+        "lsp",
+        "skill_read",
+        "proposal_show",
+        "proposal_debate_list",
+        "memory_read",
+        "memory_search",
+        "memory_list",
+        "memory_build_context",
+        "task_show",
+        "task_list",
+        "task_activity_list",
+        "epic_show",
+        "epic_tasks",
+        "output_view",
+        "output_grep",
+        "github_search",
+        "ci_job_log",
+    ];
+    for name in &required_read {
+        assert!(
+            allowed_names.contains(*name),
+            "demand-evidence contract evidence-spike profile must expose read tool `{name}`"
+        );
+        assert!(
+            crate::helpers::is_tool_allowed_for_schemas(&schemas, name),
+            "dispatch gate must accept required read tool `{name}`"
+        );
+    }
+
+    // Representative mutation-capable tools that would invalidate the spike
+    // must be absent from the surface and rejected by the fail-closed gate.
+    let forbidden_mutation = [
+        "write",
+        "edit",
+        "apply_patch",
+        "shell",
+        "task_create",
+        "task_update",
+        "task_transition",
+        "task_comment_add",
+        "epic_create",
+        "epic_update",
+        "epic_close",
+        "memory_write",
+        "memory_edit",
+        "memory_move",
+        "proposal_update",
+        "proposal_block_patch",
+        "proposal_debate_append",
+        "agent_create",
+        "agent_amend_prompt",
+        "request_lead",
+        "request_planner",
+    ];
+    for name in &forbidden_mutation {
+        assert!(
+            !allowed_names.contains(*name),
+            "demand-evidence contract evidence-spike profile must NOT contain `{name}`"
+        );
+        assert!(
+            !crate::helpers::is_tool_allowed_for_schemas(&schemas, name),
+            "dispatch gate must reject forbidden mutation tool `{name}` — fail-closed violated"
+        );
+    }
+
+    // The only mutation-capable path allowed is the spike's own findings
+    // handoff via submit_work.
+    assert!(
+        allowed_names.contains("submit_work"),
+        "demand-evidence contract evidence-spike profile must retain `submit_work` for findings handoff"
+    );
+}

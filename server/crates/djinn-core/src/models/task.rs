@@ -1646,6 +1646,26 @@ mod tests {
         assert!(!is_evidence_spike(r#"["human-review-hold"]"#));
     }
 
+    #[test]
+    fn demand_evidence_contract_labels_detected_as_evidence_spike() {
+        // The exact labels stamped by `proposal_refinement_demand_evidence`
+        // (epic 6tjy) and consumed by the runtime profile selector (xwr4).
+        // Both `refinement-evidence` and `read-only` must be present for the
+        // evidence-spike profile to be selected.
+        let labels = r#"["refinement-evidence","read-only","proposal:p1"]"#;
+        assert!(is_evidence_spike(labels));
+    }
+
+    #[test]
+    fn ordinary_architect_spike_without_read_only_label_is_not_evidence_spike() {
+        // A normal Architect spike (issue_type = "spike", agent_type =
+        // "architect") that does NOT carry the read-only refinement-evidence
+        // contract must NOT be downgraded to the evidence-spike profile.
+        assert!(!is_evidence_spike(r#"["spike","priority:high"]"#));
+        assert!(!is_evidence_spike(r#"["refinement-evidence"]"#));
+        assert!(!is_evidence_spike(r#"["read-only"]"#));
+    }
+
     // ── ReopenClass unit tests ─────────────────────────────────────────────
 
     #[test]
