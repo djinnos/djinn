@@ -9,6 +9,8 @@
 //! PR 1 only lands the typed shell. PR 2 flips the TCP listener over to
 //! calling [`TokenReviewer::review`] on the first frame of every connection.
 
+use std::fmt;
+
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::api::{Api, PostParams};
 use thiserror::Error;
@@ -39,10 +41,18 @@ pub enum TokenReviewError {
 ///
 /// Non-owner crates should use this type instead of directly holding or
 /// constructing `kube::Client` for token-review validation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TokenReviewer {
     client: kube::Client,
     audience: String,
+}
+
+impl fmt::Debug for TokenReviewer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenReviewer")
+            .field("audience", &self.audience)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TokenReviewer {
