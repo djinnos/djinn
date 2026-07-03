@@ -396,6 +396,7 @@ fn activity(
 
 fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
         checkpoint_id: Some("ckpt-1".to_string()),
         commit_sha: Some("abc123def456".to_string()),
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
@@ -411,6 +412,7 @@ fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
 
 fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
         source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
         target_ref: Some("refs/heads/task/test".to_string()),
