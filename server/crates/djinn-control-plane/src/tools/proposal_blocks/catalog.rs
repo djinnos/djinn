@@ -24,6 +24,20 @@ define_blocks! {
         },
 
     AnnotatedCode => "annotated-code", "AnnotatedCode",
+        desc = "A line-numbered, syntax-highlighted code block with optional \
+                line-anchored annotations. Put the CODE in the `code` attribute \
+                as a template-literal expression: `code={`…`}`. Real code \
+                routinely contains `<` and `{` characters that are rejected as \
+                malformed JSX when placed between the tags, so the attribute \
+                form is the reliable one; children are accepted only for simple \
+                snippets with no `<`, unbalanced braces, or backticks. Set \
+                `language` (e.g. `rust`, `ts`) and optionally `filename`. \
+                `annotations` is a strict-JSON array expression of \
+                `{\"line\": \"3\", \"note\": \"…\"}` entries — double-quoted \
+                JSON only; `line` accepts a single line `\"3\"` or a range \
+                `\"3-5\"`. Example: `<AnnotatedCode id=\"x\" language=\"rust\" \
+                code={`fn main() {}`} annotations={[{\"line\":\"1\",\
+                \"note\":\"entry point\"}]} />`.",
         fields {
             "language" => string,
             "code" => string,
