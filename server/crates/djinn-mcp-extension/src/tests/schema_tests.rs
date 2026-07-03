@@ -133,7 +133,7 @@ fn tool_names_for_role(role: &str) -> BTreeSet<String> {
         "advocate" => tool_schemas_advocate(),
         "adversary" => tool_schemas_adversary(),
         "judge" => tool_schemas_judge(),
-"evidence_spike" => tool_schemas_evidence_spike(),
+        "evidence_spike" => tool_schemas_evidence_spike(),
         _ => panic!("unknown role: {role}"),
     };
     schemas

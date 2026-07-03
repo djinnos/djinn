@@ -723,6 +723,77 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     tool_values
 }
 
+/// Tool schemas for Evidence Spike: read-only investigation tools + existing
+/// `submit_work` terminal finalize tool.
+///
+/// Evidence spikes are Architect spike runs, and the existing Architect
+/// lifecycle finalizes via `submit_work`; this profile reuses that finalize
+/// schema. It excludes all repository/database/product mutation tools, PR
+/// creation/merge, shell, and destructive session tools.
+pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
+    let mut tool_values = shared_schemas::shared_base_tool_schemas();
+    // Core read/search/analysis tools.
+    tool_values.push(serialize_tool(tool_read(), read_only()));
+    tool_values.push(serialize_tool(tool_code_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_code_graph(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_skill_read(), read_only()));
+    tool_values.push(serialize_tool(tool_lsp(), read_only()));
+    tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_output_view(), read_only()));
+    tool_values.push(serialize_tool(tool_output_grep(), read_only()));
+    // Read-only task/epic/proposal/memory inspection tools.
+    for value in shared_schemas::shared_lead_tool_schemas() {
+        tool_values.push(value);
+    }
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_health(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_extracted_audit(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_broken_links(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_read(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_search(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_list(),
+        read_only(),
+    ));
+    // Terminal finalize path: evidence spikes are still Architect spike runs.
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_work(),
+        mutation(),
+    ));
+    tool_values
+}
+
 /// Tool schemas for Advocate: base + write/edit + memory + proposal tools +
 /// proposal block enrichment tools + submit_work finalize tool.
 ///
