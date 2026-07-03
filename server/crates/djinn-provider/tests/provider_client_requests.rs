@@ -23,6 +23,7 @@ fn openai_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
         provider_headers: Default::default(),
         capabilities: ProviderCapabilities::default(),
         reasoning_effort: None,
+        tool_schema_compat: None,
     }
 }
 
@@ -41,6 +42,7 @@ fn anthropic_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
             max_tokens_default: Some(64_000),
         },
         reasoning_effort: None,
+        tool_schema_compat: None,
     }
 }
 

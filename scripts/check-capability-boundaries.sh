@@ -199,6 +199,8 @@ allowlist_awk() {
             if (substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") {
                 line = substr(line, 2, length(line) - 2)
             }
+            # unescape TOML \" sequences
+            gsub(/\\\"/, "\"", line)
             return line
         }
         END {
@@ -267,6 +269,8 @@ is_path_allowed_by_allowlist() {
             if (substr(line, 1, 1) == "\"" && substr(line, length(line), 1) == "\"") {
                 line = substr(line, 2, length(line) - 2)
             }
+            # unescape TOML \" sequences
+            gsub(/\\\"/, "\"", line)
             return line
         }
         in_entry && capability == cap && path_ == path && matcher == match_text {
@@ -423,21 +427,26 @@ check_files() {
 
             # Identify the matcher substring that matched.  We try the obvious
             # literal anchors first; if they fail, fall back to the raw line.
+            # NOTE: more specific patterns MUST come before less specific ones
+            # (e.g. tokio::process::Command::new("git") before Command::new("git"))
+            # because shell case uses first-match-wins.
             matcher=$line_text
             case "$line_text" in
                 *"git2::"*) matcher="git2::" ;;
                 *"use git2"*) matcher="use git2" ;;
-                *'Command::new("git")'*) matcher='Command::new("git")' ;;
                 *'tokio::process::Command::new("git")'*) matcher='tokio::process::Command::new("git")' ;;
-                *"reqwest::Client"*) matcher="reqwest::Client" ;;
+                *'Command::new("git")'*) matcher='Command::new("git")' ;;
+                *'::new("git")'*) matcher='Command::new("git")' ;;
                 *"reqwest::ClientBuilder"*) matcher="reqwest::ClientBuilder" ;;
                 *"reqwest::RequestBuilder"*) matcher="reqwest::RequestBuilder" ;;
-                *"use reqwest"*) matcher="use reqwest" ;;
+                *"reqwest::Client"*) matcher="reqwest::Client" ;;
+                *"reqwest::{"*) matcher="reqwest::{" ;;
                 *"kube::"*) matcher="kube::" ;;
                 *"use kube"*) matcher="use kube" ;;
                 *"k8s_openapi"*) matcher="k8s_openapi" ;;
-                *'Command::new("kubectl")'*) matcher='Command::new("kubectl")' ;;
                 *'tokio::process::Command::new("kubectl")'*) matcher='tokio::process::Command::new("kubectl")' ;;
+                *'Command::new("kubectl")'*) matcher='Command::new("kubectl")' ;;
+                *'::new("kubectl")'*) matcher='Command::new("kubectl")' ;;
             esac
 
             if is_path_allowed_by_allowlist "$CAPABILITY" "$file" "$matcher"; then

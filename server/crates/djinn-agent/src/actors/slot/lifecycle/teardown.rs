@@ -189,7 +189,6 @@ pub(crate) async fn apply_transition_and_dispatch(
         if is_conflict_rejection || is_orphaned_tool_call {
             interrupt_paused_worker_session(task_id, app_state).await;
         }
-        // Verification handoff removed; no extra post-session transition runs here.
     } else {
         tracing::info!(
             task_id = %task_id,
@@ -208,14 +207,9 @@ pub(crate) async fn apply_transition_and_dispatch(
     }
 }
 
-/// Max characters of raw model narration retained in a `session_error`
-/// `model_excerpt` context field. The excerpt is diagnostic-only (it is never
-/// the error itself), so a compact cap keeps the activity payload small while
-/// still giving a human enough of the offending line to recognize it.
 const MODEL_EXCERPT_MAX_CHARS: usize = 500;
 
-/// Truncate a scraped model line for use as a labeled `model_excerpt` context
-/// field. Char-boundary safe (never splits a multi-byte UTF-8 sequence).
+/// Truncate a scraped model line for `model_excerpt`. Char-boundary safe.
 fn truncate_model_excerpt(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.chars().count() <= MODEL_EXCERPT_MAX_CHARS {
@@ -241,17 +235,11 @@ mod tests {
         let line = "é".repeat(1000);
         let out = truncate_model_excerpt(&line);
         assert!(out.ends_with("… [truncated]"));
-        // 500 kept chars + the marker; crucially the byte slice never panicked
-        // on the multi-byte boundary.
         assert_eq!(
             out.chars().filter(|c| *c == 'é').count(),
             MODEL_EXCERPT_MAX_CHARS
         );
     }
-    /// Regression for ecji: a session that succeeds but whose model narration
-    /// mentions an "error:" must record a TYPED `session_error` — a stable
-    /// `error_class` + `error` message with the raw model prose confined to a
-    /// labeled `model_excerpt` — never the prose as the `error` itself.
     #[test]
     fn model_prose_records_typed_error_not_raw_prose() {
         let scraped = "Actually, looking at the error: `Database::open_in_memory()` returns \
@@ -262,8 +250,6 @@ mod tests {
             "model_excerpt": truncate_model_excerpt(scraped),
             "agent_type": "task_worker",
         });
-        // The `error` field consumers cluster on (`stable_error_signature`) is a
-        // stable typed message, NOT the model's chain-of-thought.
         let error = payload["error"].as_str().unwrap();
         assert_eq!(
             error,
@@ -271,12 +257,10 @@ mod tests {
         );
         assert!(!error.contains("Database::open_in_memory"));
         assert!(!error.contains("Let me check"));
-        // The machine-readable class is present and additive.
         assert_eq!(
             payload["error_class"].as_str().unwrap(),
             "model_reported_runtime_error"
         );
-        // The raw prose survives only in the clearly-labeled excerpt field.
         assert_eq!(
             payload["model_excerpt"].as_str().unwrap(),
             scraped,

@@ -60,19 +60,58 @@ closing remarks — and never mention this summary, the conversation's length, o
 // from the messages being summarised. Each compaction fully rebuilds, so at most
 // one such pair ever exists. Detection by content (not a persisted MessageMeta
 // tag) keeps this off the bincode worker boundary and a clean no-op when absent.
+/// Marker appended to summary text inside the user message so extraction can
+/// locate and strip the boundary unambiguously, even when preserved tails or
+/// re-appended user text follow the summary.
+pub(super) const COMPACTION_SUMMARY_END_MARKER: &str = "\n\n\n[Compaction summary complete]";
+
 pub(super) const FULL_COMPACTION_CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the \
      conversation so far. Continue calling tools as necessary to complete the task.";
 
-/// Find a prior full-compaction summary in `messages`: the user message
-/// immediately followed by the [`FULL_COMPACTION_CONTINUATION`] assistant marker.
-/// Returns `(summary_text, summary_idx, continuation_idx)`. At most one exists.
+/// Continuation message inserted after a *partial* compaction summary.
+pub(super) const PARTIAL_COMPACTION_CONTINUATION: &str = "Part of your context was compacted. The messages above the summary are \
+     preserved verbatim; the summary covers your more recent work. Continue \
+     calling tools as necessary to complete the task.";
+
+/// Wrap a summary text with the full-compaction end marker so that
+/// [`extract_prior_summary`] can locate the boundary later.
+pub(super) fn wrap_full_summary(summary: &str) -> String {
+    format!("{summary}{COMPACTION_SUMMARY_END_MARKER}")
+}
+
+/// Strip all known compaction boundary markers from extracted summary text.
+///
+/// Removes the end marker (and any single trailing newline left after
+/// stripping) so the cleaned text can be fed into [`previous_summary_block`]
+/// for the next prompt without leaking internal markers into the summariser.
+pub(super) fn strip_compaction_markers(text: &str) -> String {
+    let out = text
+        .strip_suffix(COMPACTION_SUMMARY_END_MARKER)
+        .unwrap_or(text);
+    // Remove a single trailing newline left after stripping.
+    out.strip_suffix('\n').unwrap_or(out).to_string()
+}
+
+/// Find a prior compaction summary in `messages`: a user message whose content
+/// ends with [`COMPACTION_SUMMARY_END_MARKER`], immediately followed by an
+/// assistant message whose text matches either [`FULL_COMPACTION_CONTINUATION`]
+/// or [`PARTIAL_COMPACTION_CONTINUATION`].
+///
+/// Returns `(summary_text, summary_idx, continuation_idx)` where
+/// `summary_text` has all compaction boundary markers stripped via
+/// [`strip_compaction_markers`]. At most one such pair exists.
 pub(super) fn extract_prior_summary(messages: &[Message]) -> Option<(String, usize, usize)> {
     for i in 1..messages.len() {
         if messages[i].role == Role::Assistant
             && messages[i - 1].role == Role::User
-            && messages[i].text_content() == FULL_COMPACTION_CONTINUATION
+            && (messages[i].text_content() == FULL_COMPACTION_CONTINUATION
+                || messages[i].text_content() == PARTIAL_COMPACTION_CONTINUATION)
         {
-            return Some((messages[i - 1].text_content(), i - 1, i));
+            return Some((
+                strip_compaction_markers(&messages[i - 1].text_content()),
+                i - 1,
+                i,
+            ));
         }
     }
     None
@@ -274,7 +313,7 @@ pub(super) fn rebuild_full_compaction_messages(
         new_messages.push(sys);
     }
 
-    new_messages.push(Message::user(summary));
+    new_messages.push(Message::user(wrap_full_summary(&summary)));
 
     new_messages.push(Message::assistant(FULL_COMPACTION_CONTINUATION));
 
@@ -328,16 +367,13 @@ pub(super) fn rebuild_partial_compaction_messages(
 ) -> Vec<Message> {
     let mut new_messages: Vec<Message> = prefix.to_vec();
 
-    new_messages.push(Message::user(format!(
+    new_messages.push(Message::user(wrap_full_summary(&format!(
         "[Partial compaction: the following is a summary of {} messages that were \
          compacted to free context space. Earlier messages are preserved above.]\n\n{}",
         tail_len, summary,
-    )));
+    ))));
 
-    let continuation_msg = "Part of your context was compacted. The messages above the summary are \
-         preserved verbatim; the summary covers your more recent work. Continue \
-         calling tools as necessary to complete the task.";
-    new_messages.push(Message::assistant(continuation_msg));
+    new_messages.push(Message::assistant(PARTIAL_COMPACTION_CONTINUATION));
 
     if matches!(
         ctx,
@@ -430,7 +466,11 @@ mod tests {
         let (text, summary_idx, continuation_idx) =
             extract_prior_summary(&grown).expect("prior summary detected");
         assert_eq!(text, "SUMMARY TEXT");
-        assert_eq!(grown[summary_idx].text_content(), "SUMMARY TEXT");
+        // The stored message includes the end marker; extraction strips it.
+        assert_eq!(
+            strip_compaction_markers(&grown[summary_idx].text_content()),
+            "SUMMARY TEXT"
+        );
         assert_eq!(
             grown[continuation_idx].text_content(),
             FULL_COMPACTION_CONTINUATION
@@ -498,7 +538,10 @@ mod tests {
         );
 
         assert_eq!(rebuilt[0].role, Role::System);
-        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[1].text_content()),
+            "summary"
+        );
         assert_eq!(
             rebuilt.last().unwrap().text_content(),
             "what is the latest answer"
@@ -521,7 +564,10 @@ mod tests {
         );
 
         assert_eq!(rebuilt[0].role, Role::System);
-        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[1].text_content()),
+            "summary"
+        );
         assert_eq!(rebuilt.last().unwrap().text_content(), "latest user");
     }
 
@@ -641,7 +687,10 @@ mod tests {
 
         // system, summary, continuation, then the preserved tail verbatim.
         assert_eq!(rebuilt[0].role, Role::System);
-        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[1].text_content()),
+            "summary"
+        );
         assert_eq!(rebuilt[2].text_content(), FULL_COMPACTION_CONTINUATION);
 
         // The last two whole turns (the recent user + recent assistant) appear
@@ -853,7 +902,10 @@ mod tests {
         // No system-only / summary-only message gets preserved as a "turn"; the
         // last user line is still re-appended once for the model to answer.
         assert_eq!(rebuilt[0].role, Role::System);
-        assert_eq!(rebuilt[1].text_content(), "summary");
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[1].text_content()),
+            "summary"
+        );
         assert_eq!(rebuilt[2].text_content(), FULL_COMPACTION_CONTINUATION);
         assert_eq!(rebuilt.last().unwrap().text_content(), "only line");
     }
@@ -895,7 +947,10 @@ mod tests {
         );
 
         // summary, continuation, then both original turns verbatim.
-        assert_eq!(rebuilt[0].text_content(), "summary");
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[0].text_content()),
+            "summary"
+        );
         assert_eq!(rebuilt[1].text_content(), FULL_COMPACTION_CONTINUATION);
         assert_eq!(rebuilt[2].text_content(), "first question");
         assert_eq!(rebuilt[3].text_content(), "first answer");
@@ -923,10 +978,221 @@ mod tests {
         let (text, summary_idx, continuation_idx) =
             extract_prior_summary(&rebuilt).expect("prior summary still detected");
         assert_eq!(text, "SUMMARY TEXT");
-        assert_eq!(rebuilt[summary_idx].text_content(), "SUMMARY TEXT");
+        // The stored message includes the end marker; extraction strips it.
+        assert_eq!(
+            strip_compaction_markers(&rebuilt[summary_idx].text_content()),
+            "SUMMARY TEXT"
+        );
         assert_eq!(
             rebuilt[continuation_idx].text_content(),
             FULL_COMPACTION_CONTINUATION
         );
+    }
+
+    // ─── 52te: boundary marker and extraction hardening tests ──────────────
+
+    ///52te: the end marker is stripped on extraction so the prior summary fed
+    /// to the summariser is clean text, not internal boundary markup.
+    #[test]
+    fn extract_prior_summary_strips_end_marker() {
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user(format!("summary text{COMPACTION_SUMMARY_END_MARKER}")),
+            Message::assistant(FULL_COMPACTION_CONTINUATION),
+        ];
+        let (text, _, _) = extract_prior_summary(&msgs).expect("should detect");
+        assert_eq!(text, "summary text");
+        assert!(!text.contains(COMPACTION_SUMMARY_END_MARKER));
+    }
+
+    ///52te: partial compaction summaries are detected by extraction so a
+    /// later full compaction treats them as prior summaries, not ordinary
+    /// conversation.
+    #[test]
+    fn extract_prior_summary_detects_partial_compaction() {
+        let partial_summary = wrap_full_summary(&format!(
+            "[Partial compaction: the following is a summary of 5 messages that were \
+             compacted to free context space. Earlier messages are preserved above.]\n\n{}",
+            "partial summary body",
+        ));
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user(partial_summary.clone()),
+            Message::assistant(PARTIAL_COMPACTION_CONTINUATION),
+            Message::assistant("more work"),
+            Message::user("even more"),
+        ];
+        let (text, summary_idx, continuation_idx) =
+            extract_prior_summary(&msgs).expect("partial summary detected");
+        assert_eq!(summary_idx, 1);
+        assert_eq!(continuation_idx, 2);
+        // End marker is stripped; partial prefix is preserved.
+        assert!(text.starts_with("[Partial compaction:"));
+        assert!(text.contains("partial summary body"));
+        assert!(!text.contains(COMPACTION_SUMMARY_END_MARKER));
+    }
+
+    ///52te: a partial-to-full transition does not treat the partial summary
+    /// prefix/marker as ordinary conversation — extraction recognises and
+    /// strips the boundary so the full compaction summariser sees clean text.
+    #[test]
+    fn partial_to_full_transition_strips_markers() {
+        // Simulate: partial compaction was done, then new messages grew, and
+        // now a full compaction is needed.
+        let partial_summary = wrap_full_summary(&format!(
+            "[Partial compaction: the following is a summary of 3 messages ...]\n\n{}",
+            "partial body",
+        ));
+        let partial_rebuilt = vec![
+            Message::system("sys"),
+            Message::user("old kept work"),
+            Message::user(partial_summary),
+            Message::assistant(PARTIAL_COMPACTION_CONTINUATION),
+            Message::assistant("new work"),
+            Message::user("new question"),
+        ];
+        // Simulate full compaction extraction on partial_rebuilt.
+        let (text, _, _) =
+            extract_prior_summary(&partial_rebuilt).expect("partial detected as prior");
+        assert_eq!(
+            text,
+            "[Partial compaction: the following is a summary of 3 messages ...]\n\npartial body"
+        );
+        assert!(!text.contains(COMPACTION_SUMMARY_END_MARKER));
+
+        // Feed into previous_summary_block — should contain the partial
+        // prefix but NOT the end marker.
+        let block = previous_summary_block(&text);
+        assert!(block.contains("<previous-summary>"));
+        assert!(block.contains("[Partial compaction:"));
+        assert!(block.contains("partial body"));
+        assert!(!block.contains(COMPACTION_SUMMARY_END_MARKER));
+    }
+
+    ///52te: `previous_summary_block` delimits merged prior context with
+    /// `<previous-summary>` tags so the summariser sees a bounded block,
+    /// and the end marker is absent from the rendered block.
+    #[test]
+    fn previous_summary_block_delimits_and_strips_marker() {
+        let prior_with_marker = format!("my summary{COMPACTION_SUMMARY_END_MARKER}");
+        let prior_clean = strip_compaction_markers(&prior_with_marker);
+        let block = previous_summary_block(&prior_clean);
+
+        assert!(block.contains("<previous-summary>"));
+        assert!(block.contains("</previous-summary>"));
+        assert!(block.contains("my summary"));
+        assert!(!block.contains(COMPACTION_SUMMARY_END_MARKER));
+        assert!(block.to_lowercase().contains("merge"));
+    }
+
+    ///52te: `previous_summary_block` with nested XML content preserves the
+    /// inner markup while the outer `<previous-summary>` tags remain intact.
+    #[test]
+    fn previous_summary_block_preserves_nested_xml() {
+        let prior = "key decision: use <foo>bar</foo> for now";
+        let block = previous_summary_block(prior);
+        assert!(block.contains("<previous-summary>"));
+        assert!(block.contains("</previous-summary>"));
+        assert!(block.contains("<foo>bar</foo>"));
+    }
+
+    ///52te: `wrap_full_summary` and `strip_compaction_markers` are inverse
+    /// operations — wrapping then stripping returns the original text.
+    #[test]
+    fn wrap_and_strip_are_inverse() {
+        let texts = [
+            "simple summary",
+            "summary with\nnewlines",
+            "summary with [brackets] and (parens)",
+            "summary ending in newline\n",
+        ];
+        for t in texts {
+            let wrapped = wrap_full_summary(t);
+            assert!(wrapped.contains(COMPACTION_SUMMARY_END_MARKER));
+            let stripped = strip_compaction_markers(&wrapped);
+            // If the original ended in \n, the trailing \n is also stripped.
+            let expected = t.strip_suffix('\n').unwrap_or(t);
+            assert_eq!(stripped, expected, "roundtrip failed for: {t:?}");
+        }
+    }
+
+    ///52te: full rebuild renders the end marker in the user message and
+    /// the continuation marker in the assistant message.
+    #[test]
+    fn full_rebuild_renders_both_markers() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old"),
+            Message::user("latest"),
+        ];
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "the summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+        // The summary user message contains the end marker.
+        assert!(
+            rebuilt[1]
+                .text_content()
+                .contains(COMPACTION_SUMMARY_END_MARKER)
+        );
+        // The continuation is the full compaction constant.
+        assert_eq!(rebuilt[2].text_content(), FULL_COMPACTION_CONTINUATION);
+    }
+
+    ///52te: partial rebuild renders the end marker and uses the extracted
+    /// `PARTIAL_COMPACTION_CONTINUATION` constant.
+    #[test]
+    fn partial_rebuild_renders_end_marker_and_uses_continuation_const() {
+        let prefix = vec![Message::system("sys"), Message::user("kept")];
+        let rebuilt = rebuild_partial_compaction_messages(
+            &prefix,
+            3,
+            "partial summary".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+            &None,
+        );
+        // The partial summary message carries the end marker.
+        let summary_msg = &rebuilt[2];
+        assert!(
+            summary_msg
+                .text_content()
+                .contains(COMPACTION_SUMMARY_END_MARKER)
+        );
+        assert!(
+            summary_msg
+                .text_content()
+                .contains("[Partial compaction: the following is a summary of 3 messages")
+        );
+        assert!(summary_msg.text_content().contains("partial summary"));
+        // The continuation uses the constant.
+        assert_eq!(rebuilt[3].text_content(), PARTIAL_COMPACTION_CONTINUATION);
+    }
+
+    ///52te: full round-trip — rebuild, grow conversation, extract, and feed
+    /// into `previous_summary_block`. Marker never leaks into the block.
+    #[test]
+    fn full_roundtrip_rebuild_extract_block_no_marker_leak() {
+        let original = vec![
+            Message::system("sys"),
+            Message::user("old work"),
+            Message::assistant("did stuff"),
+            Message::user("latest"),
+        ];
+        let rebuilt = rebuild_full_compaction_messages(
+            &original,
+            "SUMMARY TEXT".to_string(),
+            &CompactionContext::MidSession("worker".to_string()),
+        );
+        let mut grown = rebuilt;
+        grown.push(Message::assistant("more"));
+        grown.push(Message::user("even more"));
+
+        let (text, _, _) = extract_prior_summary(&grown).expect("detected");
+        assert_eq!(text, "SUMMARY TEXT");
+        let block = previous_summary_block(&text);
+        assert!(block.contains("SUMMARY TEXT"));
+        assert!(!block.contains(COMPACTION_SUMMARY_END_MARKER));
+        assert!(block.contains("<previous-summary>"));
     }
 }

@@ -9,7 +9,7 @@ pub mod mcp_json;
 ///
 /// Either `url` (for HTTP/SSE transports) or `command` (for stdio transports) should be
 /// provided. Both may be present; `url` takes precedence.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
     /// HTTP or SSE endpoint URL for this MCP server (e.g. `http://localhost:9000/mcp`).
     pub url: Option<String>,
@@ -24,6 +24,41 @@ pub struct McpServerConfig {
     /// HTTP headers to attach when connecting to a remote MCP server.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Timeout in milliseconds to wait for the MCP server handshake and
+    /// initial `tools/list` response before skipping the server. Defaults to
+    /// 30 seconds.
+    #[serde(default = "McpServerConfig::default_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    /// Timeout in milliseconds for individual MCP tool calls (e.g.
+    /// `call_tool`). Defaults to 120 seconds.
+    #[serde(default = "McpServerConfig::default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+            startup_timeout_ms: Self::default_startup_timeout_ms(),
+            request_timeout_ms: Self::default_request_timeout_ms(),
+        }
+    }
+}
+
+impl McpServerConfig {
+    /// Default startup timeout: 30 seconds, in milliseconds.
+    pub const fn default_startup_timeout_ms() -> u64 {
+        30_000
+    }
+
+    /// Default request timeout: 120 seconds, in milliseconds.
+    pub const fn default_request_timeout_ms() -> u64 {
+        120_000
+    }
 }
 
 fn dedupe_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -193,6 +228,13 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_config_defaults_to_expected_timeouts() {
+        let config = McpServerConfig::default();
+        assert_eq!(config.startup_timeout_ms, 30_000);
+        assert_eq!(config.request_timeout_ms, 120_000);
+    }
+
+    #[test]
     fn resolve_mcp_servers_returns_empty_for_empty_role_list() {
         let registry = HashMap::new();
         let resolved = resolve_mcp_servers("abc", "worker", &[], &registry);
@@ -200,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_resolves_known_servers() {
+    fn resolve_mcp_servers_resolves_known_servers_with_timeout_defaults() {
         let mut registry = HashMap::new();
         registry.insert(
             "my-tool".to_string(),
@@ -210,6 +252,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         );
 
@@ -222,6 +265,8 @@ mod tests {
             resolved[0].1.url.as_deref(),
             Some("http://localhost:9000/mcp")
         );
+        assert_eq!(resolved[0].1.startup_timeout_ms, 30_000);
+        assert_eq!(resolved[0].1.request_timeout_ms, 120_000);
     }
 
     #[test]
@@ -246,6 +291,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         );
 
@@ -269,6 +315,7 @@ mod tests {
                 args: Vec::new(),
                 env: HashMap::new(),
                 headers: HashMap::new(),
+                ..Default::default()
             },
         );
 
@@ -278,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_preserves_http_headers_env_and_args() {
+    fn resolve_mcp_servers_preserves_http_headers_env_and_args_and_timeouts() {
         let mut registry = HashMap::new();
         registry.insert(
             "remote-server".to_string(),
@@ -294,6 +341,7 @@ mod tests {
                     "Authorization".to_string(),
                     "Bearer ${DJINN_REMOTE_TOKEN}".to_string(),
                 )]),
+                ..Default::default()
             },
         );
 
@@ -313,5 +361,7 @@ mod tests {
             config.headers.get("Authorization").map(String::as_str),
             Some("Bearer ${DJINN_REMOTE_TOKEN}")
         );
+        assert_eq!(config.startup_timeout_ms, 30_000);
+        assert_eq!(config.request_timeout_ms, 120_000);
     }
 }
