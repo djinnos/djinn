@@ -8,7 +8,8 @@ The production split into `proposal_tools/` is complete (see `mod.rs` header for
 
 | Concern | Test file / module | What it covers | Why it lives there |
 |---|---|---|---|
-| CRUD / targets / list summary / schema | `create.rs` / `create_tests.rs` | `proposal_list` summary, `ProposalCreateParams`/`ProposalUpdateParams` schema-lean checks | Directly tests create/update/list/router behavior of the CRUD concern. |
+| CRUD / targets / list summary / schema | `create.rs` / `create_tests.rs` | `proposal_list` summary, `ProposalCreateParams`/`ProposalUpdateParams` schema-lean checks, `proposal_import` tool-level param validation | Directly tests create/update/list/router behavior of the CRUD concern. Import/export *tool method* param validation lives here (the tool methods are CRUD operations); the underlying MDX *parsing/rendering* helpers they call are tested in `mdx.rs`. |
+| MDX / block-patch / import-export parser | `mdx.rs` inline `import_tests`, `export_tests`, `block_patch_tests`, `block_patch_regression_tests` | MDX frontmatter parsing, proposal spec rendering on export, selector resolution, block-patch application, and regression edge cases (selector not found, frontmatter-only edits, nested block boundaries) | These tests directly verify the MDX parser/selector/application helpers (`parse_proposal_mdx`, `split_proposal_mdx_frontmatter`, `resolve_selector`, `apply_block_patch`). They live in `mdx.rs` because the helpers are a cohesive parsing concern shared by import, export, and block-patch CRUD tools. |
 | Feedback | `feedback.rs` | (none relocated yet; existing module is production-only) | Feedback tools are simple enough that their behavior is covered by the end-to-end planner tests; if future tests are added, they belong here. |
 | Signoff / readiness / composed gate | `signoff.rs` / `signoff_tests.rs` | `proposal_signoff`, `proposal_signoff_clear`, gate-status formatting, human override, verdict override | These are signoff concern tests. |
 | Debate / tribunal / spike | `signoff.rs` / `tribunal_tests.rs` | P4 tribunal regressions: composed-gate blocked transitions, needs-evidence spike parking/resume, human override, spike finding visibility, export round-trip | The production debate-trail gate logic lives in `signoff.rs` (`evaluate_composed_gate`), so the tribunal tests are paired with signoff. |
@@ -23,8 +24,9 @@ The production split into `proposal_tools/` is complete (see `mod.rs` header for
 - Left `end_to_end_planner_tests.rs` included from `mod.rs` as the cross-cutting regression suite.
 - Left `create_tests.rs` included from `create.rs` (already CRUD concern).
 - Left inline `stop_build_tests` in `lifecycle.rs` (already lifecycle concern).
+- Left inline `import_tests`, `export_tests`, `block_patch_tests`, and `block_patch_regression_tests` in `mdx.rs` (MDX/block-patch parsing helpers concern).
 - No test assertions, fixtures, error strings, or response shapes were changed.
 
 ## Production module line-count note
 
-`mdx.rs` remains ~1795 lines, which is above the 1500-line soft target.  It is retained as a single file because the MDX/block-patch helpers are a cohesive concern and further splitting would fragment parser/selector/application helpers that share a single grammar.  A follow-up cleanup task should be considered if the project wants to hard-enforce the threshold.
+`mdx.rs` remains ~1802 lines, which is above the 1500-line soft target.  It is retained as a single file because the MDX/block-patch helpers are a cohesive concern — `import_tests`, `export_tests`, `block_patch_tests`, and `block_patch_regression_tests` exercise `parse_proposal_mdx`, `split_proposal_mdx_frontmatter`, `resolve_selector`, and `apply_block_patch`, all of which share a single grammar.  Further splitting would fragment parser/selector/application helpers that must stay coherent.  A follow-up cleanup task should be considered if the project wants to hard-enforce the threshold.
