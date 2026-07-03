@@ -26,6 +26,7 @@ import type {
   ProposalRefinementStatus,
 } from "@/api/types";
 import { BlockMarkdown } from "./blocks/BlockShell";
+import { classifyRefinementEvidence } from "./refinementEvidenceStatus";
 
 /**
  * Human-readable label for a DoR check name.
@@ -304,8 +305,14 @@ export function ReadinessPanel({
   const blockingCount = gateStatus?.unresolved_blocking_count ?? 0;
   const blockingState: RowState = blockingCount > 0 ? "fail" : "pass";
 
-  // Evidence-spike row.
-  const evidence = gateStatus?.needs_evidence ?? null;
+  // Evidence-spike classification — prefer status-level evidence, fall back to
+  // the gate-level payload so the readiness panel still renders when the status
+  // object is not yet populated.
+  const evidenceDisplay = classifyRefinementEvidence(
+    refinement,
+    gateStatus?.needs_evidence,
+  );
+  const evidence = evidenceDisplay.evidence;
 
   return (
     <div className="space-y-3 rounded-md border p-3">
@@ -431,23 +438,21 @@ export function ReadinessPanel({
           </GateRow>
 
           {/* Evidence spike — renders distinct states for awaiting, received,
-              and failed evidence phases. */}
+              failed, and paused/frozen evidence phases. */}
           <GateRow
             state={
               evidence
-                ? evidence.evidence_phase === "evidence_received"
+                ? evidenceDisplay.kind === "evidence_received"
                   ? "pass"
-                  : evidence.evidence_phase === "evidence_failed"
-                    ? "fail"
-                    : "fail"
+                  : "fail"
                 : "na"
             }
             label="Evidence spike"
             detail={
               evidence
-                ? evidence.evidence_phase === "evidence_failed"
-                  ? `evidence failed — spike ${evidence.spike_short_id}${evidence.failure_reason ? ` (${evidence.failure_reason})` : ""}`
-                  : evidence.evidence_phase === "evidence_received"
+                ? evidenceDisplay.kind === "evidence_failed"
+                  ? `evidence failed — spike ${evidence.spike_short_id}${evidenceDisplay.failureReason ? ` (${evidenceDisplay.failureReason})` : ""}`
+                  : evidenceDisplay.kind === "evidence_received"
                     ? `evidence received — spike ${evidence.spike_short_id}`
                     : `awaiting evidence — spike ${evidence.spike_short_id} (${evidence.spike_status})`
                 : "none required"
@@ -455,7 +460,7 @@ export function ReadinessPanel({
           >
             {evidence && (
               <p className="ml-[26px] text-xs text-muted-foreground">
-                Claim: {evidence.claim}
+                {evidenceDisplay.claimSummary ?? evidence.claim}
               </p>
             )}
           </GateRow>
@@ -539,8 +544,8 @@ export function ReadinessPanel({
       )}
 
       {/* Needs-evidence spike parking note — renders distinct copy for
-          awaiting, received, and failed evidence phases. */}
-      {evidence && evidence.evidence_phase === "evidence_failed" && (
+          awaiting, received, failed, and paused/frozen evidence phases. */}
+      {evidenceDisplay.kind === "evidence_failed" && evidence && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2">
           <HugeiconsIcon
             icon={CancelCircleIcon}
@@ -551,20 +556,22 @@ export function ReadinessPanel({
             <p className="font-medium text-destructive">
               Evidence failed: {evidence.spike_short_id}
             </p>
-            <p className="text-muted-foreground">Claim: {evidence.claim}</p>
-            {evidence.failure_reason && (
+            <p className="text-muted-foreground">
+              {evidenceDisplay.claimSummary}
+            </p>
+            {evidenceDisplay.failureReason && (
               <p className="text-muted-foreground">
-                Reason: {evidence.failure_reason}
+                Reason: {evidenceDisplay.failureReason}
               </p>
             )}
             <p className="text-muted-foreground">
-              Review the spike findings and address the issue before
-              refinement can resume.
+              Refinement is blocked on failed or missing evidence findings.
             </p>
           </div>
         </div>
       )}
-      {evidence && evidence.evidence_phase !== "evidence_failed" && (
+
+      {evidenceDisplay.kind === "awaiting_evidence" && evidence && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/30">
           <HugeiconsIcon
             icon={AlertCircleIcon}
@@ -573,11 +580,35 @@ export function ReadinessPanel({
           />
           <div className="space-y-0.5 text-xs">
             <p className="font-medium text-amber-800 dark:text-amber-200">
-              {evidence.evidence_phase === "evidence_received"
-                ? "Evidence received"
-                : "Parked: needs-evidence spike"}
+              Awaiting evidence: {evidence.spike_short_id}
             </p>
-            <p className="text-muted-foreground">Claim: {evidence.claim}</p>
+            <p className="text-muted-foreground">
+              {evidenceDisplay.claimSummary}
+            </p>
+            <p className="text-muted-foreground">
+              Spike task: {evidence.spike_short_id} — {evidence.spike_status}
+            </p>
+            <p className="font-mono text-[10px] text-muted-foreground">
+              {evidence.spike_task_id}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {evidenceDisplay.kind === "evidence_received" && evidence && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/30">
+          <HugeiconsIcon
+            icon={AlertCircleIcon}
+            size={14}
+            className="mt-0.5 shrink-0 text-amber-600"
+          />
+          <div className="space-y-0.5 text-xs">
+            <p className="font-medium text-amber-800 dark:text-amber-200">
+              Evidence received
+            </p>
+            <p className="text-muted-foreground">
+              {evidenceDisplay.claimSummary}
+            </p>
             <p className="text-muted-foreground">
               Spike task: {evidence.spike_short_id} — {evidence.spike_status}
             </p>
@@ -585,8 +616,36 @@ export function ReadinessPanel({
         </div>
       )}
 
-      {/* Active-refinement note — only while the tribunal is still running. */}
-      {refinement?.active && !refinement?.awaiting_review && (
+      {evidenceDisplay.kind === "paused_frozen" && (
+        <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-950/30">
+          <HugeiconsIcon
+            icon={AlertCircleIcon}
+            size={14}
+            className="mt-0.5 shrink-0 text-muted-foreground"
+          />
+          <div className="space-y-0.5 text-xs">
+            <p className="font-medium text-foreground">Paused or frozen</p>
+            <p className="text-muted-foreground">
+              Refinement is paused or frozen manually. Evidence work is on hold
+              until the proposal is unfrozen.
+            </p>
+            {evidence && (
+              <>
+                <p className="text-muted-foreground">
+                  {evidenceDisplay.claimSummary}
+                </p>
+                <p className="text-muted-foreground">
+                  Spike task: {evidence.spike_short_id} — {evidence.spike_status}
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Active-refinement note — only while the tribunal is still running and
+          no evidence lifecycle state overrides the ordinary in-progress copy. */}
+      {evidenceDisplay.showInProgress && (
         <p className="text-xs text-muted-foreground">
           Autonomous tribunal in progress: Adversary, Advocate, and Judge refine
           the spec automatically. You will be asked to accept or reject the
