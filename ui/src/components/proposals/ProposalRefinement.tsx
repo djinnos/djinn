@@ -32,6 +32,7 @@ import { BlockMarkdown } from "./blocks/BlockShell";
 import { DiffView } from "./DiffView";
 import { ProposalDebateTrail } from "./ProposalDebateTrail";
 import { refinementDiffBodies } from "./refinementDiff";
+import { classifyRefinementEvidence } from "./refinementEvidenceStatus";
 
 /**
  * Human-readable label for the stop reason.
@@ -194,25 +195,22 @@ export function ProposalRefinement({
     const round = status.current_round ?? undefined;
     const headSeq = diff?.headSeq;
 
-    // Evidence lifecycle state — takes precedence over normal active/stopped
-    // states for badge, ribbon, and body rendering.
-    const evidenceState = status.evidence_lifecycle_state;
-    const isEvidenceState =
-      evidenceState === "awaiting_evidence" ||
-      evidenceState === "evidence_failed" ||
-      evidenceState === "paused_or_frozen" ||
-      evidenceState === "evidence_received";
-    const evidence = status.needs_evidence ?? null;
+    // Evidence lifecycle state — use the shared classifier from task 2grd
+    // for consistent display logic across renderers.
+    const display = classifyRefinementEvidence(status, gateStatus?.needs_evidence);
+
+    // Evidence object and spike helpers from the classifier.
+    const evidence = display.evidence;
 
     // Status ribbon: one line reconciling the tribunal state.
     const ribbon =
-      evidenceState === "awaiting_evidence" && evidence
-        ? `Awaiting evidence — spike ${evidence.spike_short_id} (${evidence.spike_status})`
-        : evidenceState === "evidence_failed" && evidence
-          ? `Evidence failed — spike ${evidence.spike_short_id}${evidence.failure_reason ? ` (${evidence.failure_reason})` : ""}`
-          : evidenceState === "paused_or_frozen"
+      display.kind === "awaiting_evidence" && evidence
+        ? `Awaiting evidence — spike ${display.spikeShortId} (${evidence.spike_status})`
+        : display.kind === "evidence_failed" && evidence
+          ? `Evidence failed — spike ${display.spikeShortId}${display.failureReason ? ` (${display.failureReason})` : ""}`
+          : display.kind === "paused_frozen"
             ? "Paused — waiting on manual gate"
-            : evidenceState === "evidence_received"
+            : display.kind === "evidence_received"
               ? "Evidence received — waiting on refinement to resume"
               : status.active && status.awaiting_review
                 ? `Converged${round ? ` after ${round} ${round === 1 ? "round" : "rounds"}` : ""} — awaiting your review`
@@ -231,19 +229,19 @@ export function ProposalRefinement({
               <Badge variant="secondary" className="text-xs">
                 Awaiting review
               </Badge>
-            ) : evidenceState === "awaiting_evidence" ? (
+            ) : display.kind === "awaiting_evidence" ? (
               <Badge variant="secondary" className="text-xs">
                 Awaiting evidence
               </Badge>
-            ) : evidenceState === "evidence_failed" ? (
+            ) : display.kind === "evidence_failed" ? (
               <Badge variant="destructive" className="text-xs">
                 Evidence failed
               </Badge>
-            ) : evidenceState === "paused_or_frozen" ? (
+            ) : display.kind === "paused_frozen" ? (
               <Badge variant="secondary" className="text-xs">
                 Paused
               </Badge>
-            ) : evidenceState === "evidence_received" ? (
+            ) : display.kind === "evidence_received" ? (
               <Badge variant="secondary" className="text-xs">
                 Evidence received
               </Badge>
@@ -415,7 +413,7 @@ export function ProposalRefinement({
         )}
 
         {/* Awaiting evidence — shows claim, spike details, and investigation context. */}
-        {evidenceState === "awaiting_evidence" && evidence && (
+        {display.kind === "awaiting_evidence" && evidence && (
           <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30">
             <Label className="text-xs uppercase text-muted-foreground">
               Awaiting evidence
@@ -449,7 +447,7 @@ export function ProposalRefinement({
         )}
 
         {/* Evidence failed — blocking state with remediation-oriented copy. */}
-        {evidenceState === "evidence_failed" && evidence && (
+        {display.kind === "evidence_failed" && evidence && (
           <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
             <Label className="text-xs uppercase text-destructive">
               Evidence failed
@@ -485,7 +483,7 @@ export function ProposalRefinement({
 
         {/* PausedOrFrozen — manual gate copy takes precedence, but evidence
             context is still visible to explain why the proposal is blocked. */}
-        {evidenceState === "paused_or_frozen" && (
+        {display.kind === "paused_frozen" && (
           <div className="space-y-2 border-t pt-2">
             <Label className="text-xs uppercase text-muted-foreground">
               Paused — waiting on manual gate
@@ -509,7 +507,7 @@ export function ProposalRefinement({
         )}
 
         {/* Evidence received — evidence is available, refinement can resume. */}
-        {evidenceState === "evidence_received" && (
+        {display.kind === "evidence_received" && (
           <div className="space-y-2 border-t pt-2">
             <Label className="text-xs uppercase text-muted-foreground">
               Evidence received
@@ -531,8 +529,9 @@ export function ProposalRefinement({
 
         {/* In-progress: tribunal still running autonomously. Only shown for
             non-evidence active states — evidence states render their own
-            body sections above. */}
-        {status.active && !status.awaiting_review && !isEvidenceState && (
+            body sections above. Uses the shared classifier's showInProgress
+            flag to determine visibility. */}
+        {status.active && !status.awaiting_review && display.showInProgress && display.kind !== "evidence_received" && (
           <div className="space-y-1 border-t pt-2">
             <Label className="text-xs uppercase text-muted-foreground">
               Refinement in progress
