@@ -5,7 +5,8 @@ use crate::database::Database;
 use crate::{Error, Result};
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::models::{
-    ActivityEntry, IssueType, Task, TaskStatus, TransitionAction, compute_transition_for_issue_type,
+    ActivityEntry, IssueType, ReopenClass, ReopenLedgerEntry, Task, TaskStatus, TransitionAction,
+    compute_transition_for_issue_type,
 };
 
 mod activity;
@@ -1134,6 +1135,728 @@ mod tests {
         assert_eq!(mapped.ci_blocking_required_check_names, "[]");
         assert_eq!(mapped.ci_same_signature_count, 0);
         assert!(mapped.ci_failure_fingerprint.is_none());
+    }
+
+    // ── ReopenClass / quality ledger tests ─────────────────────────────────
+
+    /// Helper: walk a task through the full review-reject path
+    /// (open → in_progress → needs_task_review → in_task_review → open)
+    /// using the given reject action and reason.
+    async fn walk_review_reject(
+        repo: &TaskRepository,
+        task_id: &str,
+        action: TransitionAction,
+        reason: &str,
+    ) -> Task {
+        repo.transition(
+            task_id,
+            TransitionAction::Start,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            task_id,
+            TransitionAction::SubmitTaskReview,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            task_id,
+            TransitionAction::TaskReviewStart,
+            "reviewer",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(task_id, action, "reviewer", "reviewer", Some(reason), None)
+            .await
+            .unwrap()
+    }
+
+    /// Persist classified transitions through `TaskRepository::transition`,
+    /// reload/list activity from DB, and assert the `reopen_class` survives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_class_persists_in_activity_payload() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Walk through TaskReviewReject — should persist as review_rejected.
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewReject,
+            "needs changes",
+        )
+        .await;
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        // Expect 4 entries: start, submit, review_start, review_reject
+        assert_eq!(activity.len(), 4);
+        let reject_payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(reject_payload["reopen_class"], "review_rejected");
+        assert_eq!(reject_payload["to_status"], "open");
+        assert_eq!(reject_payload["from_status"], "in_task_review");
+
+        // Now do a TaskReviewRejectStale — should also be review_rejected.
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectStale,
+            "stale work",
+        )
+        .await;
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let stale_payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(stale_payload["reopen_class"], "review_rejected");
+    }
+
+    /// TaskReviewRejectConflict persists merge_conflict but does NOT
+    /// increment raw reopen_count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn conflict_reject_classifies_merge_conflict_without_reopen_increment() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        // Conflict does NOT increment reopen_count.
+        assert_eq!(t.reopen_count, 0);
+        assert_eq!(t.total_reopen_count, 0);
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(payload["reopen_class"], "merge_conflict");
+    }
+
+    /// Non-reopen-like transitions (e.g. Close, Start) must NOT carry a
+    /// `reopen_class` in their activity payload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_reopen_transitions_omit_reopen_class() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        repo.transition(
+            &task.id,
+            TransitionAction::Start,
+            "worker",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert!(
+            payload.get("reopen_class").is_none(),
+            "Start must not set reopen_class"
+        );
+    }
+
+    /// quality_reopen_count returns 0 for a task with no reopen events.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quality_reopen_count_zero_for_no_reopen() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        let count = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// recent_reopen_ledger returns empty for a task with no reopens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recent_reopen_ledger_empty_for_no_reopen() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert!(ledger.is_empty());
+    }
+
+    /// Full mixed-class scenario: quality count includes review_rejected,
+    /// merge_queue_failed, and other; excludes merge_conflict and superseded.
+    /// Raw reopen_count can diverge from quality_reopen_count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quality_count_includes_and_excludes_correct_classes() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // 1. TaskReviewReject → review_rejected (quality strike, increments reopen)
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewReject,
+            "bad code",
+        )
+        .await;
+
+        // 2. TaskReviewRejectConflict → merge_conflict (NOT a quality strike, no reopen increment)
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+
+        // 3. TaskReviewRejectStale → review_rejected (quality strike, increments reopen)
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectStale,
+            "no progress",
+        )
+        .await;
+
+        // Check raw counts: TaskReviewReject and TaskReviewRejectStale each
+        // incremented reopen_count; conflict did not. So reopen_count = 2.
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            t.reopen_count, 2,
+            "raw reopen_count should be 2 (reject + stale)"
+        );
+        assert_eq!(t.total_reopen_count, 2);
+
+        // Quality count: review_rejected (2) + merge_conflict excluded = 2
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(
+            quality, 2,
+            "quality count should be 2 (two review_rejected)"
+        );
+
+        // Ledger: should have 3 entries (most recent first).
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 3, "ledger should have 3 reopen entries");
+        // Most recent first: stale, conflict, reject
+        assert_eq!(ledger[0].reopen_class, ReopenClass::ReviewRejected);
+        assert_eq!(ledger[1].reopen_class, ReopenClass::MergeConflict);
+        assert_eq!(ledger[2].reopen_class, ReopenClass::ReviewRejected);
+    }
+
+    /// PrCiFailed classifies as merge_queue_failed (quality strike).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_ci_failed_classifies_as_merge_queue_failed() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Walk to pr_draft: start → submit → review_start → approve → pr_created
+        repo.transition(&task.id, TransitionAction::Start, "w", "worker", None, None)
+            .await
+            .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "w",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewStart,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewApprove,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::PrCreated,
+            "sys",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Now PrCiFailed from pr_draft.
+        repo.transition(
+            &task.id,
+            TransitionAction::PrCiFailed,
+            "sys",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, "open");
+        assert_eq!(t.reopen_count, 1);
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(payload["reopen_class"], "merge_queue_failed");
+
+        // Quality count should be 1 (merge_queue_failed is a quality strike).
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(quality, 1);
+
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].reopen_class, ReopenClass::MergeQueueFailed);
+    }
+
+    /// PrConflict classifies as merge_conflict (NOT a quality strike)
+    /// and does NOT increment reopen_count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_conflict_classifies_as_merge_conflict_no_quality_strike() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Walk to approved → PrConflict
+        repo.transition(&task.id, TransitionAction::Start, "w", "worker", None, None)
+            .await
+            .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "w",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewStart,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewApprove,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::PrConflict,
+            "sys",
+            "system",
+            Some("merge_conflict:{\"head\":\"abc\"}"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, "open");
+        // PrConflict does NOT increment reopen_count.
+        assert_eq!(t.reopen_count, 0);
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(payload["reopen_class"], "merge_conflict");
+
+        // Quality count = 0 (merge_conflict excluded).
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(quality, 0);
+
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].reopen_class, ReopenClass::MergeConflict);
+    }
+
+    /// PrChangesRequested classifies as review_rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pr_changes_requested_classifies_as_review_rejected() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Walk to pr_review: start → submit → review_start → approve → pr_created → pr_undraft
+        repo.transition(&task.id, TransitionAction::Start, "w", "worker", None, None)
+            .await
+            .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "w",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewStart,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewApprove,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::PrCreated,
+            "sys",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::PrUndraft,
+            "sys",
+            "system",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // PrChangesRequested from pr_review.
+        repo.transition(
+            &task.id,
+            TransitionAction::PrChangesRequested,
+            "r",
+            "reviewer",
+            Some("fix the tests"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, "open");
+        assert_eq!(t.reopen_count, 1);
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(payload["reopen_class"], "review_rejected");
+
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(quality, 1);
+
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].reopen_class, ReopenClass::ReviewRejected);
+        assert_eq!(ledger[0].reason.as_deref(), Some("fix the tests"));
+    }
+
+    /// Generic Reopen (closed → open) classifies as other (quality strike).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn generic_reopen_classifies_as_other() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Walk to closed: start → submit → review_start → approve → close
+        repo.transition(&task.id, TransitionAction::Start, "w", "worker", None, None)
+            .await
+            .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::SubmitTaskReview,
+            "w",
+            "worker",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewStart,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(
+            &task.id,
+            TransitionAction::TaskReviewApprove,
+            "r",
+            "reviewer",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        repo.transition(&task.id, TransitionAction::Close, "w", "worker", None, None)
+            .await
+            .unwrap();
+
+        // Reopen from closed.
+        repo.transition(
+            &task.id,
+            TransitionAction::Reopen,
+            "w",
+            "worker",
+            Some("need to fix something"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        assert_eq!(t.status, "open");
+        assert_eq!(t.reopen_count, 1);
+
+        let activity = repo.list_activity(&task.id).await.unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(&activity.last().unwrap().payload).unwrap();
+        assert_eq!(payload["reopen_class"], "other");
+
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(quality, 1, "other is a quality strike");
+
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].reopen_class, ReopenClass::Other);
+    }
+
+    /// Historical activity rows that lack `reopen_class` default to `other`
+    /// (conservative) in both quality_reopen_count and recent_reopen_ledger.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn historical_missing_reopen_class_defaults_to_other() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Manually insert a historical-style activity_log entry that looks like
+        // a review-reject reopen but has no `reopen_class` field (simulating
+        // pre-feature data).
+        let historical_payload = serde_json::json!({
+            "from_status": "in_task_review",
+            "to_status": "open",
+            "reason": "historical rejection"
+        });
+        repo.log_activity(
+            Some(&task.id),
+            "reviewer",
+            "reviewer",
+            "status_changed",
+            &historical_payload.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // quality_reopen_count must count this as `other` (quality strike).
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(
+            quality, 1,
+            "historical row without reopen_class must default to other (quality strike)"
+        );
+
+        // recent_reopen_ledger must return it with ReopenClass::Other.
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].reopen_class,
+            ReopenClass::Other,
+            "historical row missing reopen_class must read as Other"
+        );
+        assert_eq!(ledger[0].from_status, "in_task_review");
+        assert_eq!(ledger[0].reason.as_deref(), Some("historical rejection"));
+    }
+
+    /// Mixed scenario: raw reopen_count diverges from quality_reopen_count
+    /// when conflict and superseded reopens are present alongside quality
+    /// strikes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn raw_and_quality_counts_diverge_after_mixed_transitions() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Review reject → quality strike, increments reopen (reopen=1, quality=1)
+        walk_review_reject(&repo, &task.id, TransitionAction::TaskReviewReject, "bad").await;
+        // Conflict → NOT quality strike, does NOT increment reopen (reopen=1, quality=1)
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict:{}",
+        )
+        .await;
+        // Review reject stale → quality strike, increments reopen (reopen=2, quality=2)
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectStale,
+            "stale",
+        )
+        .await;
+
+        // Also inject a historical "superseded" reopen (no reopen_class).
+        // This defaults to `other` = quality strike.
+        let historical_superseded = serde_json::json!({
+            "from_status": "closed",
+            "to_status": "open",
+            "reason": "superseded by newer PR"
+        });
+        repo.log_activity(
+            Some(&task.id),
+            "system",
+            "system",
+            "status_changed",
+            &historical_superseded.to_string(),
+        )
+        .await
+        .unwrap();
+
+        let t = repo.get(&task.id).await.unwrap().unwrap();
+        // Raw: reject (1) + stale (1) = 2. Conflict and historical don't increment.
+        assert_eq!(t.reopen_count, 2, "raw reopen_count should be 2");
+        assert_eq!(t.total_reopen_count, 2);
+
+        // Quality: review_rejected (2) + historical-other (1) = 3.
+        // merge_conflict excluded.
+        let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+        assert_eq!(
+            quality, 3,
+            "quality count should be 3 (2 review_rejected + 1 historical-other)"
+        );
+
+        // Ledger: 4 entries (most recent first: historical, stale, conflict, reject).
+        let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+        assert_eq!(ledger.len(), 4);
+        assert_eq!(ledger[0].reopen_class, ReopenClass::Other); // historical
+        assert_eq!(ledger[1].reopen_class, ReopenClass::ReviewRejected); // stale
+        assert_eq!(ledger[2].reopen_class, ReopenClass::MergeConflict); // conflict
+        assert_eq!(ledger[3].reopen_class, ReopenClass::ReviewRejected); // reject
+    }
+
+    /// recent_reopen_ledger respects the limit parameter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_ledger_respects_limit() {
+        let db = Database::open_in_memory().unwrap();
+        let (bus, _captured) = capturing_bus();
+        let repo = TaskRepository::new(db.clone(), bus);
+        let project = make_project(&db).await;
+        let epic_id = make_epic(&db, &project.id).await;
+        let task = make_task(&repo, &epic_id, "task", Some(r#"[{"title":"ac1"}]"#)).await;
+
+        // Create 3 reopen events.
+        walk_review_reject(&repo, &task.id, TransitionAction::TaskReviewReject, "r1").await;
+        walk_review_reject(
+            &repo,
+            &task.id,
+            TransitionAction::TaskReviewRejectStale,
+            "r2",
+        )
+        .await;
+        walk_review_reject(&repo, &task.id, TransitionAction::TaskReviewReject, "r3").await;
+
+        // Limit to 2.
+        let ledger = repo.recent_reopen_ledger(&task.id, 2).await.unwrap();
+        assert_eq!(ledger.len(), 2, "limit=2 should return only 2 entries");
+        // Most recent first.
+        assert_eq!(ledger[0].reason.as_deref(), Some("r3"));
+        assert_eq!(ledger[1].reason.as_deref(), Some("r2"));
     }
 }
 

@@ -154,7 +154,7 @@ impl TaskRepository {
                     .await?;
 
                     let payload =
-                        Self::build_activity_payload(from_str, to_str, &reason_str, &ac_snapshot);
+                        Self::build_activity_payload(from_str, to_str, &reason_str, &ac_snapshot, apply.reopen_class);
 
                     let activity_id = uuid::Uuid::now_v7().to_string();
                     sqlx::query!(
@@ -523,6 +523,7 @@ impl TaskRepository {
         to_str: &str,
         reason_str: &str,
         ac_snapshot: &Option<String>,
+        reopen_class: Option<djinn_core::models::ReopenClass>,
     ) -> serde_json::Value {
         let mut payload_obj = serde_json::json!({
             "from_status": from_str,
@@ -533,6 +534,9 @@ impl TaskRepository {
             let ac_value: serde_json::Value =
                 serde_json::from_str(ac).unwrap_or(serde_json::json!([]));
             payload_obj["ac_snapshot"] = ac_value;
+        }
+        if let Some(class) = reopen_class {
+            payload_obj["reopen_class"] = serde_json::json!(class.as_str());
         }
         payload_obj
     }

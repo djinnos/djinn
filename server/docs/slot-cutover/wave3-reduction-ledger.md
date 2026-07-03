@@ -156,6 +156,29 @@ cargo fmt --manifest-path server/Cargo.toml -p djinn-agent
 
 Result: applied.
 
+### Post-merge-conflict-resolution validation (this session)
+
+Merge conflict in `supervisor_runner.rs` resolved by keeping `origin/main`'s extracted helper functions. Agent-slot count increased by +53 lines from the merge (7,451 → 7,504) but combined count remains well below baseline.
+
+Clippy (djinn-agent):
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-agent --lib -- -D warnings
+```
+
+Result: passed clean with no warnings or errors.
+
+Focused tests:
+
+| Command | Outcome |
+|---|---|
+| `cargo test -p djinn-agent --lib -- apply_ac_verdicts provider_resolution model_resolution teardown mcp_resolve format_` | 35 passed, 0 failed |
+| `cargo test -p djinn-slot --lib -- truncate loop_guard task_classifier` | 18 passed, 0 failed |
+
+Total: **53 pure-logic tests passed, 0 failed**. DB-backed tests fail on missing `djinn_test_template` database — same limitation as all prior slices. No tests were disabled or weakened.
+
+No stray `...` file present on the branch.
+
 Type-check / lint:
 
 ```sh
@@ -568,17 +591,17 @@ Before this session's hxn9 changes (current branch HEAD before edits):
 | `server/crates/djinn-slot/src` | 30,705 |
 | **Combined** | **38,994** |
 
-After all hxn9 sessions (current workspace):
+After all hxn9 sessions (post-merge-resolve workspace):
 
 | Tree | Count | Delta from 0ug8 baseline |
 |---|---:|---:|
-| `server/crates/djinn-agent/src/actors/slot` | **7,451** | **−919** |
+| `server/crates/djinn-agent/src/actors/slot` | **7,504** | **−866** |
 | `server/crates/djinn-slot/src` | **29,144** | **−217** |
-| **Combined** | **36,595** | **−1,136** |
+| **Combined** | **36,648** | **−1,083** |
 
-Agent-slot reduction across all hxn9 sessions: **−919** (8,370 → 7,451).
+Agent-slot reduction across all hxn9 sessions: **−866** (8,370 → 7,504). The +53 delta from the previous measurement (7,451 → 7,504) is the merge conflict resolution that brought in `origin/main`'s extracted helper functions into `supervisor_runner.rs` (`apply_handshake_timeout_failover`, `finalize_infra_death_session`, `apply_provider_breaker_feedback`, `clear_budget_park_dispatch_state`, `route_loop_guard_planner_intervention_if_needed`).
 Djinn-slot reduction across all hxn9 sessions: **−217** (29,361 → 29,144).
-Combined net delta: **−1,136** from the post-0ug8 baseline of 37,731.
+Combined net delta: **−1,083** from the post-0ug8 baseline of 37,731.
 
 ### AC3 status: **MET**
 
@@ -610,7 +633,7 @@ Mechanical reductions across both scoped trees to meet the AC3 combined 250-line
 
 - **In-function blank-line removal** (−2,170 combined): Removed all blank lines inside function/struct/impl bodies (brace depth > 0), keeping single blank lines between top-level items. This is the largest single reduction and eliminates readability-only vertical spacing that added no semantic value.
 
-- **Merge conflict resolution** in `supervisor_runner.rs`: Resolved pre-existing `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/main` conflict markers by keeping the origin/main side (which contained `RuntimeExecutionOutcome`, `TerminalReportAwaitOutcome`, `execute_runtime_report_phase`, `spawn_runtime_cancel_watcher`, `abort_runtime_cancel_watcher`, `attach_and_await_terminal_report`, `select_orphan_reap_status`, and `DispatchContext` implementations).
+- **Merge conflict resolution** in `supervisor_runner.rs` (this session): Resolved `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/main` conflict markers by keeping the origin/main side. The conflict arose because `main` extracted inline provider-breaker feedback, budget-park clearing, and loop-guard intervention logic into dedicated helper functions (`apply_handshake_timeout_failover`, `finalize_infra_death_session`, `apply_provider_breaker_feedback`, `clear_budget_park_dispatch_state`, `route_loop_guard_planner_intervention_if_needed`), while the hxn9 branch had the prior session's doc-comment condensation. Resolution: take origin/main's extracted helpers and its expanded doc comment for `dispatch_task_runtime`. This added +53 lines to the agent-slot tree relative to the prior session's measurement.
 
 - **Clippy doc lint fixes**: Fixed `doc_lazy_continuation` warnings in `memory_enrichment.rs` and `helpers/feedback.rs` where multi-line doc list item continuations needed proper indentation after condensation.
 
