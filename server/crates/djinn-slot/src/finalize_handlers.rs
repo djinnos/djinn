@@ -7,6 +7,7 @@ use djinn_db::TaskRepository;
 use djinn_db::repositories::verify_run::{
     AutoSubmitReviewRepository, CreateAutoSubmitReviewParams,
 };
+use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 
 /// Process the structured finalize tool payload captured by the reply loop (ADR-036).
 ///
@@ -155,16 +156,148 @@ async fn handle_submit_work(
     }
 
     if let Some(metadata) = metadata {
-        return persist_auto_submit_review_metadata(
-            metadata,
-            app_state,
-            model_called_submit_work,
-            task_id,
-        )
-        .await;
+        match resolve_auto_submit_diff_fingerprint(task_id, &metadata, app_state).await {
+            Ok(fingerprint) => {
+                let mut metadata = metadata;
+                if let Some(fingerprint) = fingerprint {
+                    metadata.diff_fingerprint = fingerprint;
+                } else {
+                    metadata.diff_fingerprint.clear();
+                }
+                return persist_auto_submit_review_metadata(
+                    metadata,
+                    app_state,
+                    model_called_submit_work,
+                    task_id,
+                )
+                .await;
+            }
+            Err(()) => {
+                emit_fingerprint_unavailable_event(
+                    task_id,
+                    &metadata.task_run_id,
+                    "compute_error",
+                    app_state,
+                );
+                return persist_auto_submit_review_metadata(
+                    metadata,
+                    app_state,
+                    model_called_submit_work,
+                    task_id,
+                )
+                .await;
+            }
+        }
     }
 
     true
+}
+
+/// Resolve the complete submission diff fingerprint for the worktree associated with an
+/// accepted auto-submit payload. Returns `Ok(Some(digest))` when the worktree is available and
+/// has a non-empty diff, `Ok(None)` when the worktree is available but has no diff, and `Err(())`
+/// when the worktree path is unavailable or the helper fails. The caller should keep existing
+/// submit behavior safe in all error/no-diff cases and never fabricate a fingerprint.
+async fn resolve_auto_submit_diff_fingerprint(
+    task_id: &str,
+    metadata: &AutoSubmitReviewMetadataPayload,
+    app_state: &SlotContext,
+) -> Result<Option<String>, ()> {
+    let task_run_repo =
+        djinn_db::repositories::task_run::TaskRunRepository::new(app_state.db.clone());
+    let run = match task_run_repo.get(&metadata.task_run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %metadata.task_run_id,
+                "auto-submit: task_run not found for fingerprint lookup"
+            );
+            return Err(());
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %metadata.task_run_id,
+                error = %e,
+                "auto-submit: failed to load task_run for fingerprint lookup"
+            );
+            return Err(());
+        }
+    };
+
+    let workspace_path = match run.workspace_path {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            tracing::warn!(
+                task_id = %task_id,
+                task_run_id = %metadata.task_run_id,
+                "auto-submit: no workspace_path available for fingerprint lookup"
+            );
+            return Err(());
+        }
+    };
+
+    let path = std::path::Path::new(&workspace_path);
+    if !path.exists() {
+        tracing::warn!(
+            task_id = %task_id,
+            workspace_path = %workspace_path,
+            "auto-submit: workspace_path does not exist; skipping fingerprint compute"
+        );
+        return Err(());
+    }
+
+    match compute_submission_diff_fingerprint(path).await {
+        Ok(SubmissionDiffFingerprint::Diff(digest)) => {
+            tracing::info!(
+                task_id = %task_id,
+                workspace_path = %workspace_path,
+                fingerprint_len = digest.fingerprint.len(),
+                changed_paths = ?digest.changed_paths,
+                "auto-submit: computed complete submission diff fingerprint"
+            );
+            Ok(Some(digest.fingerprint))
+        }
+        Ok(SubmissionDiffFingerprint::NoDiff(no_diff)) => {
+            tracing::info!(
+                task_id = %task_id,
+                workspace_path = %workspace_path,
+                merge_base = ?no_diff.merge_base,
+                "auto-submit: no diff in worktree for fingerprint"
+            );
+            Ok(None)
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                workspace_path = %workspace_path,
+                error = %e,
+                "auto-submit: failed to compute submission diff fingerprint"
+            );
+            Err(())
+        }
+    }
+}
+
+fn emit_fingerprint_unavailable_event(
+    task_id: &str,
+    task_run_id: &str,
+    reason: &'static str,
+    ctx: &SlotContext,
+) {
+    ctx.event_bus.send(DjinnEventEnvelope {
+        entity_type: "verify",
+        action: "submission_fingerprint_unavailable",
+        payload: serde_json::json!({
+            "task_id": task_id,
+            "task_run_id": task_run_id,
+            "reason": reason,
+        }),
+        id: Some(task_id.to_string()),
+        project_id: None,
+        from_sync: false,
+    });
 }
 
 async fn persist_auto_submit_review_metadata(
