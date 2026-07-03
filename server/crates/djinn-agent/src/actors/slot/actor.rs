@@ -55,7 +55,6 @@ impl SlotHandle {
             inner: djinn_slot::SlotHandle::spawn(id, model_id, event_tx, slot_ctx, cancel),
         }
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_with_test_runner(
         id: usize,
@@ -97,15 +96,12 @@ impl SlotHandle {
             ),
         }
     }
-
     pub fn id(&self) -> usize {
         self.inner.id()
     }
-
     pub fn model_id(&self) -> &str {
         self.inner.model_id()
     }
-
     pub async fn run_task(
         &self,
         task_id: String,
@@ -113,19 +109,15 @@ impl SlotHandle {
     ) -> Result<(), djinn_slot::SlotError> {
         self.inner.run_task(task_id, project_path).await
     }
-
     pub async fn kill(&self) -> Result<(), djinn_slot::SlotError> {
         self.inner.kill().await
     }
-
     pub async fn pause(&self) -> Result<(), djinn_slot::SlotError> {
         self.inner.pause().await
     }
-
     pub async fn drain(&self) -> Result<(), djinn_slot::SlotError> {
         self.inner.drain().await
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn into_djinn_slot(self) -> djinn_slot::SlotHandle {
         self.inner

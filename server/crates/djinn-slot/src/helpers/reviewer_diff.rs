@@ -1,7 +1,5 @@
 use super::*;
 
-// ─── PR E3: diff-aware reviewer context (`detect_changes` + `impact`) ───────
-
 /// Risk bucket for a touched symbol — mirrors PR C3's `ImpactRisk`
 /// classification (`crates/djinn-control-plane/src/tools/graph_tools.rs:242`).
 /// Re-implemented here because the C3 type is crate-private; the
@@ -24,7 +22,6 @@ impl ReviewerDiffRisk {
             ReviewerDiffRisk::Low => "LOW",
         }
     }
-
     /// PR C3 thresholds (top-down: critical first wins). `direct` /
     /// `total` / `modules` are OR-combined within each tier.
     fn classify(direct: usize, total: usize, modules: usize) -> Self {
@@ -38,7 +35,6 @@ impl ReviewerDiffRisk {
             ReviewerDiffRisk::Low
         }
     }
-
     /// Sort key — descending (Critical first). `Reverse` would also
     /// work; this avoids importing an extra type for one call site.
     fn rank(self) -> u8 {
@@ -92,8 +88,7 @@ struct ReviewerDiffRow {
     modules: usize,
 }
 
-/// Build the auto-injected `code_graph detect_changes` block for the
-/// reviewer role.
+/// Build the auto-injected `code_graph detect_changes` block for the reviewer role.
 ///
 /// Returns `None` when the reviewer role is not in the
 /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist, when both `from_sha` and
@@ -126,7 +121,6 @@ pub async fn build_reviewer_diff_context(
     if from_sha.is_none() && to_sha.is_none() {
         return None;
     }
-
     let graph_ops = app_state.repo_graph_ops.clone()?;
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: task.project_id.clone(),
@@ -134,7 +128,6 @@ pub async fn build_reviewer_diff_context(
         workspace: None,
         sub_path: None,
     };
-
     let detected = match graph_ops.detect_changes(&ctx, from_sha, to_sha, &[]).await {
         Ok(d) => d,
         Err(e) => {
@@ -152,7 +145,6 @@ pub async fn build_reviewer_diff_context(
     if detected.touched_symbols.is_empty() {
         return None;
     }
-
     let mut rows: Vec<ReviewerDiffRow> = Vec::new();
     for sym in detected.touched_symbols.iter() {
         if rows.len() >= REVIEWER_DIFF_CONTEXT_MAX_BULLETS {
@@ -189,7 +181,6 @@ pub async fn build_reviewer_diff_context(
         };
         let (direct, total, modules) = reviewer_impact_metrics(&impact);
         let risk = ReviewerDiffRisk::classify(direct, total, modules);
-
         rows.push(ReviewerDiffRow {
             name: sym.name.clone(),
             file_path: sym.file_path.clone(),
@@ -198,11 +189,9 @@ pub async fn build_reviewer_diff_context(
             modules,
         });
     }
-
     if rows.is_empty() {
         return None;
     }
-
     // Sort: highest risk first; tie-break on direct caller count desc.
     rows.sort_by(|a, b| {
         b.risk
@@ -210,7 +199,6 @@ pub async fn build_reviewer_diff_context(
             .cmp(&a.risk.rank())
             .then_with(|| b.direct.cmp(&a.direct))
     });
-
     let mut lines: Vec<String> = Vec::new();
     lines.push("## Changed symbols (HIGH risk first)".to_string());
     lines.push(String::new());
@@ -224,7 +212,6 @@ pub async fn build_reviewer_diff_context(
             file = row.file_path,
         ));
     }
-
     let body = lines.join("\n");
     Some(crate::truncate::smart_truncate(
         &body,

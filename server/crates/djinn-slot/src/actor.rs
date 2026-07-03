@@ -56,7 +56,6 @@ impl SlotActor {
     pub async fn run(mut self) {
         let mut active: Option<ActiveLifecycle> = None;
         let mut drain_requested = false;
-
         loop {
             if let Some(mut running) = active.take() {
                 tokio::select! {
@@ -170,7 +169,6 @@ impl SlotActor {
             }
         }
     }
-
     /// Spawn a lifecycle task for the slot, attaching the optional
     /// resume-via-git lifecycle metadata. Returns the active lifecycle
     /// handle so the outer loop can wait on its `join` and emit
@@ -199,7 +197,6 @@ impl SlotActor {
             pause.clone(),
             resume_lifecycle_metadata,
         );
-
         let join = tokio::spawn(run.instrument(span.clone()));
         ActiveLifecycle {
             task_id,
@@ -210,7 +207,6 @@ impl SlotActor {
             killed: false,
         }
     }
-
     async fn emit_completion_event(&self, running: &ActiveLifecycle) {
         let event = if running.killed {
             running.span.in_scope(|| {
@@ -286,7 +282,6 @@ impl SlotHandle {
         );
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
-
     fn spawn_with_runner(
         id: usize,
         model_id: String,
@@ -312,7 +307,6 @@ impl SlotHandle {
             sender,
         }
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_with_test_runner(
         id: usize,
@@ -324,15 +318,12 @@ impl SlotHandle {
     ) -> Self {
         Self::spawn_with_runner(id, model_id, event_tx, app_state, cancel, runner)
     }
-
     pub fn id(&self) -> usize {
         self.id
     }
-
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
-
     #[tracing::instrument(
         name = "djinn.slot.run_task",
         skip(self, project_path),
@@ -341,7 +332,6 @@ impl SlotHandle {
     pub async fn run_task(&self, task_id: String, project_path: String) -> Result<(), SlotError> {
         self.run_task_with_resume(task_id, project_path, None).await
     }
-
     /// Additive re-dispatch path used by the coordinator's
     /// `DispatchWithResume` slot-pool message. The `resume_lifecycle_metadata`
     /// blob rides the slot pipeline through `SlotCommand::RunTaskWithResume`
@@ -386,7 +376,6 @@ impl SlotHandle {
         rx.await
             .map_err(|_| SlotError::SessionFailed("slot actor did not ack dispatch".to_string()))?
     }
-
     #[tracing::instrument(
         name = "djinn.slot.kill",
         skip(self),
@@ -398,14 +387,12 @@ impl SlotHandle {
             .await
             .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))
     }
-
     pub async fn pause(&self) -> Result<(), SlotError> {
         self.sender
             .send(SlotCommand::Pause)
             .await
             .map_err(|_| SlotError::SessionFailed("slot actor channel closed".to_string()))
     }
-
     pub async fn drain(&self) -> Result<(), SlotError> {
         self.sender
             .send(SlotCommand::Drain)
@@ -416,51 +403,42 @@ impl SlotHandle {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::test_helpers;
     use std::collections::HashMap;
     use std::sync::{Arc as StdArc, Mutex};
     use std::time::Duration;
-
     use tempfile::TempDir;
     use tracing::field::{Field, Visit};
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{Layer, registry::LookupSpan};
-
-    use super::*;
-    use crate::test_helpers;
-
     #[derive(Clone, Debug, Default)]
     struct RecordedSpan {
         name: String,
         fields: HashMap<String, String>,
     }
-
     #[derive(Clone, Debug, Default)]
     struct RecordedEvent {
         fields: HashMap<String, String>,
     }
-
     #[derive(Clone, Default)]
     struct RecordingLayer {
         spans: Arc<Mutex<Vec<RecordedSpan>>>,
         events: Arc<Mutex<Vec<RecordedEvent>>>,
     }
-
     impl RecordingLayer {
         fn spans(&self) -> Vec<RecordedSpan> {
             self.spans.lock().expect("recorded spans mutex").clone()
         }
-
         fn events(&self) -> Vec<RecordedEvent> {
             self.events.lock().expect("recorded events mutex").clone()
         }
     }
-
     #[derive(Default)]
     struct FieldRecorder {
         fields: HashMap<String, String>,
     }
-
     impl Visit for FieldRecorder {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             self.fields.insert(
@@ -469,7 +447,6 @@ mod tests {
             );
         }
     }
-
     impl<S> Layer<S> for RecordingLayer
     where
         S: tracing::Subscriber,
@@ -490,7 +467,6 @@ mod tests {
                 });
             }
         }
-
         fn on_record(
             &self,
             id: &tracing::Id,
@@ -505,7 +481,6 @@ mod tests {
                 }
             }
         }
-
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
             let mut recorder = FieldRecorder::default();
             event.record(&mut recorder);
@@ -516,7 +491,6 @@ mod tests {
                     fields: recorder.fields,
                 });
         }
-
         fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
             if let Some(span) = ctx.span(&id)
                 && let Some(recorded) = span.extensions().get::<RecordedSpan>()
@@ -528,7 +502,6 @@ mod tests {
             }
         }
     }
-
     async fn tracing_lock() -> tokio::sync::OwnedMutexGuard<()> {
         static LOCK: std::sync::OnceLock<StdArc<tokio::sync::Mutex<()>>> =
             std::sync::OnceLock::new();
@@ -537,7 +510,6 @@ mod tests {
             .lock_owned()
             .await
     }
-
     fn test_app_state() -> (SlotContext, CancellationToken, TempDir) {
         let db = test_helpers::create_test_db();
         let cancel = CancellationToken::new();
@@ -548,7 +520,6 @@ mod tests {
             temp,
         )
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn run_task_completes_and_emits_free_event() {
         let _tracing_guard = tracing_lock().await;
@@ -557,7 +528,6 @@ mod tests {
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
              _project_path,
@@ -572,7 +542,6 @@ mod tests {
                 })
             },
         );
-
         let slot = SlotHandle::spawn_with_runner(
             7,
             "test/mock".to_string(),
@@ -581,16 +550,13 @@ mod tests {
             cancel,
             runner,
         );
-
         slot.run_task("task-123".to_string(), "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
-
         let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await
             .expect("event should arrive")
             .expect("event channel should stay open");
-
         match evt {
             SlotEvent::Free {
                 slot_id,
@@ -603,7 +569,6 @@ mod tests {
             }
             other => panic!("expected SlotEvent::Free, got {other:?}"),
         }
-
         let run_span = layer
             .spans()
             .into_iter()
@@ -620,7 +585,6 @@ mod tests {
             run_span.fields.get("model_id").map(String::as_str),
             Some("test/mock")
         );
-
         let free_event = layer
             .events()
             .into_iter()
@@ -631,7 +595,6 @@ mod tests {
             Some("task-123")
         );
     }
-
     #[tokio::test(flavor = "current_thread")]
     async fn kill_emits_killed_event_and_kill_span_with_task_id() {
         let _tracing_guard = tracing_lock().await;
@@ -640,7 +603,6 @@ mod tests {
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-
         let runner: LifecycleRunner = Arc::new(
             |_task_id,
              _project_path,
@@ -655,7 +617,6 @@ mod tests {
                 })
             },
         );
-
         let slot = SlotHandle::spawn_with_runner(
             9,
             "test/kill-model".to_string(),
@@ -664,17 +625,14 @@ mod tests {
             cancel,
             runner,
         );
-
         slot.run_task("task-kill".to_string(), "/tmp/project".to_string())
             .await
             .expect("dispatch should be accepted");
         slot.kill().await.expect("kill should be accepted");
-
         let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
             .await
             .expect("event should arrive")
             .expect("event channel should stay open");
-
         match evt {
             SlotEvent::Killed {
                 slot_id,
@@ -687,7 +645,6 @@ mod tests {
             }
             other => panic!("expected SlotEvent::Killed, got {other:?}"),
         }
-
         let kill_span = layer
             .spans()
             .into_iter()
@@ -705,7 +662,6 @@ mod tests {
             Some("test/kill-model")
         );
     }
-
     /// Additive re-dispatch path: the slot actor must hand the optional
     /// resume-via-git lifecycle metadata blob to the lifecycle runner so it
     /// lands on `TaskRunSpec::resume_lifecycle_metadata`. The runner records
@@ -717,7 +673,6 @@ mod tests {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-
         // Shared slot to capture what the runner received.
         let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -737,7 +692,6 @@ mod tests {
                 })
             },
         );
-
         let slot = SlotHandle::spawn_with_runner(
             11,
             "test/resume-model".to_string(),
@@ -746,7 +700,6 @@ mod tests {
             cancel,
             runner,
         );
-
         // Build a representative resume metadata blob (mirrors
         // `djinn_runtime::ResumeLifecycleMetadata`).
         let metadata = serde_json::json!({
@@ -762,7 +715,6 @@ mod tests {
                 {"kind": "auto_submit", "reason": "auto_submit_not_accepted"}
             ]
         });
-
         slot.run_task_with_resume(
             "task-resume".to_string(),
             "/tmp/project".to_string(),
@@ -770,11 +722,9 @@ mod tests {
         )
         .await
         .expect("dispatch with resume metadata should be accepted");
-
         // Wait for the lifecycle to complete (the runner returns Ok(()) on its
         // own after recording the metadata).
         let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
-
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded,
@@ -783,7 +733,6 @@ mod tests {
              so downstream `TaskRunSpec::resume_lifecycle_metadata` carries the full selection"
         );
     }
-
     /// Default/off path: the legacy `run_task` entry point must thread
     /// `None` for the resume metadata, preserving the byte-for-byte
     /// existing dispatch contract. A bug here would silently resume tasks
@@ -793,7 +742,6 @@ mod tests {
         let _tracing_guard = tracing_lock().await;
         let (app_state, cancel, _temp) = test_app_state();
         let (event_tx, mut event_rx) = mpsc::channel(4);
-
         let observed: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let observed_clone = observed.clone();
@@ -812,7 +760,6 @@ mod tests {
                 })
             },
         );
-
         let slot = SlotHandle::spawn_with_runner(
             12,
             "test/default-model".to_string(),
@@ -821,13 +768,10 @@ mod tests {
             cancel,
             runner,
         );
-
         slot.run_task("task-default".to_string(), "/tmp/project".to_string())
             .await
             .expect("legacy dispatch should be accepted");
-
         let _ = tokio::time::timeout(Duration::from_secs(1), event_rx.recv()).await;
-
         let recorded = observed.lock().expect("observed mutex").clone();
         assert_eq!(
             recorded, None,

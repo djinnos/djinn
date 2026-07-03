@@ -76,7 +76,6 @@ impl SessionBudgetPolicy {
     pub(crate) fn from_env() -> Result<Self, SessionBudgetConfigError> {
         Self::from_env_iter(env::vars())
     }
-
     #[cfg(test)]
     fn from_env_iter<I, K, V>(vars: I) -> Result<Self, SessionBudgetConfigError>
     where
@@ -90,7 +89,6 @@ impl SessionBudgetPolicy {
             .collect();
         Self::from_env_map(&env)
     }
-
     #[cfg(not(test))]
     fn from_env_iter<I, K, V>(vars: I) -> Result<Self, SessionBudgetConfigError>
     where
@@ -104,7 +102,6 @@ impl SessionBudgetPolicy {
             .collect();
         Self::from_env_map(&env)
     }
-
     fn from_env_map(env: &HashMap<String, String>) -> Result<Self, SessionBudgetConfigError> {
         let mut policy = Self::default();
         for role in [
@@ -114,7 +111,6 @@ impl SessionBudgetPolicy {
         ] {
             let prefix = role.env_prefix();
             let mut override_value = RoleBudgetOverride::default();
-
             let max_turns_var = format!("DJINN_SESSION_BUDGET_{prefix}_MAX_TURNS");
             override_value.max_turns = parse_optional_u32(env, &max_turns_var, |v| {
                 if v >= 2 {
@@ -123,7 +119,6 @@ impl SessionBudgetPolicy {
                     Err("must be at least 2 so the wind-down turn has room to run".to_string())
                 }
             })?;
-
             let max_tokens_var = format!("DJINN_SESSION_BUDGET_{prefix}_MAX_CUMULATIVE_TOKENS");
             override_value.max_cumulative_tokens = parse_optional_u64(env, &max_tokens_var, |v| {
                 if v > 0 {
@@ -132,13 +127,10 @@ impl SessionBudgetPolicy {
                     Err("must be greater than zero".to_string())
                 }
             })?;
-
             let soft_var = format!("DJINN_SESSION_BUDGET_{prefix}_SOFT_THRESHOLD_RATIO");
             override_value.soft_threshold_ratio = parse_optional_ratio(env, &soft_var)?;
-
             let hard_var = format!("DJINN_SESSION_BUDGET_{prefix}_HARD_THRESHOLD_RATIO");
             override_value.hard_threshold_ratio = parse_optional_ratio(env, &hard_var)?;
-
             if let (Some(soft), Some(hard)) = (
                 override_value.soft_threshold_ratio,
                 override_value.hard_threshold_ratio,
@@ -149,14 +141,12 @@ impl SessionBudgetPolicy {
                     reason: format!("must be less than {hard_var}; got soft={soft}, hard={hard}"),
                 });
             }
-
             if override_value != RoleBudgetOverride::default() {
                 policy.role_overrides.insert(role, override_value);
             }
         }
         Ok(policy)
     }
-
     pub(crate) fn resolve(
         &self,
         role_name: &str,
@@ -173,7 +163,6 @@ impl SessionBudgetPolicy {
         } else {
             self.fallback_context_window_tokens
         };
-
         let default_max_cumulative_tokens =
             u64::from(context_window_tokens) * u64::from(defaults.cumulative_context_windows);
         let soft_threshold_ratio = overrides
@@ -185,7 +174,6 @@ impl SessionBudgetPolicy {
         debug_assert!(soft_threshold_ratio > 0.0);
         debug_assert!(soft_threshold_ratio < hard_threshold_ratio);
         debug_assert!(hard_threshold_ratio <= 1.0);
-
         ResolvedSessionBudget {
             role_name: role_name.to_string(),
             role,
@@ -276,7 +264,6 @@ impl SessionBudgetRole {
             _ => Self::Other,
         }
     }
-
     fn defaults(self) -> RoleBudgetDefault {
         match self {
             Self::Worker => RoleBudgetDefault {
@@ -297,7 +284,6 @@ impl SessionBudgetRole {
             },
         }
     }
-
     fn env_prefix(self) -> &'static str {
         match self {
             Self::Worker => "WORKER",
@@ -376,7 +362,6 @@ fn config_error(var_name: &str, reason: String) -> SessionBudgetConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn policy_from_pairs(
         pairs: &[(&str, &str)],
     ) -> Result<SessionBudgetPolicy, SessionBudgetConfigError> {
@@ -386,15 +371,12 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
         )
     }
-
     #[test]
     fn role_defaults_distinguish_turns_and_scale_tokens_by_context_window() {
         let policy = SessionBudgetPolicy::default();
-
         let worker = policy.resolve("worker", "anthropic/claude", 200_000, None);
         let planner = policy.resolve("planner", "anthropic/claude", 200_000, None);
         let architect = policy.resolve("architect", "anthropic/claude", 200_000, None);
-
         assert_eq!(worker.effective_max_turns, 1000);
         assert_eq!(planner.effective_max_turns, 600);
         assert_eq!(architect.effective_max_turns, 400);
@@ -404,20 +386,16 @@ mod tests {
         assert_eq!(worker.soft_threshold_ratio, 0.75);
         assert_eq!(worker.hard_threshold_ratio, 0.92);
     }
-
     #[test]
     fn unknown_context_window_uses_deterministic_conservative_fallback() {
         let policy = SessionBudgetPolicy::default();
-
         let zero = policy.resolve("planner", "test/unknown", 0, None);
         let negative = policy.resolve("planner", "test/unknown", -1, None);
-
         assert!(!zero.context_window_known);
         assert_eq!(zero.context_window_tokens, 64_000);
         assert_eq!(zero.max_cumulative_tokens, 768_000);
         assert_eq!(negative.max_cumulative_tokens, zero.max_cumulative_tokens);
     }
-
     #[test]
     fn role_scoped_overrides_are_applied_and_test_turn_override_wins() {
         let policy = policy_from_pairs(&[
@@ -430,23 +408,19 @@ mod tests {
             ("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.90"),
         ])
         .expect("valid role-scoped overrides");
-
         let production = policy.resolve("worker", "test/model", 100_000, None);
         assert_eq!(production.effective_max_turns, 321);
         assert_eq!(production.max_cumulative_tokens, 654_321);
         assert_eq!(production.soft_threshold_ratio, 0.70);
         assert_eq!(production.hard_threshold_ratio, 0.90);
-
         let test = policy.resolve("worker", "test/model", 100_000, Some(1));
         assert_eq!(test.effective_max_turns, 2);
     }
-
     #[test]
     fn invalid_overrides_are_rejected() {
         let err = policy_from_pairs(&[("DJINN_SESSION_BUDGET_PLANNER_MAX_TURNS", "1")])
             .expect_err("turn cap below two is invalid");
         assert_eq!(err.var_name, "DJINN_SESSION_BUDGET_PLANNER_MAX_TURNS");
-
         let err =
             policy_from_pairs(&[("DJINN_SESSION_BUDGET_ARCHITECT_SOFT_THRESHOLD_RATIO", "1.2")])
                 .expect_err("ratio above one is invalid");
@@ -454,7 +428,6 @@ mod tests {
             err.var_name,
             "DJINN_SESSION_BUDGET_ARCHITECT_SOFT_THRESHOLD_RATIO"
         );
-
         let err = policy_from_pairs(&[
             ("DJINN_SESSION_BUDGET_WORKER_SOFT_THRESHOLD_RATIO", "0.95"),
             ("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.90"),

@@ -13,8 +13,6 @@ use djinn_db::TaskRepository;
 use djinn_orchestration_types::coordinator::PR_REVIEW_FEEDBACK_EVENT;
 // use djinn_provider::repos::CredentialRepository; // unused — re-enable when credential helpers are wired
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
 /// Max characters for verification output included in user messages.
 /// Keeps the user-message payload reasonable (clippy stderr can be huge).
 const MAX_VERIFICATION_CHARS: usize = 3000;

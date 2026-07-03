@@ -84,7 +84,6 @@ pub async fn log_commands_run_event(
         "success": success,
         "commands": commands,
     });
-
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = task_repo
         .log_activity(

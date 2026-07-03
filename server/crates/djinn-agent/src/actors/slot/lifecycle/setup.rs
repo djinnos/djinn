@@ -1,10 +1,4 @@
 //! Setup-command execution for the task lifecycle.
-//!
-//! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
-//! preparatory work). The caller is responsible for reacting to
-//! [`SetupError`] — e.g. task-status transition + worktree teardown — so that
-//! the extracted function has no knowledge of the surrounding task-run
-//! context.
 
 use std::path::Path;
 
@@ -13,36 +7,17 @@ use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::environment::hook_commands_to_specs;
 
-/// Resolved prompt-context fragments produced after running project setup
-/// commands.
+/// Resolved prompt-context fragments produced after running project setup commands.
 pub(crate) struct SetupContext {
     pub prompt_setup_commands: Option<String>,
 }
 
 /// Failure from [`resolve_setup_context`].
-///
-/// Carries the human-readable reason string that the caller will thread into
-/// the task-status transition (preserving the original error-to-transition
-/// semantics of `run_task_lifecycle`).
 pub(crate) struct SetupError {
     pub reason: String,
 }
 
 /// Run project setup commands (if any) and format them for the prompt.
-///
-/// Setup commands come from `environment_config.lifecycle.pre_verification`;
-/// callers fetch them upstream and pass them in.
-///
-/// This mirrors the byte-for-byte behaviour of the former inline block in
-/// `run_task_lifecycle`:
-///   - emits `setup_command_started` / `setup_command_finished` task-lifecycle
-///     step events for each spec,
-///   - logs a `commands_run` activity entry on success,
-///   - returns a [`SetupError`] with the same reason strings the old block
-///     used for task-status transitions on setup failure.
-///
-/// The caller is responsible for all task-status transitions and worktree
-/// teardown on error — this function does not touch either.
 pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,
@@ -57,7 +32,6 @@ pub(crate) async fn resolve_setup_context(
                 task_id, step, &detail,
             ));
     };
-
     let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     if !setup_specs.is_empty() {
@@ -99,7 +73,6 @@ pub(crate) async fn resolve_setup_context(
                 }
             }
         }
-
         match setup_error {
             Some(e) => {
                 let reason = format!("Setup commands error: {e}");

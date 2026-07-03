@@ -24,7 +24,6 @@ impl ProviderCredential {
         }
         self
     }
-
     /// Convert into a wire-friendly [`djinn_runtime::SerializableCredential`].
     /// OAuth configs are projected onto [`OAuthConfigWire`] because the upstream
     /// `ProviderConfig` does not implement `Serialize`.
@@ -117,7 +116,6 @@ impl OAuthConfigWire {
             reasoning_effort: cfg.reasoning_effort,
         }
     }
-
     /// Reconstitute a live [`djinn_provider::provider::ProviderConfig`] from
     /// the wire mirror. Used by `djinn-agent-worker` to rebuild OAuth configs
     /// shipped over the Secret mount.
@@ -242,7 +240,6 @@ pub async fn load_provider_credential(
     let effective_id = effective_oauth_provider_id(provider_id);
     let credential_repo =
         CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     // 1. Try OAuth tokens first for OAuth-capable providers.
     match effective_id {
         "chatgpt_codex" => {
@@ -257,7 +254,6 @@ pub async fn load_provider_credential(
         }
         _ => {}
     }
-
     // 2. Fall back to credential vault (DB).
     let key_name = app_state
         .catalog
@@ -266,12 +262,10 @@ pub async fn load_provider_credential(
         .find(|p| p.id == provider_id)
         .and_then(|p| p.env_vars.into_iter().next())
         .unwrap_or_else(|| format!("{}_API_KEY", provider_id.to_ascii_uppercase()));
-
     let key = credential_repo
         .get_decrypted(&key_name)
         .await
         .map_err(|e| anyhow::anyhow!("credential lookup failed: {e}"))?;
-
     match key {
         Some(v) => Ok(ProviderCredential::ApiKey(key_name, v)),
         None => Err(anyhow::anyhow!(
@@ -369,8 +363,6 @@ pub(crate) fn resolved_needs_base_url(
     )
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,7 +370,6 @@ mod tests {
         AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort,
     };
     use serde_json::Value;
-
     fn sample_oauth_config(
         reasoning: Option<ReasoningEffort>,
     ) -> djinn_provider::provider::ProviderConfig {
@@ -401,44 +392,36 @@ mod tests {
             reasoning_effort: reasoning,
         }
     }
-
-    /// `Some(ReasoningEffort::Medium)` survives the `OAuthConfigWire`
-    /// host→Secret→worker round-trip exactly.
+    /// OAuth wire round-trip preserves reasoning_effort and core fields for both Some and None.
     #[test]
-    fn oauth_wire_round_trip_preserves_some_medium() {
-        let original = sample_oauth_config(Some(ReasoningEffort::Medium));
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-
-        assert_eq!(
-            reconstructed.reasoning_effort,
-            Some(ReasoningEffort::Medium)
-        );
-        assert_eq!(reconstructed.base_url, original.base_url);
-        assert_eq!(reconstructed.model_id, original.model_id);
-        assert_eq!(reconstructed.context_window, original.context_window);
-        assert_eq!(
-            reconstructed.session_affinity_key,
-            original.session_affinity_key
-        );
-        assert_eq!(reconstructed.provider_headers, original.provider_headers);
-        assert!(reconstructed.telemetry.is_none());
+    fn oauth_wire_round_trip_preserves_reasoning_effort_and_fields() {
+        for (reasoning, label) in [
+            (Some(ReasoningEffort::Medium), "Some(Medium)"),
+            (None, "None"),
+        ] {
+            let original = sample_oauth_config(reasoning);
+            let wire = OAuthConfigWire::from_provider_config(&original);
+            let json = serde_json::to_string(&wire).expect("serialize");
+            let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
+            let reconstructed = decoded.to_provider_config();
+            assert_eq!(reconstructed.reasoning_effort, reasoning, "{label}");
+            assert_eq!(reconstructed.base_url, original.base_url, "{label}");
+            assert_eq!(reconstructed.model_id, original.model_id, "{label}");
+            assert_eq!(
+                reconstructed.context_window, original.context_window,
+                "{label}"
+            );
+            assert_eq!(
+                reconstructed.session_affinity_key, original.session_affinity_key,
+                "{label}"
+            );
+            assert_eq!(
+                reconstructed.provider_headers, original.provider_headers,
+                "{label}"
+            );
+            assert!(reconstructed.telemetry.is_none(), "{label}");
+        }
     }
-
-    /// A host-resolved `None` (e.g. Codex/OpenAI Responses) round-trips cleanly.
-    #[test]
-    fn oauth_wire_round_trip_preserves_none() {
-        let original = sample_oauth_config(None);
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-
-        assert_eq!(reconstructed.reasoning_effort, None);
-    }
-
     /// A legacy OAuth JSON blob without `reasoning_effort` deserializes to `None`.
     #[test]
     fn oauth_wire_legacy_blob_without_field_deserializes_to_none() {
@@ -459,7 +442,6 @@ mod tests {
         assert_eq!(reconstructed.format_family, FormatFamily::OpenAIResponses);
         assert_eq!(reconstructed.model_id, "gpt-5.1-codex");
     }
-
     /// JSON wire token for `Some(Medium)` is the literal `"medium"`.
     #[test]
     fn oauth_wire_serializes_some_medium_as_lowercase_token() {
@@ -470,7 +452,6 @@ mod tests {
             json["reasoning_effort"],
             Value::String("medium".to_string())
         );
-
         for (tier, token) in [
             (ReasoningEffort::Minimal, "minimal"),
             (ReasoningEffort::Low, "low"),
@@ -482,13 +463,11 @@ mod tests {
             assert_eq!(v["reasoning_effort"], Value::String(token.to_string()));
         }
     }
-
     /// Codex/gpt-5.x OpenAI Responses request rendering is byte-equivalent
     /// under the shared policy when round-tripped through the wire mirror.
     #[test]
     fn oauth_wire_codex_openai_responses_request_rendering_is_byte_equivalent() {
         use djinn_provider::provider::default_reasoning_effort_for_model;
-
         let policy_for_codex = default_reasoning_effort_for_model(
             true,
             FormatFamily::OpenAIResponses,
@@ -498,20 +477,16 @@ mod tests {
             policy_for_codex, None,
             "shared policy must keep Codex/gpt-5.1-codex reasoning_effort at None"
         );
-
         let mut host_config = sample_oauth_config(None);
         host_config.base_url = "https://api.openai.com".to_string();
         host_config.format_family = FormatFamily::OpenAIResponses;
         host_config.model_id = "gpt-5.1-codex".to_string();
         host_config.context_window = 400_000;
-
         assert_eq!(host_config.reasoning_effort, None);
-
         let wire = OAuthConfigWire::from_provider_config(&host_config);
         let json = serde_json::to_string(&wire).expect("serialize");
         let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
         let reconstructed = decoded.to_provider_config();
-
         assert_eq!(reconstructed.reasoning_effort, host_config.reasoning_effort);
         assert_eq!(reconstructed.reasoning_effort, None);
         assert_eq!(reconstructed.format_family, host_config.format_family);

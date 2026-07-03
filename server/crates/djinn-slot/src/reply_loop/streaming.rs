@@ -92,8 +92,7 @@ pub(super) struct StreamLoopContext<'a> {
     pub total_reasoning_out: &'a mut u32,
 }
 
-/// Throttle interval for the worker→host activity-touch RPC in the
-/// per-StreamEvent loop.
+/// Throttle interval for the worker→host activity-touch RPC in the per-StreamEvent loop.
 const TOUCH_ACTIVITY_RPC_INTERVAL_SECS: u64 = 30;
 
 /// Throttle interval for the mid-flight session-row token flush.
@@ -104,7 +103,6 @@ pub(super) async fn consume_provider_stream(
 ) -> anyhow::Result<StreamTurnState> {
     let mut state = StreamTurnState::new();
     let mut streaming_inflight: FuturesUnordered<StreamingFut<'_>> = FuturesUnordered::new();
-
     loop {
         tokio::select! {
             biased;
@@ -137,15 +135,12 @@ pub(super) async fn consume_provider_stream(
                         return Err(e.context(detail));
                     }
                 };
-
                 state.saw_round_event = true;
-
                 let now = ctx.ctx.clock.now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 ctx.activity_ts.store(now, Ordering::Relaxed);
-
                 // Bridge to the host's ActivityTracker.
                 let last = ctx.last_rpc_touch.load(Ordering::Relaxed);
                 if now.saturating_sub(last) >= TOUCH_ACTIVITY_RPC_INTERVAL_SECS {
@@ -159,7 +154,6 @@ pub(super) async fn consume_provider_stream(
                         );
                     }
                 }
-
                 match evt {
                     StreamEvent::Delta(ContentBlock::Text { text }) => {
                         ctx.ctx.event_bus.send(DjinnEventEnvelope::session_message(
@@ -228,7 +222,6 @@ pub(super) async fn consume_provider_stream(
                             ctx.total_cache_write.saturating_add(usage.cache_write);
                         *ctx.total_reasoning_out =
                             ctx.total_reasoning_out.saturating_add(usage.reasoning_output);
-
                         let usage_pct = if ctx.context_window > 0 {
                             *ctx.current_context_tokens as f64 / ctx.context_window as f64
                         } else {
@@ -245,7 +238,6 @@ pub(super) async fn consume_provider_stream(
                             usage.cache_write as i64,
                             usage.reasoning_output as i64,
                         ));
-
                         // Persist mid-flight token counters.
                         let last = ctx.last_token_flush.load(Ordering::Relaxed);
                         if now.saturating_sub(last) >= TOKEN_FLUSH_INTERVAL_SECS {
@@ -276,7 +268,6 @@ pub(super) async fn consume_provider_stream(
             }
         }
     }
-
     while let Some(result) = streaming_inflight.next().await {
         state.streaming_results.push(result);
     }
@@ -288,7 +279,6 @@ pub(super) async fn consume_provider_stream(
             "ReplyLoop: streaming dispatch complete (ADR-048 §1B)"
         );
     }
-
     let _ = ctx.provider.name();
     Ok(state)
 }

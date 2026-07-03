@@ -26,7 +26,6 @@ fn assert_single_structured_ci_directive(prompt: &str) {
         1,
         "prompt must contain exactly one promoted CI BLOCKING directive"
     );
-
     let directive = ci_directive_section(prompt);
     assert_contains_all(
         directive,
@@ -79,7 +78,6 @@ async fn task_with_structured_red_ci_and_audit_activity(
         )
         .await
         .expect("create CI prompt task");
-
     for body in [
         "CI audit: required check failed. job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used",
         "CI audit repeat: job=Audit Log CI Job Should Not Be Promoted; reason=audit-log-reason-should-not-be-used; head=audit-log-head-sha-should-not-be-used",
@@ -95,7 +93,6 @@ async fn task_with_structured_red_ci_and_audit_activity(
             .await
             .expect("log CI audit activity");
     }
-
     let mut task = task;
     task.ci_status = "failing".into();
     task.ci_head_sha = Some("structured-head-sha-314159".into());
@@ -116,9 +113,7 @@ async fn prompt_context_has_one_promoted_structured_ci_directive_per_role() {
         let db = Database::ephemeral().await.expect("create ephemeral db");
         let events = EventBus::noop();
         let task = task_with_structured_red_ci_and_audit_activity(&db, &events).await;
-
         let ctx = assemble_for_role(db, &task, role, None, "", None, &[], &[]).await;
-
         assert_single_structured_ci_directive(&ctx.system_prompt);
         let activity = ctx
             .activity_text
@@ -202,7 +197,6 @@ fn build_ci_blocking_directive_renders_failing_snapshot_fields() {
         Some("base-sha-123"),
     ))
     .expect("directive should be Some");
-
     assert_contains_all(
         &directive,
         &[
@@ -273,7 +267,6 @@ fn build_ci_blocking_directive_default_and_optional_field_cases() {
             vec!["Failure fingerprint"],
         ),
     ];
-
     for (name, task, present, absent) in cases {
         let directive = build_ci_blocking_directive(&task).unwrap_or_else(|| panic!("{name}"));
         assert_contains_all(&directive, &present);
@@ -316,7 +309,6 @@ fn sa4x_directive_contains_concrete_values_and_is_stable() {
             "REQUIRED CI is failing",
         ],
     );
-
     for i in 0..5 {
         assert_eq!(
             directive,
