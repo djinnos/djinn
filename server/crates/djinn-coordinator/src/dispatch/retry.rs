@@ -330,29 +330,14 @@ impl CoordinatorActor {
 
     /// Trigger A: route a stuck worker task to a Planner intervention pass.
     ///
-    /// A task whose DB-backed quality reopen count
-    /// (`TaskRepository::quality_reopen_count`) crosses
-    /// `REOPEN_INTERVENTION_THRESHOLD` is, by definition, not converging on its
-    /// own — most commonly because the internal reviewer keeps rejecting the SAME
-    /// acceptance criterion every round.  Quality strikes exclude `merge_conflict`
-    /// and `superseded` reopens, so merge-conflict PR retries no longer arm this
-    /// trigger.  Re-dispatching the worker a fourth time will not help, so we hand
-    /// the task to the Planner, which can DECIDE how to unstick it (decompose into
-    /// focused subtasks, rescope the AC, close as moot/duplicate, or apply the
-    /// feedback) using the existing intervention machinery — the planner Workflow C
-    /// path that `dispatch_planner_escalation` already drives.
+    /// Gates on DB-backed `quality_reopen_count` (excludes `merge_conflict` /
+    /// `superseded`) reaching `REOPEN_INTERVENTION_THRESHOLD`. The Planner
+    /// decomposes, rescopes, or closes via `dispatch_planner_escalation`.
     ///
-    /// Returns `true` when the task was routed to a Planner (caller skips the
-    /// worker dispatch this pass), `false` otherwise.
+    /// Returns `true` when routed (caller skips the worker dispatch).
     ///
-    /// Idempotency: a `planner_intervention` activity marker is written per
-    /// `reopen_count` value. While the task stays at the same reopen count — or
-    /// while the Planner intervention is in flight — the marker suppresses
-    /// re-dispatching a Planner on every tick. The marker is keyed by the raw
-    /// `reopen_count` so that `reset_intervention_counters` (which clears
-    /// `reopen_count` to 0) naturally re-arms a fresh intervention when the task
-    /// climbs back to the threshold.  The `quality_strikes` count is stored in
-    /// the marker payload for audit/diagnostics.
+    /// Idempotency: marker keyed by raw `reopen_count` (re-arms after
+    /// `reset_intervention_counters`). `quality_strikes` stored for audit.
     #[tracing::instrument(
         name = "djinn.dispatch.intervention.trigger",
         skip(self, task),
@@ -362,16 +347,11 @@ impl CoordinatorActor {
         &mut self,
         task: &djinn_core::models::Task,
     ) -> bool {
-        // Use DB-backed quality_strikes for the intervention threshold instead
-        // of the raw `task.reopen_count`.  Quality strikes exclude
-        // merge_conflict and superseded reopens, so merge-conflict PR retries
-        // no longer arm planner interventions.
+        // Gate on DB-backed quality_strikes (excludes merge_conflict/superseded).
         let quality_strikes: i64 = match self.task_repo().quality_reopen_count(&task.id).await {
             Ok(count) => count,
             Err(e) => {
-                // Fail safe: on a DB read error, do NOT intervene — the normal
-                // dispatch + escalating cooldown still bounds the loop.  Better
-                // to under-trigger than to spam Planners on a transient error.
+                // Fail safe: skip intervention on DB errors.
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
@@ -585,20 +565,9 @@ impl CoordinatorActor {
         quality_strikes: i64,
     ) -> bool {
         tracing::Span::current().record("attempt", quality_strikes);
-        // Second strike (terminal hold): the Planner has ALREADY intervened on
-        // this task at least `MAX_PLANNER_INTERVENTIONS` time(s) and it has STILL
-        // churned back up to the reopen threshold. The reshape/rescope did not
-        // unstick it. Escalating again just calls `reset_intervention_counters`
-        // (reopen_count→0, intervention_count++) and the worker loops anew,
-        // monopolizing the (often single) dispatch slot indefinitely — the txr4
-        // query_subgraph case burned 37 sessions / ~11h / 10 total reopens behind
-        // one gpt-5.5 slot, starving every other ready task. Hold it indefinitely
-        // on a HUMAN instead of force-closing: a human-review remediation task
-        // blocks the source, which is parked back to `open` so it consumes no
-        // dispatch slot (`list_ready` skips blocked-open tasks) yet stays
-        // revivable — `emit_unblocked_tasks` resurfaces it the moment a human
-        // resolves the remediation. The work and its branch persist; nothing is
-        // auto-closed.
+        // Second strike: hold on human-review remediation instead of
+        // re-escalating (which just resets and loops). Parked to `open`
+        // so the dispatch slot is freed; human resolves the remediation.
         if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
             let reason = format!(
                 "Auto-parked for human review: {} planner intervention(s) failed to break the \
@@ -660,10 +629,7 @@ impl CoordinatorActor {
             return true;
         }
 
-        // Idempotency guard: have we already routed a Planner for THIS reopen
-        // count? The marker is keyed by raw `reopen_count` (not quality_strikes)
-        // so that `reset_intervention_counters` (which clears `reopen_count` to
-        // 0) naturally re-arms a fresh intervention when the task climbs back.
+        // Idempotency: keyed by raw reopen_count for re-arm after reset.
         match self
             .planner_intervention_marker_exists(task, task.reopen_count)
             .await
@@ -671,9 +637,7 @@ impl CoordinatorActor {
             Ok(true) => return false,
             Ok(false) => {}
             Err(e) => {
-                // Fail safe: on a DB read error, do NOT intervene (the normal
-                // dispatch + escalating cooldown still bounds the loop). Better
-                // to under-trigger than to spam Planners on a transient error.
+                // Fail safe: skip intervention on DB errors.
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
@@ -683,9 +647,7 @@ impl CoordinatorActor {
             }
         }
 
-        // Record the marker BEFORE dispatching so a concurrent tick (or a
-        // dispatch failure) cannot double-fire for the same reopen count.
-        // `quality_strikes` is stored in the payload for audit.
+        // Record the marker BEFORE dispatching to prevent double-fire.
         if let Err(e) = self
             .record_planner_intervention_marker(task, task.reopen_count, quality_strikes)
             .await
@@ -732,10 +694,7 @@ impl CoordinatorActor {
     }
 
     /// Returns `true` if a `planner_intervention` marker already exists for
-    /// `task` at the given `reopen_count`.  The marker idempotency key is the
-    /// raw `reopen_count` so that `reset_intervention_counters` (which clears
-    /// `reopen_count` to 0) naturally re-arms a fresh intervention when the
-    /// task climbs back to the threshold.
+    /// `task` at the given raw `reopen_count`.
     async fn planner_intervention_marker_exists(
         &self,
         task: &djinn_core::models::Task,
@@ -769,12 +728,8 @@ impl CoordinatorActor {
         }))
     }
 
-    /// Record a `planner_intervention` marker for `task` at the given
-    /// `reopen_count`.  The `quality_strikes` count is stored alongside for
-    /// audit/diagnostics but does NOT drive idempotency — `reopen_count` is
-    /// the idempotency key so that `reset_intervention_counters` (which clears
-    /// `reopen_count` to 0) naturally re-arms a fresh intervention when the
-    /// task climbs back to the threshold.
+    /// Record a `planner_intervention` marker keyed by raw `reopen_count`.
+    /// `quality_strikes` stored in payload for audit.
     async fn record_planner_intervention_marker(
         &self,
         task: &djinn_core::models::Task,
