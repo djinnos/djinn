@@ -125,6 +125,7 @@ enum McpTransportKind {
     Unsupported,
 }
 
+#[allow(dead_code)]
 impl ResolvedMcpServerConfig {
     fn transport_kind(&self) -> McpTransportKind {
         if self.url.is_some() {
