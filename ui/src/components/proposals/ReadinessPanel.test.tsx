@@ -636,8 +636,12 @@ describe("ReadinessPanel", () => {
       />,
     );
     expect(screen.getByText("Ready")).toBeInTheDocument();
-    // Evidence row should be na because the classifier sees awaiting_review first.
-    expect(screen.getByText("none required")).toBeInTheDocument();
+    // The evidence checklist row still reflects the gate payload, but the
+    // awaiting-review state is not duplicated as a distinct evidence lifecycle
+    // note (and no automatic-resume / in-progress copy appears).
+    expect(
+      screen.getByText(/awaiting evidence — spike sp-ar \(in_progress\)/),
+    ).toBeInTheDocument();
     // No evidence note should render.
     expect(
       screen.queryByText(/Awaiting evidence:/),
@@ -703,10 +707,15 @@ describe("ReadinessPanel", () => {
     );
     // The panel renders because gateStatus is present.
     expect(container.innerHTML).not.toBe("");
-    expect(screen.getByText("Awaiting evidence: sp-only")).toBeInTheDocument();
+    expect(screen.getByText("Readiness gate")).toBeInTheDocument();
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
+    // When refinement is null the classifier returns not_started, so the panel
+    // does not render evidence lifecycle notes; it still renders the checklist.
+    expect(screen.getByText("none required")).toBeInTheDocument();
     expect(
-      screen.getByText(/awaiting evidence — spike sp-only \(open\)/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Awaiting evidence:/),
+    ).not.toBeInTheDocument();
   });
 
   // ── Regression: normal states still render correctly ────────────────────
