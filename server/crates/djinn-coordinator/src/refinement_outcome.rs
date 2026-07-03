@@ -11,25 +11,12 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
     RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
     select_refinement_model,
 };
-
-fn phase_name(phase: RefinementPhase) -> &'static str {
-    match phase {
-        RefinementPhase::AdversaryAttack => "adversary_attack",
-        RefinementPhase::AdvocateRevision => "advocate_revision",
-        RefinementPhase::JudgeAdjudication => "judge_adjudication",
-        RefinementPhase::AwaitingHumanReview => "awaiting_human_review",
-        RefinementPhase::Complete => "complete",
-        RefinementPhase::AwaitingEvidence => "awaiting_evidence",
-    }
-}
 
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
@@ -95,277 +82,572 @@ impl CoordinatorActor {
                 return;
             }
             Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "Failed to read proposal after advocate session"
-                );
+                tracing::warn!(proposal_id = %proposal_id, error = %e, "DB error reading proposal");
+                self.terminate_refinement(
+                    proposal_id,
+                    StopReason::AgentFailure {
+                        role: "advocate".into(),
+                        error: format!("DB error: {e}"),
+                    },
+                )
+                .await;
                 return;
             }
         };
 
-        let revision = proposal.latest_revision_seq;
+        let new_revision_seq = proposal.latest_revision_seq;
+        let advanced = new_revision_seq > state.current_revision_seq;
 
-        // If the judge is not the current agent, this is the first pass; just
-        // note the revision and move to the adversary phase.
-        if state.judge_agent.is_none() {
-            self.advance_to_phase(
-                proposal_id,
-                RefinementPhase::AdversaryAttack,
-                state.with_revision(revision),
-            )
-            .await;
-            return;
+        if advanced {
+            let model_id = self
+                .refinement_sessions
+                .get(proposal_id)
+                .map(|s| s.model_id.clone());
+            let event_meta =
+                build_revision_event_metadata(state.current_round, model_id.as_deref());
+            let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+            let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+            if let Err(e) = proposal_repo2
+                .set_spec_revisions_event_metadata_range(
+                    proposal_id,
+                    state.current_revision_seq,
+                    new_revision_seq,
+                    &event_meta,
+                )
+                .await
+            {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    seq = new_revision_seq,
+                    error = %e,
+                    "Failed to patch advocate revision event_metadata"
+                );
+            }
         }
 
-        // Otherwise this is an adversary-driven revision: update the adversary
-        // record with the new revision and clear the objection flag so the loop
-        // can re-evaluate.
-        let mut next_state = state.clone();
-        next_state.adversary_pass_outcome = Some(AdversaryPassOutcome::Revised {
-            new_revision: revision,
-        });
-        next_state.objection = None;
-        self.advance_to_phase(proposal_id, RefinementPhase::AdversaryAttack, next_state)
-            .await;
+        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            if advanced {
+                state.record_advocate_revision(new_revision_seq);
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    new_seq = new_revision_seq,
+                    round = state.current_round,
+                    "Advocate produced revision; handing to judge"
+                );
+            } else {
+                state.phase = RefinementPhase::JudgeAdjudication;
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    revision_seq = state.current_revision_seq,
+                    round = state.current_round,
+                    "Advocate session produced no revision; handing to judge on current spec"
+                );
+            }
+        }
     }
 
-    /// Process an adversary session outcome: read the objection record (if any),
-    /// decide whether to continue, escalate, or end refinement.
+    /// Process an adversary session outcome: read debate-trail objections
+    /// and feed them to the state machine.
     async fn process_adversary_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
-        let proposal = match proposal_repo.get(proposal_id).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                tracing::warn!(proposal_id = %proposal_id, "Proposal not found after adversary");
+        let entries = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "DB error reading debate trail"
+                );
                 self.terminate_refinement(
                     proposal_id,
                     StopReason::AgentFailure {
                         role: "adversary".into(),
-                        error: "proposal not found after session".into(),
+                        error: format!("DB error: {e}"),
                     },
                 )
                 .await;
                 return;
             }
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "Failed to read proposal after adversary session"
-                );
-                return;
-            }
         };
 
-        // Read the most recent objection record for this proposal and revision.
-        let objection = match ObjectionRecord::latest_for_revision(
-            self.db.clone(),
-            proposal_id,
-            state.focused_revision,
-        )
-        .await
-        {
-            Ok(Some(obj)) => Some(obj),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    revision = state.focused_revision,
-                    error = %e,
-                    "Failed to read objection record after adversary session"
-                );
-                None
-            }
+        let round = state.current_round;
+        let round_objections: Vec<ObjectionRecord> = entries
+            .iter()
+            .filter(|e| e.agent_role == "adversary" && e.kind == "objection" && e.round == round)
+            .map(|e| ObjectionRecord {
+                body: e.body.clone(),
+                blocking: e.blocking,
+                author_model: e.author_model.clone(),
+                entry_id: Some(e.id.clone()),
+            })
+            .collect();
+
+        let explicit_dry = round_objections.is_empty();
+
+        let adversary_result = AdversaryPassResult {
+            objections: round_objections,
+            explicit_dry,
         };
 
-        let mut next_state = state.clone();
-        next_state.objection = objection.clone();
-
-        let Some(obj) = objection else {
-            // No objection: refinement is complete.
-            self.advance_to_phase(proposal_id, RefinementPhase::Complete, next_state)
-                .await;
+        let Some(state) = self.active_refinements.get_mut(proposal_id) else {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                "adversary outcome arrived for missing refinement state"
+            );
             return;
         };
+        let outcome = state.process_adversary_pass(&adversary_result);
 
-        if obj.blocking {
-            // Blocking objection: count it and decide whether to escalate or
-            // continue revising.
-            next_state.blocking_objection_count += 1;
-            if next_state.blocking_objection_count >= 3 {
-                self.terminate_refinement(proposal_id, StopReason::EscalatedToHuman)
-                    .await;
-                return;
+        match outcome {
+            AdversaryPassOutcome::Continue => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    round,
+                    "Adversary found blocking objections — next round"
+                );
             }
-            // Need a revision from the advocate.
-            self.advance_to_phase(proposal_id, RefinementPhase::AdvocateRevision, next_state)
-                .await;
-            return;
+            AdversaryPassOutcome::Dry => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    round,
+                    "Adversary dry — judge will adjudicate"
+                );
+            }
+            AdversaryPassOutcome::Escalated(reason) => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    round,
+                    ?reason,
+                    "Refinement escalated — parking for human review"
+                );
+                if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                    let summary = format!("Escalated to human review: {reason:?}");
+                    self.persist_awaiting_review(proposal_id, &summary, &state)
+                        .await;
+                }
+            }
         }
-
-        // Non-blocking objection: just note it and move to the judge.
-        self.advance_to_phase(proposal_id, RefinementPhase::JudgeAdjudication, next_state)
-            .await;
     }
 
-    /// Process a judge session outcome: read the verdict, update the
-    /// loop state, and either continue refining or finish.
+    /// Persist that the tribunal has parked for human accept/reject review.
+    pub(super) async fn persist_awaiting_review(
+        &self,
+        proposal_id: &str,
+        judge_summary: &str,
+        state: &RefinementLoopState,
+    ) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let meta = serde_json::json!({
+            "source": "refinement_loop",
+            "event": "refinement_awaiting_review",
+            "judge_summary": judge_summary,
+            "snapshot_revision_seq": state.snapshot_revision_seq,
+            "refined_revision_seq": state.current_revision_seq,
+            "stop_reason": state.stop_reason.as_ref().map(|r| r.tag()),
+        });
+        if let Err(e) = proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_awaiting_review", Some(&meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to persist refinement_awaiting_review lifecycle metadata"
+            );
+        }
+
+        // Surface converged-awaiting-review proposals in the standard status
+        // grouping: a `draft` proposal that the tribunal parks for human review
+        // advances to `in_review`. Idempotent and status-scoped (draft-only);
+        // any other status is left untouched.
+        match proposal_repo.advance_draft_to_in_review(proposal_id).await {
+            Ok(true) => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    "Tribunal converged — advanced draft proposal to in_review"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to advance draft proposal to in_review on awaiting-review park"
+                );
+            }
+        }
+    }
+
+    /// Process a judge session outcome: read the verdict from the debate
+    /// trail and advance the state machine.
     async fn process_judge_outcome(&mut self, proposal_id: &str, state: &RefinementLoopState) {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
 
-        let proposal = match proposal_repo.get(proposal_id).await {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                tracing::warn!(proposal_id = %proposal_id, "Proposal not found after judge");
+        let entries = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "DB error reading debate trail"
+                );
                 self.terminate_refinement(
                     proposal_id,
                     StopReason::AgentFailure {
                         role: "judge".into(),
-                        error: "proposal not found after session".into(),
+                        error: format!("DB error: {e}"),
                     },
                 )
                 .await;
                 return;
             }
-            Err(e) => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "Failed to read proposal after judge session"
-                );
-                return;
+        };
+
+        let round = state.current_round;
+
+        // ── Check for an accepted needs-evidence demand first ───────────
+        //
+        // If the Judge called `proposal_refinement_demand_evidence` and the
+        // demand was accepted, a `kind = "needs_evidence"` entry with valid
+        // metadata exists for the current round. This takes priority over a
+        // normal verdict: the loop parks in AwaitingEvidence and no further
+        // tribunal phases are dispatched until the evidence spike produces
+        // findings.
+        let needs_evidence_entry = entries.iter().find(|e| {
+            e.agent_role == "judge"
+                && e.kind == "needs_evidence"
+                && e.round == round
+                && e.body_metadata.is_some()
+        });
+
+        if let Some(_entry) = needs_evidence_entry {
+            if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                state.record_needs_evidence();
+            }
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge demanded evidence — refinement parked (AwaitingEvidence)"
+            );
+            return;
+        }
+
+        // ── Normal verdict path ─────────────────────────────────────────
+        let verdict_entry = entries
+            .iter()
+            .find(|e| e.agent_role == "judge" && e.kind == "verdict" && e.round == round);
+
+        let verdict = if let Some(entry) = verdict_entry {
+            JudgeVerdictResult {
+                body: entry.body.clone(),
+                blocking: entry.blocking,
+            }
+        } else {
+            // No verdict entry: treat as not-ready (non-decision).
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge session completed without a verdict debate-trail entry; treating as not-ready"
+            );
+            JudgeVerdictResult {
+                body: "Judge did not record an explicit verdict (treated as not-ready)".into(),
+                blocking: true,
             }
         };
 
-        let verdict = match &state.objection {
-            Some(obj) => JudgeVerdictResult::from_objection(&proposal, obj).await,
-            None => {
-                // No objection to judge — shouldn't happen, but treat as
-                // complete rather than crash.
-                self.advance_to_phase(proposal_id, RefinementPhase::Complete, state.clone())
-                    .await;
-                return;
-            }
+        let now_awaiting = if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            state.record_judge_verdict(&verdict);
+            state.is_awaiting_human_review()
+        } else {
+            false
         };
 
-        let mut next_state = state.clone();
-
-        match verdict {
-            JudgeVerdictResult::Sustained => {
-                // Sustained objection: the adversary wins; require a revision.
-                next_state.adversary_pass_outcome = Some(AdversaryPassOutcome::Sustained);
-                self.advance_to_phase(proposal_id, RefinementPhase::AdvocateRevision, next_state)
+        if now_awaiting {
+            if let Some(state) = self.active_refinements.get(proposal_id).cloned() {
+                self.persist_awaiting_review(proposal_id, &verdict.body, &state)
                     .await;
             }
-            JudgeVerdictResult::Overruled => {
-                // Overruled objection: the advocate wins; clear the objection
-                // and continue the adversary pass.
-                next_state.adversary_pass_outcome = Some(AdversaryPassOutcome::Overruled);
-                next_state.objection = None;
-                self.advance_to_phase(proposal_id, RefinementPhase::AdversaryAttack, next_state)
-                    .await;
-            }
-            JudgeVerdictResult::NeedsHuman => {
-                self.terminate_refinement(proposal_id, StopReason::EscalatedToHuman)
-                    .await;
-            }
-            JudgeVerdictResult::Error { error } => {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %error,
-                    "Judge verdict parse failed; continuing adversary pass"
-                );
-                next_state.objection = None;
-                self.advance_to_phase(proposal_id, RefinementPhase::AdversaryAttack, next_state)
-                    .await;
-            }
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge ruled READY — tribunal parked for human accept/reject"
+            );
+        } else {
+            tracing::info!(
+                proposal_id = %proposal_id,
+                round,
+                "Judge ruled not-ready — running another round"
+            );
         }
     }
 
-    /// Advance the refinement loop to the next phase.
-    async fn advance_to_phase(
-        &mut self,
-        proposal_id: &str,
-        phase: RefinementPhase,
-        mut next_state: RefinementLoopState,
-    ) {
-        // Keep a note of the previous phase for logging.
-        let previous_phase = next_state.phase;
-        next_state.phase = phase;
-        self.active_refinements
-            .insert(proposal_id.to_string(), next_state.clone());
-
-        // Record a phase transition if the phase actually changed.
-        if previous_phase != phase {
-            if let Err(e) = self.record_phase_transition(proposal_id, previous_phase, phase).await {
-                tracing::warn!(
-                    proposal_id = %proposal_id,
-                    error = %e,
-                    "Failed to record refinement phase transition"
-                );
-            }
+    /// Terminate a refinement loop and persist stop metadata.
+    pub(super) async fn terminate_refinement(&mut self, proposal_id: &str, reason: StopReason) {
+        if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+            state.terminate(reason.clone());
         }
+        self.persist_refinement_stop(proposal_id, &reason).await;
+        self.refinement_sessions.remove(proposal_id);
     }
 
-    /// Record a phase transition in the debate trail.
-    async fn record_phase_transition(
+    /// Resolve the human's single accept/reject review of a converged
+    /// refinement. Returns `Err` if no refinement is parked for review.
+    pub(super) async fn resolve_refinement_review(
         &mut self,
         proposal_id: &str,
-        from: RefinementPhase,
-        to: RefinementPhase,
-    ) -> djinn_db::Result<()> {
+        accept: bool,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
+            return Err(format!("no active refinement for proposal {proposal_id}"));
+        };
+        if !state.is_awaiting_human_review() {
+            return Err("refinement is not awaiting human review".into());
+        }
+
+        if !accept
+            && let Err(e) = self
+                .reset_live_spec_to_revision(proposal_id, state.snapshot_revision_seq)
+                .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to revert spec to snapshot on reject"
+            );
+        }
+
+        if let Some(s) = self.active_refinements.get_mut(proposal_id) {
+            s.resolve_human_review(accept, false);
+        }
+
+        let reason_tag = if accept {
+            "human_accepted"
+        } else {
+            "human_rejected"
+        };
+        let meta = serde_json::json!({
+            "source": "human_review",
+            "event": "refinement_stop",
+            "reason_tag": reason_tag,
+            "feedback": feedback,
+        });
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        proposal_repo
-            .create_debate_trail(
+        if let Err(e) = proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to persist human-review resolution"
+            );
+        }
+
+        self.refinement_sessions.remove(proposal_id);
+        self.active_refinements.retain(|_, s| !s.is_complete());
+        tracing::info!(
+            proposal_id = %proposal_id,
+            accept,
+            "Human resolved refinement review"
+        );
+        Ok(())
+    }
+
+    /// Reset the live proposal spec to the state at `target_revision_seq`.
+    /// Best-effort: logs a warning and continues on failure.
+    async fn reset_live_spec_to_revision(
+        &self,
+        proposal_id: &str,
+        target_revision_seq: i32,
+    ) -> Result<(), String> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+
+        let revisions = proposal_repo
+            .revisions(proposal_id)
+            .await
+            .map_err(|e| format!("failed to read revisions: {e}"))?;
+
+        let target_rev = revisions
+            .iter()
+            .rev()
+            .find(|r| r.event_kind == "spec_revision" && r.seq <= target_revision_seq);
+
+        let Some(rev) = target_rev else {
+            return Err(format!(
+                "no spec_revision found at or before seq {target_revision_seq}"
+            ));
+        };
+
+        if rev.body.is_empty() && rev.title.is_empty() {
+            return Ok(());
+        }
+
+        let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo2 = ProposalRepository::new(self.db.clone(), event_bus2);
+        let current = proposal_repo2
+            .get(proposal_id)
+            .await
+            .map_err(|e| format!("failed to read proposal: {e}"))?
+            .ok_or_else(|| format!("proposal not found: {proposal_id}"))?;
+
+        let event_bus3 = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo3 = ProposalRepository::new(self.db.clone(), event_bus3);
+        proposal_repo3
+            .update(
                 proposal_id,
-                "system",
-                "refinement",
-                "system",
-                "",
-                false,
-                Some(
-                    serde_json::json!({
-                        "from": phase_name(from),
-                        "to": phase_name(to),
-                        "kind": "phase_transition",
-                    })
-                    .to_string(),
-                ),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                djinn_db::ProposalUpdateInput {
+                    title: &rev.title,
+                    body: &rev.body,
+                    acceptance_criteria: &rev.acceptance_criteria,
+                    status: &current.status,
+                    superseded_by: current.superseded_by.as_deref(),
+                    body_format: Some(&rev.body_format),
+                    event_metadata: Some(&serde_json::json!({
+                        "source": "refinement_reject_revert",
+                        "reverted_from_seq": current.latest_revision_seq,
+                        "reverted_to_seq": target_revision_seq,
+                    })),
+                },
             )
             .await
+            .map_err(|e| format!("failed to revert proposal body: {e}"))?;
+
+        Ok(())
     }
 
-    /// Terminate the refinement loop for a proposal, recording the reason and
-    /// cleaning up any active session state.
-    async fn terminate_refinement(&mut self, proposal_id: &str, reason: StopReason) {
-        // Record terminal reason for observability.
-        tracing::info!(proposal_id = %proposal_id, reason = ?reason, "Refinement loop terminated");
-        let mut next_state = match self.active_refinements.remove(proposal_id) {
-            Some(s) => s,
-            None => RefinementLoopState::new(proposal_id, 1),
+    /// Startup reconciliation for refinements interrupted by a restart.
+    /// Runs once before the message loop; records `refinement_stop` for
+    /// every DB-dangling refinement so the proposal is restartable.
+    pub(super) async fn recover_interrupted_refinements(&mut self) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let dangling = match proposal_repo.dangling_refinement_proposal_ids().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to query dangling refinements for startup recovery"
+                );
+                return;
+            }
         };
-        next_state.phase = RefinementPhase::Complete;
-        next_state.stop_reason = Some(reason);
-        self.active_refinements
-            .insert(proposal_id.to_string(), next_state);
+        if dangling.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = dangling.len(),
+            "Reconciling refinements interrupted by restart"
+        );
+        for proposal_id in dangling {
+            if self.active_refinements.contains_key(&proposal_id) {
+                continue;
+            }
+            self.persist_refinement_stop(&proposal_id, &StopReason::Interrupted)
+                .await;
+            tracing::info!(
+                proposal_id = %proposal_id,
+                "Stopped interrupted refinement (lost across restart); proposal is restartable"
+            );
+        }
     }
 
-    /// Resolve a candidate model list for refinement dispatch.
-    ///
-    /// If `user_models` is non-empty, use those exactly; otherwise fall back to
-    /// the configured model priorities.
+    /// Persist refinement-stop lifecycle metadata.
+    pub(super) async fn persist_refinement_stop(&self, proposal_id: &str, reason: &StopReason) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+
+        let stop_meta = serde_json::json!({
+            "source": "refinement_loop",
+            "event": "refinement_stop",
+            "reason_tag": reason.tag(),
+            "reason_detail": format!("{reason:?}"),
+        });
+
+        if let Err(e) = proposal_repo
+            .record_refinement_lifecycle(proposal_id, "refinement_stop", Some(&stop_meta))
+            .await
+        {
+            tracing::warn!(
+                proposal_id = %proposal_id,
+                error = %e,
+                "Failed to persist refinement_stop lifecycle metadata"
+            );
+        }
+    }
+
+    /// Read the `diverse_refinement` user setting for the proposal's owner.
+    pub(super) async fn read_diverse_refinement_setting(&self, proposal_id: &str) -> bool {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+        let creator_id = match proposal_repo.get(proposal_id).await {
+            Ok(Some(p)) => p.author_user_id,
+            _ => return true,
+        };
+
+        let Some(uid) = creator_id else {
+            return true;
+        };
+
+        let us_repo = UserSettingsRepository::new(self.db.clone());
+        match us_repo.get(&uid).await {
+            Ok(Some(s)) => s.diverse_refinement,
+            Ok(None) => true,
+            Err(_) => true,
+        }
+    }
+
+    /// Resolve the dispatch parameters (agent_type, model_id) for a
+    /// refinement phase.
+    pub(super) async fn resolve_refinement_dispatch_params(
+        &self,
+        phase: RefinementPhase,
+        diverse_refinement: bool,
+        attributed_user_id: Option<&str>,
+    ) -> (String, String) {
+        let agent_type = match phase {
+            RefinementPhase::AdvocateRevision => "advocate",
+            RefinementPhase::AdversaryAttack => "adversary",
+            RefinementPhase::JudgeAdjudication => "judge",
+            RefinementPhase::AwaitingHumanReview
+            | RefinementPhase::AwaitingEvidence
+            | RefinementPhase::Complete => {
+                return ("advocate".into(), String::new());
+            }
+        };
+
+        let user_models = self
+            .resolve_dispatch_models_for_role("planner", attributed_user_id)
+            .await;
+
+        let primary_model = self.resolve_refinement_primary_model(&user_models);
+        let candidates = self.resolve_refinement_model_candidates(&user_models);
+
+        let (model_id, _same_fallback) =
+            select_refinement_model(diverse_refinement, &primary_model, &candidates);
+
+        (agent_type.to_string(), model_id)
+    }
+
+    /// Resolve the primary model for a refinement session.
+    pub(super) fn resolve_refinement_primary_model(&self, user_models: &[String]) -> String {
+        if let Some(first) = user_models.first() {
+            return first.clone();
+        }
+        self.model_priorities
+            .values()
+            .next()
+            .and_then(|models| models.first().cloned())
+            .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string())
+    }
+
+    /// Resolve candidate models for diverse-refinement selection.
     pub(super) fn resolve_refinement_model_candidates(
         &self,
         user_models: &[String],
@@ -400,22 +682,9 @@ impl CoordinatorActor {
 
     /// Force-close a finished refinement task. Best-effort.
     pub(super) async fn close_refinement_task(&self, task_id: &str, reason: &str) {
-        self.close_refinement_task_with_result(
-            task_id,
-            reason,
-            self.run_close_refinement_task_transition(task_id, reason).await,
-        )
-        .await;
-    }
-
-    async fn run_close_refinement_task_transition(
-        &self,
-        task_id: &str,
-        reason: &str,
-    ) -> Result<(), djinn_db::Error> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus);
-        let _ = task_repo
+        let result = task_repo
             .transition(
                 task_id,
                 TransitionAction::ForceClose,
@@ -424,38 +693,9 @@ impl CoordinatorActor {
                 Some(reason),
                 None,
             )
-            .await?;
-        Ok(())
-    }
-
-    async fn close_refinement_task_with_result(
-        &self,
-        task_id: &str,
-        _reason: &str,
-        result: Result<(), djinn_db::Error>,
-    ) {
-        if let Err(e) = result {
-            if is_already_closed_refinement_close_error(&e) {
-                // Idempotent no-op: the task was already closed — nothing to do.
-                return;
-            }
-            tracing::warn!(
-                task_id = %task_id,
-                error = %e,
-                "Failed to close completed refinement task"
-            );
-        }
-    }
-
-    #[cfg(test)]
-    async fn close_refinement_task_for_test(
-        &self,
-        task_id: &str,
-        reason: &str,
-        simulated_result: Result<(), djinn_db::Error>,
-    ) {
-        self.close_refinement_task_with_result(task_id, reason, simulated_result)
-            .await;
+            .await
+            .map(|_| ());
+        handle_close_refinement_task_result(task_id, result);
     }
 
     /// Resolve the project path for the slot pool dispatch.
@@ -529,60 +769,81 @@ impl CoordinatorActor {
             .map(|p| format!("\"{}\"", p.title))
             .unwrap_or_else(|| proposal_id.to_string());
 
-        let agent_type_label = match agent_type {
-            "advocate" => "advocate revision",
-            "adversary" => "adversary review",
-            "judge" => "judge adjudication",
-            _ => agent_type,
-        };
-
-        let title = format!(
-            "Refinement {} round {} for proposal {}",
-            agent_type_label, round, proposal_label
+        let title = format!("Refinement {agent_type} — {proposal_label} (round {round})");
+        let mut description = format!(
+            "Proposal refinement session: {agent_type} role for proposal {proposal_id}, \
+             round {round}, against revision {against_revision_seq}.\n\n\
+             Current DoR status: {readiness_context}"
         );
 
-        let body = {
-            let proposal = proposal?;
-            let mut context = String::new();
-            context.push_str(&format!(
-                "Proposal title: {}\nCurrent revision: {}\n\n",
-                proposal.title, proposal.latest_revision_seq
-            ));
-            context.push_str(&format!(
-                "Refinement readiness context (round {}, revision {}):\n{}\n\n",
-                round, against_revision_seq, readiness_context
-            ));
-            if let Some(feedback) = reviewer_feedback {
-                context.push_str("Human reviewer feedback for this round:\n");
-                context.push_str(feedback);
-            }
-            context
+        if agent_type.eq_ignore_ascii_case("advocate")
+            && let Some(evidence_context) = self
+                .build_advocate_evidence_findings_context(proposal.as_ref(), proposal_id)
+                .await
+        {
+            description.push_str("\n\n");
+            description.push_str(&evidence_context);
+        }
+
+        // Inject current human reviewer feedback near the DoR status so the
+        // tribunal agent sees the exact feedback string for this round. The
+        // caller is responsible for ensuring the feedback belongs to the
+        // proposal's current revision (see
+        // `ProposalRepository::latest_current_revision_reviewer_feedback`).
+        if let Some(feedback) = reviewer_feedback.filter(|s| !s.is_empty()) {
+            description.push_str("\n\nHuman reviewer feedback for this round: ");
+            description.push_str(feedback);
+        }
+
+        let project_id = match proposal_repo.targets(proposal_id).await {
+            Ok(targets) if !targets.is_empty() => targets[0].project_id.clone(),
+            _ => return None,
         };
 
-        // Metadata is intentionally not stored on the task; it was only used
-        // by the legacy task model and is no longer persisted. The refinement
-        // context above is fully represented in the description/body.
-        let _metadata = ();
-
-        let task = task_repo
-            .create(
-                "epic-placeholder",
-                title.as_str(),
-                body.as_str(),
+        match task_repo
+            .create_in_project(
+                &project_id,
+                None,
+                &title,
+                &description,
                 "",
-                "task",
-                3,
-                attributed_user_id.unwrap_or(""),
-                Some("open"),
+                "refinement",
+                0,
+                "system",
+                None,
+                None,
             )
-            .await;
-
-        match task {
-            Ok(t) => Some(t.id),
+            .await
+        {
+            Ok(task) => {
+                let event_bus2 = crate::events::event_bus_for(&self.events_tx);
+                let task_repo2 = TaskRepository::new(self.db.clone(), event_bus2);
+                if let Err(e) = task_repo2
+                    .update_agent_type(&task.id, Some(agent_type))
+                    .await
+                {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        agent_type,
+                        error = %e,
+                        "Failed to set agent_type on refinement task"
+                    );
+                }
+                if let Some(uid) = attributed_user_id
+                    && let Err(e) = task_repo2.set_created_by_user_id(&task.id, uid).await
+                {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        error = %e,
+                        "Failed to attribute refinement task to user"
+                    );
+                }
+                Some(task.id)
+            }
             Err(e) => {
                 tracing::warn!(
                     proposal_id = %proposal_id,
-                    agent_type = %agent_type,
+                    agent_type,
                     error = %e,
                     "Failed to create refinement task"
                 );
@@ -591,31 +852,112 @@ impl CoordinatorActor {
         }
     }
 
-    /// Build a short readiness summary for the current proposal revision.
-    ///
-    /// Used as a context string for the refinement prompt and stored in the
-    /// created task body.
-    pub(super) async fn build_refinement_readiness_context(
+    async fn build_advocate_evidence_findings_context(
         &self,
+        proposal: Option<&Proposal>,
         proposal_id: &str,
-        target_count: usize,
     ) -> Option<String> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
-        let proposal = proposal_repo.get(proposal_id).await.ok().flatten()?;
+        let entries = match proposal_repo.debate_trail(proposal_id).await {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    error = %e,
+                    "Failed to read debate trail for evidence findings context"
+                );
+                return None;
+            }
+        };
 
+        let findings = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "evidence_findings" && entry.agent_role == "spike")?;
+
+        let mut context = String::from(
+            "Evidence findings received for this Advocate round. Use these findings to respond to the current proposal and objections before Judge adjudication resumes.\n",
+        );
+        if let Some(proposal) = proposal {
+            context.push_str("\nCurrent proposal body:\n");
+            context.push_str(&proposal.body);
+            context.push('\n');
+        }
+
+        let current_debate = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind.as_str(), "objection" | "rebuttal"))
+            .map(format_debate_context_entry)
+            .collect::<Vec<_>>();
+        if !current_debate.is_empty() {
+            context.push_str("\nCurrent objections/rebuttals:\n");
+            context.push_str(&current_debate.join("\n"));
+            context.push('\n');
+        }
+
+        context.push_str("\nEvidence findings:\n");
+        context.push_str(&format_debate_context_entry(findings));
+        if let Some(metadata) = findings.body_metadata.as_deref().filter(|s| !s.is_empty()) {
+            context.push_str("\nStructured findings metadata:\n");
+            context.push_str(metadata);
+        }
+        Some(context)
+    }
+
+    /// Evaluate proposal readiness using the deterministic P1 DoR evaluator.
+    pub(super) async fn evaluate_proposal_readiness(
+        &self,
+        proposal_id: &str,
+    ) -> Option<djinn_control_plane::tools::proposal_readiness::ProposalReadinessResult> {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = ProposalRepository::new(self.db.clone(), event_bus);
+
+        let proposal = match proposal_repo.get(proposal_id).await {
+            Ok(Some(p)) => p,
+            _ => return None,
+        };
+
+        let target_count = match proposal_repo.targets(proposal_id).await {
+            Ok(targets) => targets.len(),
+            _ => 0,
+        };
+
+        // Parse ACs with the tolerant, structure-aware parser that every read
+        // path uses (proposal_show et al.). `djinn_core::models::parse_json_array`
+        // deserializes to `Vec<String>` and therefore fails wholesale on
+        // structured `{ "criterion", "met" }` ACs, silently yielding an empty
+        // vec — which made the injected "Current DoR status" report "At least
+        // one acceptance criterion is required" even when the live proposal head
         // already had structured ACs attached (proposal 019f0c32 rounds 1–3).
         let ac_items: Vec<AcceptanceCriterionItem> =
             parse_acceptance_criteria_array(&proposal.acceptance_criteria);
 
-        Some(
-            evaluate_proposal_readiness(
-                proposal.body.as_str(),
-                &ac_items,
-                target_count,
-            )
-            .to_error_string(),
-        )
+        Some(evaluate_proposal_readiness(
+            &proposal.body,
+            &ac_items,
+            target_count,
+        ))
+    }
+}
+
+/// Classify and handle the result of a `close_refinement_task` transition.
+///
+/// The already-closed case (`"task is already closed"`) is treated as an
+/// idempotent no-op — no warning is emitted.  All other errors (other
+/// [`djinn_db::Error::InvalidTransition`] messages and repository/internal
+/// failures) surface as a `WARN` so operators can investigate.
+fn handle_close_refinement_task_result(task_id: &str, result: Result<(), djinn_db::Error>) {
+    if let Err(e) = result {
+        if is_already_closed_refinement_close_error(&e) {
+            // Idempotent no-op: the task was already closed — nothing to do.
+            return;
+        }
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "Failed to close completed refinement task"
+        );
     }
 }
 
@@ -655,19 +997,14 @@ mod tests {
         assert!(!is_already_closed_refinement_close_error(&error));
     }
 
-    // ---- close_refinement_task idempotency regression ----
+    // ---- handle_close_refinement_task_result regression tests ----
 
-    #[tokio::test]
+    #[test]
     #[tracing_test::traced_test]
-    async fn close_refinement_task_already_closed_emits_no_warning() {
-        let actor = actor_for_test().await;
-
-        // Simulate the exact idempotent error the repository boundary returns.
+    fn close_already_closed_emits_no_warning() {
         let already_closed =
             djinn_db::Error::InvalidTransition("task is already closed".to_owned());
-        actor
-            .close_refinement_task_for_test("task/abc", "already closed", Err(already_closed))
-            .await;
+        handle_close_refinement_task_result("task/abc", Err(already_closed));
 
         assert!(
             !logs_contain("Failed to close completed refinement task"),
@@ -675,17 +1012,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     #[tracing_test::traced_test]
-    async fn close_refinement_task_other_invalid_transition_emits_warning() {
-        let actor = actor_for_test().await;
-
-        let other = djinn_db::Error::InvalidTransition(
-            "release is only valid from in_progress".to_owned(),
-        );
-        actor
-            .close_refinement_task_for_test("task/xyz", "other transition", Err(other))
-            .await;
+    fn close_other_invalid_transition_emits_warning() {
+        let other =
+            djinn_db::Error::InvalidTransition("release is only valid from in_progress".to_owned());
+        handle_close_refinement_task_result("task/xyz", Err(other));
 
         assert!(
             logs_contain("Failed to close completed refinement task"),
@@ -693,15 +1025,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[test]
     #[tracing_test::traced_test]
-    async fn close_refinement_task_internal_error_emits_warning() {
-        let actor = actor_for_test().await;
-
+    fn close_internal_error_emits_warning() {
         let internal = djinn_db::Error::Internal("database connection lost".to_owned());
-        actor
-            .close_refinement_task_for_test("task/123", "internal error", Err(internal))
-            .await;
+        handle_close_refinement_task_result("task/123", Err(internal));
 
         assert!(
             logs_contain("Failed to close completed refinement task"),
@@ -709,90 +1037,6 @@ mod tests {
         );
     }
 
-    // ---- test helpers ----
-
-    async fn actor_for_test() -> CoordinatorActor {
-        let db = djinn_db::Database::open_in_memory().expect("open in-memory db");
-        let (events_tx, _) = tokio::sync::broadcast::channel(16);
-        CoordinatorActor {
-            receiver: tokio::sync::mpsc::channel(1).1,
-            events: events_tx.subscribe(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            tick: tokio::time::interval(crate::types::STUCK_INTERVAL),
-            db: db.clone(),
-            events_tx: events_tx.clone(),
-            pool: djinn_slot::SlotPoolHandle::spawn(
-                crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new()),
-                CancellationToken::new(),
-                djinn_slot::SlotPoolConfig {
-                    models: vec![],
-                    role_priorities: std::collections::HashMap::new(),
-                },
-            ),
-            catalog: djinn_provider::catalog::CatalogService::new(),
-            health: djinn_provider::catalog::health::HealthTracker::default(),
-            role_registry: Arc::new(crate::roles::RoleRegistry::new()),
-            lsp: djinn_lsp::LspManager::new(),
-            self_sender: tokio::sync::mpsc::channel(1).0,
-            status_tx: tokio::sync::watch::channel(crate::SharedCoordinatorState {
-                dispatched: 0,
-                recovered: 0,
-                epic_throughput: std::collections::HashMap::new(),
-                pr_errors: std::collections::HashMap::new(),
-                rate_limited_until: None,
-            })
-            .0,
-            dispatch_limit: 50,
-            model_priorities: std::collections::HashMap::new(),
-            pr_errors: std::collections::HashMap::new(),
-            last_dispatched: std::collections::HashMap::new(),
-            inflight_dispatches: std::collections::HashMap::new(),
-            provisional_admissions: std::collections::HashMap::new(),
-            dispatch_cooldowns: std::collections::HashMap::new(),
-            dispatch_failure_streak: std::collections::HashMap::new(),
-            background_work_tracker: crate::types::BackgroundWorkTracker::default(),
-            auto_merge_tracker: crate::types::AutoMergeTracker::default(),
-            consolidation_runner: Arc::new(
-                crate::consolidation::DbConsolidationRunner::new(db.clone()),
-            ),
-            last_stale_sweep: std::time::Instant::now(),
-            last_auto_dispatch_sweep: std::time::Instant::now(),
-            last_proposal_review_sweep: std::time::Instant::now(),
-            last_graph_refresh: std::time::Instant::now(),
-            graph_warmer: None,
-            mirror: None,
-            runtime_ops: None,
-            rpc_registry: None,
-            prune_tick_counter: 0,
-            throughput_events: std::collections::HashMap::new(),
-            escalation_counts: std::collections::HashMap::new(),
-            pr_status_cache: std::collections::HashMap::new(),
-            pr_draft_first_seen: std::collections::HashMap::new(),
-            review_stuck_sha_first_seen: std::collections::HashMap::new(),
-            merge_fail_count: std::collections::HashMap::new(),
-            auto_approve_attempted: std::collections::HashMap::new(),
-            delegated_to_github: std::collections::HashMap::new(),
-            conversations_resolved: std::collections::HashMap::new(),
-            handled_dequeues: std::collections::HashMap::new(),
-            stall_killed: std::collections::HashSet::new(),
-            stall_progress_watermark: std::collections::HashMap::new(),
-            stall_cancel_streak: std::collections::HashMap::new(),
-            provider_failure_streak: std::collections::HashMap::new(),
-            last_idle_consolidation: None,
-            idle_consolidation_cancel: None,
-            idle_consolidation_handle: None,
-            pr_cleanup_config: crate::types::PrCleanupConfig::default(),
-            worker_lifecycle_config: crate::types::WorkerLifecycleConfig::default(),
-            active_refinements: std::collections::HashMap::new(),
-            refinement_sessions: std::collections::HashMap::new(),
-            dispatched: 0,
-            recovered: 0,
-        }
-    }
-
-    fn logs_contain(needle: &str) -> bool {
-        tracing_test::logs_with_scope_contain(None, needle)
-    }
+    // `logs_contain` is injected by the `#[tracing_test::traced_test]` macro
+    // into each test function scope; no module-level helper is needed.
 }
-
-
