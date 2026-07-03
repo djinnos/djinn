@@ -232,3 +232,51 @@ capability = "git"
 	owner = "team/workspace"
 	rationale = "Pre-existing git shell-out in workspace smoke tests; to be migrated to djinn-git."
 	cleanup_issue = "epic/fztz"
+
+# ── Baseline HTTP capability allowlist entries ─────────────────────────────
+# These entries pre-allowlist existing HTTP client usage outside djinn-provider/
+# so the guard runs cleanly today.  They will be cleaned up as crates migrate to
+# djinn-provider (tracked by epic fztz).
+
+# djinn-control-plane
+[[entries]]
+capability = "http"
+	path = "server/crates/djinn-control-plane/src/toolchain_versions.rs"
+	matcher = "reqwest::Client"
+	owner = "team/control-plane"
+	rationale = "Pre-existing reqwest::Client usage for toolchain version fetching; to be migrated to djinn-provider."
+	cleanup_issue = "epic/fztz"
+
+# server
+[[entries]]
+capability = "http"
+	path = "server/src/server/org_sync.rs"
+	matcher = "reqwest::{"
+	owner = "team/server"
+	rationale = "Pre-existing destructured reqwest import for org sync operations; to be migrated to djinn-provider."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "http"
+	path = "server/src/server/auth.rs"
+	matcher = "reqwest::Client"
+	owner = "team/server"
+	rationale = "Pre-existing reqwest::Client import for auth operations; to be migrated to djinn-provider."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "http"
+	path = "server/src/server/github_install.rs"
+	matcher = "reqwest::Client"
+	owner = "team/server"
+	rationale = "Pre-existing reqwest::Client import for GitHub installation; to be migrated to djinn-provider."
+	cleanup_issue = "epic/fztz"
+
+# Header-only reqwest imports (not HTTP client construction)
+[[entries]]
+capability = "http"
+	path = "server/crates/djinn-agent/src/mcp_client.rs"
+	matcher = "reqwest::{"
+	owner = "team/agent"
+	rationale = "Pre-existing reqwest::header destructured import for MCP client headers; not HTTP client construction."
+	cleanup_issue = "epic/fztz"
