@@ -15,9 +15,36 @@
 // - `signoff.rs` / `signoff_tests.rs`: signoff/clear tools and readiness/
 //   composed-gate helpers (including debate-trail gate logic)
 // - `lifecycle.rs`: graduate, stop-build, reconcile, build-teardown helpers
-// - `mdx.rs`: MDX/block-patch parsing helpers
+// - `mdx.rs`: MDX/block-patch parsing helpers (including native-skill
+//   provenance fields on block-patch params)
 // - mod.rs: shared response/error constructors, permission gates, and
 //   router composition
+//
+// Refinement-loop / debate-trail ownership decision (subtask 5z0q):
+//
+// No standalone `refinement.rs` or `debate.rs` submodules are created because
+// the production glue is not cohesive outside its current owners:
+//
+// 1. **Debate-trail gate checks** are embedded in `signoff.rs`'s
+//    `evaluate_composed_gate` and `build_gate_status`. They are evaluated as
+//    part of a single pass over DoR + tribunal conditions — extracting them
+//    would fragment a single-pass gate evaluation into multiple modules with
+//    no standalone meaning. The composed gate is the single call-through point
+//    used by signoff, lifecycle (graduate), and create (update).
+//
+// 2. **Refinement status projection** consists of thin call-throughs to
+//    `crate::tools::refinement_tools::build_refinement_status` in two places:
+//    `signoff.rs` (adversary dry count in `build_gate_status`) and `create.rs`
+//    (refinement status in `proposal_show`). These are consumers of an
+//    external module, not standalone glue.
+//
+// 3. **Block catalog** (`proposal_block_catalog`) has zero production
+//    references in `proposal_tools/` — it is only exercised in integration
+//    tests (`end_to_end_planner_tests.rs`).
+//
+// 4. **Native-skill provenance** (`native_skill_name`/`native_skill_version`)
+//    lives as fields on `ProposalBlockPatchParams` in `mdx.rs` — they are
+//    block-patch infrastructure, not native-skill glue.
 
 mod create;
 pub(crate) mod feedback;
