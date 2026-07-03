@@ -16,6 +16,14 @@
 //   `err_single`/`err_show` response constructors used by later feedback,
 //   signoff, lifecycle, and refinement slices.
 //
+// Debate-trail and refinement-status data fetches in `proposal_show`:
+// `proposal_show` fetches the debate trail (`repo.debate_trail`) and refinement
+// status (`refinement_tools::build_refinement_status`) as part of the show
+// response assembly. These are thin CRUD data fetches — not debate/refinement
+// glue — so they remain here alongside the other show response fields (targets,
+// feedback, revisions, signoffs, epics). The `refinement_active` field mapping
+// in list summary construction is likewise a response-shaping concern.
+//
 
 use std::borrow::Cow;
 
