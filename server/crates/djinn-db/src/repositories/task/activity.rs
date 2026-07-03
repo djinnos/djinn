@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::Row;
 
 impl TaskRepository {
     pub async fn log_activity(
@@ -157,5 +158,84 @@ impl TaskRepository {
         .execute(self.db.pool())
         .await?;
         Ok(result.rows_affected())
+    }
+
+    /// Count the quality-strike reopen events for a task.
+    ///
+    /// A quality strike is a reopen-like status transition whose effective
+    /// `reopen_class` is `review_rejected`, `merge_queue_failed`, or
+    /// `other` (the conservative default for historical rows that lack
+    /// the field).  `merge_conflict` and `superseded` reopens are
+    /// **excluded** — they do not count toward intervention thresholds.
+    ///
+    /// Reopen-like transitions are identified heuristically from the
+    /// activity payload: `to_status = 'open'` from one of the
+    /// review/PR/closed source states.
+    pub async fn quality_reopen_count(&self, task_id: &str) -> Result<i64> {
+        self.db.ensure_initialized().await?;
+        // NOTE: dynamic SQL with JSONB operators — compile-time check not possible.
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"SELECT COUNT(*)::bigint FROM activity_log
+             WHERE task_id = $1
+               AND event_type = 'status_changed'
+               AND archived = FALSE
+               AND (payload ->> 'to_status') = 'open'
+               AND (payload ->> 'from_status') IN ('in_task_review', 'pr_draft', 'pr_review', 'closed', 'approved')
+               AND COALESCE(payload ->> 'reopen_class', 'other') IN ('review_rejected', 'merge_queue_failed', 'other')"#,
+        )
+        .bind(task_id)
+        .fetch_one(self.db.pool())
+        .await?;
+        Ok(count)
+    }
+
+    /// Return the most recent reopen ledger entries for a task.
+    ///
+    /// Each entry carries its typed [`ReopenClass`]; historical rows that
+    /// lack the `reopen_class` payload field default to
+    /// [`ReopenClass::Other`].
+    pub async fn recent_reopen_ledger(
+        &self,
+        task_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ReopenLedgerEntry>> {
+        self.db.ensure_initialized().await?;
+        // NOTE: dynamic SQL with JSONB operators — compile-time check not possible.
+        let rows = sqlx::query(
+            r#"SELECT
+                 COALESCE(payload ->> 'reopen_class', 'other') AS reopen_class,
+                 created_at,
+                 payload ->> 'from_status' AS from_status,
+                 payload ->> 'reason' AS reason
+             FROM activity_log
+             WHERE task_id = $1
+               AND event_type = 'status_changed'
+               AND archived = FALSE
+               AND (payload ->> 'to_status') = 'open'
+               AND (payload ->> 'from_status') IN ('in_task_review', 'pr_draft', 'pr_review', 'closed', 'approved')
+             ORDER BY created_at DESC
+             LIMIT $2"#,
+        )
+        .bind(task_id)
+        .bind(limit)
+        .fetch_all(self.db.pool())
+        .await?;
+
+        let entries = rows
+            .into_iter()
+            .map(|row| {
+                let class_str: Option<String> = row.get("reopen_class");
+                let created_at: Option<String> = row.get("created_at");
+                let from_status: Option<String> = row.get("from_status");
+                let reason: Option<String> = row.get("reason");
+                ReopenLedgerEntry {
+                    reopen_class: ReopenClass::parse(class_str.as_deref().unwrap_or("other")),
+                    created_at: created_at.unwrap_or_default(),
+                    from_status: from_status.unwrap_or_default(),
+                    reason,
+                }
+            })
+            .collect();
+        Ok(entries)
     }
 }
