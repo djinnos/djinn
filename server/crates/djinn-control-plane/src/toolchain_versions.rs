@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use std::sync::OnceLock;
 
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_provider::http_util::HttpClient;
 
 const TTL: Duration = Duration::from_secs(6 * 3600);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
@@ -53,10 +54,7 @@ pub async fn fetch_toolchain_versions() -> BTreeMap<String, Vec<String>> {
         return map.clone();
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(FETCH_TIMEOUT)
-        .build()
-        .ok();
+    let client = HttpClient::new(FETCH_TIMEOUT);
 
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for lang in LANGS {
@@ -78,18 +76,10 @@ pub async fn fetch_toolchain_versions() -> BTreeMap<String, Vec<String>> {
     map
 }
 
-async fn get_json(client: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
-    let resp = client.get(url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    resp.json::<serde_json::Value>().await.ok()
-}
-
 /// go.dev/dl: array of {version:"go1.26.0", stable:bool}. Returns distinct
 /// major.minor of recent stable releases, newest first (capped).
-async fn fetch_go(client: &reqwest::Client) -> Option<Vec<String>> {
-    let json = get_json(client, "https://go.dev/dl/?mode=json").await?;
+async fn fetch_go(client: &HttpClient) -> Option<Vec<String>> {
+    let json = client.get_json("https://go.dev/dl/?mode=json").await?;
     let arr = json.as_array()?;
     let mut out: Vec<String> = Vec::new();
     for entry in arr {
@@ -118,8 +108,10 @@ async fn fetch_go(client: &reqwest::Client) -> Option<Vec<String>> {
 
 /// nodejs.org/dist: array of {version:"vX.Y.Z", lts:false|name}. Returns
 /// "lts" + recent distinct majors.
-async fn fetch_node(client: &reqwest::Client) -> Option<Vec<String>> {
-    let json = get_json(client, "https://nodejs.org/dist/index.json").await?;
+async fn fetch_node(client: &HttpClient) -> Option<Vec<String>> {
+    let json = client
+        .get_json("https://nodejs.org/dist/index.json")
+        .await?;
     let arr = json.as_array()?;
     let mut out: Vec<String> = vec!["lts".to_string()];
     for entry in arr {
@@ -138,9 +130,9 @@ async fn fetch_node(client: &reqwest::Client) -> Option<Vec<String>> {
 
 /// endoflife.date/api/<product>.json: array of {cycle:"3.13", ...}. Returns
 /// the recent cycles, newest first (capped).
-async fn fetch_endoflife(client: &reqwest::Client, product: &str) -> Option<Vec<String>> {
+async fn fetch_endoflife(client: &HttpClient, product: &str) -> Option<Vec<String>> {
     let url = format!("https://endoflife.date/api/{product}.json");
-    let json = get_json(client, &url).await?;
+    let json = client.get_json(&url).await?;
     let arr = json.as_array()?;
     let out: Vec<String> = arr
         .iter()
