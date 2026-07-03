@@ -363,7 +363,7 @@ describe("ReadinessPanel", () => {
         refinement={refinement()}
       />,
     );
-    expect(screen.getByText("Parked: needs-evidence spike")).toBeInTheDocument();
+    expect(screen.getByText("Awaiting evidence: ab12")).toBeInTheDocument();
     expect(screen.getAllByText(/X is load-bearing/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/ab12/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/open/).length).toBeGreaterThan(0);
@@ -487,9 +487,112 @@ describe("ReadinessPanel", () => {
     ).toBeInTheDocument();
   });
 
-  // ── Evidence phase-aware rendering ──────────────────────────────────────
+  // ── Evidence lifecycle matrix (task 787p) ────────────────────────────────
 
-  it("renders AwaitingEvidence phase in the evidence spike row", () => {
+  it("renders awaiting-evidence from status lifecycle with spike and claim summary", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: null,
+        })}
+        refinement={refinement({
+          active: true,
+          evidence_lifecycle_state: "awaiting_evidence",
+          needs_evidence: {
+            claim: "Can the Rust proc-macro crate emit JSON?",
+            spike_task_id: "11111111-1111-1111-1111-111111111111",
+            spike_short_id: "sp-1",
+            spike_status: "in_progress",
+            evidence_phase: "awaiting_evidence",
+            question: "Can the Rust proc-macro crate emit JSON?",
+            round: 2,
+          },
+        })}
+      />,
+    );
+    // Gate row uses the status-level evidence (gate was null).
+    expect(
+      screen.getByText(/awaiting evidence — spike sp-1 \(in_progress\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Can the Rust proc-macro crate emit JSON?"),
+    ).toBeInTheDocument();
+    // Awaiting-evidence note with short id and spike id.
+    expect(screen.getByText("Awaiting evidence: sp-1")).toBeInTheDocument();
+    expect(
+      screen.getByText("11111111-1111-1111-1111-111111111111"),
+    ).toBeInTheDocument();
+    // Should NOT show generic in-progress copy.
+    expect(
+      screen.queryByText(/Autonomous tribunal in progress/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders awaiting-evidence from gate status when status lacks needs_evidence", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Fallback gate claim",
+            spike_task_id: "22222222-2222-2222-2222-222222222222",
+            spike_short_id: "sp-gate",
+            spike_status: "open",
+            evidence_phase: "awaiting_evidence",
+            question: "Fallback gate question",
+          },
+        })}
+        refinement={refinement({ active: true })}
+      />,
+    );
+    expect(
+      screen.getByText(/awaiting evidence — spike sp-gate \(open\)/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Fallback gate question")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Autonomous tribunal in progress/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders evidence-failed with failure reason and blocked copy", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Y handles concurrency safely",
+            spike_task_id: "33333333-3333-3333-3333-333333333333",
+            spike_short_id: "cd34",
+            spike_status: "closed",
+            evidence_phase: "evidence_failed",
+            failure_reason: "spike_force_closed",
+          },
+        })}
+        refinement={refinement({ active: true })}
+      />,
+    );
+    // Gate row shows failed with reason.
+    expect(
+      screen.getByText(/evidence failed — spike cd34 \(spike_force_closed\)/),
+    ).toBeInTheDocument();
+    // Destructive note with blocked copy and reason.
+    expect(screen.getByText("Evidence failed: cd34")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Refinement is blocked on failed or missing evidence findings/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Reason: spike_force_closed/)).toBeInTheDocument();
+    // No contradictory in-progress note.
+    expect(
+      screen.queryByText(/Autonomous tribunal in progress/),
+    ).not.toBeInTheDocument();
+    // No amber "awaiting" note.
+    expect(
+      screen.queryByText(/Awaiting evidence:/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders ordinary in-progress copy only when no evidence lifecycle applies", () => {
     render(
       <ReadinessPanel
         gateStatus={gateStatus({
@@ -499,99 +602,67 @@ describe("ReadinessPanel", () => {
             spike_task_id: "uuid-spike",
             spike_short_id: "ab12",
             spike_status: "open",
+          },
+        })}
+        refinement={refinement({ active: true })}
+      />,
+    );
+    // Implicit awaiting evidence keeps the in-progress copy suppressed.
+    expect(
+      screen.queryByText(/Autonomous tribunal in progress/),
+    ).not.toBeInTheDocument();
+    // It still shows an awaiting-evidence note.
+    expect(screen.getByText("Awaiting evidence: ab12")).toBeInTheDocument();
+  });
+
+  it("does not duplicate converged/awaiting-review as an evidence state", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: true,
+          needs_evidence: {
+            claim: "Should be ignored because awaiting review",
+            spike_task_id: "44444444-4444-4444-4444-444444444444",
+            spike_short_id: "sp-ar",
+            spike_status: "in_progress",
             evidence_phase: "awaiting_evidence",
           },
         })}
-        refinement={refinement()}
-      />,
-    );
-    // Gate row
-    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
-    expect(
-      screen.getByText(/awaiting evidence — spike ab12 \(open\)/),
-    ).toBeInTheDocument();
-    // Parked note (amber, not destructive)
-    expect(
-      screen.getByText(/Parked: needs-evidence spike/),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText(/X is load-bearing/).length).toBeGreaterThan(0);
-  });
-
-  it("renders EvidenceFailed phase with destructive styling and failure reason", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus({
-          ready: false,
-          needs_evidence: {
-            claim: "Y handles concurrency safely",
-            spike_task_id: "uuid-spike-2",
-            spike_short_id: "cd34",
-            spike_status: "closed",
-            evidence_phase: "evidence_failed",
-            failure_reason: "spike_force_closed",
-          },
+        refinement={refinement({
+          active: false,
+          awaiting_review: true,
+          current_round: 3,
         })}
-        refinement={refinement()}
       />,
     );
-    // Gate row shows failed
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    // The evidence checklist row still reflects the gate payload, but the
+    // awaiting-review state is not duplicated as a distinct evidence lifecycle
+    // note (and no automatic-resume / in-progress copy appears).
     expect(
-      screen.getByText(/evidence failed — spike cd34 \(spike_force_closed\)/),
+      screen.getByText(/awaiting evidence — spike sp-ar \(in_progress\)/),
     ).toBeInTheDocument();
-    // Destructive parked note instead of amber
+    // No evidence note should render.
     expect(
-      screen.getByText(/Evidence failed: cd34/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Awaiting evidence:/),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Reason: spike_force_closed/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Evidence failed:/),
+    ).not.toBeInTheDocument();
+    // No in-progress note since not active.
     expect(
-      screen.getByText(/Review the spike findings and address the issue/),
-    ).toBeInTheDocument();
-    // Should NOT show the amber "Parked" note
-    expect(
-      screen.queryByText(/Parked: needs-evidence spike/),
+      screen.queryByText(/Autonomous tribunal in progress/),
     ).not.toBeInTheDocument();
   });
 
-  it("renders EvidenceReceived phase with green/received copy", () => {
-    render(
-      <ReadinessPanel
-        gateStatus={gateStatus({
-          ready: false,
-          needs_evidence: {
-            claim: "Performance is acceptable",
-            spike_task_id: "uuid-spike-3",
-            spike_short_id: "ef56",
-            spike_status: "closed",
-            evidence_phase: "evidence_received",
-          },
-        })}
-        refinement={refinement()}
-      />,
-    );
-    // Gate row shows received (pass state)
-    expect(
-      screen.getByText(/evidence received — spike ef56/),
-    ).toBeInTheDocument();
-    // Note says "Evidence received" not "Parked"
-    expect(
-      screen.getByText("Evidence received"),
-    ).toBeInTheDocument();
-    // Should NOT show the amber "Parked" note
-    expect(
-      screen.queryByText(/Parked: needs-evidence spike/),
-    ).not.toBeInTheDocument();
-  });
-
-  it("preserves non-contradictory manual pause/freeze precedence with evidence", () => {
+  it("renders paused/frozen with precedence and no auto-resume language", () => {
     render(
       <ReadinessPanel
         gateStatus={gateStatus({
           ready: false,
           needs_evidence: {
             claim: "Z is safe to deploy",
-            spike_task_id: "uuid-spike-4",
+            spike_task_id: "55555555-5555-5555-5555-555555555555",
             spike_short_id: "gh78",
             spike_status: "open",
             evidence_phase: "awaiting_evidence",
@@ -603,38 +674,48 @@ describe("ReadinessPanel", () => {
         })}
       />,
     );
-    // The evidence row is still rendered with the claim
-    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
-    expect(screen.getAllByText(/Z is safe to deploy/).length).toBeGreaterThan(0);
-    // The refinement active note still shows (from refinement.active)
+    // Paused/frozen note.
+    expect(screen.getByText("Paused or frozen")).toBeInTheDocument();
     expect(
-      screen.getByText(/Autonomous tribunal in progress/),
+      screen.getByText(/Refinement is paused or frozen manually/),
     ).toBeInTheDocument();
+    // Evidence context preserved but no auto-resume wording.
+    expect(screen.getByText(/Z is safe to deploy/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Autonomous tribunal in progress/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/refinement can resume/),
+    ).not.toBeInTheDocument();
   });
 
-  it("does not show stale in-progress copy when refinement has evidence state", () => {
-    render(
+  it("falls back to gate evidence when refinement is null and gate has awaiting evidence", () => {
+    const { container } = render(
       <ReadinessPanel
         gateStatus={gateStatus({
           ready: false,
           needs_evidence: {
-            claim: "System is stable",
-            spike_task_id: "uuid-spike-5",
-            spike_short_id: "ij90",
+            claim: "Gate-only claim",
+            spike_task_id: "66666666-6666-6666-6666-666666666666",
+            spike_short_id: "sp-only",
             spike_status: "open",
             evidence_phase: "awaiting_evidence",
           },
         })}
-        refinement={refinement({ active: true })}
+        refinement={null}
       />,
     );
-    // The evidence row and note are shown
+    // The panel renders because gateStatus is present.
+    expect(container.innerHTML).not.toBe("");
+    expect(screen.getByText("Readiness gate")).toBeInTheDocument();
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
     expect(screen.getByText("Evidence spike")).toBeInTheDocument();
-    // The refinement active note is still present (ReadinessPanel renders it
-    // independently of evidence state, driven by refinement.active)
+    // When refinement is null the classifier returns not_started, so the panel
+    // does not render evidence lifecycle notes; it still renders the checklist.
+    expect(screen.getByText("none required")).toBeInTheDocument();
     expect(
-      screen.getByText(/Autonomous tribunal in progress/),
-    ).toBeInTheDocument();
+      screen.queryByText(/Awaiting evidence:/),
+    ).not.toBeInTheDocument();
   });
 
   // ── Regression: normal states still render correctly ────────────────────
