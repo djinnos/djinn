@@ -334,6 +334,22 @@ pub struct ResumeLifecycleMetadata {
     /// used for the worker→host frame can serialize/deserialize it.
     #[serde(default)]
     pub skipped: Vec<RejectedResumeSourceWire>,
+    /// Previous model used before the termination that triggered this
+    /// resume. Populated by the coordinator from model-rotation metadata
+    /// when available. Used by the resume-prompt note (`48ru`) and
+    /// model-rotation logic.
+    #[serde(default)]
+    pub previous_model: Option<String>,
+    /// Last durable-progress summary from the prior session, when
+    /// available. Used by the resume-prompt note to give the worker
+    /// context about what was accomplished before termination.
+    #[serde(default)]
+    pub last_durable_progress_summary: Option<String>,
+    /// Suggested verification command from the prior session's
+    /// auto-submit/checkpoint metadata, when available. Used by the
+    /// resume-prompt note so the worker can re-verify quickly.
+    #[serde(default)]
+    pub verification_command: Option<String>,
 }
 
 /// Rejected candidate + machine-readable skip reason. Typed mirror of
@@ -690,6 +706,9 @@ mod tests {
                     submit_or_review_id: Some("review-7".to_string()),
                     reason: Some(ResumeSelectionReason::CheckpointUnsafe),
                 }],
+                previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+                last_durable_progress_summary: Some("Implemented core feature".to_string()),
+                verification_command: Some("cargo test".to_string()),
             }),
         };
 

@@ -78,10 +78,11 @@ use crate::actors::slot::helpers::{
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
-    ModelResolutionError, resolve_model_and_credential,
+    ModelResolutionError, attempt_resume_model_rotation, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
+    build_worker_resume_note,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -562,6 +563,24 @@ pub(crate) async fn execute_stage(
         }
     };
 
+    // ── Model rotation for resume (y8pv / 48ru) ────────────────────────────
+    // When resume metadata indicates the prior session used a specific model
+    // that terminated for a rotation-worthy cause (no-progress, deadline,
+    // flaky, or repeated verify-loop), attempt to select a different model
+    // from the connected catalog. Falls back to the current model when
+    // rotation is not applicable or no alternate is available.
+    let model_id = if provider_override.is_some() {
+        model_id
+    } else {
+        attempt_resume_model_rotation(
+            &task.short_id,
+            &model_id,
+            spec.resume_lifecycle_metadata.as_ref(),
+            agent_context,
+        )
+        .await
+    };
+
     // ── Model + credential ───────────────────────────────────────────────────
     let resolved = if provider_override.is_some() {
         None
@@ -646,6 +665,21 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
+    // y8pv / 48ru: build a one-line worker resume note from the coordinator-
+    // selected resume lifecycle metadata. Only injected for worker dispatch;
+    // non-worker roles receive no resume instructions.
+    let worker_resume_note = build_worker_resume_note(
+        runtime_role.config().name,
+        spec.resume_lifecycle_metadata.as_ref(),
+    );
+    if worker_resume_note.is_some() {
+        tracing::info!(
+            task_id = %task.short_id,
+            task_run_id = %task_run_id,
+            role = %runtime_role_name,
+            "Supervisor stage: injected worker resume note"
+        );
+    }
     // Coarse pre-session progress marker for the host-side liveness deadline:
     // model/credential/MCP/skill resolution and prompt assembly happen here,
     // before any session row exists.
@@ -666,6 +700,7 @@ pub(crate) async fn execute_stage(
         resolved_skills: &resolved_skills,
         app_state: agent_context,
         read_sources: &read_sources,
+        worker_resume_note: worker_resume_note.as_deref(),
     })
     .await;
 

@@ -285,6 +285,35 @@ impl CoordinatorActor {
         )?;
         let metadata = crate::dispatch::resume_source::selection_to_metadata(&selection);
 
+        // Thread additional context fields from the lifecycle metadata into
+        // the resume metadata's extra map so they deserialize into the
+        // runtime ResumeLifecycleMetadata typed fields (previous_model,
+        // verification_command, last_durable_progress_summary). These are
+        // consumed by the worker resume-prompt note (48ru).
+        let mut metadata = metadata;
+        if let Some(model_rotation) = &lifecycle.model_rotation
+            && let Some(prev) = &model_rotation.previous_model
+        {
+            metadata
+                .extra
+                .insert("previous_model".to_string(), serde_json::json!(prev));
+        }
+        if let Some(auto_submit) = &lifecycle.auto_submit
+            && let Some(cmd) = &auto_submit.verification_command
+        {
+            metadata
+                .extra
+                .insert("verification_command".to_string(), serde_json::json!(cmd));
+        }
+        // last_durable_progress_summary: extract from checkpoint extra if present.
+        if let Some(checkpoint) = &lifecycle.checkpoint
+            && let Some(summary) = checkpoint.extra.get("last_durable_progress_summary")
+        {
+            metadata
+                .extra
+                .insert("last_durable_progress_summary".to_string(), summary.clone());
+        }
+
         let payload = serde_json::json!({
             "event": "resume_source_selected",
             "worker_lifecycle": {
