@@ -185,6 +185,7 @@ pub(crate) fn build_provider_from_resolved(
                     provider_headers,
                     capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
                     reasoning_effort: None,
+                    tool_schema_compat: None,
                 },
             ))
         }
