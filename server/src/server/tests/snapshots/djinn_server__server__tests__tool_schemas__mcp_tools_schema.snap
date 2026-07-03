@@ -15348,8 +15348,22 @@ expression: signatures
               ],
               "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
             },
+            "expected_findings": {
+              "description": "What the evidence spike should produce to resolve the claim.\nFrom the structured claim's `expected_findings`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "failure_reason": {
               "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "insufficient_in_session_research": {
+              "description": "Why in-session research was insufficient to resolve the claim.\nFrom the structured claim's `insufficient_in_session_research`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
               "type": [
                 "string",
                 "null"
@@ -15695,8 +15709,22 @@ expression: signatures
               ],
               "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
             },
+            "expected_findings": {
+              "description": "What the evidence spike should produce to resolve the claim.\nFrom the structured claim's `expected_findings`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "failure_reason": {
               "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "insufficient_in_session_research": {
+              "description": "Why in-session research was insufficient to resolve the claim.\nFrom the structured claim's `insufficient_in_session_research`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
               "type": [
                 "string",
                 "null"
@@ -15968,8 +15996,22 @@ expression: signatures
               ],
               "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
             },
+            "expected_findings": {
+              "description": "What the evidence spike should produce to resolve the claim.\nFrom the structured claim's `expected_findings`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "failure_reason": {
               "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "insufficient_in_session_research": {
+              "description": "Why in-session research was insufficient to resolve the claim.\nFrom the structured claim's `insufficient_in_session_research`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
               "type": [
                 "string",
                 "null"
@@ -16373,8 +16415,22 @@ expression: signatures
               ],
               "description": "Current evidence lifecycle phase (awaiting, received, or failed).\nDerived from persisted `proposal_revisions` lifecycle events.\n`None` when no lifecycle event has been recorded yet."
             },
+            "expected_findings": {
+              "description": "What the evidence spike should produce to resolve the claim.\nFrom the structured claim's `expected_findings`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "failure_reason": {
               "description": "For `evidence_failed`, the failure reason (`spike_cancelled`,\n`spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).\n`None` for other phases.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "insufficient_in_session_research": {
+              "description": "Why in-session research was insufficient to resolve the claim.\nFrom the structured claim's `insufficient_in_session_research`.\n`None` when `needs_evidence_claim` is a legacy plain string.",
               "type": [
                 "string",
                 "null"

@@ -194,13 +194,31 @@ export function ProposalRefinement({
     const round = status.current_round ?? undefined;
     const headSeq = diff?.headSeq;
 
+    // Evidence lifecycle state — takes precedence over normal active/stopped
+    // states for badge, ribbon, and body rendering.
+    const evidenceState = status.evidence_lifecycle_state;
+    const isEvidenceState =
+      evidenceState === "awaiting_evidence" ||
+      evidenceState === "evidence_failed" ||
+      evidenceState === "paused_or_frozen" ||
+      evidenceState === "evidence_received";
+    const evidence = status.needs_evidence ?? null;
+
     // Status ribbon: one line reconciling the tribunal state.
     const ribbon =
-      status.active && status.awaiting_review
-        ? `Converged${round ? ` after ${round} ${round === 1 ? "round" : "rounds"}` : ""} — awaiting your review`
-        : status.active
-          ? `Tribunal running${round ? ` — round ${round}` : ""}`
-          : `Stopped — ${stopReasonLabel(status.stop_reason ?? "")}`;
+      evidenceState === "awaiting_evidence" && evidence
+        ? `Awaiting evidence — spike ${evidence.spike_short_id} (${evidence.spike_status})`
+        : evidenceState === "evidence_failed" && evidence
+          ? `Evidence failed — spike ${evidence.spike_short_id}${evidence.failure_reason ? ` (${evidence.failure_reason})` : ""}`
+          : evidenceState === "paused_or_frozen"
+            ? "Paused — waiting on manual gate"
+            : evidenceState === "evidence_received"
+              ? "Evidence received — waiting on refinement to resume"
+              : status.active && status.awaiting_review
+                ? `Converged${round ? ` after ${round} ${round === 1 ? "round" : "rounds"}` : ""} — awaiting your review`
+                : status.active
+                  ? `Tribunal running${round ? ` — round ${round}` : ""}`
+                  : `Stopped — ${stopReasonLabel(status.stop_reason ?? "")}`;
 
     return (
       <div className="space-y-3 rounded-md border p-3">
@@ -212,6 +230,22 @@ export function ProposalRefinement({
             {status.active && status.awaiting_review ? (
               <Badge variant="secondary" className="text-xs">
                 Awaiting review
+              </Badge>
+            ) : evidenceState === "awaiting_evidence" ? (
+              <Badge variant="secondary" className="text-xs">
+                Awaiting evidence
+              </Badge>
+            ) : evidenceState === "evidence_failed" ? (
+              <Badge variant="destructive" className="text-xs">
+                Evidence failed
+              </Badge>
+            ) : evidenceState === "paused_or_frozen" ? (
+              <Badge variant="secondary" className="text-xs">
+                Paused
+              </Badge>
+            ) : evidenceState === "evidence_received" ? (
+              <Badge variant="secondary" className="text-xs">
+                Evidence received
               </Badge>
             ) : status.active ? (
               <Badge variant="default" className="text-xs">
@@ -380,8 +414,125 @@ export function ProposalRefinement({
           </div>
         )}
 
-        {/* In-progress: tribunal still running autonomously. */}
-        {status.active && !status.awaiting_review && (
+        {/* Awaiting evidence — shows claim, spike details, and investigation context. */}
+        {evidenceState === "awaiting_evidence" && evidence && (
+          <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30">
+            <Label className="text-xs uppercase text-muted-foreground">
+              Awaiting evidence
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              The tribunal has parked refinement pending evidence from spike{" "}
+              <span className="font-mono font-medium">
+                {evidence.spike_short_id}
+              </span>
+              .
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Claim: {evidence.claim}
+            </p>
+            {evidence.question && (
+              <p className="text-xs text-muted-foreground">
+                Question: {evidence.question}
+              </p>
+            )}
+            {evidence.target_subsystem && (
+              <p className="text-xs text-muted-foreground">
+                Target: {evidence.target_subsystem}
+              </p>
+            )}
+            {evidence.spec_unknown_anchor && (
+              <p className="text-xs text-muted-foreground">
+                Unknown: {evidence.spec_unknown_anchor}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Evidence failed — blocking state with remediation-oriented copy. */}
+        {evidenceState === "evidence_failed" && evidence && (
+          <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+            <Label className="text-xs uppercase text-destructive">
+              Evidence failed
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              The evidence spike{" "}
+              <span className="font-mono font-medium">
+                {evidence.spike_short_id}
+              </span>{" "}
+              {evidence.failure_reason === "spike_force_closed"
+                ? "was force-closed"
+                : evidence.failure_reason === "malformed_findings"
+                  ? "submitted malformed findings"
+                  : evidence.failure_reason === "spike_cancelled"
+                    ? "was cancelled"
+                    : evidence.failure_reason === "spike_errored"
+                      ? "encountered an error"
+                      : "failed"}
+              {evidence.failure_reason
+                ? ` (${evidence.failure_reason})`
+                : ""}
+              .
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Review the spike activity, address the underlying issue, and
+              restart evidence collection to unblock refinement.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Claim: {evidence.claim}
+            </p>
+          </div>
+        )}
+
+        {/* PausedOrFrozen — manual gate copy takes precedence, but evidence
+            context is still visible to explain why the proposal is blocked. */}
+        {evidenceState === "paused_or_frozen" && (
+          <div className="space-y-2 border-t pt-2">
+            <Label className="text-xs uppercase text-muted-foreground">
+              Paused — waiting on manual gate
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Refinement is paused until a manual gate is cleared.
+              {evidence
+                ? " Evidence has been collected and is ready for review."
+                : ""}
+            </p>
+            {evidence && (
+              <div className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+                Evidence spike: {evidence.spike_short_id} (
+                {evidence.spike_status})
+                {evidence.claim && (
+                  <> — claim: {evidence.claim}</>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Evidence received — evidence is available, refinement can resume. */}
+        {evidenceState === "evidence_received" && (
+          <div className="space-y-2 border-t pt-2">
+            <Label className="text-xs uppercase text-muted-foreground">
+              Evidence received
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Evidence has been collected and the spike findings are available.
+              {evidence?.spike_short_id && (
+                <>
+                  {" "}
+                  Spike:{" "}
+                  <span className="font-mono font-medium">
+                    {evidence.spike_short_id}
+                  </span>
+                </>
+              )}
+            </p>
+          </div>
+        )}
+
+        {/* In-progress: tribunal still running autonomously. Only shown for
+            non-evidence active states — evidence states render their own
+            body sections above. */}
+        {status.active && !status.awaiting_review && !isEvidenceState && (
           <div className="space-y-1 border-t pt-2">
             <Label className="text-xs uppercase text-muted-foreground">
               Refinement in progress

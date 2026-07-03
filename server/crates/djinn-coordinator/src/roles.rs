@@ -327,4 +327,48 @@ mod tests {
             assert!(!planner_claims(&t, &ctx));
         }
     }
+
+    /// Evidence-spike tasks (carrying `refinement-evidence` + `read-only`
+    /// labels from the Judge demand-evidence path in epic 6tjy) must still
+    /// route to the Architect role — the runtime profile restriction
+    /// happens at the agent stage, not at the coordinator dispatch level.
+    #[test]
+    fn evidence_spike_task_is_claimed_by_architect() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+        // Exact labels from proposal_refinement_demand_evidence.
+        let labels = r#"["refinement-evidence","read-only","proposal:p1"]"#;
+
+        for status in ["open", "in_progress"] {
+            let t = task("spike", status, labels);
+
+            assert!(
+                architect_claims(&t, &ctx),
+                "evidence-spike task ({status}) must be claimed by architect_claims"
+            );
+            assert_eq!(
+                registry.role_for_task(&t, &ctx),
+                Some("architect"),
+                "evidence-spike task ({status}) must route to architect"
+            );
+        }
+    }
+
+    /// Generic spike tasks without evidence-spike labels still route to
+    /// the Architect — the evidence-spike profile must not change generic
+    /// routing.
+    #[test]
+    fn generic_spike_without_evidence_labels_still_routes_to_architect() {
+        let registry = RoleRegistry::new();
+        let ctx = DispatchContext;
+
+        for status in ["open", "in_progress"] {
+            let t = task("spike", status, "[]");
+            assert_eq!(
+                registry.role_for_task(&t, &ctx),
+                Some("architect"),
+                "generic spike ({status}) must still route to architect"
+            );
+        }
+    }
 }

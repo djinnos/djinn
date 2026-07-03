@@ -486,4 +486,194 @@ describe("ReadinessPanel", () => {
       screen.getByText(/Autonomous tribunal in progress/),
     ).toBeInTheDocument();
   });
+
+  // ── Evidence phase-aware rendering ──────────────────────────────────────
+
+  it("renders AwaitingEvidence phase in the evidence spike row", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "X is load-bearing",
+            spike_task_id: "uuid-spike",
+            spike_short_id: "ab12",
+            spike_status: "open",
+            evidence_phase: "awaiting_evidence",
+          },
+        })}
+        refinement={refinement()}
+      />,
+    );
+    // Gate row
+    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
+    expect(
+      screen.getByText(/awaiting evidence — spike ab12 \(open\)/),
+    ).toBeInTheDocument();
+    // Parked note (amber, not destructive)
+    expect(
+      screen.getByText(/Parked: needs-evidence spike/),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/X is load-bearing/).length).toBeGreaterThan(0);
+  });
+
+  it("renders EvidenceFailed phase with destructive styling and failure reason", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Y handles concurrency safely",
+            spike_task_id: "uuid-spike-2",
+            spike_short_id: "cd34",
+            spike_status: "closed",
+            evidence_phase: "evidence_failed",
+            failure_reason: "spike_force_closed",
+          },
+        })}
+        refinement={refinement()}
+      />,
+    );
+    // Gate row shows failed
+    expect(
+      screen.getByText(/evidence failed — spike cd34 \(spike_force_closed\)/),
+    ).toBeInTheDocument();
+    // Destructive parked note instead of amber
+    expect(
+      screen.getByText(/Evidence failed: cd34/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Reason: spike_force_closed/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Review the spike findings and address the issue/),
+    ).toBeInTheDocument();
+    // Should NOT show the amber "Parked" note
+    expect(
+      screen.queryByText(/Parked: needs-evidence spike/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders EvidenceReceived phase with green/received copy", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Performance is acceptable",
+            spike_task_id: "uuid-spike-3",
+            spike_short_id: "ef56",
+            spike_status: "closed",
+            evidence_phase: "evidence_received",
+          },
+        })}
+        refinement={refinement()}
+      />,
+    );
+    // Gate row shows received (pass state)
+    expect(
+      screen.getByText(/evidence received — spike ef56/),
+    ).toBeInTheDocument();
+    // Note says "Evidence received" not "Parked"
+    expect(
+      screen.getByText("Evidence received"),
+    ).toBeInTheDocument();
+    // Should NOT show the amber "Parked" note
+    expect(
+      screen.queryByText(/Parked: needs-evidence spike/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves non-contradictory manual pause/freeze precedence with evidence", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "Z is safe to deploy",
+            spike_task_id: "uuid-spike-4",
+            spike_short_id: "gh78",
+            spike_status: "open",
+            evidence_phase: "awaiting_evidence",
+          },
+        })}
+        refinement={refinement({
+          active: true,
+          evidence_lifecycle_state: "paused_or_frozen",
+        })}
+      />,
+    );
+    // The evidence row is still rendered with the claim
+    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
+    expect(screen.getAllByText(/Z is safe to deploy/).length).toBeGreaterThan(0);
+    // The refinement active note still shows (from refinement.active)
+    expect(
+      screen.getByText(/Autonomous tribunal in progress/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show stale in-progress copy when refinement has evidence state", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          ready: false,
+          needs_evidence: {
+            claim: "System is stable",
+            spike_task_id: "uuid-spike-5",
+            spike_short_id: "ij90",
+            spike_status: "open",
+            evidence_phase: "awaiting_evidence",
+          },
+        })}
+        refinement={refinement({ active: true })}
+      />,
+    );
+    // The evidence row and note are shown
+    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
+    // The refinement active note is still present (ReadinessPanel renders it
+    // independently of evidence state, driven by refinement.active)
+    expect(
+      screen.getByText(/Autonomous tribunal in progress/),
+    ).toBeInTheDocument();
+  });
+
+  // ── Regression: normal states still render correctly ────────────────────
+
+  it("still renders normal in-progress refinement without evidence states", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus()}
+        refinement={refinement({ active: true, current_round: 2 })}
+      />,
+    );
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Evidence spike")).toBeInTheDocument();
+    expect(screen.getByText("none required")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Autonomous tribunal in progress/),
+    ).toBeInTheDocument();
+  });
+
+  it("still renders converged state without evidence interference", () => {
+    render(
+      <ReadinessPanel
+        gateStatus={gateStatus({
+          judge_verdict_body: "Approved",
+          judge_verdict_id: "v-1",
+          judge_needs_work: false,
+        })}
+        refinement={refinement({
+          active: true,
+          awaiting_review: true,
+          current_round: 3,
+        })}
+      />,
+    );
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(
+      screen.getByText(/approve \/ ready/),
+    ).toBeInTheDocument();
+    // No evidence row content
+    expect(screen.getByText("none required")).toBeInTheDocument();
+  });
 });

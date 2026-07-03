@@ -430,13 +430,26 @@ export function ReadinessPanel({
             )}
           </GateRow>
 
-          {/* Evidence spike */}
+          {/* Evidence spike — renders distinct states for awaiting, received,
+              and failed evidence phases. */}
           <GateRow
-            state={evidence ? "fail" : "na"}
+            state={
+              evidence
+                ? evidence.evidence_phase === "evidence_received"
+                  ? "pass"
+                  : evidence.evidence_phase === "evidence_failed"
+                    ? "fail"
+                    : "fail"
+                : "na"
+            }
             label="Evidence spike"
             detail={
               evidence
-                ? `spike ${evidence.spike_short_id} — ${evidence.spike_status}`
+                ? evidence.evidence_phase === "evidence_failed"
+                  ? `evidence failed — spike ${evidence.spike_short_id}${evidence.failure_reason ? ` (${evidence.failure_reason})` : ""}`
+                  : evidence.evidence_phase === "evidence_received"
+                    ? `evidence received — spike ${evidence.spike_short_id}`
+                    : `awaiting evidence — spike ${evidence.spike_short_id} (${evidence.spike_status})`
                 : "none required"
             }
           >
@@ -525,9 +538,33 @@ export function ReadinessPanel({
         </div>
       )}
 
-      {/* Needs-evidence spike parking note (kept for parity with the old
-          affordance; the row above summarises it inline). */}
-      {evidence && (
+      {/* Needs-evidence spike parking note — renders distinct copy for
+          awaiting, received, and failed evidence phases. */}
+      {evidence && evidence.evidence_phase === "evidence_failed" && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-2">
+          <HugeiconsIcon
+            icon={CancelCircleIcon}
+            size={14}
+            className="mt-0.5 shrink-0 text-destructive"
+          />
+          <div className="space-y-0.5 text-xs">
+            <p className="font-medium text-destructive">
+              Evidence failed: {evidence.spike_short_id}
+            </p>
+            <p className="text-muted-foreground">Claim: {evidence.claim}</p>
+            {evidence.failure_reason && (
+              <p className="text-muted-foreground">
+                Reason: {evidence.failure_reason}
+              </p>
+            )}
+            <p className="text-muted-foreground">
+              Review the spike findings and address the issue before
+              refinement can resume.
+            </p>
+          </div>
+        </div>
+      )}
+      {evidence && evidence.evidence_phase !== "evidence_failed" && (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/30">
           <HugeiconsIcon
             icon={AlertCircleIcon}
@@ -536,7 +573,9 @@ export function ReadinessPanel({
           />
           <div className="space-y-0.5 text-xs">
             <p className="font-medium text-amber-800 dark:text-amber-200">
-              Parked: needs-evidence spike
+              {evidence.evidence_phase === "evidence_received"
+                ? "Evidence received"
+                : "Parked: needs-evidence spike"}
             </p>
             <p className="text-muted-foreground">Claim: {evidence.claim}</p>
             <p className="text-muted-foreground">

@@ -740,4 +740,270 @@ describe("ProposalRefinement", () => {
     // The debate trail is only surfaced in the converged review card's tab.
     expect(screen.queryByText("Debate trail")).not.toBeInTheDocument();
   });
+
+  // ── Evidence lifecycle states ──────────────────────────────────────────────
+
+  it("renders AwaitingEvidence with spike id, status, and claim", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "awaiting_evidence",
+      needs_evidence: {
+        claim: "X is load-bearing for the subsystem",
+        spike_task_id: "uuid-spike",
+        spike_short_id: "ab12",
+        spike_status: "open",
+        evidence_phase: "awaiting_evidence",
+        question: "Does X handle failover correctly?",
+        target_subsystem: "coordinator",
+        spec_unknown_anchor: "failover behavior",
+        round: 2,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Badge
+    expect(screen.getAllByText("Awaiting evidence").length).toBeGreaterThanOrEqual(2);
+    // Ribbon includes spike id and status
+    expect(
+      screen.getByText(/Awaiting evidence — spike ab12 \(open\)/),
+    ).toBeInTheDocument();
+    // Body section
+    expect(
+      screen.getByText(/The tribunal has parked refinement pending evidence/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Claim: X is load-bearing for the subsystem/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Question: Does X handle failover correctly?/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Target: coordinator/)).toBeInTheDocument();
+    // Does NOT show stale in-progress copy
+    expect(
+      screen.queryByText("Refinement in progress"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+  });
+
+  it("renders EvidenceFailed with failure reason and remediation copy", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 3,
+      dry_rounds: 0,
+      total_entries: 6,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "evidence_failed",
+      needs_evidence: {
+        claim: "Y handles concurrent access safely",
+        spike_task_id: "uuid-spike-2",
+        spike_short_id: "cd34",
+        spike_status: "closed",
+        evidence_phase: "evidence_failed",
+        failure_reason: "spike_force_closed",
+        round: 3,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Badge + body label both say "Evidence failed"
+    expect(screen.getAllByText("Evidence failed").length).toBeGreaterThanOrEqual(2);
+    // Ribbon includes spike id and failure reason
+    expect(
+      screen.getByText(
+        /Evidence failed — spike cd34 \(spike_force_closed\)/,
+      ),
+    ).toBeInTheDocument();
+    // Body section
+    expect(screen.getByText(/was force-closed/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Review the spike activity, address the underlying issue/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Claim: Y handles concurrent access safely/),
+    ).toBeInTheDocument();
+    // Does NOT show stale states
+    expect(
+      screen.queryByText("Refinement in progress"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Active")).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Converged")).not.toBeInTheDocument();
+  });
+
+  it("renders PausedOrFrozen with manual gate copy and evidence context", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "paused_or_frozen",
+      needs_evidence: {
+        claim: "Z is safe to deploy",
+        spike_task_id: "uuid-spike-3",
+        spike_short_id: "ef56",
+        spike_status: "closed",
+        evidence_phase: "evidence_received",
+        round: 2,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Badge
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    // Ribbon + body label both say "Paused — waiting on manual gate"
+    expect(
+      screen.getAllByText(/Paused — waiting on manual gate/).length,
+    ).toBeGreaterThanOrEqual(2);
+    // Manual gate copy with evidence context
+    expect(
+      screen.getByText(/Refinement is paused until a manual gate is cleared/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Evidence has been collected and is ready for review/),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/ef56/).length).toBeGreaterThan(0);
+    // Does NOT show stale in-progress copy
+    expect(
+      screen.queryByText("Refinement in progress"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders PausedOrFrozen without evidence context when no spike", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 1,
+      dry_rounds: 0,
+      total_entries: 2,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "paused_or_frozen",
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    // Ribbon + body label both say "Paused — waiting on manual gate"
+    expect(
+      screen.getAllByText(/Paused — waiting on manual gate/).length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByText(/Refinement is paused until a manual gate is cleared/),
+    ).toBeInTheDocument();
+    // No evidence context when no spike
+    expect(screen.queryByText(/Evidence has been collected/)).not.toBeInTheDocument();
+  });
+
+  it("renders EvidenceReceived with spike details", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 3,
+      dry_rounds: 0,
+      total_entries: 6,
+      stop_reason: null,
+      awaiting_review: false,
+      evidence_lifecycle_state: "evidence_received",
+      needs_evidence: {
+        claim: "Performance is acceptable",
+        spike_task_id: "uuid-spike-4",
+        spike_short_id: "gh78",
+        spike_status: "closed",
+        evidence_phase: "evidence_received",
+        round: 3,
+      },
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    // Badge + body label both say "Evidence received"
+    expect(screen.getAllByText("Evidence received").length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getByText(/Evidence received — waiting on refinement to resume/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Evidence has been collected and the spike findings are available/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/gh78/)).toBeInTheDocument();
+    // Does NOT show in-progress
+    expect(
+      screen.queryByText("Refinement in progress"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not render evidence sections for normal active state", () => {
+    const status: ProposalRefinementStatus = {
+      active: true,
+      current_round: 2,
+      dry_rounds: 0,
+      total_entries: 4,
+      stop_reason: null,
+      awaiting_review: false,
+    };
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={status}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Active")).toBeInTheDocument();
+    expect(screen.getByText("Refinement in progress")).toBeInTheDocument();
+    expect(screen.queryByText("Awaiting evidence")).not.toBeInTheDocument();
+    expect(screen.queryByText("Evidence failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Evidence received")).not.toBeInTheDocument();
+    expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+  });
+
+  it("does not render evidence sections for converged awaiting_review state", () => {
+    render(
+      <ProposalRefinement
+        proposalId={proposalId}
+        status={reviewStatus()}
+        canStart={false}
+        onChanged={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Awaiting review")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Converged after 4 rounds/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Awaiting evidence")).not.toBeInTheDocument();
+    expect(screen.queryByText("Evidence failed")).not.toBeInTheDocument();
+  });
 });
