@@ -16,6 +16,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { cn } from "@/lib/utils";
 
 import type { BlockProps } from "./types";
+import { unwrapExprValue } from "./exprAttr";
 import { BlockShell } from "./BlockShell";
 import { splitFilename } from "./diff";
 import {
@@ -65,10 +66,26 @@ const CodeBlock = lazy(() => import("./CodeBlock"));
  * Robust: invalid `annotations` JSON renders the code WITHOUT annotations plus a
  * quiet warning (never crashes, never silently swallows). The app is DARK-ONLY.
  */
+/** The code comes from the `code` schema field (preferred) or the block
+ *  children. The `code` attribute is the form agents author with
+ *  (`<AnnotatedCode language="rust" code={`…`} />`) — real code routinely
+ *  carries `<` / `{` that the MDX grammar would reject as malformed JSX if it
+ *  sat between the tags. Reading children only — as this did before — dropped
+ *  that code entirely and rendered an empty block (same bug and fix as
+ *  Diagram's `source`). */
+function codeContent(
+  code: string | undefined,
+  children: BlockProps["children"],
+): string {
+  if (typeof code === "string" && code.trim().length > 0) {
+    return unwrapExprValue(code).replace(/^\n/, "").replace(/\s+$/, "");
+  }
+  return typeof children === "string" ? children.replace(/\s+$/, "") : "";
+}
+
 export function AnnotatedCode({ attributes, children }: BlockProps) {
   const filename = attributes.filename?.trim() || undefined;
-  const content =
-    typeof children === "string" ? children.replace(/\s+$/, "") : "";
+  const content = codeContent(attributes.code, children);
 
   // The active language can be re-picked via the switcher; it seeds from the
   // authored `lang`/`language` attr (or filename inference), with "" meaning Auto.

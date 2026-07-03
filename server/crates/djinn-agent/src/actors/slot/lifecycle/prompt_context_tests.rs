@@ -18,102 +18,15 @@ async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
     assemble_for_role(db, task, &role, None, "", None, &[], &[]).await
 }
 
-async fn lead_epic_context(db: Database, task: &Task) -> String {
-    lead_prompt_context(db, task)
-        .await
-        .epic_context
-        .expect("lead prompt context includes epic context")
-}
-
-#[tokio::test]
-async fn epic_context_includes_blocking_and_sibling_sections() {
-    let db = Database::ephemeral().await.expect("create ephemeral db");
-    let events = EventBus::noop();
-    let project = create_test_project(&db).await;
-    let epic_repo = EpicRepository::new(db.clone(), events.clone());
-    let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
-    let subject_epic = create_epic(
-        &db,
-        &events,
-        &project.id,
-        "Subject decomposition epic",
-        "Build on dependency foundations without duplicating them.",
-        None,
-    )
-    .await;
-    let blocking_epic = create_epic(
-        &db,
-        &events,
-        &project.id,
-        "Foundation blocking epic",
-        "Owns the schema and migration foundation.",
-        Some("closed"),
-    )
-    .await;
-    for title in ["Ship shared migration", "Ship shared schema module"] {
-        create_task(&db, &events, &blocking_epic.id, title, Some("closed")).await;
-    }
-    epic_repo
-        .update_blockers_atomic(
-            &subject_epic.id,
-            std::slice::from_ref(&blocking_epic.id),
-            &[],
-        )
-        .await
-        .expect("wire epic blocker relationship");
-    let sibling_epic = create_epic(
-        &db,
-        &events,
-        &project.id,
-        "Sibling proposal epic",
-        "Owns a later proposal phase.",
-        None,
-    )
-    .await;
-    let proposal = proposal_repo
-        .create(ProposalCreateInput {
-            title: "Dependency-aware decomposition proposal",
-            body: "Proposal body",
-            acceptance_criteria: None,
-            status: Some("building"),
-            body_format: None,
-        })
-        .await
-        .expect("create proposal");
-    for epic_id in [&subject_epic.id, &sibling_epic.id] {
-        proposal_repo
-            .link_epic(&proposal.id, epic_id, &project.id)
-            .await
-            .expect("link epic to proposal");
-    }
-    let task = create_task(
-        &db,
-        &events,
-        &subject_epic.id,
-        "Decompose subject epic",
-        None,
-    )
-    .await;
-    let epic_context = lead_epic_context(db, &task).await;
-    assert_contains_all(
-        &epic_context,
-        &[
-            "### Blocking Epics",
-            "Foundation blocking epic",
-            "Ship shared migration",
-            "Ship shared schema module",
-            "### Proposal Sibling Epics",
-            "Sibling proposal epic",
-        ],
-    );
-}
-
 #[tokio::test]
 async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Standalone epic", "Standalone task").await;
-    let epic_context = lead_epic_context(db, &task).await;
+    let epic_context = lead_prompt_context(db, &task)
+        .await
+        .epic_context
+        .expect("lead prompt context includes epic context");
     for section in ["### Blocking Epics", "### Proposal Sibling Epics"] {
         assert!(
             !epic_context.contains(section),
@@ -367,20 +280,13 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
     let project = create_test_project(&db).await;
     let epic_repo = EpicRepository::new(db.clone(), events.clone());
     let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
-    let subject_epic = create_epic(
-        &db,
-        &events,
-        &project.id,
-        "Subject epic for direct helper test",
-        "Direct test of load_epic_context.",
-        None,
-    )
-    .await;
+    let subject_epic =
+        create_epic(&db, &events, &project.id, "Subject epic", "Subject.", None).await;
     let blocking_epic = create_epic(
         &db,
         &events,
         &project.id,
-        "Blocking epic for helper test",
+        "Blocking epic",
         "Blocks the subject.",
         Some("closed"),
     )
@@ -405,14 +311,14 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
         &db,
         &events,
         &project.id,
-        "Proposal sibling epic for helper test",
+        "Proposal sibling epic",
         "Sibling.",
         None,
     )
     .await;
     let proposal = proposal_repo
         .create(ProposalCreateInput {
-            title: "Test proposal for helper",
+            title: "Test proposal",
             body: "body",
             acceptance_criteria: None,
             status: Some("building"),
@@ -438,7 +344,7 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
             "### Blocking Epics",
             "Delivered blocker task",
             "### Proposal Sibling Epics",
-            "Proposal sibling epic for helper test",
+            "Proposal sibling epic",
         ],
     );
     assert_ordered(
@@ -496,29 +402,23 @@ fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
         source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
         target_ref: Some("refs/heads/task/test".to_string()),
-        submit_or_review_id: None,
         prior_session_lineage: Some("session-prior-001".to_string()),
-        skipped: vec![],
         previous_model: Some("anthropic/claude-opus-4.7".to_string()),
         last_durable_progress_summary: Some("Implemented core feature".to_string()),
         verification_command: Some("cargo test -p djinn-agent".to_string()),
+        ..Default::default()
     }
 }
 
 fn resume_metadata_with_auto_submit() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
-        checkpoint_id: None,
-        commit_sha: None,
         selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
         source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
         target_ref: Some("refs/heads/task/test".to_string()),
         submit_or_review_id: Some("review-7".to_string()),
         prior_session_lineage: Some("session-prior-002".to_string()),
-        skipped: vec![],
-        previous_model: None,
-        last_durable_progress_summary: None,
-        verification_command: None,
+        ..Default::default()
     }
 }
 
@@ -545,7 +445,6 @@ async fn worker_resume_note_injected_for_worker_role() {
             "cargo test -p djinn-agent",
         ],
     );
-    // The note should appear in the system prompt.
     assert!(ctx.system_prompt.contains("## Resume Context"));
     assert!(ctx.system_prompt.contains("Resuming from prior session"));
 }
@@ -565,74 +464,45 @@ async fn worker_resume_note_included_for_auto_submit_source() {
         &note_text,
         &["session-prior-002", "review-7", "auto-submit accepted"],
     );
-    // Checkpoint SHA should NOT appear (it's an auto-submit source).
     assert!(!note_text.contains("checkpoint"));
 }
 
-#[tokio::test]
-async fn worker_resume_note_absent_for_non_worker_roles() {
+#[test]
+fn worker_resume_note_absent_cases() {
     let metadata = resume_metadata_with_checkpoint();
-    // Lead role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("lead", Some(&metadata)).is_none());
-    // Reviewer role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("reviewer", Some(&metadata)).is_none());
-    // Planner role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("planner", Some(&metadata)).is_none());
-    // Architect role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("architect", Some(&metadata)).is_none());
-}
-
-#[tokio::test]
-async fn worker_resume_note_absent_when_not_considered() {
-    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+    for role_name in ["lead", "reviewer", "planner", "architect"] {
+        assert!(build_worker_resume_note(role_name, Some(&metadata)).is_none());
+    }
+    let not_considered = djinn_runtime::ResumeLifecycleMetadata {
         considered: false,
         ..resume_metadata_with_checkpoint()
     };
-    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
-}
-
-#[tokio::test]
-async fn worker_resume_note_absent_when_no_identifying_fields() {
-    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+    assert!(build_worker_resume_note("worker", Some(&not_considered)).is_none());
+    let no_fields = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
         commit_sha: None,
         submit_or_review_id: None,
         prior_session_lineage: None,
         ..Default::default()
     };
-    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
-}
-
-#[test]
-fn worker_resume_note_absent_when_metadata_is_none() {
+    assert!(build_worker_resume_note("worker", Some(&no_fields)).is_none());
     assert!(build_worker_resume_note("worker", None).is_none());
-}
-
-#[tokio::test]
-async fn non_worker_role_prompt_has_no_resume_section() {
-    let db = Database::ephemeral().await.expect("create ephemeral db");
-    let events = EventBus::noop();
-    let task = create_project_epic_task(&db, &events, "No-resume epic", "No-resume task").await;
-    let role = LeadRole;
-    let metadata = resume_metadata_with_checkpoint();
-    // Even with metadata present, the lead role gets no resume note.
-    let note = build_worker_resume_note(role.config().name, Some(&metadata));
-    assert!(note.is_none());
-    let ctx = assemble_for_role_with_resume(db, &task, &role, None).await;
-    assert!(ctx.worker_resume_note.is_none());
-    assert!(!ctx.system_prompt.contains("## Resume Context"));
 }
 
 #[test]
 fn role_receives_worker_resume_check() {
     assert!(role_receives_worker_resume("worker"));
-    assert!(!role_receives_worker_resume("lead"));
-    assert!(!role_receives_worker_resume("reviewer"));
-    assert!(!role_receives_worker_resume("planner"));
-    assert!(!role_receives_worker_resume("architect"));
-    assert!(!role_receives_worker_resume("advocate"));
-    assert!(!role_receives_worker_resume("adversary"));
-    assert!(!role_receives_worker_resume("judge"));
+    for non_worker in [
+        "lead",
+        "reviewer",
+        "planner",
+        "architect",
+        "advocate",
+        "adversary",
+        "judge",
+    ] {
+        assert!(!role_receives_worker_resume(non_worker));
+    }
 }
 
 #[test]
@@ -646,44 +516,12 @@ fn worker_resume_note_truncates_long_progress_summary() {
         ..Default::default()
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
-    // The truncated summary should end with … and be shorter than 200 chars.
     assert!(note.contains('…'));
     assert!(!note.contains(&"x".repeat(200)));
 }
 
 #[test]
-fn worker_resume_note_contains_all_required_fields_for_checkpoint() {
-    let metadata = resume_metadata_with_checkpoint();
-    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
-    assert_contains_all(
-        &note,
-        &[
-            "Resuming from prior session",
-            "session-prior-001",
-            "abc123def456",
-            "claude-opus-4.7",
-            "no-progress checkpoint",
-            "Implemented core feature",
-            "cargo test -p djinn-agent",
-        ],
-    );
-}
-
-#[test]
-fn worker_resume_note_contains_all_required_fields_for_auto_submit() {
-    let metadata = resume_metadata_with_auto_submit();
-    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
-    assert_contains_all(
-        &note,
-        &["session-prior-002", "review-7", "auto-submit accepted"],
-    );
-    // Should not mention checkpoint since this is an auto-submit source.
-    assert!(!note.contains("checkpoint"));
-}
-
-#[test]
 fn worker_resume_note_minimal_fields() {
-    // Only prior session is present — note should still be generated.
     let metadata = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
         prior_session_lineage: Some("sess-1".to_string()),
