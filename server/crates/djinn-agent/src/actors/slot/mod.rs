@@ -21,8 +21,6 @@ pub(crate) mod finalize_handlers; // THIN SHIM: finalize handler adapters
 pub mod helpers; // HOST-ONLY: provider resolution, feedback, code-context
 pub(crate) mod host_callbacks; // HOST-ONLY: dispatch callback adapter
 pub(crate) mod lifecycle; // HOST-ONLY: per-stage lifecycle helpers
-pub(crate) mod llm_extraction; // THIN SHIM: LLM extraction adapters + tests
-mod memory_enrichment; // EMPTY SHIM: re-exported from djinn-slot
 mod pool; // HOST-ONLY: slot pool, handle, factory
 pub(crate) mod reply_loop; // THIN SHIM: reply-loop facade adapter
 pub(crate) mod session_extraction; // THIN SHIM: extraction backfill adapter
