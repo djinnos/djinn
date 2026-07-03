@@ -52,6 +52,12 @@ pub struct ParsedAgentOutput {
     /// Auto-submit decision payload consumed by lifecycle teardown when the
     /// model did not call the role's finalize tool.
     pub auto_submit: Option<AutoSubmitSettlement>,
+    /// Set to `true` when the reply loop's no-progress integrity gate detected
+    /// a second consecutive identical rejected-fingerprint `submit_work`. The
+    /// finalize payload is NOT accepted (no `finalize_payload`); lifecycle
+    /// teardown settles this as a typed `no_progress_submission` and routes
+    /// the task into planner intervention.
+    pub no_progress_submission: bool,
 }
 
 impl Default for ParsedAgentOutput {
@@ -71,6 +77,7 @@ impl ParsedAgentOutput {
             budget_wind_down_summary: None,
             budget_wind_down_details: None,
             auto_submit: None,
+            no_progress_submission: false,
         }
     }
 
