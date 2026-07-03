@@ -8870,7 +8870,7 @@ expression: signatures
           "type": "object"
         },
         "EnrichmentReport": {
-          "description": "Structured report returned by the enrichment pass.\n\nMirrors `djinn_agent::actors::slot::memory_enrichment::EnrichmentReport`\none-for-one. The server-side bridge converts between the two at the\nimplementation boundary so the MCP wire shape stays stable.",
+          "description": "Structured report returned by the enrichment pass.\n\nMirrors `djinn_slot::memory_enrichment::EnrichmentReport`\none-for-one. The server-side bridge converts between the two at the\nimplementation boundary so the MCP wire shape stays stable.",
           "properties": {
             "batches_sent": {
               "format": "int64",
