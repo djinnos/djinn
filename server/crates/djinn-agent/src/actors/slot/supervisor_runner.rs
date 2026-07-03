@@ -104,6 +104,226 @@ async fn surface_credential_revocation(
     }
 }
 
+/// Record stall + failover + activity when the worker never completed its
+/// startup handshake within the deadline.
+async fn apply_handshake_timeout_failover(
+    app_state: &AgentContext,
+    task_repo: &TaskRepository,
+    task: &Task,
+    model_id: &str,
+    creator_scope: Option<&str>,
+) {
+    app_state
+        .health_tracker
+        .record_stall(creator_scope, model_id, true);
+    app_state.health_tracker.note_task_provider_failure(
+        &task.id,
+        djinn_provider::catalog::health::TaskFailureSignal {
+            throttle: true,
+            retry_after_ms: None,
+        },
+    );
+    let _ = task_repo
+        .log_activity(
+            Some(&task.id),
+            "system",
+            "system",
+            "comment",
+            &serde_json::json!({
+                "body": format!(
+                    "Worker Pod failed to complete its startup handshake within the \
+                     deadline (image pull, unschedulable, or crash-loop). Tore down the \
+                     Job and failed over off model {model_id}."
+                )
+            })
+            .to_string(),
+        )
+        .await;
+    tracing::warn!(
+        task_id = %task.short_id,
+        %model_id,
+        "supervisor dispatch: worker handshake timed out; recorded stall + failover"
+    );
+}
+
+/// Log a `session_error` activity entry and finalize any orphaned running
+/// session rows when the worker infrastructure died before completing a run.
+async fn finalize_infra_death_session(
+    task_repo: &TaskRepository,
+    task: &Task,
+    app_state: &AgentContext,
+    reason: &str,
+) {
+    let payload = serde_json::json!({
+        "error": format!("Worker infrastructure died before completing the run: {reason}"),
+        "agent_type": "system",
+    })
+    .to_string();
+    let _ = task_repo
+        .log_activity(
+            Some(&task.id),
+            "agent-supervisor",
+            "system",
+            "session_error",
+            &payload,
+        )
+        .await;
+    let session_repo =
+        djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+    match session_repo.interrupt_running_for_task(&task.id).await {
+        Ok(n) if n > 0 => tracing::warn!(
+            task_id = %task.short_id,
+            %reason,
+            sessions = n,
+            "supervisor dispatch: finalized orphaned running session(s) after infra death"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            task_id = %task.short_id,
+            error = %e,
+            "supervisor dispatch: failed to finalize session row after infra death"
+        ),
+    }
+}
+
+/// Feed provider-breaker feedback on the terminal report, including OAuth
+/// refresh-on-401 and credential-revocation surfacing.
+async fn apply_provider_breaker_feedback(
+    app_state: &AgentContext,
+    report: &TaskRunReport,
+    model_id: &str,
+    creator_scope: Option<&str>,
+    task_id: &str,
+) {
+    if terminal_report_feeds_model_success(report) {
+        app_state
+            .health_tracker
+            .record_success(creator_scope, model_id);
+    }
+    if let Some(class) = provider_failure_class_for_report(report) {
+        let (is_throttle, retry_after_ms) = match class {
+            djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
+                app_state
+                    .health_tracker
+                    .record_stall(creator_scope, model_id, false);
+                (true, retry_after_ms)
+            }
+            djinn_runtime::ProviderFailureClass::Failure => {
+                app_state
+                    .health_tracker
+                    .record_failure(creator_scope, model_id);
+                (false, None)
+            }
+            djinn_runtime::ProviderFailureClass::AuthInvalid => {
+                if refresh_oauth_credential_after_401(model_id, app_state).await {
+                    app_state
+                        .health_tracker
+                        .record_stall(creator_scope, model_id, false);
+                    (true, None)
+                } else {
+                    app_state
+                        .health_tracker
+                        .record_stall(creator_scope, model_id, true);
+                    surface_credential_revocation(app_state, creator_scope, model_id).await;
+                    (true, None)
+                }
+            }
+        };
+        app_state.health_tracker.note_task_provider_failure(
+            task_id,
+            djinn_provider::catalog::health::TaskFailureSignal {
+                throttle: is_throttle,
+                retry_after_ms,
+            },
+        );
+    }
+}
+
+/// Clear budget-park dispatch state in the coordinator when a run ended
+/// with a `budget` park reason.
+async fn clear_budget_park_dispatch_state(app_state: &AgentContext, task: &Task) {
+    match app_state.coordinator().await {
+        Some(coordinator) => {
+            if let Err(e) = coordinator
+                .clear_planned_dispatch_completion(&task.id, "budget_park_planned_completion_clear")
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "supervisor dispatch: failed to clear budget-park dispatch state"
+                );
+            }
+        }
+        None => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                "supervisor dispatch: no coordinator handle; budget-park dispatch state clear skipped"
+            );
+        }
+    }
+}
+
+/// Route a loop-guard trip to the Planner for intervention when the report
+/// outcome is `LoopGuardTripped`.
+async fn route_loop_guard_planner_intervention_if_needed(
+    app_state: &AgentContext,
+    report: &TaskRunReport,
+    task: &Task,
+    role: &'static str,
+) {
+    let TaskRunOutcome::LoopGuardTripped {
+        kind,
+        offending_signature,
+        threshold,
+        observed,
+        turn_span,
+        session_id,
+    } = &report.outcome
+    else {
+        return;
+    };
+    let reason = loop_guard_planner_intervention_reason(
+        *kind,
+        offending_signature,
+        *threshold,
+        *observed,
+        *turn_span,
+        session_id,
+    );
+    tracing::warn!(
+        task_id = %task.short_id,
+        guard_kind = ?kind,
+        offending_signature = %offending_signature,
+        threshold,
+        observed,
+        turn_start = turn_span.0,
+        turn_end = turn_span.1,
+        session_id = %session_id,
+        "supervisor dispatch: loop guard tripped; routing to Planner intervention"
+    );
+    match app_state.coordinator().await {
+        Some(coordinator) => {
+            if let Err(e) = coordinator
+                .route_loop_guard_planner_intervention(&task.id, role, &reason)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "supervisor dispatch: failed to enqueue loop-guard Planner intervention"
+                );
+            }
+        }
+        None => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                "supervisor dispatch: no coordinator handle; loop-guard Planner intervention not enqueued"
+            );
+        }
+    }
+}
+
 /// Host-side dispatch: resolve task -> build spec -> construct runtime -> drive lifecycle.
 ///
 /// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
@@ -176,70 +396,18 @@ pub(super) async fn dispatch_task_runtime(
     .await?;
 
     if handshake_timed_out {
-        app_state
-            .health_tracker
-            .record_stall(creator_scope.as_deref(), &model_id, true);
-        app_state.health_tracker.note_task_provider_failure(
-            &task.id,
-            djinn_provider::catalog::health::TaskFailureSignal {
-                throttle: true,
-                retry_after_ms: None,
-            },
-        );
-        let _ = task_repo
-            .log_activity(
-                Some(&task.id),
-                "system",
-                "system",
-                "comment",
-                &serde_json::json!({
-                    "body": format!(
-                        "Worker Pod failed to complete its startup handshake within the \
-                         deadline (image pull, unschedulable, or crash-loop). Tore down the \
-                         Job and failed over off model {model_id}."
-                    )
-                })
-                .to_string(),
-            )
-            .await;
-        tracing::warn!(
-            task_id = %task.short_id,
-            %model_id,
-            "supervisor dispatch: worker handshake timed out; recorded stall + failover"
-        );
+        apply_handshake_timeout_failover(
+            &app_state,
+            &task_repo,
+            &task,
+            &model_id,
+            creator_scope.as_deref(),
+        )
+        .await;
     }
 
     if let Some(reason) = infra_death.as_deref() {
-        let payload = serde_json::json!({
-            "error": format!("Worker infrastructure died before completing the run: {reason}"),
-            "agent_type": "system",
-        })
-        .to_string();
-        let _ = task_repo
-            .log_activity(
-                Some(&task.id),
-                "agent-supervisor",
-                "system",
-                "session_error",
-                &payload,
-            )
-            .await;
-        let session_repo =
-            djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-        match session_repo.interrupt_running_for_task(&task.id).await {
-            Ok(n) if n > 0 => tracing::warn!(
-                task_id = %task.short_id,
-                %reason,
-                sessions = n,
-                "supervisor dispatch: finalized orphaned running session(s) after infra death"
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                task_id = %task.short_id,
-                error = %e,
-                "supervisor dispatch: failed to finalize session row after infra death"
-            ),
-        }
+        finalize_infra_death_session(&task_repo, &task, &app_state, reason).await;
     }
 
     if let Some(timeout) = presession_timeout {
@@ -297,144 +465,24 @@ pub(super) async fn dispatch_task_runtime(
             );
 
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
-            // Feed breaker on productive completed runs.
-            if terminal_report_feeds_model_success(&report) {
-                app_state
-                    .health_tracker
-                    .record_success(creator_scope.as_deref(), &model_id);
-            }
-            // Feed breaker on fast provider failures (throttle, auth, 5xx).
-            if let Some(class) = provider_failure_class_for_report(&report) {
-                let (is_throttle, retry_after_ms) = match class {
-                    djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
-                        app_state.health_tracker.record_stall(
-                            creator_scope.as_deref(),
-                            &model_id,
-                            false,
-                        );
-                        (true, retry_after_ms)
-                    }
-                    djinn_runtime::ProviderFailureClass::Failure => {
-                        app_state
-                            .health_tracker
-                            .record_failure(creator_scope.as_deref(), &model_id);
-                        (false, None)
-                    }
-                    djinn_runtime::ProviderFailureClass::AuthInvalid => {
-                        // Try silent OAuth refresh first; only mark revoked if refresh fails.
-                        if refresh_oauth_credential_after_401(&model_id, &app_state).await {
-                            app_state.health_tracker.record_stall(
-                                creator_scope.as_deref(),
-                                &model_id,
-                                false,
-                            );
-                            (true, None)
-                        } else {
-                            // Dead credential: trip breaker immediately + surface revocation.
-                            app_state.health_tracker.record_stall(
-                                creator_scope.as_deref(),
-                                &model_id,
-                                true,
-                            );
-                            surface_credential_revocation(
-                                &app_state,
-                                creator_scope.as_deref(),
-                                &model_id,
-                            )
-                            .await;
-                            (true, None)
-                        }
-                    }
-                };
-                // Per-task failure signal for coordinator redispatch logic (A3/A6).
-                app_state.health_tracker.note_task_provider_failure(
-                    &task.id,
-                    djinn_provider::catalog::health::TaskFailureSignal {
-                        throttle: is_throttle,
-                        retry_after_ms,
-                    },
-                );
-            }
-
+            apply_provider_breaker_feedback(
+                &app_state,
+                &report,
+                &model_id,
+                creator_scope.as_deref(),
+                &task.id,
+            )
+            .await;
             if is_budget_park_report(&report) {
-                match app_state.coordinator().await {
-                    Some(coordinator) => {
-                        if let Err(e) = coordinator
-                            .clear_planned_dispatch_completion(
-                                &task.id,
-                                "budget_park_planned_completion_clear",
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                task_id = %task.short_id,
-                                error = %e,
-                                "supervisor dispatch: failed to clear budget-park dispatch state"
-                            );
-                        }
-                    }
-                    None => {
-                        tracing::debug!(
-                            task_id = %task.short_id,
-                            "supervisor dispatch: no coordinator handle; budget-park dispatch state clear skipped"
-                        );
-                    }
-                }
+                clear_budget_park_dispatch_state(&app_state, &task).await;
             }
-
-            if let TaskRunOutcome::LoopGuardTripped {
-                kind,
-                offending_signature,
-                threshold,
-                observed,
-                turn_span,
-                session_id,
-            } = &report.outcome
-            {
-                let reason = loop_guard_planner_intervention_reason(
-                    *kind,
-                    offending_signature,
-                    *threshold,
-                    *observed,
-                    *turn_span,
-                    session_id,
-                );
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    guard_kind = ?kind,
-                    offending_signature = %offending_signature,
-                    threshold,
-                    observed,
-                    turn_start = turn_span.0,
-                    turn_end = turn_span.1,
-                    session_id = %session_id,
-                    "supervisor dispatch: loop guard tripped; routing to Planner intervention"
-                );
-                match app_state.coordinator().await {
-                    Some(coordinator) => {
-                        if let Err(e) = coordinator
-                            .route_loop_guard_planner_intervention(
-                                &task.id,
-                                loop_guard_intervention_role,
-                                &reason,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                task_id = %task.short_id,
-                                error = %e,
-                                "supervisor dispatch: failed to enqueue loop-guard Planner intervention"
-                            );
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            task_id = %task.short_id,
-                            "supervisor dispatch: no coordinator handle; loop-guard Planner intervention not enqueued"
-                        );
-                    }
-                }
-            }
+            route_loop_guard_planner_intervention_if_needed(
+                &app_state,
+                &report,
+                &task,
+                loop_guard_intervention_role,
+            )
+            .await;
             // Fire-and-forget post-session knowledge extraction.
             if !report.stages_completed.is_empty() {
                 let app_state_ext = app_state.clone();
