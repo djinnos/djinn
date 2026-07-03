@@ -24,7 +24,6 @@ where
 {
     const MAX_RETRIES: u32 = 5;
     const BASE_DELAY_MS: u64 = 200;
-
     let mut attempt = 0;
     loop {
         match op().await {

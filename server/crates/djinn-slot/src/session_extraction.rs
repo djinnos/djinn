@@ -49,7 +49,6 @@ pub async fn run_post_session_extraction(
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let msg_repo =
         djinn_db::SessionMessageRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     let sessions = match session_repo.list_for_task(&task_id).await {
         Ok(s) => s,
         Err(e) => {
@@ -57,7 +56,6 @@ pub async fn run_post_session_extraction(
             return;
         }
     };
-
     for session in sessions {
         // Only sessions produced by this task-run.
         if session.task_run_id.as_deref() != Some(task_run_id.as_str()) {
@@ -71,7 +69,6 @@ pub async fn run_post_session_extraction(
         ) {
             continue;
         }
-
         let messages = match msg_repo.load_conversation(&session.id).await {
             Ok(conv) => conv.messages,
             Err(e) => {
@@ -83,7 +80,6 @@ pub async fn run_post_session_extraction(
         if messages.len() < 2 {
             continue;
         }
-
         tracing::info!(
             task_id = %task_id,
             session_id = %session.id,
@@ -128,13 +124,11 @@ pub async fn run_extraction_backfill(app_state: SlotContext) {
             return;
         }
     };
-
     let total = candidates.len();
     tracing::info!(
         task_runs = total,
         "extraction_backfill: starting one-shot sweep over completed, unextracted task-runs"
     );
-
     for (idx, candidate) in candidates.into_iter().enumerate() {
         tracing::info!(
             task_id = %candidate.task_id,
@@ -145,11 +139,8 @@ pub async fn run_extraction_backfill(app_state: SlotContext) {
         run_post_session_extraction(candidate.task_id, candidate.task_run_id, app_state.clone())
             .await;
     }
-
     tracing::info!(task_runs = total, "extraction_backfill: sweep complete");
 }
-
-// ── Event taxonomy ────────────────────────────────────────────────────────────
 
 /// Aggregated event counts extracted from a completed session's tool log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,8 +186,6 @@ pub struct ExtractionQuality {
     pub admission_dropped: u32,
 }
 
-// ── Tool name classification ──────────────────────────────────────────────────
-
 fn is_memory_write_tool(name: &str) -> bool {
     matches!(name, "memory_write" | "memory_edit" | "memory_move")
 }
@@ -226,8 +215,6 @@ fn extract_apply_patch_paths(input: &serde_json::Value) -> Vec<String> {
     }
     paths
 }
-
-// ── Extraction logic ──────────────────────────────────────────────────────────
 
 /// Extract the note identifier from a `memory_read` tool call input.
 ///
@@ -303,14 +290,12 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
     let mut tool_call_index: usize = 0;
     // Collect all subsequent tool inputs for staleness analysis
     let mut tool_inputs_after: Vec<(usize, Vec<String>)> = Vec::new(); // (call_index, string_values)
-
     // Track tool_use_ids belonging to memory_write/edit/move calls so we can
     // extract the canonical permalink from their corresponding ToolResult.
     let mut memory_write_tool_use_ids: HashSet<String> = HashSet::new();
     // Deduplicated, ordered list of note permalinks written during this session.
     let mut notes_written_permalinks: Vec<String> = Vec::new();
     let mut notes_written_set: HashSet<String> = HashSet::new();
-
     for msg in messages {
         match msg.role {
             Role::Assistant => {
@@ -319,7 +304,6 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
                         unique_tools.insert(name.clone());
                         let current_index = tool_call_index;
                         tool_call_index += 1;
-
                         if name == "memory_read" {
                             if let Some(note_id) = note_id_from_memory_read(input)
                                 && notes_read_set.insert(note_id.clone())
@@ -347,7 +331,6 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
                                 files_changed_set.insert(path.to_string());
                             }
                         }
-
                         // Collect all string values for staleness analysis
                         let mut vals = Vec::new();
                         collect_string_values(input, &mut vals);
@@ -379,12 +362,10 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
             Role::System => {}
         }
     }
-
     taxonomy.changed_file_paths = files_changed_set.into_iter().collect();
     taxonomy.changed_file_paths.sort();
     taxonomy.files_changed = taxonomy.changed_file_paths.len() as u32;
     taxonomy.tools_used = unique_tools.len() as u32;
-
     // Staleness analysis: notes read but never mentioned in a subsequent tool call
     let stale_note_ids: Vec<String> = notes_read_ordered
         .iter()
@@ -398,7 +379,6 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
         })
         .cloned()
         .collect();
-
     SessionSignals {
         taxonomy,
         notes_read_ids: notes_read_ordered,
@@ -406,8 +386,6 @@ pub fn extract_session_signals(messages: &[Message]) -> SessionSignals {
         notes_written_permalinks,
     }
 }
-
-// ── Top-level entry point ─────────────────────────────────────────────────────
 
 /// Run structural extraction for a completed session in the background.
 ///
@@ -430,10 +408,7 @@ pub async fn run_structural_extraction(
         tracing::debug!(session_id = %session_id, "structural_extraction: no messages; skipping");
         return None;
     }
-
     let signals = extract_session_signals(&messages);
-
-    // ── Log staleness signals ──────────────────────────────────────────────
     for stale_id in &signals.stale_note_ids {
         tracing::debug!(
             session_id = %session_id,
@@ -441,7 +416,6 @@ pub async fn run_structural_extraction(
             "structural_extraction: note read but never referenced again (staleness signal)"
         );
     }
-
     tracing::debug!(
         session_id = %session_id,
         notes_read = signals.notes_read_ids.len(),
@@ -454,8 +428,6 @@ pub async fn run_structural_extraction(
         tasks_transitioned = signals.taxonomy.tasks_transitioned,
         "structural_extraction: taxonomy built"
     );
-
-    // ── Store taxonomy on session record ───────────────────────────────────
     let taxonomy_json = match serde_json::to_string(&signals.taxonomy) {
         Ok(j) => j,
         Err(e) => {
@@ -463,7 +435,6 @@ pub async fn run_structural_extraction(
             return None;
         }
     };
-
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = session_repo
@@ -476,16 +447,10 @@ pub async fn run_structural_extraction(
             "structural_extraction: failed to store event taxonomy"
         );
     }
-
-    // ── Flush co-access pairs ──────────────────────────────────────────────
     flush_co_access(&session_id, &signals.notes_read_ids, &app_state).await;
-
-    // ── Auto-link written notes to task and epic memory_refs ───────────────
     if !signals.notes_written_permalinks.is_empty() {
         autolink_memory_refs(&session_id, &signals.notes_written_permalinks, &app_state).await;
     }
-
-    // ── Emit proposal derived_from edges ──────────────────────────────────
     emit_proposal_derived_from_edges(
         &session_id,
         &signals.notes_read_ids,
@@ -493,7 +458,6 @@ pub async fn run_structural_extraction(
         &app_state,
     )
     .await;
-
     Some(signals.taxonomy)
 }
 
@@ -507,7 +471,6 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
         );
         return;
     }
-
     // Load the session to find project_id
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -529,7 +492,6 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
             return;
         }
     };
-
     // Chat sessions (migration 14) carry no project_id, so they can't
     // participate in project-scoped note resolution. Skip cleanly.
     let session_project_id = match session.project_id.as_deref() {
@@ -542,10 +504,8 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
             return;
         }
     };
-
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     // Resolve note identifiers → note IDs (UUID strings)
     let mut resolved_ids: Vec<String> = Vec::new();
     for identifier in notes_read {
@@ -568,7 +528,6 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
             }
         }
     }
-
     if resolved_ids.len() < 2 {
         tracing::debug!(
             session_id = %session_id,
@@ -577,7 +536,6 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
         );
         return;
     }
-
     // Flush all (i, j) pairs
     let mut pairs_flushed: u32 = 0;
     for (i, note_a) in resolved_ids.iter().enumerate() {
@@ -595,7 +553,6 @@ async fn flush_co_access(session_id: &str, notes_read: &[String], app_state: &Sl
             }
         }
     }
-
     tracing::debug!(
         session_id = %session_id,
         pairs_flushed,
@@ -644,7 +601,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
             return;
         }
     };
-
     let Some(task_id) = session.task_id.as_deref() else {
         tracing::debug!(
             session_id = %session_id,
@@ -652,8 +608,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
         );
         return;
     };
-
-    // ── Update task memory_refs ───────────────────────────────────────────
     let task_repo =
         djinn_db::TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = match task_repo.get(task_id).await {
@@ -676,7 +630,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
             return;
         }
     };
-
     let updated_task_refs = dedup_append_memory_refs(&task.memory_refs, permalinks);
     if updated_task_refs != task.memory_refs {
         if let Err(e) = task_repo
@@ -698,8 +651,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
             );
         }
     }
-
-    // ── Propagate to parent epic memory_refs ──────────────────────────────
     let Some(epic_id) = task.epic_id.as_deref() else {
         tracing::debug!(
             session_id = %session_id,
@@ -708,7 +659,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
         );
         return;
     };
-
     let epic_repo =
         djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let epic = match epic_repo.get(epic_id).await {
@@ -731,7 +681,6 @@ async fn autolink_memory_refs(session_id: &str, permalinks: &[String], app_state
             return;
         }
     };
-
     let updated_epic_refs = dedup_append_memory_refs(&epic.memory_refs, permalinks);
     if updated_epic_refs != epic.memory_refs {
         if let Err(e) = epic_repo
@@ -781,7 +730,6 @@ async fn emit_proposal_derived_from_edges(
     if notes_read.is_empty() && notes_written_permalinks.is_empty() {
         return;
     }
-
     // Load the session to find task_id and project_id.
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -803,7 +751,6 @@ async fn emit_proposal_derived_from_edges(
             return;
         }
     };
-
     let Some(task_id) = session.task_id.as_deref() else {
         tracing::debug!(
             session_id = %session_id,
@@ -811,9 +758,7 @@ async fn emit_proposal_derived_from_edges(
         );
         return;
     };
-
     let session_project_id = session.project_id.as_deref();
-
     // Load the task so we can route either through its epic or, for the initial
     // proposal breakdown Planner, through proposals.build_breakdown_task_id.
     let task_repo =
@@ -838,7 +783,6 @@ async fn emit_proposal_derived_from_edges(
             return;
         }
     };
-
     // Look up the proposal linked to this task. Worker tasks flow through their
     // parent epic's proposal_epics edge. The initial proposal-decomposition
     // Planner task has no epic yet, so fall back to proposals.build_breakdown_task_id
@@ -869,7 +813,6 @@ async fn emit_proposal_derived_from_edges(
     } else {
         None
     };
-
     let proposal = match proposal {
         Some(p) => p,
         None => match proposal_repo.proposal_for_breakdown_task(task_id).await {
@@ -893,11 +836,9 @@ async fn emit_proposal_derived_from_edges(
             }
         },
     };
-
     let proposal_ref = djinn_db::MemoryEntityRef::proposal(&proposal.id);
     let note_repo =
         djinn_db::NoteRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     // Collect all note identifiers that need resolution. Written notes use
     // permalinks (from tool results); read notes use identifiers (from tool
     // inputs). Both are resolved the same way via `note_repo.resolve`.
@@ -911,7 +852,6 @@ async fn emit_proposal_derived_from_edges(
             all_note_identifiers.push(permalink.as_str());
         }
     }
-
     let mut edges_recorded: u32 = 0;
     for identifier in &all_note_identifiers {
         // We need a project_id to resolve the identifier. If the session has
@@ -924,7 +864,6 @@ async fn emit_proposal_derived_from_edges(
             );
             break;
         };
-
         let note = match note_repo.resolve(pid, identifier).await {
             Ok(Some(n)) => n,
             Ok(None) => {
@@ -945,7 +884,6 @@ async fn emit_proposal_derived_from_edges(
                 continue;
             }
         };
-
         let note_ref = djinn_db::MemoryEntityRef::note(&note.id);
         if let Err(e) = note_repo
             .upsert_typed_entity_association(
@@ -967,7 +905,6 @@ async fn emit_proposal_derived_from_edges(
             edges_recorded += 1;
         }
     }
-
     if edges_recorded > 0 {
         tracing::debug!(
             session_id = %session_id,
@@ -977,8 +914,6 @@ async fn emit_proposal_derived_from_edges(
         );
     }
 }
-
-// ── Scope path derivation ────────────────────────────────────────────────────
 
 /// Derive scope paths from a list of changed file paths.
 ///
@@ -996,18 +931,15 @@ async fn emit_proposal_derived_from_edges(
 pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<String> {
     let mut scopes: std::collections::HashSet<String> = std::collections::HashSet::new();
     let root_prefix = project_root.trim_end_matches('/');
-
     for path in file_paths {
         // Strip project root prefix if present
         let relative = path
             .strip_prefix(root_prefix)
             .unwrap_or(path)
             .trim_start_matches('/');
-
         if relative.is_empty() {
             continue;
         }
-
         if let Some(idx) = relative.rfind('/') {
             let dir = &relative[..idx];
             if !dir.is_empty() {
@@ -1019,16 +951,14 @@ pub fn derive_scope_paths(file_paths: &[String], project_root: &str) -> Vec<Stri
             scopes.insert(".".to_string());
         }
     }
-
     let mut result: Vec<String> = scopes.into_iter().collect();
     result.sort();
     result
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
+    use super::*;
     use djinn_core::message::{ContentBlock, Message};
     use djinn_db::{
         CreateSessionParams, EpicCreateInput, EpicRepository, MemoryEntityKind, MemoryEntityRef,
@@ -1036,9 +966,6 @@ mod tests {
         SessionRepository, TaskRepository,
     };
     use tokio_util::sync::CancellationToken;
-
-    use super::*;
-
     fn tool_use(name: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
@@ -1050,7 +977,6 @@ mod tests {
             metadata: None,
         }
     }
-
     fn memory_write_result(tool_use_id: &str, permalink: &str) -> Message {
         Message {
             role: Role::User,
@@ -1064,7 +990,6 @@ mod tests {
             metadata: None,
         }
     }
-
     fn has_proposal_derived_from_edge(
         edges: &[djinn_db::MemoryEntityAssociation],
         proposal_id: &str,
@@ -1078,7 +1003,6 @@ mod tests {
                 && edge.kind == MemoryEntityKind::DerivedFrom
         })
     }
-
     fn tool_result_error(tool_use_id: &str) -> Message {
         Message {
             role: Role::User,
@@ -1090,7 +1014,6 @@ mod tests {
             metadata: None,
         }
     }
-
     fn tool_result_ok(tool_use_id: &str) -> Message {
         Message {
             role: Role::User,
@@ -1102,7 +1025,6 @@ mod tests {
             metadata: None,
         }
     }
-
     #[test]
     fn empty_messages_returns_zero_taxonomy() {
         let signals = extract_session_signals(&[]);
@@ -1111,7 +1033,6 @@ mod tests {
         assert!(signals.stale_note_ids.is_empty());
         assert!(signals.notes_written_permalinks.is_empty());
     }
-
     #[test]
     fn memory_read_increments_notes_read() {
         let msgs = vec![tool_use(
@@ -1122,7 +1043,6 @@ mod tests {
         assert_eq!(signals.taxonomy.notes_read, 1);
         assert_eq!(signals.notes_read_ids, vec!["decisions/my-adr"]);
     }
-
     #[test]
     fn memory_read_deduplication() {
         let msgs = vec![
@@ -1139,7 +1059,6 @@ mod tests {
         assert_eq!(signals.taxonomy.notes_read, 1);
         assert_eq!(signals.notes_read_ids.len(), 1);
     }
-
     #[test]
     fn task_transition_counted() {
         let msgs = vec![tool_use(
@@ -1149,7 +1068,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.tasks_transitioned, 1);
     }
-
     #[test]
     fn error_tool_result_increments_errors() {
         let msgs = vec![
@@ -1159,7 +1077,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.errors, 1);
     }
-
     #[test]
     fn ok_tool_result_does_not_increment_errors() {
         let msgs = vec![
@@ -1169,7 +1086,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.errors, 0);
     }
-
     #[test]
     fn files_changed_deduplication() {
         let msgs = vec![
@@ -1185,7 +1101,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.files_changed, 1); // same file edited twice
     }
-
     #[test]
     fn apply_patch_collects_all_paths() {
         let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n context\n-old\n+new\n*** Add File: src/b.rs\n+content\n*** Delete File: src/c.rs\n*** End Patch\n";
@@ -1201,7 +1116,6 @@ mod tests {
             ]
         );
     }
-
     #[test]
     fn notes_written_counted() {
         let msgs = vec![
@@ -1217,7 +1131,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.notes_written, 2);
     }
-
     #[test]
     fn tools_used_counts_unique_tool_names() {
         let msgs = vec![
@@ -1238,7 +1151,6 @@ mod tests {
         let signals = extract_session_signals(&msgs);
         assert_eq!(signals.taxonomy.tools_used, 3); // memory_read, task_transition, write
     }
-
     #[test]
     fn stale_note_detection_when_not_referenced_later() {
         let msgs = vec![
@@ -1255,7 +1167,6 @@ mod tests {
         assert_eq!(signals.notes_read_ids, vec!["decisions/adr-unused"]);
         assert_eq!(signals.stale_note_ids, vec!["decisions/adr-unused"]);
     }
-
     #[test]
     fn note_not_stale_when_referenced_in_later_tool() {
         let msgs = vec![
@@ -1274,20 +1185,17 @@ mod tests {
             "note was referenced in later tool call"
         );
     }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_epic_task_written_notes_emit_derived_from_edges_after_autolink() {
         let db = crate::test_helpers::create_test_db();
         let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
         let events = djinn_core::events::EventBus::noop();
-
         let project = crate::test_helpers::create_test_project(&db).await;
         let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
         let epic_repo = EpicRepository::new(db.clone(), events.clone());
         let task_repo = TaskRepository::new(db.clone(), events.clone());
         let session_repo = SessionRepository::new(db.clone(), events.clone());
         let note_repo = NoteRepository::new(db.clone(), events.clone());
-
         let proposal = proposal_repo
             .create(ProposalCreateInput {
                 title: "Derived provenance proposal",
@@ -1352,7 +1260,6 @@ mod tests {
             .create(&project.id, "Written Case", "body", "case", "[]")
             .await
             .expect("create written note");
-
         let messages = vec![
             Message {
                 role: Role::Assistant,
@@ -1365,10 +1272,8 @@ mod tests {
             },
             memory_write_result("write-note", &written.permalink),
         ];
-
         let taxonomy = run_structural_extraction(session.id.clone(), messages, ctx).await;
         assert!(taxonomy.is_some());
-
         let task_after = task_repo
             .get(&task.id)
             .await
@@ -1381,7 +1286,6 @@ mod tests {
             .expect("load epic")
             .expect("epic exists");
         assert!(epic_after.memory_refs.contains(&written.permalink));
-
         let edges = note_repo
             .list_typed_entity_associations_for(MemoryEntityRef::proposal(&proposal.id), 0.0, 10)
             .await
@@ -1392,19 +1296,16 @@ mod tests {
             &written.id
         ));
     }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn proposal_breakdown_task_read_notes_emit_derived_from_edges() {
         let db = crate::test_helpers::create_test_db();
         let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
         let events = djinn_core::events::EventBus::noop();
-
         let project = crate::test_helpers::create_test_project(&db).await;
         let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
         let task_repo = TaskRepository::new(db.clone(), events.clone());
         let session_repo = SessionRepository::new(db.clone(), events.clone());
         let note_repo = NoteRepository::new(db.clone(), events.clone());
-
         let proposal = proposal_repo
             .create(ProposalCreateInput {
                 title: "Graduation provenance proposal",
@@ -1451,15 +1352,12 @@ mod tests {
             })
             .await
             .expect("create session");
-
         let messages = vec![tool_use(
             "memory_read",
             serde_json::json!({"identifier": read_note.permalink, "project": project.slug()}),
         )];
-
         let taxonomy = run_structural_extraction(session.id.clone(), messages, ctx).await;
         assert!(taxonomy.is_some());
-
         let edges = note_repo
             .list_typed_entity_associations_for(MemoryEntityRef::proposal(&proposal.id), 0.0, 10)
             .await
@@ -1470,7 +1368,6 @@ mod tests {
             &read_note.id
         ));
     }
-
     #[test]
     fn taxonomy_serializes_round_trips() {
         let tax = SessionTaxonomy {
@@ -1496,7 +1393,6 @@ mod tests {
         let parsed: SessionTaxonomy = serde_json::from_str(&json).unwrap();
         assert_eq!(tax, parsed);
     }
-
     #[test]
     fn taxonomy_deserializes_without_extraction_quality_field() {
         let json = serde_json::json!({
@@ -1509,13 +1405,9 @@ mod tests {
             "tasks_transitioned": 0
         })
         .to_string();
-
         let parsed: SessionTaxonomy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.extraction_quality, ExtractionQuality::default());
     }
-
-    // ── Tool-use + tool-result helper with custom id ──────────────────────
-
     fn tool_use_with_id(id: &str, name: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
@@ -1527,7 +1419,6 @@ mod tests {
             metadata: None,
         }
     }
-
     fn tool_result_with_json(tool_use_id: &str, json_text: &str) -> Message {
         Message {
             role: Role::User,
@@ -1539,9 +1430,6 @@ mod tests {
             metadata: None,
         }
     }
-
-    // ── Note auto-linking extraction tests ─────────────────────────────────
-
     #[test]
     fn memory_write_extracts_permalink_from_result() {
         let msgs = vec![
@@ -1568,7 +1456,6 @@ mod tests {
             vec!["research/my-research"]
         );
     }
-
     #[test]
     fn memory_edit_extracts_permalink_from_result() {
         let msgs = vec![
@@ -1591,7 +1478,6 @@ mod tests {
         assert_eq!(signals.taxonomy.notes_written, 1);
         assert_eq!(signals.notes_written_permalinks, vec!["decisions/adr-1"]);
     }
-
     #[test]
     fn memory_move_extracts_canonical_permalink() {
         let msgs = vec![
@@ -1617,7 +1503,6 @@ mod tests {
             "should use canonical permalink from result, not input identifier"
         );
     }
-
     #[test]
     fn written_permalinks_deduplication() {
         let msgs = vec![
@@ -1650,7 +1535,6 @@ mod tests {
             "duplicate permalinks should be deduplicated"
         );
     }
-
     #[test]
     fn error_write_result_not_included_in_permalinks() {
         let msgs = vec![
@@ -1677,7 +1561,6 @@ mod tests {
             "error results should not produce permalinks"
         );
     }
-
     #[test]
     fn multiple_writes_collect_all_permalinks() {
         let msgs = vec![
@@ -1716,7 +1599,6 @@ mod tests {
             vec!["research/a", "decisions/b", "patterns/c"]
         );
     }
-
     #[test]
     fn dedup_append_memory_refs_adds_new_and_skips_existing() {
         let existing = r#"["research/old", "decisions/adr-1"]"#;
@@ -1731,21 +1613,18 @@ mod tests {
             vec!["research/old", "decisions/adr-1", "research/new"]
         );
     }
-
     #[test]
     fn dedup_append_memory_refs_empty_existing() {
         let result = dedup_append_memory_refs("[]", &["research/a".to_string()]);
         let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed, vec!["research/a"]);
     }
-
     #[test]
     fn dedup_append_memory_refs_malformed_json_recovers() {
         let result = dedup_append_memory_refs("not-json", &["research/a".to_string()]);
         let parsed: Vec<String> = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed, vec!["research/a"]);
     }
-
     #[test]
     fn permalink_from_tool_result_extracts_from_json_text() {
         let content = vec![ContentBlock::text(
@@ -1756,7 +1635,6 @@ mod tests {
             Some("research/note".to_string())
         );
     }
-
     #[test]
     fn permalink_from_tool_result_returns_none_for_missing_field() {
         let content = vec![ContentBlock::text(
@@ -1764,7 +1642,6 @@ mod tests {
         )];
         assert_eq!(permalink_from_tool_result(&content), None);
     }
-
     #[test]
     fn permalink_from_tool_result_returns_none_for_empty_permalink() {
         let content = vec![ContentBlock::text(
@@ -1772,7 +1649,6 @@ mod tests {
         )];
         assert_eq!(permalink_from_tool_result(&content), None);
     }
-
     #[test]
     fn permalink_from_tool_result_returns_none_for_non_json() {
         let content = vec![ContentBlock::text("not json at all")];

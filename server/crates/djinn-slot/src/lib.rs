@@ -26,25 +26,17 @@
 // is in progress. Remove once all modules are connected.
 #![allow(dead_code)]
 
-// ─── Public host seam ───────────────────────────────────────────────────────
-
 pub mod host;
 pub use host::{KnowledgeBranchTarget, SlotContext, SlotHostCallbacks, SlotToolDispatcher};
-
-// ─── Supporting types extracted from djinn-agent ────────────────────────────
 
 pub mod output_parser;
 pub mod roles_support;
 pub mod truncate;
 
-// ─── Re-exports from djinn-orchestration-types ─────────────────────────────
-
 pub use djinn_orchestration_types::slot::{
     MERGE_CONFLICT_PREFIX, MergeConflictMetadata, ModelSlotConfig, SlotInfo, SlotPoolConfig,
     SlotState,
 };
-
-// ─── Slot modules ───────────────────────────────────────────────────────────
 
 mod actor;
 pub mod commands;
@@ -59,8 +51,6 @@ pub mod reply_loop;
 pub mod session_extraction;
 mod supervisor_runner;
 
-// ─── Test modules ───────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod finalize_handlers_fingerprint_tests;
 #[cfg(test)]
@@ -74,8 +64,6 @@ mod reply_loop_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
-// ─── Public re-exports ──────────────────────────────────────────────────────
-
 pub use actor::*;
 // Public re-exports from `commands` so callers can use
 // `djinn_slot::SlotCommand`, `djinn_slot::SlotError`, `djinn_slot::log_commands_run_event`.
@@ -87,22 +75,16 @@ pub use finalize_handlers::{apply_ac_verdicts, handle_budget_park, process_final
 pub use helpers::*;
 pub use pool::*;
 
-// ─── LLM extraction re-exports ──────────────────────────────────────────────
-
 pub use llm_extraction::run_llm_extraction;
 #[cfg(any(test, feature = "test-support"))]
 pub use llm_extraction::{
     run_llm_extraction_with_provider, run_llm_extraction_with_provider_and_candidate_lookup,
 };
 
-// ─── Memory enrichment re-exports ───────────────────────────────────────────
-
 pub use memory_enrichment::{
     EnrichmentClaim, EnrichmentEdge, EnrichmentEntity, EnrichmentReport, run_memory_enrichment,
     run_memory_enrichment_with_db,
 };
-
-// ─── Session extraction re-export ───────────────────────────────────────────
 
 pub use session_extraction::{
     ExtractionQuality, SessionSignals, SessionTaxonomy, derive_scope_paths,
@@ -110,20 +92,16 @@ pub use session_extraction::{
     run_structural_extraction,
 };
 
-// ─── Supervisor runner re-export ────────────────────────────────────────────
 // hfhw cutover: expose `run_supervisor_dispatch` so the host (djinn-agent)
 // can call through the djinn-slot pathway from `actor.rs`.
 
 pub use supervisor_runner::run_supervisor_dispatch;
 
-// ─── Reply loop re-export ──────────────────────────────────────────────────
 // The canonical reply loop implementation now lives in djinn-slot.
 // Re-export the public surface so callers can use
 // `djinn_slot::reply_loop::{ReplyLoopContext, run_reply_loop}`.
 
 pub use reply_loop::{ReplyLoopContext, run_reply_loop};
-
-// ─── SlotEvent ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum SlotEvent {

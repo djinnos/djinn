@@ -1,7 +1,4 @@
 //! Setup-command execution for the task lifecycle.
-//!
-//! Pure extraction from `run_task_lifecycle` (task #14). The caller handles
-//! error-to-transition and worktree teardown.
 
 use std::path::Path;
 
@@ -10,7 +7,7 @@ use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::environment::hook_commands_to_specs;
 
-/// Resolved prompt-context fragments from setup commands.
+/// Resolved prompt-context fragments produced after running project setup commands.
 pub(crate) struct SetupContext {
     pub prompt_setup_commands: Option<String>,
 }
@@ -20,8 +17,7 @@ pub(crate) struct SetupError {
     pub reason: String,
 }
 
-/// Run project setup commands and format them for the prompt.
-/// Mirrors the former inline block in `run_task_lifecycle`.
+/// Run project setup commands (if any) and format them for the prompt.
 pub(crate) async fn resolve_setup_context(
     pre_verification_hooks: Vec<djinn_stack::environment::HookCommand>,
     worktree_path: &Path,
@@ -36,7 +32,6 @@ pub(crate) async fn resolve_setup_context(
                 task_id, step, &detail,
             ));
     };
-
     let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     if !setup_specs.is_empty() {
@@ -78,7 +73,6 @@ pub(crate) async fn resolve_setup_context(
                 }
             }
         }
-
         match setup_error {
             Some(e) => {
                 let reason = format!("Setup commands error: {e}");

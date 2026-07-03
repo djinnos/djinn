@@ -8,8 +8,7 @@ use djinn_provider::message::{Conversation, Message};
 
 /// Persist a single conversation message to `session_messages`, best-effort.
 ///
-/// Failures are logged and never propagated — persistence must not affect the
-/// task-run outcome.
+/// Failures are logged and never propagated — persistence must not affect the task-run outcome.
 pub(super) async fn persist_session_message(
     repo: &SessionMessageRepository,
     session_id: &str,

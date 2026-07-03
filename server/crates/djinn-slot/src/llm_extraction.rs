@@ -44,8 +44,6 @@ use time::format_description::well_known::Rfc3339;
 use super::session_extraction::SessionTaxonomy;
 use crate::host::{KnowledgeBranchTarget, SlotContext};
 
-// ── Prompt constants ──────────────────────────────────────────────────────────
-
 const SYSTEM_PROMPT: &str = "You are a knowledge extractor. Given a completed agent session \
 summary, extract reusable knowledge as structured notes. Respond with valid JSON only.";
 
@@ -92,13 +90,11 @@ async fn resolve_llm_extraction_provider_after_creator_attempt(
     if let Some(provider) = creator_resolved_provider {
         return LlmExtractionProviderResolution::Provider(provider);
     }
-
     tracing::debug!(
         session_id = %session_id,
         provider_resolution_stage = "org_shared_memory_provider_fallback",
         "llm_extraction: creator-scoped provider unavailable; trying org-shared memory-provider fallback"
     );
-
     match resolve_memory_provider_for_user(db, None).await {
         Ok(provider) => match provider.config_snapshot() {
             Some(mut config) => {
@@ -292,7 +288,6 @@ fn build_extraction_prompt(
 /// arrays every time).
 fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars: usize) -> String {
     use djinn_core::message::{ContentBlock, Role};
-
     fn take_chars(s: &str, n: usize) -> String {
         if s.chars().count() > n {
             let mut t: String = s.chars().take(n).collect();
@@ -313,7 +308,6 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
             .collect::<Vec<_>>()
             .join(" ")
     }
-
     let mut lines: Vec<String> = Vec::new();
     for msg in messages {
         let role = match msg.role {
@@ -352,7 +346,6 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
             }
         }
     }
-
     let full = lines.join("\n");
     if full.len() <= max_chars {
         return full;
@@ -368,8 +361,6 @@ fn build_transcript_excerpt(messages: &[djinn_core::message::Message], max_chars
 }
 
 const MIN_DURABLE_WORDS: usize = 16;
-
-// ── JSON response shape ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct ExtractedNote {
@@ -422,7 +413,6 @@ fn dedup_extracted_notes(
         ("pattern", extracted.patterns.as_slice()),
         ("pitfall", extracted.pitfalls.as_slice()),
     ];
-
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut out: Vec<(&'static str, ExtractedNote)> = Vec::new();
     let mut dupes = 0usize;
@@ -568,15 +558,12 @@ impl CandidateLookup {
             override_lookup: None,
         }
     }
-
     const fn with_override(override_lookup: CandidateLookupOverride) -> Self {
         Self {
             override_lookup: Some(override_lookup),
         }
     }
 }
-
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Run LLM-based knowledge extraction for a completed session.
 ///
@@ -643,7 +630,6 @@ async fn run_llm_extraction_inner(
         CandidateLookupOverride,
     >,
 ) {
-    // ── Load session ───────────────────────────────────────────────────────
     let session_repo = SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let session = match session_repo.get(&session_id).await {
         Ok(Some(s)) => s,
@@ -663,8 +649,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Require a task_id ─────────────────────────────────────────────────
     let task_id = match session.task_id {
         Some(ref id) => id.clone(),
         None => {
@@ -675,8 +659,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Load task ──────────────────────────────────────────────────────────
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = match task_repo.get(&task_id).await {
         Ok(Some(t)) => t,
@@ -698,8 +680,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Load project ───────────────────────────────────────────────────────
     // Since migration 14, `sessions.project_id` is NULL for chat sessions.
     // This extractor only runs for task-scoped (non-chat) sessions, but guard
     // defensively: without a project_id there's nothing to extract against.
@@ -734,8 +714,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Resolve provider ───────────────────────────────────────────────────
     // In tests, a provider_override bypasses credential loading entirely.
     let provider: Box<dyn LlmProvider> = if let Some(p) = provider_override {
         struct ArcProvider(Arc<dyn LlmProvider>);
@@ -794,7 +772,6 @@ async fn run_llm_extraction_inner(
             LlmExtractionProviderResolution::NoProvider { .. } => return,
         }
     };
-
     // B5a: knowledge extraction (the extraction completion + the per-note
     // novelty judgements) is a cheap background distillation, not the agent's
     // reasoning loop. Force the weakest reasoning tier so it doesn't waste
@@ -806,8 +783,6 @@ async fn run_llm_extraction_inner(
             Some(downgraded) => downgraded,
             None => provider,
         };
-
-    // ── Build prompt ───────────────────────────────────────────────────────
     // Non-panicking fallback: `unwrap_or_else` provides a minimal `"{}"` payload if
     // serialization fails, so prompt construction never aborts the extraction.
     let taxonomy_json = serde_json::to_string(&taxonomy).unwrap_or_else(|_| "{}".to_string());
@@ -846,8 +821,6 @@ async fn run_llm_extraction_inner(
         &transcript,
         &scope_json,
     );
-
-    // ── Call LLM ───────────────────────────────────────────────────────────
     let response = match complete(
         provider.as_ref(),
         CompletionRequest {
@@ -868,8 +841,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Parse JSON response ────────────────────────────────────────────────
     // FAILURE case: the call returned text but it could not be parsed as the
     // expected JSON shape. This is an error (the model misbehaved, the output
     // was truncated, etc.) and must be logged at warn — it is NOT the same as a
@@ -886,8 +857,6 @@ async fn run_llm_extraction_inner(
             return;
         }
     };
-
-    // ── Intra-batch dedup ──────────────────────────────────────────────────
     // The model can emit the same note more than once within a single
     // extraction (e.g. a case and a pitfall with an identical title, or two
     // copies of the same case). Collapse them by a normalized key
@@ -896,7 +865,6 @@ async fn run_llm_extraction_inner(
     // semantic dedup against existing notes still happens later per-note.
     let (deduped_notes, intra_batch_dupes) = dedup_extracted_notes(&extracted);
     taxonomy.extraction_quality.dedup_skipped += intra_batch_dupes as u32;
-
     let total = deduped_notes.len();
     taxonomy.extraction_quality.extracted = total as u32;
     // EMPTY (success) case: the call + parse succeeded, but after dedup there is
@@ -910,7 +878,6 @@ async fn run_llm_extraction_inner(
         );
         return;
     }
-
     tracing::debug!(
         session_id = %session_id,
         cases = extracted.cases.len(),
@@ -920,8 +887,6 @@ async fn run_llm_extraction_inner(
         unique = total,
         "llm_extraction: writing extracted notes"
     );
-
-    // ── Write notes ────────────────────────────────────────────────────────
     // Resolve the workspace path from the session's task_run.  Task #8
     // removed the `sessions.worktree_path` migration-window fallback; task
     // #13 will drop the column outright.
@@ -955,7 +920,6 @@ async fn run_llm_extraction_inner(
     let provenance = format!(
         "\n\n---\n*Extracted from session {session_id}. Confidence: 0.5 (session-extracted).*"
     );
-
     let mut extraction_quality = taxonomy.extraction_quality.clone();
     let extraction_context = ExtractionContext {
         note_repo: &note_repo,
@@ -974,7 +938,6 @@ async fn run_llm_extraction_inner(
             .map(|lookup| CandidateLookup::with_override(lookup))
             .unwrap_or_else(CandidateLookup::production),
     };
-
     for (note_type, note) in &deduped_notes {
         process_extracted_note(
             &extraction_context,
@@ -984,11 +947,8 @@ async fn run_llm_extraction_inner(
         )
         .await;
     }
-
     taxonomy.extraction_quality = extraction_quality;
-
     persist_extraction_quality(&session_repo, &session_id, &taxonomy).await;
-
     // Write a lightweight consolidation_run_metrics row so the admission-dropped
     // count is queryable via memory_health and list_run_metrics. The row uses
     // note_type "extraction" and zeros for consolidation-specific fields. The
@@ -1040,7 +1000,6 @@ async fn persist_extraction_quality(
             return;
         }
     };
-
     if let Err(error) = session_repo
         .set_event_taxonomy(session_id, &taxonomy_json)
         .await
@@ -1070,7 +1029,6 @@ async fn process_extracted_note(
     note: &ExtractedNote,
     extraction_quality: &mut super::session_extraction::ExtractionQuality,
 ) {
-    // ── ADR-054 admission gate ──────────────────────────────────────────────
     // Runs BEFORE the novelty judge and BEFORE `create_extracted_note`. A
     // candidate that fails the structural gate is dropped without a novelty
     // LLM call, without a working-spec fallback, and without any note write
@@ -1095,7 +1053,6 @@ async fn process_extracted_note(
             return;
         }
     }
-
     let novelty = match novelty_decision(extraction_context, note_type, note).await {
         Ok(result) => result,
         Err(e) => {
@@ -1112,9 +1069,7 @@ async fn process_extracted_note(
             }
         }
     };
-
     let assessment = assess_quality_gate(note_type, note, &novelty);
-
     tracing::debug!(
         session_id = %extraction_context.session_id,
         note_type = %note_type,
@@ -1129,7 +1084,6 @@ async fn process_extracted_note(
         reasons = ?assessment.reasons,
         "llm_extraction: evaluated extraction quality gate"
     );
-
     match assessment.outcome {
         ExtractionOutcome::MergeIntoExisting => {
             if let Some(candidate_id) = novelty.existing_note_id.as_deref() {
@@ -1171,7 +1125,6 @@ async fn process_extracted_note(
         }
         ExtractionOutcome::DurableWrite => {}
     }
-
     let content_with_provenance = format!("{}{}", note.content, extraction_context.provenance);
     let scope_paths = if note.scope_paths.is_empty() {
         extraction_context.session_scope_paths.to_vec()
@@ -1256,7 +1209,6 @@ async fn persist_working_spec(
     let title = format!("Working Spec {}", extraction_context.task_short_id);
     let permalink = permalink_for("design", &title);
     let section = render_working_spec_entry(extraction_context, note, reasons, &scope_paths);
-
     match extraction_context
         .note_repo
         .get_by_permalink(extraction_context.project_id, &permalink)
@@ -1346,7 +1298,6 @@ fn render_working_spec_document(
             .collect::<Vec<_>>()
             .join("\n")
     };
-
     format!(
         "# Working Spec\n\n## Active objective\n- Task {task_short_id}: {task_title}\n- {task_description}\n\n## Relevant scope\n{scope_lines}\n\n## Constraints\n- This note is task-scoped working context routed from non-durable extraction output.\n- Keep mutable hypotheses and open questions here instead of promoting them to durable case/pattern/pitfall notes.\n\n## Current hypotheses\n- Session-local understanding may evolve as implementation continues.\n\n## Open questions\n- Which parts of this working context should be promoted or discarded when the task completes?\n\n## Captured session knowledge\n{section}",
         task_short_id = extraction_context.task_short_id,
@@ -1379,7 +1330,6 @@ fn render_working_spec_entry(
             .collect::<Vec<_>>()
             .join("\n")
     };
-
     format!(
         "### {title}\n\n#### Objective\n- Preserve useful but non-durable understanding for task {task_short_id}.\n\n#### Files / symbols / scope\n{scope_lines}\n\n#### Constraints\n{routing_reasons}\n\n#### Current hypotheses\n- {content}\n\n#### Open questions\n- Should any portion of this be promoted into durable memory after the task completes?\n\n#### Routing rationale\n- Routed from extracted session output because it was useful for the current task but failed durable extraction thresholds.\n\n#### Provenance\n- Extracted from session {session_id}.\n",
         title = note.title,
@@ -1409,14 +1359,12 @@ async fn novelty_decision(
     let candidates = lookup_candidates(extraction_context, folder, note_type, &candidate_abstract)
         .await
         .map_err(|e| format!("candidate lookup failed: {e}"))?;
-
     if candidates.is_empty() {
         return Ok(NoveltyCheckResult {
             assessment: NoveltyAssessment::Novel,
             existing_note_id: None,
         });
     }
-
     let response = complete(
         extraction_context.provider,
         CompletionRequest {
@@ -1427,10 +1375,8 @@ async fn novelty_decision(
     )
     .await
     .map_err(|e| format!("semantic compare failed: {e}"))?;
-
     let decision: NoveltyDecision = serde_json::from_str(response.text.trim())
         .map_err(|e| format!("invalid novelty decision json: {e}"))?;
-
     match decision.decision {
         NoveltyDecisionKind::Novel => Ok(NoveltyCheckResult {
             assessment: NoveltyAssessment::Novel,
@@ -1473,7 +1419,6 @@ fn assess_quality_gate(
     let quality = assess_note_quality(note_type, &note.content);
     let required_structure = !quality.is_underspecified;
     let novelty_assessment = novelty.assessment;
-
     let mut reasons = Vec::new();
     if !specificity {
         reasons.push("insufficient_specificity");
@@ -1493,7 +1438,6 @@ fn assess_quality_gate(
     if novelty_assessment == NoveltyAssessment::Duplicate {
         reasons.push("semantic_duplicate_of_existing_note");
     }
-
     let outcome = if novelty_assessment == NoveltyAssessment::Duplicate {
         ExtractionOutcome::MergeIntoExisting
     } else if !required_structure {
@@ -1505,7 +1449,6 @@ fn assess_quality_gate(
     } else {
         ExtractionOutcome::DurableWrite
     };
-
     QualityAssessment {
         specificity,
         generality,
@@ -1654,7 +1597,6 @@ async fn lookup_candidates(
             candidate_abstract,
         ));
     }
-
     extraction_context
         .note_repo
         .dedup_candidates(
@@ -1697,14 +1639,11 @@ fn build_novelty_prompt(
         })
         .collect::<Vec<_>>()
         .join("\n");
-
     format!(
         "Note type: {note_type}\nProposed extracted note title: {title}\nProposed extracted note summary:\n{candidate_abstract}\n\nExisting candidates:\n{candidate_lines}\n\nReturn JSON only in this schema:\n{{\"decision\":\"already_known\"|\"novel\",\"existing_note_id\":\"candidate-id-or-null\"}}\nChoose already_known only when the proposed note is semantically the same knowledge as one existing candidate. Otherwise choose novel.",
         title = note.title,
     )
 }
-
-// ── JSON parsing helpers ──────────────────────────────────────────────────────
 
 /// Parse the LLM response text into an `ExtractionResponse`.
 ///
@@ -1713,7 +1652,6 @@ fn build_novelty_prompt(
 /// parsing.
 fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
     let text = text.trim();
-
     // Strip optional markdown code fences: ```json ... ``` or ``` ... ```
     let text = if let Some(inner) = text
         .strip_prefix("```json")
@@ -1728,23 +1666,17 @@ fn parse_extraction_response(text: &str) -> Result<ExtractionResponse, String> {
     } else {
         text
     };
-
     serde_json::from_str::<ExtractionResponse>(text).map_err(|e| format!("JSON parse error: {e}"))
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
-    use tokio_util::sync::CancellationToken;
-
     use super::*;
     use crate::session_extraction::ExtractionQuality;
     use crate::test_helpers::{agent_context_from_db, create_test_db, test_path};
-
+    use tokio_util::sync::CancellationToken;
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
     impl CapturedLogs {
         fn take(&self) -> String {
             let mut buf = self.0.lock().expect("captured logs mutex poisoned");
@@ -1754,21 +1686,17 @@ mod tests {
             out
         }
     }
-
     impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
         type Writer = CapturedLogsWriter;
-
         fn make_writer(&'a self) -> Self::Writer {
             CapturedLogsWriter {
                 inner: std::sync::Arc::clone(&self.0),
             }
         }
     }
-
     struct CapturedLogsWriter {
         inner: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     }
-
     impl std::io::Write for CapturedLogsWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             self.inner
@@ -1777,12 +1705,10 @@ mod tests {
                 .extend_from_slice(buf);
             Ok(buf.len())
         }
-
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-
     fn extraction_telemetry_for_test(
         task_id: &str,
         creator: Option<&str>,
@@ -1794,9 +1720,7 @@ mod tests {
             creator,
         )
     }
-
     struct CredentialScopedTestCallbacks;
-
     impl crate::host::SlotHostCallbacks for CredentialScopedTestCallbacks {
         fn interrupt_paused_worker_session<'a>(
             &'a self,
@@ -1805,7 +1729,6 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
             Box::pin(async {})
         }
-
         fn resolve_mcp_tools<'a>(
             &'a self,
             _worktree_path: &'a str,
@@ -1820,7 +1743,6 @@ mod tests {
         > {
             Box::pin(async { Err("not implemented in credential-scoped test".into()) })
         }
-
         fn render_prompt(
             &self,
             _role_name: &str,
@@ -1829,7 +1751,6 @@ mod tests {
         ) -> String {
             String::new()
         }
-
         fn initial_user_message<'a>(
             &'a self,
             _task_id: &'a str,
@@ -1837,11 +1758,9 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
             Box::pin(async { String::new() })
         }
-
         fn build_mcp_state(&self, _ctx: &SlotContext) -> djinn_control_plane::McpState {
             panic!("not implemented in credential-scoped test")
         }
-
         fn require_project_id_for_task_ops<'a>(
             &'a self,
             _project: &'a str,
@@ -1863,7 +1782,6 @@ mod tests {
                 })
             })
         }
-
         fn resolve_provider_credential<'a>(
             &'a self,
             provider_id: &'a str,
@@ -1899,7 +1817,6 @@ mod tests {
                 }
             })
         }
-
         fn run_task_dispatch<'a>(
             &'a self,
             _task_id: String,
@@ -1913,7 +1830,6 @@ mod tests {
         {
             Box::pin(async { Ok(()) })
         }
-
         fn touch_activity_rpc<'a>(
             &'a self,
             _task_id: String,
@@ -1921,7 +1837,6 @@ mod tests {
         {
             Box::pin(async { Ok(()) })
         }
-
         fn flush_session_tokens_rpc<'a>(
             &'a self,
             _session_id: String,
@@ -1934,13 +1849,11 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
     }
-
     fn credential_scoped_test_context(db: djinn_db::Database) -> SlotContext {
         let mut ctx = agent_context_from_db(db, CancellationToken::new());
         ctx.callbacks = std::sync::Arc::new(CredentialScopedTestCallbacks);
         ctx
     }
-
     fn provider_auth_key(config: &djinn_provider::provider::ProviderConfig) -> Option<&str> {
         match &config.auth {
             djinn_provider::provider::AuthMethod::BearerToken(key) => Some(key),
@@ -1948,7 +1861,6 @@ mod tests {
             djinn_provider::provider::AuthMethod::NoAuth => None,
         }
     }
-
     async fn seed_credential_scope_users(db: djinn_db::Database) -> (String, String) {
         let users = djinn_db::UserRepository::new(db);
         let creator = users
@@ -1959,10 +1871,8 @@ mod tests {
             .upsert_from_github(710_002, "credential-scope-other", None, None)
             .await
             .expect("seed other user");
-
         (creator.id, other.id)
     }
-
     #[tokio::test]
     async fn creator_scoped_llm_extraction_fails_closed_with_only_other_user_private_credential() {
         let db = create_test_db();
@@ -1988,7 +1898,6 @@ mod tests {
         .await
         .expect("seed other user's private credential");
         let ctx = credential_scoped_test_context(db);
-
         let resolution = resolve_creator_scoped_llm_extraction_provider(
             &ctx,
             "session-creator-absent",
@@ -1997,7 +1906,6 @@ mod tests {
             "anthropic/claude-3-5-haiku-latest",
         )
         .await;
-
         match resolution {
             LlmExtractionProviderResolution::NoProvider { error, .. } => assert!(
                 error.contains("no connected builtin provider models are available")
@@ -2020,7 +1928,6 @@ mod tests {
             }
         }
     }
-
     #[tokio::test]
     async fn creator_scoped_llm_extraction_uses_org_shared_fallback_not_other_user_private() {
         let db = create_test_db();
@@ -2051,7 +1958,6 @@ mod tests {
             .await
             .expect("seed org-shared credential");
         let ctx = credential_scoped_test_context(db);
-
         let resolution = resolve_creator_scoped_llm_extraction_provider(
             &ctx,
             "session-org-fallback",
@@ -2060,7 +1966,6 @@ mod tests {
             "anthropic/claude-3-5-haiku-latest",
         )
         .await;
-
         let provider = match resolution {
             LlmExtractionProviderResolution::Provider(provider) => provider,
             LlmExtractionProviderResolution::NoProvider { error, .. } => {
@@ -2087,17 +1992,14 @@ mod tests {
             "provider telemetry remains attributed to the extraction creator"
         );
     }
-
     #[tokio::test]
     async fn llm_extraction_fallback_returns_early_when_no_org_shared_provider() {
         use tracing::dispatcher::Dispatch;
-
         let db = djinn_db::Database::open_in_memory().expect("in-memory db");
         djinn_db::SettingsRepository::new(db.clone(), djinn_core::events::EventBus::noop())
             .set("settings.raw", r#"{"models":["openai/gpt-4.1-mini"]}"#)
             .await
             .expect("configure memory model without credentials");
-
         let logs = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::WARN)
@@ -2108,7 +2010,6 @@ mod tests {
             .with_level(true)
             .finish();
         let dispatch = Dispatch::new(subscriber);
-
         let guard = tracing::dispatcher::set_default(&dispatch);
         let resolution = resolve_llm_extraction_provider_after_creator_attempt(
             &db,
@@ -2118,7 +2019,6 @@ mod tests {
         )
         .await;
         drop(guard);
-
         let captured = logs.take();
         assert!(
             captured.contains(NO_LLM_PROVIDER_WARNING),
@@ -2128,7 +2028,6 @@ mod tests {
             captured.contains("session-no-provider"),
             "warning should retain session context; captured: {captured}"
         );
-
         match resolution {
             LlmExtractionProviderResolution::NoProvider {
                 warning_message,
@@ -2146,7 +2045,6 @@ mod tests {
             ),
         }
     }
-
     #[tokio::test]
     async fn llm_extraction_fallback_uses_org_shared_provider_with_memory_telemetry() {
         let db = djinn_db::Database::open_in_memory().expect("in-memory db");
@@ -2164,7 +2062,6 @@ mod tests {
         .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "org-key", None)
         .await
         .expect("configure org-shared credential");
-
         let resolution = resolve_llm_extraction_provider_after_creator_attempt(
             &db,
             "session-fallback",
@@ -2172,7 +2069,6 @@ mod tests {
             extraction_telemetry_for_test("task-fallback", Some("user_a")),
         )
         .await;
-
         let provider = match resolution {
             LlmExtractionProviderResolution::Provider(provider) => provider,
             LlmExtractionProviderResolution::NoProvider { error, .. } => {
@@ -2180,7 +2076,6 @@ mod tests {
             }
         };
         assert_eq!(provider.name(), "anthropic");
-
         let config = provider
             .config_snapshot()
             .expect("org-shared fallback provider should expose config snapshot");
@@ -2190,7 +2085,6 @@ mod tests {
         assert_eq!(telemetry.user_id.as_deref(), Some("user_a"));
         assert_eq!(telemetry.operation.as_deref(), Some("memory_extraction"));
     }
-
     /// B5a: knowledge extraction is a cheap background distillation. The call
     /// site downgrades its resolved provider to the weakest reasoning tier
     /// before issuing the extraction + novelty completions. This locks the
@@ -2201,7 +2095,6 @@ mod tests {
             AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ReasoningEffort,
             create_provider,
         };
-
         // A resolved provider as extraction would build it — start STRONG so a
         // missing/incorrect override is visible.
         let provider: Box<dyn LlmProvider> = create_provider(ProviderConfig {
@@ -2216,21 +2109,18 @@ mod tests {
             capabilities: ProviderCapabilities::default(),
             reasoning_effort: Some(ReasoningEffort::High),
         });
-
         // Exact downgrade logic from the call site.
         let provider: Box<dyn LlmProvider> =
             match provider.with_reasoning_effort(ReasoningEffort::Minimal) {
                 Some(downgraded) => downgraded,
                 None => provider,
             };
-
         assert_eq!(
             provider.config_snapshot().unwrap().reasoning_effort,
             Some(ReasoningEffort::Minimal),
             "extraction must run its LLM calls at the weakest reasoning tier"
         );
     }
-
     #[test]
     fn transcript_excerpt_renders_text_tools_and_results_and_skips_system() {
         use djinn_core::message::{ContentBlock, Message, Role};
@@ -2271,7 +2161,6 @@ mod tests {
         assert!(out.contains("assistant → edit("));
         assert!(out.contains("tool error: No such file or directory"));
     }
-
     #[test]
     fn transcript_excerpt_tail_biased_truncation() {
         use djinn_core::message::{ContentBlock, Message, Role};
@@ -2295,7 +2184,6 @@ mod tests {
         );
         assert!(!out.contains("line 0:"), "head should be dropped");
     }
-
     #[test]
     fn parse_extraction_response_valid_json() {
         let json = r#"{"cases":[{"title":"T","content":"C"}],"patterns":[],"pitfalls":[]}"#;
@@ -2305,21 +2193,18 @@ mod tests {
         assert!(result.patterns.is_empty());
         assert!(result.pitfalls.is_empty());
     }
-
     #[test]
     fn parse_extraction_response_strips_markdown_fence() {
         let json = "```json\n{\"cases\":[],\"patterns\":[],\"pitfalls\":[]}\n```";
         let result = parse_extraction_response(json).expect("markdown-wrapped json");
         assert!(result.cases.is_empty());
     }
-
     #[test]
     fn parse_extraction_response_strips_plain_fence() {
         let json = "```\n{\"cases\":[],\"patterns\":[],\"pitfalls\":[]}\n```";
         let result = parse_extraction_response(json).expect("plain-fenced json");
         assert!(result.cases.is_empty());
     }
-
     #[test]
     fn parse_extraction_response_empty_arrays_when_fields_missing() {
         let json = r#"{}"#;
@@ -2328,13 +2213,11 @@ mod tests {
         assert!(result.patterns.is_empty());
         assert!(result.pitfalls.is_empty());
     }
-
     #[test]
     fn parse_extraction_response_returns_error_on_invalid_json() {
         let result = parse_extraction_response("not json");
         assert!(result.is_err());
     }
-
     #[test]
     fn parse_extraction_response_parses_applies_when_per_note() {
         // Prompt-facing field name `applies_when` must parse into the durable
@@ -2358,7 +2241,6 @@ mod tests {
             Some("When F applies.")
         );
     }
-
     #[test]
     fn parse_extraction_response_accepts_retrieval_anchor_alias() {
         // The storage-facing field name `retrieval_anchor` is also accepted as
@@ -2374,7 +2256,6 @@ mod tests {
             Some("When T applies.")
         );
     }
-
     #[test]
     fn parse_extraction_response_tolerates_missing_applies_when() {
         // A model that forgets the field must not break extraction — the note
@@ -2388,7 +2269,6 @@ mod tests {
         assert_eq!(result.cases.len(), 1);
         assert!(result.cases[0].normalized_anchor().is_none());
     }
-
     #[test]
     fn parse_extraction_response_tolerates_empty_and_whitespace_anchor() {
         // Empty / whitespace-only anchors normalize to None and do not crash.
@@ -2410,7 +2290,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn normalized_anchor_trims_surrounding_whitespace() {
         let note = ExtractedNote {
@@ -2424,14 +2303,12 @@ mod tests {
             Some("When trimming matters.")
         );
     }
-
     #[test]
     fn prompt_template_requires_applies_when_field() {
         // The full extraction prompt must explicitly request `applies_when`
         // and the ADR-054 sections. (Reuse the production prompt builder so
         // the test cannot drift from the live template.)
         let prompt = build_extraction_prompt("title-x", "desc-y", "{}", "(none)", "[]");
-
         assert!(
             prompt.contains("\"applies_when\""),
             "prompt must include the applies_when field name"
@@ -2444,18 +2321,15 @@ mod tests {
         // Anchor must be required to be distinct from the body.
         assert!(prompt.contains("DISTINCT from the markdown body"));
     }
-
     #[test]
     fn extraction_quality_defaults_to_zero() {
         assert_eq!(ExtractionQuality::default().novelty_skipped, 0);
     }
-
     #[test]
     fn extraction_max_tokens_is_raised_value() {
         // Guards against a regression back to the truncating 1024 cap.
         assert_eq!(EXTRACTION_MAX_TOKENS, 4096);
     }
-
     #[test]
     fn dedup_extracted_notes_collapses_same_normalized_title_and_type() {
         // Two cases with the same title modulo case/whitespace must collapse to one.
@@ -2483,7 +2357,6 @@ mod tests {
         assert_eq!(deduped[0].0, "case");
         assert_eq!(deduped[0].1.content, "first body");
     }
-
     #[test]
     fn dedup_extracted_notes_keeps_same_title_across_different_types() {
         // Same title but different note_type are NOT duplicates (key includes type).
@@ -2506,19 +2379,16 @@ mod tests {
         assert_eq!(dupes, 0);
         assert_eq!(deduped.len(), 2);
     }
-
     #[tokio::test]
     async fn run_llm_extraction_returns_early_when_session_has_no_task_id() {
         let db = create_test_db();
         let cancel = CancellationToken::new();
         let ctx = agent_context_from_db(db.clone(), cancel);
-
         // Create a session without task_id via SessionRepository
         let session_repo =
             djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
         let project_repo =
             djinn_db::ProjectRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-
         // Need a project first
         let id = uuid::Uuid::now_v7().to_string();
         let _ = test_path(&format!("djinn-llm-extraction-no-task-{id}-"));
@@ -2527,7 +2397,6 @@ mod tests {
             .create(&name, "test", &name)
             .await
             .expect("create project");
-
         let session = session_repo
             .create(djinn_db::CreateSessionParams {
                 project_id: &project.id,
@@ -2541,25 +2410,20 @@ mod tests {
             })
             .await
             .expect("create session");
-
         let taxonomy = SessionTaxonomy::default();
-
         // Should return early without panicking
         run_llm_extraction(session.id, taxonomy, ctx).await;
     }
-
     #[tokio::test]
     async fn run_llm_extraction_graceful_degradation_when_provider_unavailable() {
         let db = create_test_db();
         let cancel = CancellationToken::new();
         let ctx = agent_context_from_db(db.clone(), cancel);
-
         let events = djinn_core::events::EventBus::noop();
         let session_repo = djinn_db::SessionRepository::new(db.clone(), events.clone());
         let project_repo = djinn_db::ProjectRepository::new(db.clone(), events.clone());
         let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
         let epic_repo = djinn_db::EpicRepository::new(db.clone(), events.clone());
-
         let id = uuid::Uuid::now_v7().to_string();
         let _ = test_path(&format!("djinn-llm-extraction-provider-{id}-"));
         let name = format!("proj-{id}");
@@ -2567,7 +2431,6 @@ mod tests {
             .create(&name, "test", &name)
             .await
             .expect("create project");
-
         let epic = epic_repo
             .create_for_project(
                 &project.id,
@@ -2586,7 +2449,6 @@ mod tests {
             )
             .await
             .expect("create epic");
-
         let task = task_repo
             .create_in_project(
                 &project.id,
@@ -2602,7 +2464,6 @@ mod tests {
             )
             .await
             .expect("create task");
-
         let session = session_repo
             .create(djinn_db::CreateSessionParams {
                 project_id: &project.id,
@@ -2616,7 +2477,6 @@ mod tests {
             })
             .await
             .expect("create session");
-
         let taxonomy = SessionTaxonomy {
             files_changed: 5,
             errors: 3,
@@ -2627,7 +2487,6 @@ mod tests {
             changed_file_paths: vec![],
             extraction_quality: ExtractionQuality::default(),
         };
-
         // No credentials configured → resolve_memory_provider will fail → graceful skip
         // Should not panic
         run_llm_extraction(session.id, taxonomy, ctx).await;

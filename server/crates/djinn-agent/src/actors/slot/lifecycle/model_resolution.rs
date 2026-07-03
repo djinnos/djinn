@@ -1,7 +1,4 @@
 //! Model-ID parsing + provider credential lookup for the task lifecycle.
-//!
-//! Pure extraction from `run_task_lifecycle` (task #14). The caller handles
-//! error-to-transition and slot release.
 
 use crate::actors::slot::helpers::{ProviderCredential, load_provider_credential, parse_model_id};
 use crate::context::AgentContext;
@@ -19,8 +16,7 @@ pub(crate) struct ModelResolutionError {
     pub reason: String,
 }
 
-/// Parse `model_id`, resolve against provider catalog, load credential.
-/// Mirrors the former inline block in `run_task_lifecycle`.
+/// Parse model_id, resolve against catalog, and load credential.
 pub(crate) async fn resolve_model_and_credential(
     model_id: &str,
     task_id: &str,
@@ -73,8 +69,7 @@ pub(crate) async fn resolve_model_and_credential(
     })
 }
 
-/// Resolve a per-role project preference into a concrete `provider/model` id.
-/// Returns `None` when no match or on error.
+/// Resolve per-role project preference into a concrete provider/model id.
 pub(crate) async fn resolve_role_model_preference(
     project_id: &str,
     base_role: &str,
@@ -97,23 +92,16 @@ pub(crate) async fn resolve_role_model_preference(
             return None;
         }
     };
-
     let preference = match db_role.model_preference.as_deref() {
         Some(p) if !p.trim().is_empty() => p.trim().to_string(),
         _ => return None,
     };
-
-    // Match `preference` (a bare suffix like "claude-opus-4-6", a display
-    // name, the full `provider/model` id, or the catalog id) against every
-    // connected provider — identical resolution to dispatch's priority path.
+    // Match `preference` against every connected provider — identical resolution
+    // to dispatch's priority path.
     let cred_repo = djinn_provider::repos::CredentialRepository::new(
         app_state.db.clone(),
         app_state.event_bus.clone(),
     );
-    // Scope to the acting user (the task creator — supervisor_runner runs this
-    // under `SESSION_USER_ID.scope(created_by_user_id)`, same as
-    // `load_provider_credential`), so preference-matching sees exactly the
-    // providers this task can authenticate, never another user's private creds.
     let credentials = match cred_repo
         .list_for_user(djinn_core::auth_context::current_user_id().as_deref())
         .await
@@ -133,7 +121,6 @@ pub(crate) async fn resolve_role_model_preference(
     if credential_provider_ids.is_empty() {
         return None;
     }
-
     for provider_id in &credential_provider_ids {
         for model in app_state.catalog.list_models(provider_id) {
             let bare = model.id.rsplit('/').next().unwrap_or(&model.id);
@@ -147,7 +134,6 @@ pub(crate) async fn resolve_role_model_preference(
             }
         }
     }
-
     None
 }
 
@@ -164,8 +150,7 @@ pub(crate) fn map_resume_selection_reason_to_rotation_cause(
     }
 }
 
-/// Attempt model rotation for a resume dispatch.
-/// Returns `current_model_id` unchanged when rotation is not applicable.
+/// Attempt model rotation for a resume dispatch; returns selected model id.
 pub(crate) async fn attempt_resume_model_rotation(
     task_id: &str,
     current_model_id: &str,
@@ -175,23 +160,16 @@ pub(crate) async fn attempt_resume_model_rotation(
     let Some(metadata) = metadata else {
         return current_model_id.to_string();
     };
-
     let prev_model = match &metadata.previous_model {
         Some(m) if !m.trim().is_empty() => m.as_str(),
         _ => return current_model_id.to_string(),
     };
-
     let cause = match map_resume_selection_reason_to_rotation_cause(metadata.selection_reason) {
         Some(cause) => cause,
         _ => return current_model_id.to_string(),
     };
-
     let outcome = resolve_model_with_rotation(task_id, Some(prev_model), cause, app_state).await;
-
-    // Use selected_model() to extract the model id from the outcome before
-    // the match consumes it.
     let selected = outcome.selected_model().map(str::to_string);
-
     match outcome {
         ModelRotationOutcome::Rotated { cause, .. } => {
             let model = selected.unwrap_or_else(|| current_model_id.to_string());
@@ -218,9 +196,7 @@ pub(crate) async fn attempt_resume_model_rotation(
     }
 }
 
-// ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
-
-/// Termination causes that should trigger model rotation.
+/// Termination causes that trigger model rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RotationTerminationCause {
     /// No durable progress for the configured threshold.
@@ -243,7 +219,7 @@ impl RotationTerminationCause {
     }
 }
 
-/// Outcome of a model-rotation attempt.
+/// Outcome of a model rotation attempt.
 #[derive(Debug, Clone)]
 pub(crate) enum ModelRotationOutcome {
     /// A different model was selected.
@@ -252,15 +228,13 @@ pub(crate) enum ModelRotationOutcome {
         selected_model: String,
         cause: RotationTerminationCause,
     },
-    /// No alternate was available or credentials were missing; the existing
-    /// model is retained with a machine-readable fallback reason.
+    /// No alternate available; existing model retained.
     Fallback {
         previous_model: String,
         reason: ModelRotationFallbackReason,
         cause: RotationTerminationCause,
     },
-    /// Rotation was not applicable (cause does not warrant rotation, or no
-    /// previous model was recorded).
+    /// Rotation not applicable.
     NotApplicable,
 }
 
@@ -286,8 +260,7 @@ impl ModelRotationOutcome {
     }
 }
 
-/// Attempt to select a different available model after a rotation-worthy
-/// termination. Falls back to `previous_model` when no alternate is available.
+/// Select a different model after a rotation-worthy termination.
 pub(crate) async fn resolve_model_with_rotation(
     task_id: &str,
     previous_model: Option<&str>,
@@ -303,17 +276,11 @@ pub(crate) async fn resolve_model_with_rotation(
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     };
-
     if !cause.should_rotate() {
         let outcome = ModelRotationOutcome::NotApplicable;
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     }
-
-    // Scan connected providers for an alternate model. This mirrors the
-    // credential-scoped catalog scan in `resolve_role_model_preference`
-    // but does NOT require a role preference — it picks any available
-    // model that is NOT the previous one.
     let cred_repo = djinn_provider::repos::CredentialRepository::new(
         app_state.db.clone(),
         app_state.event_bus.clone(),
@@ -338,7 +305,6 @@ pub(crate) async fn resolve_model_with_rotation(
             return outcome;
         }
     };
-
     let provider_ids = app_state.catalog.connected_provider_ids(&credentials);
     if provider_ids.is_empty() {
         let outcome = ModelRotationOutcome::Fallback {
@@ -349,8 +315,6 @@ pub(crate) async fn resolve_model_with_rotation(
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     }
-
-    // Find the first model that is NOT the previous model.
     let mut found_alternate: Option<String> = None;
     let mut any_model_seen = false;
     for provider_id in &provider_ids {
@@ -362,7 +326,6 @@ pub(crate) async fn resolve_model_with_rotation(
             {
                 continue;
             }
-            // Verify this provider has a loadable credential before selecting it.
             if load_provider_credential(provider_id, app_state)
                 .await
                 .is_ok()
@@ -376,7 +339,6 @@ pub(crate) async fn resolve_model_with_rotation(
             break;
         }
     }
-
     match found_alternate {
         Some(selected_model) => {
             let outcome = ModelRotationOutcome::Rotated {
@@ -418,7 +380,6 @@ pub(crate) async fn resolve_model_with_rotation(
     }
 }
 
-/// Emit a `model_rotation` task-lifecycle-step event.
 async fn emit_rotation_event(
     task_id: &str,
     outcome: &ModelRotationOutcome,
@@ -449,7 +410,6 @@ async fn emit_rotation_event(
             "action": "not_applicable",
         }),
     };
-
     app_state
         .event_bus
         .send(djinn_core::events::DjinnEventEnvelope::task_lifecycle_step(
@@ -462,7 +422,6 @@ async fn emit_rotation_event(
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
-
     #[test]
     fn maps_resume_reason_to_rotation_cause() {
         use djinn_runtime::ResumeSelectionReason as R;
@@ -488,7 +447,6 @@ mod rotation_tests {
             None
         );
     }
-
     #[test]
     fn rotation_cause_should_rotate() {
         assert!(RotationTerminationCause::NoProgress.should_rotate());
@@ -496,7 +454,6 @@ mod rotation_tests {
         assert!(RotationTerminationCause::Flaky.should_rotate());
         assert!(RotationTerminationCause::RepeatedVerifyLoop.should_rotate());
     }
-
     #[test]
     fn outcome_selected_model_returns_correct_value() {
         let rotated = ModelRotationOutcome::Rotated {
@@ -505,17 +462,14 @@ mod rotation_tests {
             cause: RotationTerminationCause::NoProgress,
         };
         assert_eq!(rotated.selected_model(), Some("b/new"));
-
         let fallback = ModelRotationOutcome::Fallback {
             previous_model: "a/old".to_string(),
             reason: ModelRotationFallbackReason::NoAlternateAvailable,
             cause: RotationTerminationCause::NoProgress,
         };
         assert_eq!(fallback.selected_model(), Some("a/old"));
-
         assert_eq!(ModelRotationOutcome::NotApplicable.selected_model(), None);
     }
-
     #[test]
     fn fallback_reason_distinct() {
         assert_ne!(

@@ -1,16 +1,4 @@
-//! Per-stage role-config resolution shared by the supervisor-driven dispatch path.
-//!
-//! Maps a `RoleKind` to the effective `AgentRole` and project-level override
-//! fields (system prompt extensions, learned prompt, MCP servers, skills, model
-//! preference). Two paths feed the same output:
-//!
-//! 1. Specialist override (Worker stage): when `task.agent_type` resolves to a
-//!    specialist `Agent` row, its `base_role` picks the runtime role and its
-//!    fields populate every override slot.
-//! 2. Default role config: load the project's `is_default = 1` row for the
-//!    `RoleKind`'s `base_role`; missing rows yield empty defaults.
-//!
-//! All DB failures are non-fatal.
+//! Per-stage role-config resolution: specialist override or default role config. DB failures non-fatal.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -55,7 +43,6 @@ impl ResolvedRoleOverrides {
             specialist_overrode_runtime_role: false,
         }
     }
-
     fn apply_agent_fields(&mut self, agent: &Agent) {
         self.system_prompt_extensions = agent.system_prompt_extensions.clone();
         self.learned_prompt = agent.learned_prompt.clone();
@@ -138,7 +125,6 @@ async fn resolve_runtime_role_override(
             }
         }
     }
-
     // Refinement tribunal override path.
     if role_kind == RoleKind::Refinement
         && let Some(tribunal_role) = task.agent_type.as_deref()
@@ -158,7 +144,6 @@ async fn resolve_runtime_role_override(
             }
         }
     }
-
     false
 }
 
@@ -174,14 +159,12 @@ pub(crate) async fn resolve_role_overrides(
     let injected_role = role_impl_for(injected_agent_type);
     let mut out = ResolvedRoleOverrides::empty(injected_role.clone());
     let role_repo = AgentRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     // Try specialist/tribunal override first.
     if resolve_runtime_role_override(task, role_kind, injected_agent_type, &role_repo, &mut out)
         .await
     {
         return out;
     }
-
     // Default role config path.
     let base_role = injected_agent_type.as_str();
     match role_repo
@@ -201,7 +184,6 @@ pub(crate) async fn resolve_role_overrides(
             );
         }
     }
-
     out
 }
 
@@ -213,7 +195,6 @@ mod tests {
     use djinn_db::repositories::agent::AgentCreateInput;
     use djinn_db::{Database, ProjectRepository};
     use tokio_util::sync::CancellationToken;
-
     async fn setup_project(db: &Database) -> String {
         db.ensure_initialized().await.unwrap();
         let repo = ProjectRepository::new(db.clone(), EventBus::noop());
@@ -221,7 +202,6 @@ mod tests {
         let proj = repo.create(&name, "test", &name).await.unwrap();
         proj.id
     }
-
     async fn make_task(db: &Database, project_id: &str, agent_type: Option<&str>) -> Task {
         let repo = TaskRepository::new(db.clone(), EventBus::noop());
         let task = repo
@@ -245,11 +225,9 @@ mod tests {
             task
         }
     }
-
     fn agent_context(db: Database) -> AgentContext {
         crate::test_helpers::agent_context_from_db(db, CancellationToken::new())
     }
-
     #[tokio::test]
     async fn seeded_project_default_row_yields_empty_overrides() {
         let db = crate::test_helpers::create_test_db();
@@ -265,7 +243,6 @@ mod tests {
         assert!(!out.specialist_overrode_runtime_role);
         assert_eq!(out.runtime_role.config().name, "worker");
     }
-
     #[tokio::test]
     async fn default_worker_row_populates_overrides() {
         let db = crate::test_helpers::create_test_db();
@@ -291,7 +268,6 @@ mod tests {
             )
             .await
             .unwrap();
-
         let task = make_task(&db, &project_id, None).await;
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Worker, &ctx).await;
@@ -302,7 +278,6 @@ mod tests {
         assert!(!out.specialist_overrode_runtime_role);
         assert_eq!(out.runtime_role.config().name, "worker");
     }
-
     #[tokio::test]
     async fn worker_specialist_override_swaps_role_and_fields() {
         let db = crate::test_helpers::create_test_db();
@@ -324,7 +299,6 @@ mod tests {
             )
             .await
             .unwrap();
-
         let task = make_task(&db, &project_id, Some("senior-planner")).await;
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Worker, &ctx).await;
@@ -334,7 +308,6 @@ mod tests {
         assert_eq!(out.skills, vec!["planning".to_string()]);
         assert_eq!(out.mcp_servers, Some(Vec::<String>::new()));
     }
-
     #[tokio::test]
     async fn specialist_only_applies_on_worker_stage() {
         let db = crate::test_helpers::create_test_db();
@@ -360,7 +333,6 @@ mod tests {
             .set_default_system_prompt_extensions(&project_id, "planner", "default-planner-ext")
             .await
             .unwrap();
-
         let task = make_task(&db, &project_id, Some("rust-expert")).await;
         let ctx = agent_context(db);
         let out = resolve_role_overrides(&task, RoleKind::Planner, &ctx).await;
@@ -368,7 +340,6 @@ mod tests {
         assert!(!out.specialist_overrode_runtime_role);
         assert_eq!(out.system_prompt_extensions, "default-planner-ext");
     }
-
     #[tokio::test]
     async fn missing_specialist_falls_back_to_default() {
         let db = crate::test_helpers::create_test_db();

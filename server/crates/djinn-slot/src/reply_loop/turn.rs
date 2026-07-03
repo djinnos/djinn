@@ -154,7 +154,6 @@ async fn check_worker_submit_no_progress_guard(
     if role_name != "worker" || primary_finalize != "submit_work" {
         return NoProgressGuardResult::Allow;
     }
-
     // Load the latest rejected fingerprint for this task.
     let rejected_repo = TaskRejectedSubmissionIntegrityRepository::new(slot_ctx.db.clone());
     let latest_rejected = match rejected_repo.latest_for_task(task_id).await {
@@ -169,7 +168,6 @@ async fn check_worker_submit_no_progress_guard(
             return NoProgressGuardResult::Allow;
         }
     };
-
     let Some(rejected) = latest_rejected else {
         tracing::debug!(
             task_id = %task_id,
@@ -178,7 +176,6 @@ async fn check_worker_submit_no_progress_guard(
         );
         return NoProgressGuardResult::Allow;
     };
-
     // Compute the current complete submission diff fingerprint.
     let current_fp = match compute_submission_diff_fingerprint(worktree_path).await {
         Ok(SubmissionDiffFingerprint::Diff(digest)) => {
@@ -212,7 +209,6 @@ async fn check_worker_submit_no_progress_guard(
             return NoProgressGuardResult::Allow;
         }
     };
-
     // Compare current fingerprint with latest rejected.
     if current_fp == rejected.diff_fingerprint {
         if guard_already_triggered {
@@ -313,7 +309,6 @@ impl WindDownReason {
     fn is_budget(&self) -> bool {
         matches!(self, Self::Budget { .. })
     }
-
     fn as_str(&self) -> &'static str {
         if self.is_budget() {
             "token_budget"
@@ -321,14 +316,12 @@ impl WindDownReason {
             "turn_cap"
         }
     }
-
     fn details(&self) -> String {
         match self {
             Self::StepCap { max_turns } => format!("max turns ({max_turns}) reached"),
             Self::Budget { details } => details.clone(),
         }
     }
-
     fn hard_error(&self, max_turns: u32) -> anyhow::Error {
         match self {
             Self::StepCap { .. } => anyhow::anyhow!(
@@ -469,7 +462,6 @@ pub async fn run_reply_loop(
         active_mcp_server_names,
         max_turns_override,
     } = ctx;
-
     let tool_dispatcher = match slot_ctx.tool_dispatcher.as_ref() {
         Some(d) => d.as_ref(),
         None => {
@@ -485,17 +477,13 @@ pub async fn run_reply_loop(
             );
         }
     };
-
     let tool_metadata = tool_runtime_metadata(tools);
-
     // Register activity tracker.
     let activity_ts = slot_ctx.register_activity(task_id);
     let last_rpc_touch = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let last_token_flush = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
     let mut output =
         ParsedAgentOutput::new(role_name == "reviewer" || role_name == "task_reviewer");
-
     // Persist the conversation as it unfolds.
     let msg_repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     if !is_resumed_session {
@@ -507,7 +495,6 @@ pub async fn run_reply_loop(
             persist_session_message(&msg_repo, session_id, task_id, msg).await;
         }
     }
-
     let mut total_tokens_in: u32 = 0;
     let mut total_tokens_out: u32 = 0;
     let mut total_cache_read: u32 = 0;
@@ -515,8 +502,6 @@ pub async fn run_reply_loop(
     let mut total_reasoning_out: u32 = 0;
     let mut current_context_tokens: u32 = 0;
     let mut final_assistant_text = String::new();
-
-    // ── Create session-level OTel span (root trace) ──────────────────────
     let otel_session = if telemetry::is_active() {
         let session = telemetry::SessionSpan::start(&telemetry::SessionSpanAttributes {
             provider: provider.name(),
@@ -561,7 +546,6 @@ pub async fn run_reply_loop(
     } else {
         None
     };
-
     let run_result: anyhow::Result<()> = async {
         let mut saw_any_event = false;
         let mut assistant_message_count: usize = 0;
@@ -576,11 +560,9 @@ pub async fn run_reply_loop(
         // once real work happens, so a lone mid-session empty turn never trips.
         let mut empty_start_turns: u32 = 0;
         let mut saw_productive_turn = false;
-
         let mut tool_failure_guard_state = LoopGuardState::default();
         let mut corrected_tool_failure_signatures: HashSet<ToolCallSignature> = HashSet::new();
         let mut last_assistant_text = String::new();
-
         let mut turns: u32 = 0;
         let session_budget = SessionBudgetPolicy::from_env()
             .unwrap_or_else(|err| {
@@ -614,7 +596,6 @@ pub async fn run_reply_loop(
         // fingerprint match we inject a corrective tool result; on the second
         // we settle the session as a typed no_progress_submission.
         let mut no_progress_guard_triggered = false;
-
         loop {
             let hard_budget_exceeded = hard_budget_threshold_exceeded(
                 &session_budget,
@@ -685,7 +666,6 @@ pub async fn run_reply_loop(
                     return Err(reason.hard_error(max_turns));
                 }
             }
-
             maybe_inject_soft_budget_reminder(
                 &mut soft_budget_reminder_injected,
                 &session_budget,
@@ -701,7 +681,6 @@ pub async fn run_reply_loop(
             )
             .await;
             turns += 1;
-
             let env_diag = runtime_env_diagnostics(session_id, project_path, worktree_path);
             tracing::info!(
                 task_id = %task_id,
@@ -711,8 +690,6 @@ pub async fn run_reply_loop(
                 "ReplyLoop: starting provider stream; {}",
                 env_diag
             );
-
-            // ── Start OTel generation span for this turn ─────────────────────
             let otel_llm = otel_session.as_ref().map(|session| {
                 let llm = telemetry::LlmSpan::start(
                     session.context(),
@@ -724,7 +701,6 @@ pub async fn run_reply_loop(
                 llm.record_input(&serde_json::to_string(&input).unwrap_or_default());
                 llm
             });
-
             let tool_choice = tool_choice_for_turn(model_id, tools);
             // Repair any dangling tool calls (assistant tool_use ids with no
             // persisted result) left by a prior session that was cancelled
@@ -781,7 +757,6 @@ pub async fn run_reply_loop(
                     ));
                 }
             };
-
             let dispatch_ctx = ToolDispatchContext {
                 ctx: slot_ctx,
                 task_id,
@@ -817,7 +792,6 @@ pub async fn run_reply_loop(
                 total_reasoning_out: &mut total_reasoning_out,
             })
             .await?;
-
             let StreamTurnState {
                 turn_text,
                 turn_thinking,
@@ -835,8 +809,6 @@ pub async fn run_reply_loop(
                 streaming_dispatched,
             } = stream_state;
             saw_any_event |= saw_round_event;
-
-            // ── End OTel generation span for this turn ───────────────────────
             if let Some(llm) = otel_llm {
                 if interrupted.is_some() {
                     llm.end_error("interrupted");
@@ -867,12 +839,9 @@ pub async fn run_reply_loop(
                     llm.end_ok();
                 }
             }
-
             if let Some(reason) = interrupted {
                 return Err(anyhow::anyhow!(reason));
             }
-
-            // ── Reactive compaction: mid-stream context overflow ─────────────
             if needs_reactive_compaction {
                 tracing::warn!(
                     task_id = %task_id,
@@ -897,7 +866,6 @@ pub async fn run_reply_loop(
                     "context_length_exceeded and reactive compaction failed"
                 ));
             }
-
             if !saw_round_event {
                 if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries) {
                     empty_turn_retries = next_retry;
@@ -919,8 +887,6 @@ pub async fn run_reply_loop(
                     diag,
                 ));
             }
-
-            // ── Build the assistant message from this turn ───────────────────
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
             assistant_content.extend(turn_provider_state);
             if !turn_thinking.is_empty() {
@@ -938,7 +904,6 @@ pub async fn run_reply_loop(
                 }
                 assistant_content.push(tool_call.clone());
             }
-
             if assistant_content.is_empty() {
                 if empty_turn_is_reasoning_only(turn_reasoning_out) {
                     tracing::warn!(
@@ -1006,7 +971,6 @@ pub async fn run_reply_loop(
             // zero-progress guard for the rest of the run so a later isolated
             // empty turn can't fail a working session over.
             saw_productive_turn = true;
-
             let assistant_msg = Message {
                 role: Role::Assistant,
                 content: assistant_content,
@@ -1022,20 +986,15 @@ pub async fn run_reply_loop(
                     provider_data: None,
                 }),
             };
-
             assistant_message_count += 1;
-
             slot_ctx.event_bus.send(DjinnEventEnvelope::session_message(
                 session_id,
                 task_id,
                 role_name,
                 &serialize_message(&assistant_msg),
             ));
-
             persist_session_message(&msg_repo, session_id, task_id, &assistant_msg).await;
             conversation.push(assistant_msg);
-
-            // ── Budget wind-down: park on budget ─────────────────────────────
             if wind_down_injected
                 && wind_down_reason
                     .as_ref()
@@ -1056,12 +1015,9 @@ pub async fn run_reply_loop(
                     );
                     break;
                 }
-
                 budget_wind_down_final_turn_spent = true;
                 continue;
             }
-
-            // ── Compaction threshold check ────────────────────────────────────
             if needs_compaction(current_context_tokens, context_window) {
                 tracing::info!(
                     task_id = %task_id,
@@ -1084,7 +1040,6 @@ pub async fn run_reply_loop(
                     total_tokens_out = 0;
                     current_context_tokens = 0;
                     tool_dispatcher.clear_stash();
-
                     if should_retry_after_tool_call_compaction(compacted, !turn_tool_calls.is_empty()) {
                         compaction_attempts += 1;
                         conversation.push(Message::user("Continue with the task."));
@@ -1092,8 +1047,6 @@ pub async fn run_reply_loop(
                     }
                 }
             }
-
-            // ── Worker submit_work no-progress integrity gate ────────────────
             // Before accepting a worker's finalize payload, check whether the
             // current worktree diff fingerprint matches the latest rejected
             // fingerprint for this task. On the first identical no-progress
@@ -1160,8 +1113,6 @@ pub async fn run_reply_loop(
                     }
                 }
             }
-
-            // ── Finalize-tool detection (ADR-036) ────────────────────────────
             let primary_finalize = finalize_tool_names.first().copied().unwrap_or("");
             if let Some(finalize_call) = turn_tool_calls
                 .iter()
@@ -1192,7 +1143,6 @@ pub async fn run_reply_loop(
                 } else {
                     None
                 });
-
             if alternate_finalize.is_none() && !turn_text.trim().is_empty() {
                 let signature = AssistantOutputSignature::from_content_blocks(
                     turn_text.trim().to_string(),
@@ -1212,8 +1162,6 @@ pub async fn run_reply_loop(
                     return Err(loop_guard_error(condition, turns, session_id));
                 }
             }
-
-            // ── G9 wind-down: capture the one-shot summary and end gracefully ─
             if wind_down_injected && turn_tool_calls.is_empty() {
                 let fallback_reason = WindDownReason::StepCap { max_turns };
                 let reason = wind_down_reason.as_ref().unwrap_or(&fallback_reason);
@@ -1233,8 +1181,6 @@ pub async fn run_reply_loop(
                     .unwrap_or(WindDownReason::StepCap { max_turns });
                 return Err(reason.hard_error(max_turns));
             }
-
-            // ── Nudge loop: text-only without finalize ────────────────────────
             if let Some((next_nudge_count, nudge_message)) = next_nudge_message(
                 !turn_tool_calls.is_empty(),
                 !tools.is_empty(),
@@ -1262,9 +1208,7 @@ pub async fn run_reply_loop(
                 );
                 break;
             }
-
             consecutive_nudge_count = 0;
-
             let tool_result_blocks = collect_tool_results(
                 &turn_tool_calls,
                 streaming_results,
@@ -1273,7 +1217,6 @@ pub async fn run_reply_loop(
                 &dispatch_ctx,
             )
             .await;
-
             let signatures_corrected_before_dispatch = corrected_tool_failure_signatures.clone();
             let mut loop_guard_condition_to_inject: Option<LoopGuardCondition> = None;
             let tool_batch_has_success = tool_result_blocks.iter().any(|result_block| {
@@ -1298,7 +1241,6 @@ pub async fn run_reply_loop(
                 else {
                     continue;
                 };
-
                 let Some(signature) =
                     tool_call_signature_for_result(result_index, tool_use_id, &turn_tool_calls)
                 else {
@@ -1309,7 +1251,6 @@ pub async fn run_reply_loop(
                     );
                     continue;
                 };
-
                 if *is_error {
                     let failure_text = tool_result_text(content);
                     let condition = if tool_batch_has_success {
@@ -1350,7 +1291,6 @@ pub async fn run_reply_loop(
                     }
                 }
             }
-
             // Touch activity after tool execution.
             {
                 let now = slot_ctx.clock.now()
@@ -1368,7 +1308,6 @@ pub async fn run_reply_loop(
                     );
                 }
             }
-
             let tool_result_msg = Message {
                 role: Role::User,
                 content: tool_result_blocks,
@@ -1376,7 +1315,6 @@ pub async fn run_reply_loop(
             };
             persist_session_message(&msg_repo, session_id, task_id, &tool_result_msg).await;
             conversation.push(tool_result_msg);
-
             if let Some(condition) = loop_guard_condition_to_inject {
                 inject_loop_guard_correction(
                     &msg_repo,
@@ -1387,8 +1325,6 @@ pub async fn run_reply_loop(
                 )
                 .await;
             }
-
-            // ── Post-dispatch finalize check for alternate finalize tools ─────
             if let Some((name, payload)) = alternate_finalize {
                 tracing::info!(
                     task_id = %task_id,
@@ -1403,7 +1339,6 @@ pub async fn run_reply_loop(
                 break;
             }
         }
-
         if !saw_any_event {
             let diag = runtime_fs_diagnostics(project_path, worktree_path);
             return Err(anyhow::anyhow!(
@@ -1411,11 +1346,9 @@ pub async fn run_reply_loop(
                 diag
             ));
         }
-
         if !last_assistant_text.is_empty() {
             output.ingest_text(&last_assistant_text);
         }
-
         tracing::info!(
             task_id = %task_id,
             agent_type = %role_name,
@@ -1425,12 +1358,9 @@ pub async fn run_reply_loop(
             finalize_called = output.finalize_payload.is_some(),
             "ReplyLoop: session completed normally"
         );
-
         Ok(())
     }
     .await;
-
-    // ── End session-level OTel span ──────────────────────────────────────
     if let Some(session) = otel_session {
         session.record_usage(total_tokens_in, total_tokens_out);
         session.record_cache_usage(total_cache_read, total_cache_write, total_reasoning_out);
@@ -1442,9 +1372,7 @@ pub async fn run_reply_loop(
             Err(e) => session.end_error(&e.to_string()),
         }
     }
-
     slot_ctx.deregister_activity(task_id);
-
     (
         run_result,
         output,
@@ -1459,7 +1387,6 @@ pub async fn run_reply_loop(
 mod tests {
     use super::*;
     use djinn_provider::provider::ProviderError;
-
     #[test]
     fn empty_turn_terminal_error_is_breaker_classifiable() {
         for kind in ["no-event", "assistant"] {
@@ -1478,7 +1405,6 @@ mod tests {
             assert!(display.contains("diag"), "{kind}: {display}");
         }
     }
-
     #[test]
     fn empty_turn_terminal_error_codex_family_is_throttle_not_failure() {
         for kind in ["no-event", "assistant"] {

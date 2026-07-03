@@ -19,8 +19,7 @@ use sha2::{Digest, Sha256};
 /// before the general repeated-tool-failure guard trips.
 pub const DEFAULT_IDENTICAL_TOOL_FAILURE_THRESHOLD: u32 = 3;
 
-/// Default number of identical permission/security denials before the stricter
-/// denial guard trips.
+/// Default number of identical permission/security denials before the stricter denial guard trips.
 pub const DEFAULT_PERMISSION_DENIAL_THRESHOLD: u32 = 2;
 
 /// Default number of identical assistant output signatures before the assistant
@@ -71,7 +70,6 @@ impl ToolCallSignature {
             digest,
         }
     }
-
     pub fn display_label(&self) -> String {
         format!(
             "{}({}) [digest={}]",
@@ -112,7 +110,6 @@ impl AssistantOutputSignature {
             digest,
         }
     }
-
     pub fn from_content_blocks(narrative_text: impl Into<String>, blocks: &[ContentBlock]) -> Self {
         let tool_calls = blocks.iter().filter_map(|block| match block {
             ContentBlock::ToolUse { name, input, .. } => Some(ToolCallSignature::new(name, input)),
@@ -173,7 +170,6 @@ impl LoopGuardCondition {
     pub fn kind(&self) -> LoopGuardKind {
         self.reason.kind()
     }
-
     pub fn offending_signature_label(&self) -> String {
         match &self.reason {
             LoopGuardReason::RepeatedToolFailure { signature }
@@ -190,8 +186,7 @@ impl LoopGuardCondition {
     }
 }
 
-/// Typed reply-loop error used when a deterministic loop guard terminates the
-/// session.
+/// Typed reply-loop error used when a deterministic loop guard terminates the session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoopGuardError {
     pub condition: LoopGuardCondition,
@@ -242,7 +237,6 @@ impl LoopGuardState {
             consecutive_tool_failures: 0,
         }
     }
-
     pub fn record_assistant_output(
         &mut self,
         signature: AssistantOutputSignature,
@@ -254,16 +248,13 @@ impl LoopGuardState {
             threshold: self.config.assistant_output_repeat_threshold,
         })
     }
-
     pub fn record_tool_failure(
         &mut self,
         signature: ToolCallSignature,
         class: ToolFailureClass,
     ) -> Option<LoopGuardCondition> {
         self.consecutive_tool_failures = self.consecutive_tool_failures.saturating_add(1);
-
         let repeated_condition = self.record_identical_tool_failure(signature.clone(), class);
-
         let observed = self.consecutive_tool_failures;
         repeated_condition.or_else(|| {
             (observed >= self.config.consecutive_tool_failure_threshold).then_some(
@@ -277,7 +268,6 @@ impl LoopGuardState {
             )
         })
     }
-
     pub fn record_tool_failure_after_progress(
         &mut self,
         signature: ToolCallSignature,
@@ -285,7 +275,6 @@ impl LoopGuardState {
     ) -> Option<LoopGuardCondition> {
         self.record_identical_tool_failure(signature, class)
     }
-
     fn record_identical_tool_failure(
         &mut self,
         signature: ToolCallSignature,
@@ -317,14 +306,12 @@ impl LoopGuardState {
             }
         }
     }
-
     pub fn record_tool_success(&mut self) {
         self.tool_failure_counts.clear();
         self.permission_denial_counts.clear();
         self.assistant_output_counts.clear();
         self.consecutive_tool_failures = 0;
     }
-
     pub fn consecutive_tool_failures(&self) -> u32 {
         self.consecutive_tool_failures
     }
@@ -389,7 +376,6 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-
     #[test]
     fn default_thresholds_match_epic_values() {
         let config = LoopGuardConfig::default();
@@ -398,7 +384,6 @@ mod tests {
         assert_eq!(config.assistant_output_repeat_threshold, 4);
         assert_eq!(config.consecutive_tool_failure_threshold, 6);
     }
-
     #[test]
     fn json_normalization_sorts_object_keys_but_preserves_arrays() {
         let left = json!({
@@ -416,7 +401,6 @@ mod tests {
             "b": [1, 2, {"a": true, "z": null}],
             "c": false
         });
-
         assert_eq!(normalize_json(&left), normalize_json(&right));
         assert_ne!(
             normalize_json(&left),
@@ -427,14 +411,12 @@ mod tests {
             r#"{"a":"text","b":[2,1,{"a":true,"z":null}],"c":false}"#
         );
     }
-
     #[test]
     fn tool_call_signature_is_stable_for_equivalent_argument_objects() {
         let first = ToolCallSignature::new("shell", &json!({"timeout_ms": 10, "command": "true"}));
         let second = ToolCallSignature::new("shell", &json!({"command": "true", "timeout_ms": 10}));
         let different_tool =
             ToolCallSignature::new("read", &json!({"command": "true", "timeout_ms": 10}));
-
         assert_eq!(first, second);
         assert_ne!(first, different_tool);
         assert_eq!(
@@ -443,12 +425,10 @@ mod tests {
         );
         assert_eq!(first.digest.len(), 64);
     }
-
     #[test]
     fn assistant_output_signature_includes_text_and_ordered_tool_calls() {
         let shell = ToolCallSignature::new("shell", &json!({"command": "true"}));
         let read = ToolCallSignature::new("read", &json!({"file_path": "Cargo.toml"}));
-
         let first =
             AssistantOutputSignature::new("I will inspect.", vec![shell.clone(), read.clone()]);
         let repeated =
@@ -456,13 +436,11 @@ mod tests {
         let different_text =
             AssistantOutputSignature::new("Different.", vec![shell.clone(), read.clone()]);
         let different_order = AssistantOutputSignature::new("I will inspect.", vec![read, shell]);
-
         assert_eq!(first, repeated);
         assert_ne!(first, different_text);
         assert_ne!(first, different_order);
         assert_eq!(first.digest.len(), 64);
     }
-
     #[test]
     fn assistant_output_signature_ignores_runtime_tool_call_ids() {
         let blocks_a = vec![ContentBlock::ToolUse {
@@ -475,18 +453,15 @@ mod tests {
             name: "shell".to_string(),
             input: json!({"timeout_ms": 10, "command": "true"}),
         }];
-
         assert_eq!(
             AssistantOutputSignature::from_content_blocks("Checking", &blocks_a),
             AssistantOutputSignature::from_content_blocks("Checking", &blocks_b)
         );
     }
-
     #[test]
     fn state_trips_repeated_tool_failure_at_threshold() {
         let mut state = LoopGuardState::default();
         let sig = ToolCallSignature::new("shell", &json!({"command": "false"}));
-
         assert!(
             state
                 .record_tool_failure(sig.clone(), ToolFailureClass::General)
@@ -500,7 +475,6 @@ mod tests {
         let condition = state
             .record_tool_failure(sig.clone(), ToolFailureClass::General)
             .expect("third identical failure trips");
-
         assert_eq!(condition.kind(), LoopGuardKind::RepeatedToolFailure);
         assert_eq!(condition.observed, 3);
         assert_eq!(condition.threshold, 3);
@@ -509,12 +483,10 @@ mod tests {
             LoopGuardReason::RepeatedToolFailure { signature: sig }
         );
     }
-
     #[test]
     fn state_trips_permission_denial_at_stricter_threshold() {
         let mut state = LoopGuardState::default();
         let sig = ToolCallSignature::new("write", &json!({"path": "/etc/passwd"}));
-
         assert!(
             state
                 .record_tool_failure(sig.clone(), ToolFailureClass::PermissionOrSecurityDenial)
@@ -523,7 +495,6 @@ mod tests {
         let condition = state
             .record_tool_failure(sig, ToolFailureClass::PermissionOrSecurityDenial)
             .expect("second identical denial trips");
-
         assert_eq!(
             condition.kind(),
             LoopGuardKind::RepeatedPermissionOrSecurityDenial
@@ -531,7 +502,6 @@ mod tests {
         assert_eq!(condition.observed, 2);
         assert_eq!(condition.threshold, 2);
     }
-
     #[test]
     fn state_trips_repeated_assistant_output_at_threshold() {
         let mut state = LoopGuardState::default();
@@ -542,24 +512,20 @@ mod tests {
                 &json!({"file_path": "src/lib.rs"}),
             )],
         );
-
         for _ in 0..3 {
             assert!(state.record_assistant_output(sig.clone()).is_none());
         }
         let condition = state
             .record_assistant_output(sig)
             .expect("fourth identical assistant output trips");
-
         assert_eq!(condition.kind(), LoopGuardKind::RepeatedAssistantOutput);
         assert_eq!(condition.observed, 4);
         assert_eq!(condition.threshold, 4);
     }
-
     #[test]
     fn state_tracks_consecutive_failures_across_signatures_and_resets_on_success() {
         let mut state = LoopGuardState::default();
         let repeated_sig = ToolCallSignature::new("shell", &json!({"command": "false"}));
-
         assert!(
             state
                 .record_tool_failure(repeated_sig.clone(), ToolFailureClass::General)
@@ -570,10 +536,8 @@ mod tests {
                 .record_tool_failure(repeated_sig.clone(), ToolFailureClass::General)
                 .is_none()
         );
-
         state.record_tool_success();
         assert_eq!(state.consecutive_tool_failures(), 0);
-
         assert!(
             state
                 .record_tool_failure(repeated_sig.clone(), ToolFailureClass::General)
@@ -584,9 +548,7 @@ mod tests {
                 .record_tool_failure(repeated_sig, ToolFailureClass::General)
                 .is_none()
         );
-
         state.record_tool_success();
-
         for idx in 0..5 {
             let sig = ToolCallSignature::new("shell", &json!({"command": format!("false {idx}")}));
             assert!(
@@ -596,10 +558,8 @@ mod tests {
             );
         }
         assert_eq!(state.consecutive_tool_failures(), 5);
-
         state.record_tool_success();
         assert_eq!(state.consecutive_tool_failures(), 0);
-
         for idx in 0..5 {
             let sig =
                 ToolCallSignature::new("read", &json!({"file_path": format!("missing-{idx}")}));
@@ -613,7 +573,6 @@ mod tests {
         let condition = state
             .record_tool_failure(final_sig.clone(), ToolFailureClass::General)
             .expect("sixth consecutive failure trips");
-
         assert_eq!(condition.kind(), LoopGuardKind::ConsecutiveToolFailures);
         assert_eq!(condition.observed, 6);
         assert_eq!(condition.threshold, 6);

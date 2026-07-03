@@ -1,9 +1,4 @@
-//! Compatibility facade for the canonical `djinn-slot` reply loop.
-//!
-//! The duplicated agent reply-loop implementation has been removed from the
-//! compiled module graph. This module preserves the historical
-//! `crate::actors::slot::reply_loop::*` API by adapting agent host services into
-//! `djinn-slot`'s `SlotContext` and `SlotToolDispatcher` seams.
+//! Reply-loop facade: adapts agent host services into djinn-slot SlotContext.
 
 use std::sync::{Arc, Mutex};
 
@@ -96,7 +91,6 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     fn is_stash_tool(&self, tool_name: &str) -> bool {
         is_stash_tool(tool_name)
     }
-
     fn handle_stash_call(
         &self,
         tool_name: &str,
@@ -104,7 +98,6 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     ) -> Result<String, String> {
         handle_stash_tool(&self.output_stash, tool_name, arguments)
     }
-
     fn render_result(
         &self,
         tool_use_id: &str,
@@ -113,7 +106,6 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     ) -> String {
         render_tool_result(&self.output_stash, tool_use_id, tool_name, value)
     }
-
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -136,13 +128,11 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             self.allowed_schemas.as_deref(),
         ))
     }
-
     fn is_mcp_tool(&self, tool_name: &str) -> bool {
         self.mcp_registry
             .map(|registry| registry.has_tool(tool_name))
             .unwrap_or(false)
     }
-
     fn dispatch_mcp_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -155,13 +145,11 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             None => Box::pin(async move { Err(format!("MCP tool `{tool_name}` not found")) }),
         }
     }
-
     fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
         self.mcp_registry
             .and_then(|registry| registry.server_for_tool(tool_name))
             .map(str::to_owned)
     }
-
     fn clear_stash(&self) {
         self.output_stash
             .lock()
@@ -197,7 +185,6 @@ pub(crate) async fn run_reply_loop(
         max_turns_override,
         is_evidence_spike,
     } = ctx;
-
     let mut slot_ctx = super::host_callbacks::agent_to_reply_loop_slot_context(app_state, services);
     // Evidence-spike sessions get the restricted tool set as allowed_schemas
     // for defense-in-depth dispatch-time enforcement.  For normal sessions
@@ -213,7 +200,6 @@ pub(crate) async fn run_reply_loop(
         mcp_registry,
         allowed_for_dispatch,
     )));
-
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
@@ -239,7 +225,6 @@ pub(crate) async fn run_reply_loop(
             is_resumed_session,
         )
         .await;
-
     let mut agent_output = ParsedAgentOutput::new(false);
     agent_output.runtime_error = output.runtime_error;
     agent_output.reviewer_feedback = output.reviewer_feedback;
@@ -247,7 +232,6 @@ pub(crate) async fn run_reply_loop(
     agent_output.finalize_tool_name = output.finalize_tool_name;
     agent_output.budget_wind_down_summary = output.budget_wind_down_summary;
     agent_output.budget_wind_down_details = output.budget_wind_down_details;
-
     (
         result,
         agent_output,

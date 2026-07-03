@@ -45,7 +45,6 @@ impl RecordingRuntimeOps {
             fail_teardown,
         }
     }
-
     fn calls(&self) -> Vec<String> {
         self.calls.lock().expect("calls mutex").clone()
     }
@@ -56,18 +55,14 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     async fn apply_settings(&self, _: &djinn_core::models::DjinnSettings) -> Result<(), String> {
         Ok(())
     }
-
     async fn embed_memory_query(
         &self,
         _: &str,
     ) -> Result<Option<djinn_control_plane::bridge::SemanticQueryEmbedding>, String> {
         Ok(None)
     }
-
     async fn reset_runtime_settings(&self) {}
-
     async fn persist_model_health_state(&self) {}
-
     async fn apply_environment_config(
         &self,
         _: &str,
@@ -75,17 +70,12 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
     ) -> Result<(), String> {
         Ok(())
     }
-
     async fn trigger_mirror_refresh(&self, _: &str) {}
-
     async fn apply_user_model_change(&self) {}
-
     async fn enqueue_image_build(&self, _: &str) -> Result<(), String> {
         Ok(())
     }
-
     async fn trigger_graph_warm(&self, _: &str) {}
-
     async fn teardown_taskrun_job(&self, task_run_id: &str) -> Result<(), String> {
         self.calls
             .lock()
@@ -97,14 +87,12 @@ impl djinn_control_plane::bridge::RuntimeOps for RecordingRuntimeOps {
             Ok(())
         }
     }
-
     async fn list_taskrun_jobs(
         &self,
     ) -> Result<Vec<djinn_control_plane::bridge::TaskrunJobRef>, String> {
         // Agent-internal test fakes don't track a kube inventory.
         Ok(Vec::new())
     }
-
     async fn cleanup_task_branches(&self, _: &str) {}
 }
 
@@ -224,11 +212,9 @@ async fn slot_pool_metrics_aggregate_by_state_and_model_without_slot_labels() {
     );
     let (_tx, rx) = mpsc::channel(1);
     let mut pool = SlotPool::new(rx, app_state, cancel, config);
-
     pool.test_assign_busy("task-a", 0);
     pool.test_record_slot_pool_metrics();
     let rendered = djinn_telemetry::render().unwrap();
-
     assert!(rendered.contains("djinn_slot_pool"));
     assert!(rendered.contains("model=\"model-a\""));
     assert!(rendered.contains("model=\"model-b\""));
@@ -270,7 +256,6 @@ fn test_slot_factory(
                 })
             },
         );
-
         SlotHandle::spawn_with_test_runner(slot_id, model_id, event_tx, app_state, cancel, runner)
     })
 }
@@ -312,7 +297,6 @@ fn blocking_cancel_slot_factory(
                 })
             },
         );
-
         SlotHandle::spawn_with_test_runner(slot_id, model_id, event_tx, app_state, cancel, runner)
     })
 }
@@ -325,13 +309,11 @@ impl<'a> SlotPoolInvariantHarness<'a> {
     fn new(pool: &'a SlotPool) -> Self {
         Self { pool }
     }
-
     fn assert_after(&self, event: &str) {
         self.assert_per_model_free_list_uniqueness(event);
         self.assert_retired_slots_absent_from_free_lists(event);
         self.assert_mapped_or_busy_slots_not_free(event);
     }
-
     fn assert_per_model_free_list_uniqueness(&self, event: &str) {
         for (model_id, free_slots) in self.pool.test_free_slots_by_model() {
             let mut seen = HashSet::new();
@@ -343,7 +325,6 @@ impl<'a> SlotPoolInvariantHarness<'a> {
             }
         }
     }
-
     fn assert_retired_slots_absent_from_free_lists(&self, event: &str) {
         let retired = self.pool.test_retired_slots();
         for (model_id, free_slots) in self.pool.test_free_slots_by_model() {
@@ -355,7 +336,6 @@ impl<'a> SlotPoolInvariantHarness<'a> {
             }
         }
     }
-
     fn assert_mapped_or_busy_slots_not_free(&self, event: &str) {
         let task_slots = self.pool.test_task_slots();
         let slot_states = self.pool.test_slot_states();
@@ -367,7 +347,6 @@ impl<'a> SlotPoolInvariantHarness<'a> {
                         "slot-pool invariant failed after {event}: mapped slot id {slot_id} for task '{task_id}' is present in model '{model_id}' free list; free_slots={free_slots:?}, task_slots={task_slots:?}"
                     );
                 }
-
                 if let Some(SlotState::Busy { task_id, .. }) = slot_states.get(slot_id) {
                     panic!(
                         "slot-pool invariant failed after {event}: busy slot id {slot_id} for task '{task_id}' is present in model '{model_id}' free list; free_slots={free_slots:?}"
@@ -432,19 +411,16 @@ async fn snapshot_reports_free_busy_and_draining_slots() {
     pool.test_set_slot_state(2, SlotState::Draining);
     pool.test_set_task_slot("task-busy", 1);
     pool.test_set_task_slot("task-draining", 2);
-
     let snapshot = pool.snapshot();
     assert_eq!(snapshot.len(), 3);
     assert_eq!(snapshot[0].state, "free");
     assert_eq!(snapshot[0].model, "model-a");
     assert_eq!(snapshot[0].task_id, None);
     assert_eq!(snapshot[0].started_at, None);
-
     assert_eq!(snapshot[1].state, "busy");
     assert_eq!(snapshot[1].model, "model-a");
     assert_eq!(snapshot[1].task_id.as_deref(), Some("task-busy"));
     assert_eq!(snapshot[1].started_at.as_deref(), Some("12345"));
-
     assert_eq!(snapshot[2].state, "draining");
     assert_eq!(snapshot[2].model, "model-b");
     assert_eq!(snapshot[2].task_id.as_deref(), Some("task-draining"));
@@ -498,7 +474,6 @@ async fn run_lifecycle_permutation(case: LifecyclePermutation) {
     let (mut pool, _temp) = new_white_box_pool(1);
     let mut task_slots: HashMap<&'static str, usize> = HashMap::new();
     assert_slot_pool_invariants_after(&pool, &format!("{}: initial spawn", case.name));
-
     for (idx, step) in case.steps.iter().copied().enumerate() {
         let label = format!("{} step {idx} {step:?}", case.name);
         match step {
@@ -667,7 +642,6 @@ async fn dispatch_for_role(
     model_roles: &HashMap<String, HashSet<String>>,
 ) -> Result<String, PoolError> {
     let priorities = role_priorities.get(role).cloned().unwrap_or_default();
-
     let mut last_capacity: Option<PoolError> = None;
     for model_id in priorities {
         if !model_roles
@@ -676,7 +650,6 @@ async fn dispatch_for_role(
         {
             continue;
         }
-
         match pool.dispatch(task_id, project_path, &model_id).await {
             Ok(()) => return Ok(model_id),
             Err(PoolError::AtCapacity { .. }) => {
@@ -687,7 +660,6 @@ async fn dispatch_for_role(
             Err(other) => return Err(other),
         }
     }
-
     Err(last_capacity.unwrap_or(PoolError::AtCapacity {
         model_id: role.to_string(),
     }))
@@ -707,18 +679,15 @@ async fn parallel_completions_finish_concurrently() {
         config,
         test_slot_factory(Duration::from_millis(120), signal_tx),
     );
-
     let task_ids: Vec<String> = (0..4).map(|i| format!("parallel-{i}")).collect();
     for task_id in &task_ids {
         pool.dispatch(task_id, "/tmp/project", "model-a")
             .await
             .expect("dispatch should succeed");
     }
-
     let started = Instant::now();
     wait_until_no_sessions(&pool, &task_ids).await;
     let elapsed = started.elapsed();
-
     assert!(
         elapsed < Duration::from_millis(380),
         "expected concurrent completion under 380ms, got {:?}",
@@ -742,14 +711,12 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
         ("model-a".to_string(), role_set(&["worker"])),
         ("model-b".to_string(), role_set(&["worker"])),
     ]);
-
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     let m1 = dispatch_for_role(
         &pool,
         "task-1",
@@ -780,7 +747,6 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     )
     .await
     .expect("third dispatch should succeed");
-
     // Elastic pool: there is no per-model ceiling — repeated dispatches to the
     // first-priority model all spawn on demand (past the pre-warm count), so we
     // never fall back to model-b and never hit AtCapacity. Per-user concurrency
@@ -788,7 +754,6 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
     assert_eq!(m1, "model-a");
     assert_eq!(m2, "model-a");
     assert_eq!(m3, "model-a");
-
     let fourth = dispatch_for_role(
         &pool,
         "task-4",
@@ -802,7 +767,6 @@ async fn elastic_pool_spawns_on_demand_without_capacity_fallback() {
         fourth.expect("elastic dispatch always succeeds (spawns on demand)"),
         "model-a"
     );
-
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
@@ -837,14 +801,12 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
         ("opus".to_string(), role_set(&["reviewer"])),
         ("sonnet".to_string(), role_set(&["worker"])),
     ]);
-
     let pool = SlotPoolHandle::spawn_with_factory(
         app_state,
         cancel,
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     let first = dispatch_for_role(
         &pool,
         "worker-1",
@@ -856,10 +818,8 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
     .await
     .expect("worker dispatch should succeed");
     assert_eq!(first, "sonnet");
-
     let status = pool.get_status().await.expect("status should succeed");
     assert_eq!(status.per_model.get("opus").map(|s| s.free), Some(1));
-
     let second = dispatch_for_role(
         &pool,
         "worker-2",
@@ -882,7 +842,6 @@ async fn role_isolation_skips_models_that_do_not_serve_role() {
         Some(1),
         "opus (reviewer-only) must stay untouched by worker dispatches"
     );
-
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
@@ -903,7 +862,6 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch("up-1", "/tmp/project", "model-a")
         .await
         .expect("dispatch 1 should succeed");
@@ -912,14 +870,12 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
         .expect("dispatch 2 should succeed");
     // (No AtCapacity check at the pre-warm count of 2 — the pool is elastic.
     // This test now verifies that scaling UP pre-warms additional FREE slots.)
-
     pool.reconfigure(make_config(
         vec![model("model-a", 4, &["worker"])],
         &[("worker", vec!["model-a"])],
     ))
     .await
     .expect("reconfigure should succeed");
-
     let status = pool.get_status().await.expect("status should succeed");
     let per_model = status
         .per_model
@@ -928,14 +884,12 @@ async fn reconfigure_scale_up_adds_free_slots_for_dispatch() {
     assert_eq!(status.total_slots, 4);
     assert_eq!(per_model.active, 2);
     assert_eq!(per_model.free, 2);
-
     pool.dispatch("up-3", "/tmp/project", "model-a")
         .await
         .expect("dispatch 3 should succeed after scale-up");
     pool.dispatch("up-4", "/tmp/project", "model-a")
         .await
         .expect("dispatch 4 should succeed after scale-up");
-
     pool.interrupt_all("test cleanup")
         .await
         .expect("interrupt_all should succeed");
@@ -960,35 +914,29 @@ async fn reconfigure_scale_down_drains_busy_slots_then_retires_them() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     let task_ids: Vec<String> = (0..4).map(|i| format!("down-{i}")).collect();
     for task_id in &task_ids {
         pool.dispatch(task_id, "/tmp/project", "model-a")
             .await
             .expect("dispatch should succeed");
     }
-
     pool.reconfigure(make_config(
         vec![model("model-a", 2, &["worker"])],
         &[("worker", vec!["model-a"])],
     ))
     .await
     .expect("reconfigure should succeed");
-
     // Tasks are still running (10s runtime), so all 4 slots should still exist.
     let status_during_drain = pool.get_status().await.expect("status should succeed");
     assert_eq!(status_during_drain.total_slots, 4);
-
     // Kill all tasks so they finish immediately.
     pool.interrupt_all("test drain")
         .await
         .expect("interrupt_all should succeed");
     wait_until_no_sessions(&pool, &task_ids).await;
-
     // Scale-down still drained the idle slots back to the pre-warm count of 2.
     let status_after = pool.get_status().await.expect("status should succeed");
     assert_eq!(status_after.total_slots, 2);
-
     // Elastic: the 2 retained slots are reused, and a 3rd dispatch spawns a new
     // slot on demand — there is no per-model capacity ceiling anymore.
     pool.dispatch("down-next-1", "/tmp/project", "model-a")
@@ -1035,12 +983,10 @@ async fn running_count_for_cap(repo: &djinn_db::SessionRepository) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
     use djinn_db::{EpicCreateInput, EpicRepository, TaskRepository};
-
     let (app_state, cancel, _temp) = test_app_state();
     let db = app_state.db.clone();
     let event_bus = app_state.event_bus.clone();
     let session_repo = djinn_db::SessionRepository::new(db.clone(), event_bus.clone());
-
     // Seed a real project → epic → task so the session row satisfies its
     // FK constraints (`sessions.project_id` → projects, `sessions.task_id`
     // → tasks).
@@ -1068,7 +1014,6 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
         .await
         .expect("task create should succeed");
     let task_id = task.id.as_str();
-
     // Materialize the `running` session row the real worker lifecycle would
     // create. (The test slot runner is a stub and does not touch the DB.)
     let created = session_repo
@@ -1094,7 +1039,6 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
         1,
         "a running worker session counts against the per-user cap"
     );
-
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1106,20 +1050,16 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
-
     // Stall-kill: the coordinator's stall detector routes through
     // `pool.kill_session`, which kills the slot and emits `SlotEvent::Killed`.
     pool.kill_session(task_id)
         .await
         .expect("kill_session should succeed");
-
     // Wait for the slot to drain (the `Killed` event handler runs the settle).
     wait_until_no_sessions(&pool, &[task_id.to_string()]).await;
-
     // The settle is performed in `handle_slot_event` after the kill event; poll
     // until the row goes terminal (the event is processed async).
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -1143,7 +1083,6 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-
     // The settled row no longer counts against the per-user concurrency cap.
     assert_eq!(
         running_count_for_cap(&session_repo).await,
@@ -1158,7 +1097,6 @@ async fn stall_kill_settles_session_row_and_clears_from_per_user_cap() {
             .is_empty(),
         "no running sessions should remain after a stall-kill"
     );
-
     // Idempotent: re-settling an already-terminal row affects zero rows and
     // leaves it terminal.
     let reaffected = session_repo
@@ -1195,14 +1133,12 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch("task-kill", "/tmp/project", "model-a")
         .await
         .expect("kill task dispatch should succeed");
     pool.dispatch("task-pause", "/tmp/project", "model-a")
         .await
         .expect("pause task dispatch should succeed");
-
     let kill_slot = pool
         .session_for_task("task-kill")
         .await
@@ -1219,14 +1155,12 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
         kill_slot, pause_slot,
         "tasks should be running in different slots"
     );
-
     pool.kill_session("task-kill")
         .await
         .expect("kill should succeed");
     pool.pause_session("task-pause")
         .await
         .expect("pause should succeed");
-
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut saw_kill = false;
     let mut saw_pause = false;
@@ -1246,7 +1180,6 @@ async fn kill_and_pause_are_routed_to_the_correct_task_slot() {
             }
         }
     }
-
     wait_until_no_sessions(&pool, &["task-kill".into(), "task-pause".into()]).await;
 }
 
@@ -1267,14 +1200,12 @@ async fn kill_session_tears_down_taskrun_job_and_ignores_teardown_errors() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     pool.kill_session(&task_id)
         .await
         .expect("teardown failure must not fail kill_session");
-
     assert!(
         runtime.calls().iter().any(|call| call == "run-kill"),
         "kill_session should attempt task-run Job teardown"
@@ -1300,14 +1231,12 @@ async fn evict_session_tears_down_taskrun_job_before_reclaiming_slot() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     pool.evict_session(&task_id)
         .await
         .expect("evict_session should succeed");
-
     assert!(
         runtime.calls().iter().any(|call| call == "run-evict"),
         "evict_session should attempt task-run Job teardown"
@@ -1348,7 +1277,6 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
             release_after_cancel.clone(),
         ),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("initial dispatch should succeed");
@@ -1365,7 +1293,6 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
         .expect("initial task should have an active session")
         .slot_id;
     assert_actor_pool_status(&pool, "initial dispatch", 1, 1, 0, 1).await;
-
     pool.evict_session(&task_id)
         .await
         .expect("evict_session should reclaim the mapping even when teardown fails");
@@ -1397,7 +1324,6 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
         "evict_session must remove stale session_for_task state"
     );
     assert_actor_pool_status(&pool, "after evict before lifecycle Killed", 1, 1, 0, 0).await;
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("reclaimed task should redispatch before the old Killed event arrives");
@@ -1418,7 +1344,6 @@ async fn actor_handle_evict_then_late_killed_event_preserves_reclaimed_mapping()
         "redispatch before the old Killed event must not reuse the still-killing slot"
     );
     assert_actor_pool_status(&pool, "redispatch before lifecycle Killed", 2, 2, 0, 1).await;
-
     release_after_cancel.notify_waiters();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1466,7 +1391,6 @@ async fn interrupt_all_tears_down_each_running_taskrun_job() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_a, "/tmp/project", "model-a")
         .await
         .expect("dispatch A should succeed");
@@ -1476,7 +1400,6 @@ async fn interrupt_all_tears_down_each_running_taskrun_job() {
     pool.interrupt_all("test interrupt")
         .await
         .expect("interrupt_all should succeed");
-
     let calls = runtime.calls();
     assert!(calls.iter().any(|call| call == "run-int-a"));
     assert!(calls.iter().any(|call| call == "run-int-b"));
@@ -1506,15 +1429,12 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
         // Long runtime: the slot stays genuinely busy for the whole test.
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-
     pool.test_dispatch("task-a", "/tmp/project", "model-a")
         .await
         .expect("first dispatch should occupy a slot");
     assert_slot_pool_invariants_after(&pool, "dispatch task-a");
-
     // Inject the exact desync: the still-busy slot back on the free list.
     let slot_a = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
-
     // Must self-heal: drop the stale entry and spawn a fresh slot — NOT wedge.
     pool.test_dispatch("task-b", "/tmp/project", "model-a")
         .await
@@ -1523,7 +1443,6 @@ async fn dispatch_recovers_from_stale_busy_free_slot() {
     let slot_b = pool
         .test_slot_of("task-b")
         .expect("task-b should hold a slot");
-
     assert_ne!(
         slot_b, slot_a,
         "task-b must land on a fresh slot, not the still-busy one"
@@ -1555,18 +1474,14 @@ async fn invariant_harness_accepts_stale_busy_slot_self_heal() {
         config,
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-
     assert_slot_pool_invariants_after(&pool, "initial spawn");
-
     pool.test_dispatch("task-a", "/tmp/project", "model-a")
         .await
         .expect("first dispatch should occupy the pre-warmed slot");
     let stale_slot = inject_stale_busy_free_slot(&mut pool, "task-a", "model-a");
-
     pool.test_dispatch("task-b", "/tmp/project", "model-a")
         .await
         .expect("dispatch should self-heal the stale busy free-list entry");
-
     assert_slot_pool_invariants_after(&pool, "self-healed dispatch after stale busy injection");
     assert!(
         !pool.test_free_slots("model-a").contains(&stale_slot),
@@ -1635,7 +1550,6 @@ async fn lifecycle_permutations_preserve_slot_pool_invariants() {
             ],
         },
     ];
-
     for case in CASES {
         run_lifecycle_permutation(*case).await;
     }
@@ -1661,11 +1575,9 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
         config,
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-
     // spawn_slots_for_config already created slot 0, free exactly once.
     assert_eq!(pool.test_free_slots("model-a"), vec![0]);
     assert_slot_pool_invariants_after(&pool, "initial spawn");
-
     // Re-freeing an already-free slot is a no-op, never a duplicate.
     pool.test_mark_slot_free(0, "model-a");
     assert_slot_pool_invariants_after(&pool, "idempotent mark_slot_free");
@@ -1674,7 +1586,6 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
         vec![0],
         "mark_slot_free must not duplicate an already-free slot"
     );
-
     // Take slot 0 out of the free list (as a dispatch would), then retire it.
     pool.test_dispatch("task-a", "/tmp/project", "model-a")
         .await
@@ -1684,7 +1595,6 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
     assert!(!pool.test_free_slots("model-a").contains(&0));
     pool.test_retire(0);
     assert_slot_pool_invariants_after(&pool, "manual retire while busy");
-
     // A stale Free event for a retired slot must not return it to rotation.
     pool.test_mark_slot_free(0, "model-a");
     assert_slot_pool_invariants_after(&pool, "stale free event for retired slot");
@@ -1693,8 +1603,6 @@ async fn mark_slot_free_is_idempotent_and_skips_retired() {
         "mark_slot_free must refuse to resurrect a retired slot"
     );
 }
-
-// ── Regression coverage for the "kill actually kills" teardown contract ──
 
 /// `interrupt_project` is the bulk-interrupt surface scoped to a single
 /// project (e.g. project delete / leadership handoff). It must hit the
@@ -1718,11 +1626,9 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
     let task_other =
         seed_running_session_with_task_run_in_project(&app_state, &other_project_id, "run-other")
             .await;
-
     // Sanity: two affected tasks share one project, while the third task lives
     // in a different project and must survive the scoped interrupt.
     assert_ne!(project_id, other_project_id);
-
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 3, &["worker"])],
@@ -1734,7 +1640,6 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_a, "/tmp/project", "model-a")
         .await
         .expect("dispatch A should succeed");
@@ -1744,11 +1649,9 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
     pool.dispatch(&task_other, "/tmp/other-project", "model-a")
         .await
         .expect("dispatch other should succeed");
-
     pool.interrupt_project(&project_id, "test project interrupt")
         .await
         .expect("interrupt_project should succeed");
-
     let calls = runtime.calls();
     assert!(
         calls.iter().any(|call| call == "run-proj-a"),
@@ -1769,7 +1672,6 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
             .expect("has_session should succeed"),
         "unrelated project task should still be running"
     );
-
     pool.interrupt_all("test cleanup")
         .await
         .expect("cleanup interrupt_all should succeed");
@@ -1785,7 +1687,6 @@ async fn interrupt_project_tears_down_each_affected_taskrun_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn evict_session_with_no_task_run_id_is_idempotent() {
     use djinn_db::CreateSessionParams;
-
     let (mut app_state, cancel, _temp) = test_app_state();
     let runtime = RecordingRuntimeOps::new(false);
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
@@ -1793,7 +1694,6 @@ async fn evict_session_with_no_task_run_id_is_idempotent() {
     let epic = crate::test_helpers::create_test_epic(&app_state.db, &project.id).await;
     let task = crate::test_helpers::create_test_task(&app_state.db, &project.id, &epic.id).await;
     let task_id = task.id.clone();
-
     let session_repo =
         djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     session_repo
@@ -1809,7 +1709,6 @@ async fn evict_session_with_no_task_run_id_is_idempotent() {
         })
         .await
         .expect("session create should succeed");
-
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1821,14 +1720,12 @@ async fn evict_session_with_no_task_run_id_is_idempotent() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     pool.evict_session(&task_id)
         .await
         .expect("evict_session should succeed");
-
     assert!(
         runtime.calls().is_empty(),
         "evict_session with no task_run_id must not invoke teardown"
@@ -1863,7 +1760,6 @@ async fn kill_session_with_no_slot_mapping_returns_task_not_found() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.kill_session("ghost-task")
         .await
         .expect_err("kill_session on an unmapped task should return TaskNotFound");
@@ -1897,18 +1793,15 @@ async fn interrupt_all_is_idempotent_and_skips_already_removed_sessions() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
-
     // First interrupt: tears down `run-double` once, then drains via the
     // slot `Killed` event handler.
     pool.interrupt_all("first interrupt")
         .await
         .expect("first interrupt_all should succeed");
     wait_until_no_sessions(&pool, std::slice::from_ref(&task_id)).await;
-
     // Second interrupt on the now-empty pool is a no-op: zero calls,
     // zero panics.
     let calls_before = runtime.calls().len();
@@ -1935,7 +1828,6 @@ async fn slot_event_killed_tears_down_taskrun_job() {
     app_state.runtime_ops = Some(Arc::new(runtime.clone()));
     let task_id =
         seed_running_session_with_task_run(&app_state, "killed event teardown", "run-killed").await;
-
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
         vec![model("model-a", 1, &["worker"])],
@@ -1949,21 +1841,18 @@ async fn slot_event_killed_tears_down_taskrun_job() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.test_dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     let slot_id = pool
         .test_slot_of(&task_id)
         .expect("task should hold a slot");
-
     pool.test_handle_slot_event(super::super::SlotEvent::Killed {
         slot_id,
         model_id: "model-a".to_string(),
         task_id: task_id.clone(),
     })
     .await;
-
     assert!(
         runtime.calls().iter().any(|call| call == "run-killed"),
         "SlotEvent::Killed handler must tear down the task-run Job (saw calls: {:?})",
@@ -1998,7 +1887,6 @@ async fn terminate_session_synchronously_reclaims_mapping_activity_and_session_r
         app_state.idle_seconds(&task_id).is_some(),
         "test should start with tracked activity"
     );
-
     let app_state_for_assert = app_state.clone();
     let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
     let config = make_config(
@@ -2011,16 +1899,13 @@ async fn terminate_session_synchronously_reclaims_mapping_activity_and_session_r
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     pool.dispatch(&task_id, "/tmp/project", "model-a")
         .await
         .expect("dispatch should succeed");
     assert_eq!(running_count_for_cap(&session_repo).await, 1);
-
     pool.terminate_session(&task_id)
         .await
         .expect("terminate_session should succeed");
-
     assert!(
         runtime
             .calls()
@@ -2077,7 +1962,6 @@ async fn terminate_session_with_no_slot_mapping_returns_task_not_found() {
         config,
         test_slot_factory(Duration::from_secs(10), signal_tx),
     );
-
     let err = pool
         .terminate_session("ghost-task")
         .await
@@ -2090,7 +1974,6 @@ async fn terminate_session_with_no_slot_mapping_returns_task_not_found() {
         runtime.calls().is_empty(),
         "terminate_session on an unmapped task must not call teardown"
     );
-
     pool.evict_session("ghost-task")
         .await
         .expect("evict_session keeps leaked-session idempotent no-op semantics");
@@ -2112,7 +1995,6 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         config,
         test_slot_factory(Duration::from_secs(3600), signal_tx),
     );
-
     pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
         .await
         .expect("dispatch should occupy slot 0");
@@ -2124,17 +2006,14 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         pool.test_free_slots("model-a").is_empty(),
         "busy slot should not be on the free list before termination"
     );
-
     pool.test_terminate_session("task-terminate")
         .await
         .expect("terminate_session should reclaim the task mapping");
-
     assert_eq!(pool.test_slot_of("task-terminate"), None);
     assert!(
         pool.test_free_slots("model-a").is_empty(),
         "terminate_session must not synchronously append a non-draining slot to the free list"
     );
-
     pool.test_dispatch("task-terminate", "/tmp/project", "model-a")
         .await
         .expect("terminated task should be immediately redispatchable before Killed event");
@@ -2149,7 +2028,6 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         pool.test_free_slots("model-a").is_empty(),
         "redispatch must not reuse or duplicate the still-killing slot"
     );
-
     pool.test_handle_slot_event(super::super::SlotEvent::Killed {
         slot_id,
         model_id: "model-a".to_string(),

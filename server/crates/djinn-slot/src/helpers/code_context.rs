@@ -1,7 +1,5 @@
 use super::*;
 
-// ─── Knowledge context helpers ──────────────────────────────────────────────
-
 /// Extract crate/module path prefixes from a task's description, design, and epic context.
 pub fn derive_task_scope_paths(
     task: &djinn_core::models::Task,
@@ -9,7 +7,6 @@ pub fn derive_task_scope_paths(
 ) -> Vec<String> {
     use regex::Regex;
     use std::sync::OnceLock;
-
     // Match paths like: crates/foo, src/bar/baz, server/crates/djinn-db
     // Looking for patterns with at least 2 slash-separated segments
     static TASK_SCOPE_PATH_RE: OnceLock<Result<Regex, regex::Error>> = OnceLock::new();
@@ -25,9 +22,7 @@ pub fn derive_task_scope_paths(
             return Vec::new();
         }
     };
-
     let mut paths = std::collections::HashSet::new();
-
     for text in [&task.description, &task.design] {
         for cap in re.captures_iter(text) {
             if let Some(m) = cap.get(1) {
@@ -44,7 +39,6 @@ pub fn derive_task_scope_paths(
             }
         }
     }
-
     if let Some(epic) = epic_context {
         for cap in re.captures_iter(epic) {
             if let Some(m) = cap.get(1) {
@@ -59,7 +53,6 @@ pub fn derive_task_scope_paths(
             }
         }
     }
-
     paths.into_iter().collect()
 }
 
@@ -69,7 +62,6 @@ pub fn derive_task_scope_paths(
 pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize) -> String {
     let mut lines = Vec::new();
     let mut used = 0;
-
     for note in notes {
         let label = match note.note_type.as_str() {
             "pitfall" => "Pitfall",
@@ -77,7 +69,6 @@ pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize)
             "case" => "Case",
             _ => "Note",
         };
-
         let summary = if note.confidence > 0.8 {
             // High confidence: use overview (L1) if available
             note.overview
@@ -90,20 +81,15 @@ pub fn format_knowledge_notes(notes: &[djinn_memory::Note], budget_chars: usize)
                 .as_deref()
                 .unwrap_or_else(|| &note.content[..note.content.len().min(100)])
         };
-
         let line = format!("- **[{}] {}**: {}", label, note.title, summary);
-
         if used + line.len() > budget_chars {
             break;
         }
         used += line.len() + 1; // +1 for newline
         lines.push(line);
     }
-
     lines.join("\n")
 }
-
-// ─── PR E2: auto-injected `code_graph context` for worker / reviewer ──────
 
 /// Returns true when the given role name is opted-in to auto-injected
 /// `code_graph context` blocks via `DJINN_AUTO_CODE_CONTEXT_ROLES`.
@@ -187,7 +173,6 @@ pub async fn build_role_code_graph_context(
     if task_paths.is_empty() {
         return None;
     }
-
     let graph_ops = app_state.repo_graph_ops.clone()?;
     let ctx = djinn_control_plane::bridge::ProjectCtx {
         id: task.project_id.clone(),
@@ -195,7 +180,6 @@ pub async fn build_role_code_graph_context(
         workspace: None,
         sub_path: None,
     };
-
     let ranked = match graph_ops
         .ranked(
             &ctx,
@@ -220,11 +204,9 @@ pub async fn build_role_code_graph_context(
     if ranked.is_empty() {
         return None;
     }
-
     let mut per_file_count: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut bullets: Vec<String> = Vec::new();
-
     for node in ranked {
         if bullets.len() >= AUTO_CODE_CONTEXT_MAX_BULLETS {
             break;
@@ -242,7 +224,6 @@ pub async fn build_role_code_graph_context(
                 continue;
             }
         };
-
         let file_path = symbol_ctx.symbol.file_path.clone();
         if !path_under_any_scope(&file_path, task_paths) {
             continue;
@@ -252,11 +233,9 @@ pub async fn build_role_code_graph_context(
             continue;
         }
         *count += 1;
-
         let callers: usize = symbol_ctx.incoming.values().map(|v| v.len()).sum();
         let callees: usize = symbol_ctx.outgoing.values().map(|v| v.len()).sum();
         let tier = pagerank_tier(node.page_rank);
-
         // Outgoing calls (function-like edges) and writes give the worker
         // a quick read on what this symbol *does*; reads give a quick read
         // on its inputs.
@@ -271,17 +250,14 @@ pub async fn build_role_code_graph_context(
             .get(&EdgeCategory::Reads)
             .map(|v| format_related_names(v, 5))
             .unwrap_or_else(|| "none".to_string());
-
         bullets.push(format!(
             "- `{file_path}::{name}` (callers: {callers}, callees: {callees}, pagerank-tier: {tier})\n  - calls: {calls}\n  - reads: {reads}",
             name = symbol_ctx.symbol.name,
         ));
     }
-
     if bullets.is_empty() {
         return None;
     }
-
     let body = bullets.join("\n");
     Some(crate::truncate::smart_truncate(
         &body,
