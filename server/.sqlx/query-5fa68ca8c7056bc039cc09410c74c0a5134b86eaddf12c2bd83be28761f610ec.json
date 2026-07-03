@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO task_rejected_submission_integrity\n                (id, task_id, task_run_id, verdict_kind,\n                 rejected_at, diff_fingerprint, no_progress_streak)\n             VALUES ($1, $2, $3, 'no_progress', $4, $5, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fa68ca8c7056bc039cc09410c74c0a5134b86eaddf12c2bd83be28761f610ec"
+}

@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, task_id, task_run_id, review_id, verdict_kind,\n                      activity_id, rejected_at, diff_fingerprint,\n                      no_progress_streak, created_at\n               FROM task_rejected_submission_integrity WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "review_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "verdict_kind",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "activity_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "rejected_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "diff_fingerprint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "no_progress_streak",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "78e1dbb5956e8b085151a3739610869a437ada5fb9560f8c4e719922e92e008a"
+}
