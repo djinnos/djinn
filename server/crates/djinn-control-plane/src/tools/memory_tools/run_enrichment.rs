@@ -8,7 +8,7 @@
 // (`run_enrichment_tests::memory_graph_concurrent_with_enrichment_does_not_block`).
 //
 // Logging contract: the pass itself emits `INFO` start/finish lines (see
-// `djinn_agent::actors::slot::memory_enrichment`); the trigger logs a
+// `djinn_slot::memory_enrichment` via the agent facade); the trigger logs a
 // high-level `INFO` line on entry so operators can correlate admin-tool
 // invocations with the pass's own telemetry.
 
