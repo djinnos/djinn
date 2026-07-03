@@ -36,7 +36,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_in,
             tokens_out,
         } = params;
-
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         if final_output.finalize_payload.is_none()
             && let Some(feedback) = final_output.reviewer_feedback.as_deref()
@@ -55,7 +54,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 tracing::warn!(task_id = %task_id, error = %e, "failed to store reviewer feedback comment");
             }
         }
-
         if final_result_ok {
             super::super::finalize_handlers::process_finalize_payload(
                 &final_output.finalize_payload,
@@ -65,7 +63,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             )
             .await;
         }
-
         if let Some(reason) = &final_error {
             let payload = serde_json::json!({
                 "error": reason,
@@ -102,11 +99,9 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 )
                 .await;
         }
-
         // Pass None: the supervisor stage loop is the sole transition authority.
         let _ = final_result_ok;
         let _ = &final_error;
-
         apply_transition_and_dispatch(
             None,
             &task_id,
@@ -117,7 +112,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         )
         .await;
-
         app_state.deregister_background_work(&task_id);
     });
 }
@@ -132,7 +126,6 @@ pub(crate) async fn apply_transition_and_dispatch(
     tokens_out: i64,
 ) {
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     if let Some((action, reason)) = transition {
         tracing::info!(
             task_id = %task_id,
@@ -206,7 +199,6 @@ pub(crate) async fn apply_transition_and_dispatch(
             "Lifecycle: session completed with no task transition"
         );
     }
-
     if let Ok(task) = load_task(task_id, app_state).await
         && let Some(coordinator) = app_state.coordinator().await
     {
@@ -236,7 +228,6 @@ fn truncate_model_excerpt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn short_excerpt_is_returned_verbatim_trimmed() {
         let line = "  Actually, looking at the error: connection refused  ";
@@ -245,7 +236,6 @@ mod tests {
             "Actually, looking at the error: connection refused"
         );
     }
-
     #[test]
     fn long_excerpt_is_truncated_on_char_boundary() {
         let line = "é".repeat(1000);
@@ -258,7 +248,6 @@ mod tests {
             MODEL_EXCERPT_MAX_CHARS
         );
     }
-
     /// Regression for ecji: a session that succeeds but whose model narration
     /// mentions an "error:" must record a TYPED `session_error` — a stable
     /// `error_class` + `error` message with the raw model prose confined to a
@@ -273,7 +262,6 @@ mod tests {
             "model_excerpt": truncate_model_excerpt(scraped),
             "agent_type": "task_worker",
         });
-
         // The `error` field consumers cluster on (`stable_error_signature`) is a
         // stable typed message, NOT the model's chain-of-thought.
         let error = payload["error"].as_str().unwrap();
@@ -283,13 +271,11 @@ mod tests {
         );
         assert!(!error.contains("Database::open_in_memory"));
         assert!(!error.contains("Let me check"));
-
         // The machine-readable class is present and additive.
         assert_eq!(
             payload["error_class"].as_str().unwrap(),
             "model_reported_runtime_error"
         );
-
         // The raw prose survives only in the clearly-labeled excerpt field.
         assert_eq!(
             payload["model_excerpt"].as_str().unwrap(),

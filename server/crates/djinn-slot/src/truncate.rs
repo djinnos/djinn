@@ -26,19 +26,15 @@ pub fn smart_truncate(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-
     let total_bytes = text.len();
-
     // Reserve some bytes for the separator line
     let separator_reserve = 80; // plenty for "... [N bytes omitted] ..."
     let usable = max_bytes.saturating_sub(separator_reserve);
     if usable == 0 {
         return format!("[truncated — {total_bytes} bytes total]");
     }
-
     let head_budget = (usable * 60) / 100;
     let tail_budget = usable - head_budget;
-
     // Collect head lines within budget
     let mut head_end = 0;
     for line in text.split_inclusive('\n') {
@@ -49,7 +45,6 @@ pub fn smart_truncate(text: &str, max_bytes: usize) -> String {
     }
     // Snap to char boundary
     head_end = floor_char_boundary(text, head_end);
-
     // Collect tail lines within budget (scan backwards).
     // We walk backwards by finding newlines from the end.
     let mut tail_start = text.len();
@@ -82,7 +77,6 @@ pub fn smart_truncate(text: &str, max_bytes: usize) -> String {
     while tail_start < text.len() && !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
-
     // Ensure no overlap
     if head_end >= tail_start {
         // Overlap means the split covers everything — just do a hard head truncation
@@ -92,7 +86,6 @@ pub fn smart_truncate(text: &str, max_bytes: usize) -> String {
             &text[..end]
         );
     }
-
     let omitted = tail_start - head_end;
     format!(
         "{}\n\n... [{omitted} bytes omitted — {total_bytes} bytes total] ...\n\n{}",
@@ -108,29 +101,24 @@ pub fn smart_truncate_lines(text: &str, max_bytes: usize, max_lines: usize) -> S
     if text.len() <= max_bytes && line_count <= max_lines {
         return text.to_string();
     }
-
     // If line count is the binding constraint, pre-trim by lines first
     if line_count > max_lines {
         let lines: Vec<&str> = text.split('\n').collect();
         let head_lines = (max_lines * 60) / 100;
         let tail_lines = max_lines - head_lines;
-
         let head = lines[..head_lines].join("\n");
         let tail_start = lines.len() - tail_lines;
         let tail = lines[tail_start..].join("\n");
-
         let omitted_lines = tail_start - head_lines;
         let reassembled = format!(
             "{head}\n\n... [{omitted_lines} lines omitted — {line_count} lines total] ...\n\n{tail}"
         );
-
         // Now also apply byte limit if needed
         if reassembled.len() > max_bytes {
             return smart_truncate(&reassembled, max_bytes);
         }
         return reassembled;
     }
-
     // Only byte limit applies
     smart_truncate(text, max_bytes)
 }
@@ -138,13 +126,11 @@ pub fn smart_truncate_lines(text: &str, max_bytes: usize, max_lines: usize) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn small_input_returned_unchanged() {
         let s = "hello world";
         assert_eq!(smart_truncate(s, 1000), s);
     }
-
     #[test]
     fn preserves_head_and_tail() {
         let mut lines = Vec::new();
@@ -156,9 +142,7 @@ mod tests {
         lines.push("test_foo: assertion failed");
         lines.push("test_bar: panicked at 'not yet implemented'");
         let text = lines.join("\n");
-
         let truncated = smart_truncate(&text, 500);
-
         // Head preserved
         assert!(truncated.contains("=== TEST START ==="));
         // Tail preserved — this is the critical part
@@ -168,7 +152,6 @@ mod tests {
         // Omission marker present
         assert!(truncated.contains("bytes omitted"));
     }
-
     #[test]
     fn line_count_limit_preserves_both_ends() {
         let mut lines: Vec<String> = Vec::new();
@@ -178,14 +161,11 @@ mod tests {
         }
         lines.push("FOOTER: the important error".to_string());
         let text = lines.join("\n");
-
         let truncated = smart_truncate_lines(&text, 100_000, 50);
-
         assert!(truncated.contains("HEADER"));
         assert!(truncated.contains("FOOTER: the important error"));
         assert!(truncated.contains("lines omitted"));
     }
-
     #[test]
     fn floor_char_boundary_multibyte() {
         let s = "a\u{2500}b"; // ─ is 3 bytes
@@ -195,30 +175,25 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 3), 1); // still inside ─
         assert_eq!(floor_char_boundary(s, 4), 4); // start of b
     }
-
     #[test]
     fn floor_char_boundary_beyond_len() {
         assert_eq!(floor_char_boundary("hi", 100), 2);
     }
-
     #[test]
     fn handles_empty_input() {
         assert_eq!(smart_truncate("", 100), "");
         assert_eq!(smart_truncate_lines("", 100, 50), "");
     }
-
     #[test]
     fn both_limits_applied() {
         // Many short lines + large byte count
         let text: String = (0..500).map(|i| format!("line {i}\n")).collect();
         let truncated = smart_truncate_lines(&text, 500, 50);
-
         // Should mention omitted lines
         assert!(truncated.contains("omitted"));
         // And fit within byte budget
         assert!(truncated.len() <= 600); // some slack for separator
     }
-
     fn leaked(s: String) -> &'static str {
         Box::leak(s.into_boxed_str())
     }

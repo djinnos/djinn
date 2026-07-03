@@ -15,8 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::host::{SlotContext, SlotToolDispatcher};
 
-// ─── MockToolDispatcher ────────────────────────────────────────────────────
-
 /// Minimal `SlotToolDispatcher` for tests that exercise the reply loop.
 /// Stash tools (`output_view`/`output_grep`) return stub text; extension
 /// and MCP tools return errors because tests should not reach them.
@@ -26,7 +24,6 @@ impl SlotToolDispatcher for MockToolDispatcher {
     fn is_stash_tool(&self, tool_name: &str) -> bool {
         tool_name == "output_view" || tool_name == "output_grep"
     }
-
     fn handle_stash_call(
         &self,
         tool_name: &str,
@@ -36,7 +33,6 @@ impl SlotToolDispatcher for MockToolDispatcher {
         // so tool results carry is_error: true (matching test expectations).
         Err(format!("no stashed output for tool_use_id in {tool_name}"))
     }
-
     fn render_result(
         &self,
         _tool_use_id: &str,
@@ -45,7 +41,6 @@ impl SlotToolDispatcher for MockToolDispatcher {
     ) -> String {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     }
-
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -74,11 +69,9 @@ impl SlotToolDispatcher for MockToolDispatcher {
             }
         })
     }
-
     fn is_mcp_tool(&self, _tool_name: &str) -> bool {
         false
     }
-
     fn dispatch_mcp_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -91,15 +84,11 @@ impl SlotToolDispatcher for MockToolDispatcher {
             ))
         })
     }
-
     fn mcp_server_for_tool(&self, _tool_name: &str) -> Option<String> {
         None
     }
-
     fn clear_stash(&self) {}
 }
-
-// ─── ConfigurableToolDispatcher ─────────────────────────────────────────────
 
 use std::collections::HashMap;
 
@@ -131,7 +120,6 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
     fn is_stash_tool(&self, tool_name: &str) -> bool {
         tool_name == "output_view" || tool_name == "output_grep"
     }
-
     fn handle_stash_call(
         &self,
         tool_name: &str,
@@ -139,7 +127,6 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
     ) -> Result<String, String> {
         Ok(format!("[mock stash result for {tool_name}]"))
     }
-
     fn render_result(
         &self,
         _tool_use_id: &str,
@@ -148,7 +135,6 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
     ) -> String {
         serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
     }
-
     fn dispatch_extension_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -167,11 +153,9 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         };
         Box::pin(async move { result })
     }
-
     fn is_mcp_tool(&self, tool_name: &str) -> bool {
         self.mcp_tools.iter().any(|t| t == tool_name)
     }
-
     fn dispatch_mcp_tool<'a>(
         &'a self,
         tool_name: &'a str,
@@ -187,7 +171,6 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         };
         Box::pin(async move { result })
     }
-
     fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
         if self.mcp_tools.iter().any(|t| t == tool_name) {
             Some(format!("mock-server-{tool_name}"))
@@ -195,11 +178,8 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
             None
         }
     }
-
     fn clear_stash(&self) {}
 }
-
-// ─── Extract stash content (slot-local copy) ──────────────────────────────
 
 /// Extract concise text from a tool result for stashing/display.
 /// Returns `None` for non-shell tools.
@@ -214,7 +194,6 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
     let stdout = obj.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
     let stderr = obj.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
     let exit_code = obj.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-
     let mut out = String::with_capacity(stdout.len() + stderr.len() + 64);
     if !stdout.is_empty() {
         out.push_str(stdout);
@@ -238,8 +217,6 @@ pub fn extract_stash_content(tool_name: &str, value: &serde_json::Value) -> Opti
     Some(out)
 }
 
-// ─── Session settlement helper (slot-local copy) ──────────────────────────
-
 /// Map a `StageOutcome` to `(SessionStatus, Option<park_reason>)`.
 ///
 /// Slot-local copy of the agent's `session_settlement_for_stage_outcome` so
@@ -251,7 +228,6 @@ pub fn test_session_settlement_for_stage_outcome(
 ) -> (djinn_core::models::SessionStatus, Option<String>) {
     use djinn_core::models::SessionStatus;
     use djinn_supervisor::{ParkReason, StageOutcome};
-
     match stage_outcome {
         StageOutcome::Parked {
             reason: ParkReason::Budget,
@@ -305,7 +281,6 @@ pub fn agent_context_from_db_with_dispatcher(
     let background_work =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let active_tasks = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
     // No-op host callbacks for tests
     struct NoopCallbacks;
     impl crate::host::SlotHostCallbacks for NoopCallbacks {
@@ -414,7 +389,6 @@ pub fn agent_context_from_db_with_dispatcher(
             Box::pin(async { Ok(()) })
         }
     }
-
     SlotContext {
         db,
         event_bus,
@@ -491,8 +465,6 @@ pub async fn create_test_task(
     .expect("create task")
 }
 
-// ─── FakeProvider ────────────────────────────────────────────────────────────
-
 /// Pre-scripted `LlmProvider` for tests. Each "turn" is a list of
 /// `StreamEvent`s that will be returned in order.
 pub struct FakeProvider {
@@ -507,7 +479,6 @@ impl FakeProvider {
             StreamEvent::Done,
         ]])
     }
-
     /// Create a provider that returns a single tool-call turn.
     pub fn tool_call(id: impl Into<String>, name: impl Into<String>, input: Value) -> Self {
         Self::script(vec![vec![
@@ -519,7 +490,6 @@ impl FakeProvider {
             StreamEvent::Done,
         ]])
     }
-
     /// Create a provider with a fully custom sequence of turns.
     pub fn script(turns: Vec<Vec<StreamEvent>>) -> Self {
         let scripted_turns = turns
@@ -530,7 +500,6 @@ impl FakeProvider {
             scripted_turns: Arc::new(StdMutex::new(scripted_turns)),
         }
     }
-
     /// How many scripted turns remain.
     pub fn remaining(&self) -> usize {
         self.scripted_turns.lock().unwrap().len()
@@ -541,7 +510,6 @@ impl LlmProvider for FakeProvider {
     fn name(&self) -> &str {
         "fake"
     }
-
     fn stream<'a>(
         &'a self,
         _conversation: &'a Conversation,
@@ -573,8 +541,6 @@ impl LlmProvider for FakeProvider {
     }
 }
 
-// ─── FailingProvider ─────────────────────────────────────────────────────────
-
 /// A `LlmProvider` that always returns an error.
 pub struct FailingProvider {
     message: Arc<String>,
@@ -598,7 +564,6 @@ impl LlmProvider for FailingProvider {
     fn name(&self) -> &str {
         "failing"
     }
-
     fn stream<'a>(
         &'a self,
         _conversation: &'a Conversation,

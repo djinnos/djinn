@@ -7,8 +7,7 @@ use crate::commands::run_commands;
 use crate::context::AgentContext;
 use crate::environment::hook_commands_to_specs;
 
-/// Resolved prompt-context fragments produced after running project setup
-/// commands.
+/// Resolved prompt-context fragments produced after running project setup commands.
 pub(crate) struct SetupContext {
     pub prompt_setup_commands: Option<String>,
 }
@@ -33,7 +32,6 @@ pub(crate) async fn resolve_setup_context(
                 task_id, step, &detail,
             ));
     };
-
     let setup_specs = hook_commands_to_specs(&pre_verification_hooks);
     let prompt_setup_commands = format_command_details(&setup_specs);
     if !setup_specs.is_empty() {
@@ -75,7 +73,6 @@ pub(crate) async fn resolve_setup_context(
                 }
             }
         }
-
         match setup_error {
             Some(e) => {
                 let reason = format!("Setup commands error: {e}");

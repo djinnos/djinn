@@ -67,7 +67,6 @@ impl ToolRuntimeMetadata {
     pub(super) fn auto_approval_safe(self) -> bool {
         self.read_only && self.idempotent && !self.destructive && self.concurrent_safe
     }
-
     pub(super) fn retry_safe(self) -> bool {
         !self.destructive && (self.read_only || self.idempotent)
     }
@@ -123,8 +122,7 @@ pub(super) fn is_tool_retry_safe(tool_metadata: &ToolRuntimeMetadataMap, name: &
         .unwrap_or(false)
 }
 
-/// ADR-048 side queries are ordinary tool calls whose schema marks them
-/// `concurrent_safe=true`.
+/// ADR-048 side queries are ordinary tool calls whose schema marks them `concurrent_safe=true`.
 pub(super) fn is_side_query_tool(tool_metadata: &ToolRuntimeMetadataMap, name: &str) -> bool {
     tool_metadata
         .get(name)
@@ -170,7 +168,6 @@ pub(super) fn build_tool_batches<'a>(
             matches!(b, ContentBlock::ToolUse { .. }) && !streaming_dispatched.contains(idx)
         })
         .collect();
-
     let mut batches: Vec<ToolBatch> = Vec::new();
     let mut current_parallel: Vec<usize> = Vec::new();
     for &(idx, block) in &indexed_tool_calls {
@@ -190,7 +187,6 @@ pub(super) fn build_tool_batches<'a>(
     if !current_parallel.is_empty() {
         batches.push(ToolBatch::Parallel(current_parallel));
     }
-
     (indexed_tool_calls, batches)
 }
 
@@ -206,8 +202,6 @@ pub(super) async fn dispatch_single_tool<'a>(
         tool_span,
         retry_safe,
     } = req;
-
-    // ── Stash tools (output_view / output_grep) ──────────────────────
     if ctx.tool_dispatcher.is_stash_tool(&name) {
         let result = ctx.tool_dispatcher.handle_stash_call(&name, args.as_ref());
         let (content, is_error) = match result {
@@ -245,8 +239,6 @@ pub(super) async fn dispatch_single_tool<'a>(
             },
         );
     }
-
-    // ── MCP tools ────────────────────────────────────────────────────
     if ctx.tool_dispatcher.is_mcp_tool(&name) {
         tracing::debug!(task_id = %ctx.task_id, tool = %name, "ReplyLoop: dispatching to MCP server");
         let mcp_result = run_with_heartbeat(
@@ -291,8 +283,6 @@ pub(super) async fn dispatch_single_tool<'a>(
             },
         );
     }
-
-    // ── Extension tools ──────────────────────────────────────────────
     let mut result = run_with_heartbeat(
         tool_heartbeat_interval(),
         || beat_activity(ctx.ctx, ctx.task_id),
@@ -305,7 +295,6 @@ pub(super) async fn dispatch_single_tool<'a>(
         ),
     )
     .await;
-
     {
         let mut retries = 0u32;
         while retries < 5 {
@@ -338,7 +327,6 @@ pub(super) async fn dispatch_single_tool<'a>(
             }
         }
     }
-
     let (content, is_error) = match result {
         Ok(value) => {
             let text = ctx.tool_dispatcher.render_result(&id, &name, &value);
@@ -426,7 +414,6 @@ pub(super) async fn collect_tool_results(
 ) -> Vec<ContentBlock> {
     let (indexed_tool_calls, batches) =
         build_tool_batches(turn_tool_calls, streaming_dispatched, tool_metadata);
-
     let total_tools = turn_tool_calls
         .iter()
         .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
@@ -450,11 +437,9 @@ pub(super) async fn collect_tool_results(
             "ReplyLoop: tool call dispatch (ADR-048 §1A+§1B)"
         );
     }
-
     let mut indexed_results: Vec<(usize, ContentBlock)> =
         Vec::with_capacity(indexed_tool_calls.len() + streaming_results.len());
     indexed_results.extend(streaming_results);
-
     for batch in &batches {
         match batch {
             ToolBatch::Parallel(indices) => {
@@ -473,7 +458,6 @@ pub(super) async fn collect_tool_results(
             }
         }
     }
-
     indexed_results.sort_by_key(|(idx, _)| *idx);
     indexed_results
         .into_iter()
@@ -484,7 +468,6 @@ pub(super) async fn collect_tool_results(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn test_tool_schema(
         name: &str,
         read_only: Option<bool>,
@@ -522,7 +505,6 @@ mod tests {
         }
         schema
     }
-
     #[test]
     fn runtime_metadata_parses_safety_annotations_and_gates_retry() {
         let schemas = vec![
@@ -569,7 +551,6 @@ mod tests {
             test_tool_schema("missing_metadata", None, None, None, None, None),
         ];
         let metadata = tool_runtime_metadata(&schemas);
-
         assert_eq!(
             metadata["open_read"],
             ToolRuntimeMetadata {
@@ -580,13 +561,11 @@ mod tests {
                 concurrent_safe: true,
             }
         );
-
         assert!(is_side_query_tool(&metadata, "safe_read"));
         assert!(is_side_query_tool(&metadata, "open_read"));
         assert!(is_tool_retry_safe(&metadata, "safe_read"));
         assert!(is_tool_retry_safe(&metadata, "open_read"));
         assert!(is_tool_retry_safe(&metadata, "idempotent_write"));
-
         assert!(!is_side_query_tool(&metadata, "idempotent_write"));
         assert!(!is_side_query_tool(&metadata, "non_idempotent_write"));
         assert!(!is_tool_retry_safe(&metadata, "non_idempotent_write"));
@@ -597,13 +576,11 @@ mod tests {
         assert!(!is_side_query_tool(&metadata, "unknown"));
         assert!(!is_tool_retry_safe(&metadata, "unknown"));
     }
-
     #[tokio::test(start_paused = true)]
     async fn heartbeat_fires_while_a_long_tool_runs() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let beats = AtomicU32::new(0);
         let interval = std::time::Duration::from_secs(30);
-
         let out = run_with_heartbeat(
             interval,
             || async {
@@ -615,7 +592,6 @@ mod tests {
             },
         )
         .await;
-
         assert_eq!(out, 42);
         assert_eq!(
             beats.load(Ordering::SeqCst),
@@ -623,12 +599,10 @@ mod tests {
             "a 95s tool at a 30s cadence should beat at 30/60/90s"
         );
     }
-
     #[tokio::test(start_paused = true)]
     async fn heartbeat_does_not_fire_for_a_fast_tool() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let beats = AtomicU32::new(0);
-
         let out = run_with_heartbeat(
             std::time::Duration::from_secs(30),
             || async {
@@ -637,7 +611,6 @@ mod tests {
             async { 7u32 },
         )
         .await;
-
         assert_eq!(out, 7);
         assert_eq!(beats.load(Ordering::SeqCst), 0);
     }

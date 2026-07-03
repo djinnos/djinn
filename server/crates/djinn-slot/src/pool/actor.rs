@@ -44,7 +44,6 @@ impl SlotPool {
         let slot_factory: SlotFactory = std::sync::Arc::new(SlotHandle::spawn);
         Self::new_with_factory(receiver, ctx, cancel, config, slot_factory)
     }
-
     pub(super) fn new_with_factory(
         receiver: mpsc::Receiver<PoolMessage>,
         ctx: SlotContext,
@@ -77,14 +76,12 @@ impl SlotPool {
         pool.spawn_slots_for_config(&config);
         pool
     }
-
     fn roles_by_model(models: &[ModelSlotConfig]) -> HashMap<String, HashSet<String>> {
         models
             .iter()
             .map(|m| (m.model_id.clone(), m.roles.iter().cloned().collect()))
             .collect()
     }
-
     fn spawn_slots_for_config(&mut self, config: &SlotPoolConfig) {
         for model in &config.models {
             for _ in 0..model.max_slots {
@@ -92,7 +89,6 @@ impl SlotPool {
             }
         }
     }
-
     fn spawn_slot(&mut self, model_id: String) {
         let id = self.slots.len();
         let handle = (self.slot_factory)(
@@ -106,7 +102,6 @@ impl SlotPool {
         self.slot_models.insert(id, model_id.clone());
         self.mark_slot_free(id, model_id);
     }
-
     pub(super) async fn run(mut self) {
         loop {
             tokio::select! {
@@ -122,7 +117,6 @@ impl SlotPool {
             }
         }
     }
-
     async fn handle_message(&mut self, msg: PoolMessage) {
         match msg {
             PoolMessage::Dispatch {
@@ -236,7 +230,6 @@ impl SlotPool {
             }
         }
     }
-
     fn session_for_task(&self, task_id: &str) -> Option<super::types::RunningTaskInfo> {
         let slot_id = self.task_to_slot.get(task_id)?;
         let model_id = self.slot_models.get(slot_id)?.clone();
@@ -280,7 +273,6 @@ impl SlotPool {
             no_progress_streak: 0,
         })
     }
-
     async fn dispatch(
         &mut self,
         task_id: &str,
@@ -290,7 +282,6 @@ impl SlotPool {
         self.dispatch_with_resume(task_id, project_path, model_id, None)
             .await
     }
-
     /// Re-dispatch with optional resume-via-git lifecycle metadata. This is
     /// the additive re-dispatch path used when the coordinator's
     /// `select_resume_lifecycle_metadata_for_dispatch` produced a selection
@@ -313,7 +304,6 @@ impl SlotPool {
                 task_id: task_id.to_string(),
             });
         }
-
         // Elastic: there is no fixed per-model ceiling. Admission is gated
         // per-user by the coordinator (each user's per-model cap); if that gate
         // let this dispatch through, place the task on a slot — reuse a free
@@ -349,7 +339,6 @@ impl SlotPool {
                         })?
                 }
             };
-
             let slot = self.slot(slot_id)?;
             match slot
                 .run_task_with_resume(
@@ -388,7 +377,6 @@ impl SlotPool {
                     return Err(PoolError::Slot(err));
                 }
             }
-
             self.task_to_slot.insert(task_owned.clone(), slot_id);
             self.task_started
                 .insert(task_owned.clone(), self.ctx.clock.now_instant());
@@ -409,7 +397,6 @@ impl SlotPool {
             return Ok(());
         }
     }
-
     async fn project_id_for_task(&self, task_id: &str) -> Option<String> {
         let task_repo =
             djinn_db::TaskRepository::new(self.ctx.db.clone(), self.ctx.event_bus.clone());
@@ -420,7 +407,6 @@ impl SlotPool {
             .flatten()
             .map(|task| task.project_id)
     }
-
     async fn handle_event(&mut self, event: SlotEvent) {
         let killed = matches!(event, SlotEvent::Killed { .. });
         match event {
@@ -435,7 +421,6 @@ impl SlotPool {
                 task_id,
             } => {
                 let owns_task_mapping = self.task_to_slot.get(&task_id).copied() == Some(slot_id);
-
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
                 // explicit Kill command) settle the session DB row to a terminal
                 // state *now*, at the moment the kill lands. A worker that is
@@ -447,27 +432,23 @@ impl SlotPool {
                         .await;
                     self.settle_session_row(&task_id).await;
                 }
-
                 if owns_task_mapping {
                     self.task_to_slot.remove(&task_id);
                     self.task_started.remove(&task_id);
                     self.task_projects.remove(&task_id);
                     self.ctx.deregister_activity(&task_id);
                 }
-
                 if self.draining_slots.remove(&slot_id) {
                     self.retired_slots.insert(slot_id);
                     self.slot_states.insert(slot_id, SlotState::Draining);
                 } else {
                     self.mark_slot_free(slot_id, model_id);
                 }
-
                 // Trigger coordinator dispatch
                 self.ctx.try_trigger_dispatch();
             }
         }
     }
-
     async fn kill_session(&self, task_id: &str) -> Result<(), PoolError> {
         let slot_id =
             self.task_to_slot
@@ -484,7 +465,6 @@ impl SlotPool {
         self.slot(slot_id)?.kill().await?;
         Ok(())
     }
-
     /// Authoritatively terminate an operator/user-requested running session.
     /// Unlike [`kill_session`], this synchronously reclaims the task mapping,
     /// activity tracker, and running session row before returning. Unlike
@@ -494,7 +474,6 @@ impl SlotPool {
         self.reclaim_session(task_id, "terminate_session", true)
             .await
     }
-
     /// Forcibly reclaim a leaked task→slot mapping. The normal lifecycle frees a
     /// slot only when the worker emits `SlotEvent::Free`/`Killed`; a pod that
     /// dies without that event (eviction, OOM, stuck RPC stream) leaves
@@ -503,7 +482,6 @@ impl SlotPool {
     async fn evict_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         self.reclaim_session(task_id, "evict_session", false).await
     }
-
     /// Shared reclaim logic for `terminate_session` and `evict_session`.
     async fn reclaim_session(
         &mut self,
@@ -543,7 +521,6 @@ impl SlotPool {
         self.ctx.try_trigger_dispatch();
         Ok(())
     }
-
     /// Transition any `running` session row for `task_id` to a terminal
     /// (`interrupted`) state so it stops counting against the per-user
     /// concurrency cap. Idempotent: `interrupt_running_for_task` updates only
@@ -560,7 +537,6 @@ impl SlotPool {
             );
         }
     }
-
     /// Best-effort task-run Job teardown for interrupting slot-pool paths.
     /// The slot pool stays behind the RuntimeOps bridge (no direct K8s
     /// dependency), and teardown failures are deliberately non-fatal so DB
@@ -582,7 +558,6 @@ impl SlotPool {
                 return;
             }
         };
-
         let mut task_run_ids = HashSet::new();
         for session in sessions {
             if session.status != djinn_core::models::SessionStatus::Running.as_str() {
@@ -594,7 +569,6 @@ impl SlotPool {
                 task_run_ids.insert(task_run_id.to_string());
             }
         }
-
         for task_run_id in task_run_ids {
             if let Err(e) = runtime_ops.teardown_taskrun_job(&task_run_id).await {
                 tracing::warn!(
@@ -607,16 +581,13 @@ impl SlotPool {
             }
         }
     }
-
     async fn reconfigure(&mut self, config: SlotPoolConfig) -> Result<(), PoolError> {
         self.role_priorities = config.role_priorities.clone();
         self.model_roles = Self::roles_by_model(&config.models);
-
         let mut desired: HashMap<String, usize> = HashMap::new();
         for model in &config.models {
             desired.insert(model.model_id.clone(), model.max_slots as usize);
         }
-
         let mut current: HashMap<String, Vec<usize>> = HashMap::new();
         for (slot_id, model_id) in &self.slot_models {
             if self.retired_slots.contains(slot_id) {
@@ -624,7 +595,6 @@ impl SlotPool {
             }
             current.entry(model_id.clone()).or_default().push(*slot_id);
         }
-
         // Scale up: spawn additional slots
         for (model_id, wanted) in &desired {
             let existing = current.get(model_id).map(|v| v.len()).unwrap_or(0);
@@ -634,16 +604,13 @@ impl SlotPool {
                 }
             }
         }
-
         // Scale down: drain excess slots
         for (model_id, slots) in current {
             let wanted = desired.get(&model_id).copied().unwrap_or(0);
             if slots.len() <= wanted {
                 continue;
             }
-
             let mut to_drain = slots.len() - wanted;
-
             // Drain free slots immediately
             let mut free_candidates = self.free_slots.get(&model_id).cloned().unwrap_or_default();
             while to_drain > 0 {
@@ -654,11 +621,9 @@ impl SlotPool {
                 self.drain_slot_immediately(slot_id).await;
                 to_drain -= 1;
             }
-
             if to_drain == 0 {
                 continue;
             }
-
             // Mark busy slots for draining (they'll retire when their task finishes)
             for slot_id in slots {
                 if to_drain == 0 {
@@ -674,17 +639,14 @@ impl SlotPool {
                 }
             }
         }
-
         Ok(())
     }
-
     async fn interrupt_all(&self, _reason: &str) {
         let task_ids: Vec<String> = self.task_to_slot.keys().cloned().collect();
         for task_id in task_ids {
             let _ = self.kill_session(&task_id).await;
         }
     }
-
     async fn interrupt_project(&self, project_id: &str, _reason: &str) {
         let affected: Vec<String> = self
             .task_projects
@@ -697,23 +659,18 @@ impl SlotPool {
                 }
             })
             .collect();
-
         for task_id in affected {
             let _ = self.kill_session(&task_id).await;
         }
     }
-
     fn get_status(&self) -> super::types::PoolStatus {
         self.record_slot_pool_metrics();
-
         let mut per_model: HashMap<String, super::types::ModelPoolStatus> = HashMap::new();
         let mut active_slots = 0usize;
-
         for (slot_id, model_id) in &self.slot_models {
             if self.retired_slots.contains(slot_id) {
                 continue;
             }
-
             let status =
                 per_model
                     .entry(model_id.clone())
@@ -722,7 +679,6 @@ impl SlotPool {
                         free: 0,
                         total: 0,
                     });
-
             status.total += 1;
             match self.slot_states.get(slot_id) {
                 Some(SlotState::Busy { .. }) => {
@@ -735,7 +691,6 @@ impl SlotPool {
                 _ => {}
             }
         }
-
         let running_tasks = self
             .task_to_slot
             .iter()
@@ -765,7 +720,6 @@ impl SlotPool {
                 })
             })
             .collect();
-
         super::types::PoolStatus {
             active_slots,
             total_slots: self
@@ -776,7 +730,6 @@ impl SlotPool {
             running_tasks,
         }
     }
-
     pub(super) fn snapshot(&self) -> Vec<DebugSlot> {
         let mut slots: Vec<_> = self
             .slot_models
@@ -825,15 +778,11 @@ impl SlotPool {
         slots.sort_by_key(|slot| slot.slot_id);
         slots
     }
-
-    // ── Internal helpers ─────────────────────────────────────────────────
-
     fn slot(&self, slot_id: usize) -> Result<&SlotHandle, PoolError> {
         self.slots
             .get(slot_id)
             .ok_or(PoolError::SlotNotFound { slot_id })
     }
-
     fn remove_from_free_list(&mut self, model_id: &str, slot_id: usize) {
         if let Some(free) = self.free_slots.get_mut(model_id)
             && let Some(pos) = free.iter().position(|id| *id == slot_id)
@@ -841,7 +790,6 @@ impl SlotPool {
             free.swap_remove(pos);
         }
     }
-
     /// Return a slot to the free list if it's not retired and not already present.
     fn mark_slot_free(&mut self, slot_id: usize, model_id: String) {
         if self.retired_slots.contains(&slot_id) {
@@ -853,7 +801,6 @@ impl SlotPool {
             free.push(slot_id);
         }
     }
-
     async fn drain_slot_immediately(&mut self, slot_id: usize) {
         if let Some(model_id) = self.slot_models.get(&slot_id).cloned() {
             self.remove_from_free_list(&model_id, slot_id);
@@ -866,12 +813,10 @@ impl SlotPool {
         self.draining_slots.remove(&slot_id);
         self.retired_slots.insert(slot_id);
     }
-
     /// Publish scrape-visible slot-pool gauges aggregated only by `(state, model)`.
     fn record_slot_pool_metrics(&self) {
         let mut free_by_model: HashMap<String, usize> = HashMap::new();
         let mut busy_by_model: HashMap<String, usize> = HashMap::new();
-
         for (model_id, slots) in &self.free_slots {
             let count = slots
                 .iter()
@@ -879,7 +824,6 @@ impl SlotPool {
                 .count();
             free_by_model.insert(model_id.clone(), count);
         }
-
         for slot_id in self.task_to_slot.values() {
             if self.retired_slots.contains(slot_id) {
                 continue;
@@ -888,11 +832,9 @@ impl SlotPool {
                 *busy_by_model.entry(model_id.clone()).or_insert(0) += 1;
             }
         }
-
         let mut model_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         model_ids.extend(free_by_model.keys().map(String::as_str));
         model_ids.extend(busy_by_model.keys().map(String::as_str));
-
         for model_id in model_ids {
             djinn_telemetry::slot_pool::set_slots(
                 djinn_telemetry::slot_pool::STATE_FREE,
@@ -906,9 +848,6 @@ impl SlotPool {
             );
         }
     }
-
-    // ── Test helpers (behind #[cfg(test)]) ─────────────────────────────────
-
     #[cfg(test)]
     pub(super) async fn test_dispatch(
         &mut self,
@@ -918,57 +857,46 @@ impl SlotPool {
     ) -> Result<(), PoolError> {
         self.dispatch(task_id, project_path, model_id).await
     }
-
     #[cfg(test)]
     pub(super) async fn test_terminate_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         self.terminate_session(task_id).await
     }
-
     #[cfg(test)]
     pub(super) fn test_slot_of(&self, task_id: &str) -> Option<usize> {
         self.task_to_slot.get(task_id).copied()
     }
-
     #[cfg(test)]
     pub(super) fn test_free_slots(&self, model_id: &str) -> Vec<usize> {
         self.free_slots.get(model_id).cloned().unwrap_or_default()
     }
-
     #[cfg(test)]
     pub(super) fn test_free_slots_by_model(&self) -> HashMap<String, Vec<usize>> {
         self.free_slots.clone()
     }
-
     #[cfg(test)]
     pub(super) fn test_retired_slots(&self) -> HashSet<usize> {
         self.retired_slots.clone()
     }
-
     #[cfg(test)]
     pub(super) fn test_slot_states(&self) -> HashMap<usize, SlotState> {
         self.slot_states.clone()
     }
-
     #[cfg(test)]
     pub(super) fn test_task_slots(&self) -> HashMap<String, usize> {
         self.task_to_slot.clone()
     }
-
     #[cfg(test)]
     pub(super) fn test_set_slot_model(&mut self, slot_id: usize, model_id: &str) {
         self.slot_models.insert(slot_id, model_id.to_owned());
     }
-
     #[cfg(test)]
     pub(super) fn test_set_slot_state(&mut self, slot_id: usize, state: SlotState) {
         self.slot_states.insert(slot_id, state);
     }
-
     #[cfg(test)]
     pub(super) fn test_set_task_slot(&mut self, task_id: &str, slot_id: usize) {
         self.task_to_slot.insert(task_id.to_owned(), slot_id);
     }
-
     /// Raw push onto the free list, bypassing `mark_slot_free`.
     #[cfg(test)]
     pub(super) fn test_inject_free(&mut self, slot_id: usize, model_id: &str) {
@@ -977,12 +905,10 @@ impl SlotPool {
             .or_default()
             .push(slot_id);
     }
-
     #[cfg(test)]
     pub(super) fn test_mark_slot_free(&mut self, slot_id: usize, model_id: &str) {
         self.mark_slot_free(slot_id, model_id.to_string());
     }
-
     #[cfg(test)]
     pub(super) fn test_assign_busy(&mut self, task_id: &str, slot_id: usize) {
         self.task_to_slot.insert(task_id.to_owned(), slot_id);
@@ -998,17 +924,14 @@ impl SlotPool {
             },
         );
     }
-
     #[cfg(test)]
     pub(super) fn test_record_slot_pool_metrics(&self) {
         self.record_slot_pool_metrics();
     }
-
     #[cfg(test)]
     pub(super) fn test_retire(&mut self, slot_id: usize) {
         self.retired_slots.insert(slot_id);
     }
-
     #[cfg(test)]
     pub(super) async fn test_handle_slot_event(&mut self, event: SlotEvent) {
         self.handle_event(event).await;

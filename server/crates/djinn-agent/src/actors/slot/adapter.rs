@@ -77,7 +77,6 @@ impl AgentHostCallbacks {
             dispatch_mode: true,
         }
     }
-
     pub(crate) fn reply_loop(
         agent: &AgentContext,
         services: &'static dyn SupervisorServices,
@@ -88,7 +87,6 @@ impl AgentHostCallbacks {
             dispatch_mode: true,
         }
     }
-
     pub(crate) fn extraction(agent: &AgentContext) -> Self {
         Self {
             agent: agent.clone(),
@@ -106,7 +104,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }
-
     fn resolve_mcp_tools<'a>(
         &'a self,
         _worktree_path: &'a str,
@@ -116,7 +113,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     {
         Box::pin(async { Err("not available in host adapter".into()) })
     }
-
     fn render_prompt(
         &self,
         _role_name: &str,
@@ -125,7 +121,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     ) -> String {
         String::new()
     }
-
     fn initial_user_message<'a>(
         &'a self,
         _task_id: &'a str,
@@ -133,14 +128,12 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
     ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
         Box::pin(async { String::new() })
     }
-
     fn build_mcp_state(
         &self,
         _ctx: &djinn_slot::host::SlotContext,
     ) -> djinn_control_plane::McpState {
         unreachable!("build_mcp_state not available in host adapter")
     }
-
     fn require_project_id_for_task_ops<'a>(
         &'a self,
         _project: &'a str,
@@ -159,7 +152,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             })
         })
     }
-
     fn resolve_provider_credential<'a>(
         &'a self,
         provider_id: &'a str,
@@ -186,7 +178,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
                 })
         })
     }
-
     fn run_task_dispatch<'a>(
         &'a self,
         task_id: String,
@@ -214,7 +205,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             .await
         })
     }
-
     fn touch_activity_rpc<'a>(
         &'a self,
         task_id: String,
@@ -224,7 +214,6 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
             None => Box::pin(async { Ok(()) }),
         }
     }
-
     fn flush_session_tokens_rpc<'a>(
         &'a self,
         session_id: String,

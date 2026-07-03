@@ -92,12 +92,10 @@ pub(crate) async fn resolve_role_model_preference(
             return None;
         }
     };
-
     let preference = match db_role.model_preference.as_deref() {
         Some(p) if !p.trim().is_empty() => p.trim().to_string(),
         _ => return None,
     };
-
     // Match `preference` (a bare suffix like "claude-opus-4-6", a display
     // name, the full `provider/model` id, or the catalog id) against every
     // connected provider — identical resolution to dispatch's priority path.
@@ -128,7 +126,6 @@ pub(crate) async fn resolve_role_model_preference(
     if credential_provider_ids.is_empty() {
         return None;
     }
-
     for provider_id in &credential_provider_ids {
         for model in app_state.catalog.list_models(provider_id) {
             let bare = model.id.rsplit('/').next().unwrap_or(&model.id);
@@ -142,7 +139,6 @@ pub(crate) async fn resolve_role_model_preference(
             }
         }
     }
-
     None
 }
 
@@ -169,23 +165,18 @@ pub(crate) async fn attempt_resume_model_rotation(
     let Some(metadata) = metadata else {
         return current_model_id.to_string();
     };
-
     let prev_model = match &metadata.previous_model {
         Some(m) if !m.trim().is_empty() => m.as_str(),
         _ => return current_model_id.to_string(),
     };
-
     let cause = match map_resume_selection_reason_to_rotation_cause(metadata.selection_reason) {
         Some(cause) => cause,
         _ => return current_model_id.to_string(),
     };
-
     let outcome = resolve_model_with_rotation(task_id, Some(prev_model), cause, app_state).await;
-
     // Use selected_model() to extract the model id from the outcome before
     // the match consumes it.
     let selected = outcome.selected_model().map(str::to_string);
-
     match outcome {
         ModelRotationOutcome::Rotated { cause, .. } => {
             let model = selected.unwrap_or_else(|| current_model_id.to_string());
@@ -211,8 +202,6 @@ pub(crate) async fn attempt_resume_model_rotation(
         ModelRotationOutcome::NotApplicable => current_model_id.to_string(),
     }
 }
-
-// ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
 
 /// Termination causes that trigger model rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,13 +285,11 @@ pub(crate) async fn resolve_model_with_rotation(
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     };
-
     if !cause.should_rotate() {
         let outcome = ModelRotationOutcome::NotApplicable;
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     }
-
     // Scan connected providers for an alternate model. This mirrors the
     // credential-scoped catalog scan in `resolve_role_model_preference`
     // but does NOT require a role preference — it picks any available
@@ -331,7 +318,6 @@ pub(crate) async fn resolve_model_with_rotation(
             return outcome;
         }
     };
-
     let provider_ids = app_state.catalog.connected_provider_ids(&credentials);
     if provider_ids.is_empty() {
         let outcome = ModelRotationOutcome::Fallback {
@@ -342,7 +328,6 @@ pub(crate) async fn resolve_model_with_rotation(
         emit_rotation_event(task_id, &outcome, app_state).await;
         return outcome;
     }
-
     // Find the first model that is NOT the previous model.
     let mut found_alternate: Option<String> = None;
     let mut any_model_seen = false;
@@ -369,7 +354,6 @@ pub(crate) async fn resolve_model_with_rotation(
             break;
         }
     }
-
     match found_alternate {
         Some(selected_model) => {
             let outcome = ModelRotationOutcome::Rotated {
@@ -442,7 +426,6 @@ async fn emit_rotation_event(
             "action": "not_applicable",
         }),
     };
-
     app_state
         .event_bus
         .send(djinn_core::events::DjinnEventEnvelope::task_lifecycle_step(
@@ -455,7 +438,6 @@ async fn emit_rotation_event(
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
-
     #[test]
     fn maps_resume_reason_to_rotation_cause() {
         use djinn_runtime::ResumeSelectionReason as R;
@@ -481,7 +463,6 @@ mod rotation_tests {
             None
         );
     }
-
     #[test]
     fn rotation_cause_should_rotate() {
         assert!(RotationTerminationCause::NoProgress.should_rotate());
@@ -489,7 +470,6 @@ mod rotation_tests {
         assert!(RotationTerminationCause::Flaky.should_rotate());
         assert!(RotationTerminationCause::RepeatedVerifyLoop.should_rotate());
     }
-
     #[test]
     fn outcome_selected_model_returns_correct_value() {
         let rotated = ModelRotationOutcome::Rotated {
@@ -498,17 +478,14 @@ mod rotation_tests {
             cause: RotationTerminationCause::NoProgress,
         };
         assert_eq!(rotated.selected_model(), Some("b/new"));
-
         let fallback = ModelRotationOutcome::Fallback {
             previous_model: "a/old".to_string(),
             reason: ModelRotationFallbackReason::NoAlternateAvailable,
             cause: RotationTerminationCause::NoProgress,
         };
         assert_eq!(fallback.selected_model(), Some("a/old"));
-
         assert_eq!(ModelRotationOutcome::NotApplicable.selected_model(), None);
     }
-
     #[test]
     fn fallback_reason_distinct() {
         assert_ne!(

@@ -28,8 +28,6 @@ use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::helpers::ProviderCredential;
 
-// ─── KnowledgeBranchTarget ──────────────────────────────────────────────────
-
 /// Identifies the knowledge-write target for a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeBranchTarget {
@@ -44,7 +42,6 @@ impl KnowledgeBranchTarget {
             Self::TaskScoped { worktree_root } => Some(worktree_root.as_path()),
         }
     }
-
     pub fn intent_label(&self) -> &'static str {
         match self {
             Self::Main => "main",
@@ -53,12 +50,8 @@ impl KnowledgeBranchTarget {
     }
 }
 
-// ─── ActivityTracker ────────────────────────────────────────────────────────
-
 /// Per-task last-activity timestamps (unix seconds).
 pub type ActivityTracker = Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>;
-
-// ─── Host callback trait ────────────────────────────────────────────────────
 
 /// Opaque host-specific operations that slot code invokes through callbacks.
 ///
@@ -72,7 +65,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         task_id: &'a str,
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
     /// Build the MCP tool registry for a worktree+role combination.
     fn resolve_mcp_tools<'a>(
         &'a self,
@@ -80,7 +72,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         role_name: &'a str,
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedMcpTools, String>> + Send + 'a>>;
-
     /// Render the prompt for a role.
     fn render_prompt(
         &self,
@@ -88,24 +79,20 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         task: &Task,
         context_json: &serde_json::Value,
     ) -> String;
-
     /// Build the initial user message for a task session.
     fn initial_user_message<'a>(
         &'a self,
         task_id: &'a str,
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>>;
-
     /// Build a control-plane McpState from the slot context.
     fn build_mcp_state(&self, ctx: &SlotContext) -> djinn_control_plane::McpState;
-
     /// Resolve a project path to a project ID through the control-plane.
     fn require_project_id_for_task_ops<'a>(
         &'a self,
         project: &'a str,
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, ErrorResponse>> + Send + 'a>>;
-
     /// Resolve a provider credential from the host's credential store
     /// (including OAuth refresh when applicable). Serialization for worker
     /// dispatch is host-only and remains outside `djinn-slot`; this callback
@@ -115,7 +102,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         provider_id: &'a str,
         ctx: &'a SlotContext,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderCredential, String>> + Send + 'a>>;
-
     /// Run the supervisor dispatch for a task.  This encapsulates the entire
     /// `supervisor_runner::run_supervisor_dispatch` logic and its dependencies
     /// (runtime_bridge, supervisor, lifecycle stages, reply_loop, etc.).
@@ -144,7 +130,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         pause: tokio_util::sync::CancellationToken,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
-
     /// Touch activity for stall detection (best-effort RPC to host's
     /// ActivityTracker).  On the host this is a local atomic write; on a
     /// worker it routes over RPC.  Fire-and-forget — transient errors are
@@ -154,7 +139,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         &'a self,
         task_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
-
     /// Flush session token counts to the session row (best-effort).
     /// Used by the streaming loop to persist mid-flight counters so
     /// long-running sessions don't read stale zeros until teardown.
@@ -167,8 +151,6 @@ pub trait SlotHostCallbacks: Send + Sync + 'static {
         cache_write: i64,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
-
-// ─── ResolvedMcpTools ───────────────────────────────────────────────────────
 
 /// Resolved MCP tools for a slot session.
 #[derive(Clone)]
@@ -186,8 +168,6 @@ pub trait ToolRegistryHandle: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
 }
 
-// ─── SlotToolDispatcher ──────────────────────────────────────────────────
-
 /// Trait for dispatching tool calls from the reply loop.
 ///
 /// The host implements this trait to route tool calls through its stash,
@@ -197,14 +177,12 @@ pub trait ToolRegistryHandle: Send + Sync {
 pub trait SlotToolDispatcher: Send + Sync + 'static {
     /// Check if a tool name is a stash-only tool (`output_view`, `output_grep`).
     fn is_stash_tool(&self, tool_name: &str) -> bool;
-
     /// Handle a stash tool call internally (`output_view`, `output_grep`).
     fn handle_stash_call(
         &self,
         tool_name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<String, String>;
-
     /// Render a raw tool result through the host's truncation/stash pipeline.
     fn render_result(
         &self,
@@ -212,7 +190,6 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         tool_name: &str,
         value: &serde_json::Value,
     ) -> String;
-
     /// Dispatch a tool call through the host's extension layer (non-stash,
     /// non-MCP tools).  The host resolves the tool, runs it, and returns
     /// the raw JSON result.
@@ -224,25 +201,19 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
         task_id: &'a str,
         role_name: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
-
     /// Check if a tool name is registered as an MCP tool.
     fn is_mcp_tool(&self, tool_name: &str) -> bool;
-
     /// Dispatch an MCP tool call.
     fn dispatch_mcp_tool<'a>(
         &'a self,
         tool_name: &'a str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
-
     /// Return the MCP server name for a tool, if known.
     fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String>;
-
     /// Clear the session's stash (used during compaction resets).
     fn clear_stash(&self);
 }
-
-// ─── SlotContext ────────────────────────────────────────────────────────────
 
 /// Concrete host context for slot operations.
 ///
@@ -286,11 +257,9 @@ impl SlotContext {
             None => fallback.to_path_buf(),
         }
     }
-
     pub fn default_project_id(&self) -> Option<&str> {
         self.default_project_id.as_deref()
     }
-
     /// Resolve the knowledge-write target for a session.
     pub fn knowledge_branch_target_for(
         &self,
@@ -303,7 +272,6 @@ impl SlotContext {
         else {
             return KnowledgeBranchTarget::Main;
         };
-
         let worktree_root = PathBuf::from(workspace_path);
         if worktree_root == project_root {
             KnowledgeBranchTarget::Main
@@ -311,9 +279,6 @@ impl SlotContext {
             KnowledgeBranchTarget::TaskScoped { worktree_root }
         }
     }
-
-    // ── Activity tracking ──────────────────────────────────────────────
-
     /// Current unix-seconds timestamp read through the shared clock seam.
     /// Falls back to 0 when the wall-clock is before `UNIX_EPOCH`.
     fn now_unix_secs(&self) -> u64 {
@@ -323,14 +288,12 @@ impl SlotContext {
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
-
     pub fn register_activity(&self, task_id: &str) -> Arc<AtomicU64> {
         let now = self.now_unix_secs();
         let ts = Arc::new(AtomicU64::new(now));
         recover_lock(&self.active_tasks, "active_tasks").insert(task_id.to_string(), ts.clone());
         ts
     }
-
     pub fn touch_activity(&self, task_id: &str) {
         let now = self.now_unix_secs();
         let mut guard = recover_lock(&self.active_tasks, "active_tasks");
@@ -341,11 +304,9 @@ impl SlotContext {
             }
         }
     }
-
     pub fn deregister_activity(&self, task_id: &str) {
         recover_lock(&self.active_tasks, "active_tasks").remove(task_id);
     }
-
     pub fn idle_seconds(&self, task_id: &str) -> Option<u64> {
         let now = self.now_unix_secs();
         let guard = recover_lock(&self.active_tasks, "active_tasks");
@@ -353,40 +314,26 @@ impl SlotContext {
         let last = ts.load(Ordering::Relaxed);
         Some(now.saturating_sub(last))
     }
-
-    // ── Background work ────────────────────────────────────────────────
-
     pub fn register_background_work(&self, task_id: &str) {
         recover_lock(&self.background_work_tasks, "background_work_tasks")
             .insert(task_id.to_string());
     }
-
     pub fn deregister_background_work(&self, task_id: &str) {
         recover_lock(&self.background_work_tasks, "background_work_tasks").remove(task_id);
     }
-
-    // ── Coordinator ────────────────────────────────────────────────────
-
     pub async fn trigger_dispatch_for_project(&self, _project_id: &str) {
         if let Some(ref trigger) = self.coordinator_trigger {
             trigger.try_trigger_dispatch();
         }
     }
-
     pub fn try_trigger_dispatch(&self) {
         if let Some(ref trigger) = self.coordinator_trigger {
             trigger.try_trigger_dispatch();
         }
     }
-
-    // ── MCP state ──────────────────────────────────────────────────────
-
     pub fn mcp_state(&self) -> djinn_control_plane::McpState {
         self.callbacks.build_mcp_state(self)
     }
-
-    // ── Task lookup ────────────────────────────────────────────────────
-
     pub async fn load_task(&self, task_id: &str) -> Result<Task, String> {
         let task_repo = djinn_db::TaskRepository::new(self.db.clone(), self.event_bus.clone());
         task_repo

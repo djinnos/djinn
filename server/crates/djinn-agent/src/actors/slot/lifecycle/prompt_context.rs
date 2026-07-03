@@ -122,7 +122,6 @@ fn format_activity_text(
         Some(entries) if !entries.is_empty() => {
             // Last N high-signal comments (lead, reviewer, verification)
             let feedback = recent_feedback(entries, max_feedback);
-
             // Count comments by role for the summary line
             let mut counts: std::collections::BTreeMap<&str, usize> =
                 std::collections::BTreeMap::new();
@@ -136,7 +135,6 @@ fn format_activity_text(
                 .map(|(role, n)| format!("{n} {role}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-
             let mut parts = Vec::new();
             if !feedback.is_empty() {
                 parts.push(format!(
@@ -149,7 +147,6 @@ fn format_activity_text(
                     "**Activity totals:** {count_summary} comments. Use `task_activity_list` with `actor_role` filter for full history."
                 ));
             }
-
             if parts.is_empty() {
                 None
             } else {
@@ -173,8 +170,6 @@ fn apply_prompt_sections(
     let with_skills = apply_skills(&with_extensions, resolved_skills);
     append_read_sources_prompt(&with_skills, read_sources)
 }
-
-// ── Async context loaders ──────────────────────────────────────────────
 
 /// Append sibling task summary lines to `ctx_lines` for the given epic.
 async fn load_sibling_tasks(
@@ -233,7 +228,6 @@ async fn append_blocker_deliveries(
             return;
         }
     };
-
     for t in &closed_tasks.tasks {
         ctx_lines.push(format!("  - Delivered: {}", t.title));
     }
@@ -250,7 +244,6 @@ async fn load_blocking_epics(
         Ok(b) if !b.is_empty() => b,
         _ => return,
     };
-
     ctx_lines.push("\n### Blocking Epics".to_string());
     for blocker in &blockers {
         ctx_lines.push(format!(
@@ -284,7 +277,6 @@ async fn load_proposal_sibling_epics(
     if sibling_ids.is_empty() {
         return;
     }
-
     ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal.title));
     for sid in &sibling_ids {
         append_proposal_sibling_epic(epic_id, sid, epic_repo, ctx_lines).await;
@@ -331,7 +323,6 @@ async fn load_epic_context(
         djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let epic = epic_repo.get(epic_id).await.ok()??;
-
     let mut ctx_lines = vec![
         format!("**Epic:** {} ({})", epic.title, epic.short_id),
         format!("**Description:** {}", epic.description),
@@ -340,13 +331,10 @@ async fn load_epic_context(
             epic.short_id
         ),
     ];
-
     load_sibling_tasks(epic_id, &task_repo, &mut ctx_lines).await;
     load_blocking_epics(epic_id, &epic_repo, &task_repo, &mut ctx_lines).await;
-
     let proposal_repo = ProposalRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     load_proposal_sibling_epics(epic_id, &epic_repo, &proposal_repo, &mut ctx_lines).await;
-
     Some(ctx_lines.join("\n"))
 }
 
@@ -401,33 +389,21 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         read_sources,
         worker_resume_note,
     } = inputs;
-
-    // ── Conflict metadata ────────────────────────────────────────────────
     let conflict_files = format_conflict_files(conflict_ctx);
-
-    // ── Activity log ─────────────────────────────────────────────────────
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity_entries = task_repo.list_activity(&task.id).await.ok();
     let activity_text = format_activity_text(&activity_entries, 3);
-
     // Extract worker submission summary/concerns from the activity log so the
     // reviewer can see why certain changes were made.
     let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
-
-    // ── Build epic context for roles that need it (e.g. lead) ─────────────────
     let epic_context =
         load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state).await;
-
-    // ── Build knowledge context from scope-matched notes ─────────────
     let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
-
-    // ── CI blocking directive (sa4x) ─────────────────────────────────────
     // Generate a promoted BLOCKING directive when the durable CI gate snapshot
     // says the current PR head is failing required CI and a remediation baseline
     // exists. Deliberately separate from ordinary activity-log prose and deduped
     // by construction (derived from durable state, not from activity replay).
     let ci_blocking_directive = build_ci_blocking_directive(task);
-
     // PR E2: auto-include `code_graph context` for worker / reviewer roles
     // when `DJINN_AUTO_CODE_CONTEXT_ROLES` enables this role. Reuses the
     // task-scope-path inference already used by the knowledge context block.
@@ -440,7 +416,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         &task_paths_for_code_graph,
     )
     .await;
-
     // PR E3: auto-include `code_graph detect_changes` summary for the
     // reviewer role. Resolves base/head SHAs by running `git merge-base
     // <target> HEAD` and `git rev-parse HEAD` against the task worktree
@@ -470,7 +445,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             None
         }
     };
-
     let base_system_prompt = runtime_role.render_prompt(
         task,
         &TaskContext {
@@ -496,7 +470,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
             worker_resume_note: worker_resume_note.map(str::to_string),
         },
     );
-    // ── Final prompt: extensions → skills → read sources (canonical order) ──
     let system_prompt_with_extensions = apply_role_extensions(
         &base_system_prompt,
         system_prompt_extensions,
@@ -509,7 +482,6 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         resolved_skills,
         read_sources,
     );
-
     PromptContext {
         conflict_files,
         activity_text,
@@ -536,7 +508,6 @@ fn build_ci_blocking_directive(task: &Task) -> Option<String> {
     let base_sha = task.ci_last_remediation_base_sha.as_deref()?;
     let head_sha = task.ci_head_sha.as_deref().unwrap_or("unknown");
     let pr_number = task.ci_pr_number.unwrap_or(0);
-
     let check_names: Vec<String> =
         serde_json::from_str(&task.ci_blocking_required_check_names).unwrap_or_default();
     let checks_display = if check_names.is_empty() {
@@ -544,12 +515,10 @@ fn build_ci_blocking_directive(task: &Task) -> Option<String> {
     } else {
         check_names.join(", ")
     };
-
     let fingerprint_line = match &task.ci_failure_fingerprint {
         Some(fp) => format!("**Failure fingerprint:** `{fp}`\n"),
         None => String::new(),
     };
-
     Some(format!(
         "**PR:** #{pr_number}\n\
          **Failing head SHA:** `{head_sha}`\n\
@@ -577,10 +546,8 @@ async fn resolve_reviewer_diff_shas(
             _ => "main".to_string(),
         }
     };
-
     let head_sha = git_rev_parse(worktree_path, "HEAD").ok();
     let base_sha = git_merge_base(worktree_path, &target_branch, "HEAD").ok();
-
     (base_sha, head_sha)
 }
 
@@ -615,8 +582,6 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-// ── Worker resume note (y8pv / 48ru) ──────────────────────────────────────
-
 /// Only the worker role receives resume context.
 pub(crate) fn role_receives_worker_resume(role_name: &str) -> bool {
     role_name == "worker"
@@ -630,13 +595,10 @@ pub(crate) fn build_worker_resume_note(
     if !role_receives_worker_resume(role_name) {
         return None;
     }
-
     let metadata = metadata?;
-
     if !metadata.considered {
         return None;
     }
-
     // CleanTaskBranchFallback with no checkpoint SHA or submit/review id
     // means there is nothing to resume from — the dispatch starts fresh.
     // We check this after the considered flag so a clean fallback that
@@ -650,19 +612,15 @@ pub(crate) fn build_worker_resume_note(
         .prior_session_lineage
         .as_ref()
         .is_some_and(|s| !s.trim().is_empty());
-
     if !has_checkpoint && !has_submit_or_review && !has_prior_session {
         return None;
     }
-
     let mut parts: Vec<String> = Vec::new();
-
     if let Some(session) = &metadata.prior_session_lineage
         && !session.trim().is_empty()
     {
         parts.push(format!("prior session `{session}`"));
     }
-
     // Checkpoint SHA or submit/review ID (whichever is present).
     if let Some(sha) = &metadata.commit_sha
         && !sha.trim().is_empty()
@@ -673,17 +631,14 @@ pub(crate) fn build_worker_resume_note(
     {
         parts.push(format!("submit/review `{id}`"));
     }
-
     if let Some(reason) = metadata.selection_reason {
         parts.push(format!("terminated: {}", termination_label(reason)));
     }
-
     if let Some(prev_model) = &metadata.previous_model
         && !prev_model.trim().is_empty()
     {
         parts.push(format!("prev model `{prev_model}`"));
     }
-
     if let Some(summary) = &metadata.last_durable_progress_summary
         && !summary.trim().is_empty()
     {
@@ -695,25 +650,21 @@ pub(crate) fn build_worker_resume_note(
         };
         parts.push(format!("last progress: {truncated}"));
     }
-
     if let Some(cmd) = &metadata.verification_command
         && !cmd.trim().is_empty()
     {
         parts.push(format!("verify: `{cmd}`"));
     }
-
     if parts.is_empty() {
         return None;
     }
-
     Some(format!(
         "**Resuming from prior session.** {}",
         parts.join("; ")
     ))
 }
 
-/// Map a [`ResumeSelectionReason`] to a human-readable termination label
-/// for the resume note.
+/// Map a [`ResumeSelectionReason`] to a human-readable termination label for the resume note.
 fn termination_label(reason: djinn_runtime::ResumeSelectionReason) -> &'static str {
     use djinn_runtime::ResumeSelectionReason as R;
     match reason {

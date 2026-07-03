@@ -158,7 +158,6 @@ pub fn next_nudge_message(
     if turn_has_tool_calls || !tools_are_available {
         return Ok(None);
     }
-
     let finalize_list = finalize_tool_names.join("` or `");
     let next_count = consecutive_nudge_count + 1;
     if next_count >= MAX_NUDGE_ATTEMPTS {
@@ -168,7 +167,6 @@ pub fn next_nudge_message(
             finalize_list
         ));
     }
-
     Ok(Some((
         next_count,
         Message::user(format!(
@@ -192,7 +190,6 @@ pub fn tool_choice_for_turn(model_id: &str, tools: &[serde_json::Value]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn empty_turn_backoff_increases_then_caps() {
         assert_eq!(empty_turn_backoff(1), std::time::Duration::from_secs(3));
@@ -201,7 +198,6 @@ mod tests {
         assert_eq!(empty_turn_backoff(0), std::time::Duration::from_secs(3));
         assert_eq!(empty_turn_backoff(10), std::time::Duration::from_secs(27));
     }
-
     #[test]
     fn empty_start_streak_feeds_breaker_only_before_first_progress() {
         // An empty-first-turns session (no productive turn yet) trips at the
@@ -220,7 +216,6 @@ mod tests {
             false
         ));
     }
-
     #[test]
     fn empty_start_streak_never_trips_after_a_productive_turn() {
         // A single empty turn mid-session (after real progress) must NOT fail the
@@ -234,7 +229,6 @@ mod tests {
         ));
         assert!(!empty_start_streak_feeds_breaker(100, true));
     }
-
     #[test]
     fn empty_turn_reasoning_only_discriminator() {
         assert!(empty_turn_is_reasoning_only(1));
@@ -250,7 +244,6 @@ mod tests {
         assert!(text.contains("NO visible output"), "{text}");
         assert!(text.contains("system-reminder"), "{text}");
     }
-
     #[test]
     fn tool_choice_auto_for_unsupported_providers() {
         assert!(!supports_tool_choice_required("synthetic/Kimi-K2.5"));

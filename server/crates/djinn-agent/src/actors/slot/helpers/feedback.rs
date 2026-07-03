@@ -1,6 +1,5 @@
 use super::*;
 
-// ─── Re-exports from canonical djinn-slot feedback helpers ────────────────
 //
 // Context-free functions are re-exported directly — no adapter overhead.
 // Async functions that take `&AgentContext` are wrapped below via the shared

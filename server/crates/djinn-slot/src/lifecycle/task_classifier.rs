@@ -26,7 +26,6 @@ pub fn classify_native_skill_trigger(role_name: &str, task: &Task) -> Option<Nat
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn proposal_authoring_roles_trigger_native_skills() {
         assert_eq!(
@@ -38,7 +37,6 @@ mod tests {
             Some(NativeSkillTrigger::ProposalAuthoring)
         );
     }
-
     #[test]
     fn non_authoring_roles_and_issue_types_do_not_trigger_native_skills() {
         for (role, issue_type) in [

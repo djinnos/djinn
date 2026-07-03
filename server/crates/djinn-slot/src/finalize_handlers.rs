@@ -40,7 +40,6 @@ pub async fn process_finalize_payload_with_outcome(
     app_state: &SlotContext,
 ) -> bool {
     let Some(payload) = payload else { return true };
-
     match finalize_tool_name {
         "submit_work" => handle_submit_work(payload, task_id, app_state, true).await,
         "submit_review" => {
@@ -85,13 +84,11 @@ pub async fn handle_budget_park(
     if summary.is_empty() {
         return;
     }
-
     let activity_payload = serde_json::json!({
         "summary": summary,
         "remaining_concerns": format!("budget-parked: {details}"),
     })
     .to_string();
-
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = repo
         .log_activity(
@@ -130,7 +127,6 @@ pub(crate) async fn handle_submit_work(
         }
     };
     let metadata = work.auto_submit_review_metadata.clone();
-
     let activity_payload = serde_json::json!({
         "commit_title": work.commit_title,
         "summary": work.summary,
@@ -138,7 +134,6 @@ pub(crate) async fn handle_submit_work(
         "remaining_concerns": work.remaining_concerns,
     })
     .to_string();
-
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = repo
         .log_activity(
@@ -157,7 +152,6 @@ pub(crate) async fn handle_submit_work(
         );
         return false;
     }
-
     if let Some(metadata) = metadata {
         match resolve_auto_submit_diff_fingerprint(task_id, &metadata, app_state).await {
             Ok(fingerprint) => {
@@ -189,7 +183,6 @@ pub(crate) async fn handle_submit_work(
             }
         }
     }
-
     true
 }
 
@@ -216,7 +209,6 @@ async fn resolve_auto_submit_diff_fingerprint(
                 return Err(());
             }
         };
-
     match compute_submission_diff_fingerprint(&worktree_path).await {
         Ok(SubmissionDiffFingerprint::Diff(digest)) => {
             tracing::info!(
@@ -276,7 +268,6 @@ async fn resolve_task_worktree_path(
             return Some(root);
         }
     }
-
     let task_run_repo =
         djinn_db::repositories::task_run::TaskRunRepository::new(app_state.db.clone());
     let run = match task_run_repo.get(task_run_id).await {
@@ -299,7 +290,6 @@ async fn resolve_task_worktree_path(
             return None;
         }
     };
-
     let workspace_path = match run.workspace_path.filter(|p| !p.is_empty()) {
         Some(p) => p,
         None => {
@@ -311,7 +301,6 @@ async fn resolve_task_worktree_path(
             return None;
         }
     };
-
     let path = std::path::PathBuf::from(&workspace_path);
     if !path.exists() {
         tracing::warn!(
@@ -321,7 +310,6 @@ async fn resolve_task_worktree_path(
         );
         return None;
     }
-
     Some(path)
 }
 
@@ -369,7 +357,6 @@ async fn persist_auto_submit_review_metadata(
             model_called_submit_work,
         })
         .await;
-
     if let Err(e) = result {
         tracing::warn!(
             task_id = %task_id,
@@ -379,7 +366,6 @@ async fn persist_auto_submit_review_metadata(
         );
         return false;
     }
-
     true
 }
 
@@ -400,9 +386,7 @@ pub(crate) async fn handle_submit_review(
             return;
         }
     };
-
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-
     // Atomically set AC met/unmet state from the criteria array.
     if !review.acceptance_criteria.is_empty() {
         match repo.get(task_id).await {
@@ -444,14 +428,12 @@ pub(crate) async fn handle_submit_review(
             }
         }
     }
-
     // Log verdict and feedback as structured activity.
     let activity_payload = serde_json::json!({
         "verdict": review.verdict,
         "feedback": review.feedback,
     })
     .to_string();
-
     if let Err(e) = repo
         .log_activity(
             Some(task_id),
@@ -468,7 +450,6 @@ pub(crate) async fn handle_submit_review(
             "finalize_handlers: failed to log submit_review activity"
         );
     }
-
     // When the reviewer verdict is "rejected", persist a task-level rejected
     // submission fingerprint so the live submit-work guard can detect
     // no-progress resubmissions in future task runs.
@@ -508,7 +489,6 @@ pub(crate) async fn record_rejected_submission_fingerprint(
             return;
         }
     };
-
     // Find the latest run with a workspace_path.
     let Some((task_run_id, workspace_path)) = runs
         .iter()
@@ -530,7 +510,6 @@ pub(crate) async fn record_rejected_submission_fingerprint(
         );
         return;
     };
-
     let worktree = std::path::PathBuf::from(&workspace_path);
     let fingerprint = match djinn_git::compute_submission_diff_fingerprint(&worktree).await {
         Ok(fp) => fp,
@@ -547,7 +526,6 @@ pub(crate) async fn record_rejected_submission_fingerprint(
             return;
         }
     };
-
     let Some(digest) = fingerprint.fingerprint().map(|s| s.to_string()) else {
         emit_fingerprint_unavailable_event(task_id, &task_run_id, "no_diff", app_state);
         tracing::info!(
@@ -559,7 +537,6 @@ pub(crate) async fn record_rejected_submission_fingerprint(
         );
         return;
     };
-
     record_rejected_integrity_entry(
         task_id,
         app_state,
@@ -589,11 +566,9 @@ pub(crate) async fn record_rejected_integrity_entry(
         .latest_no_progress_streak_for_task(task_id)
         .await
         .unwrap_or(0);
-
     let rejected_at = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-
     let id = uuid::Uuid::now_v7().to_string();
     let params = RecordTaskRejectedSubmissionParams {
         id: &id,
@@ -606,7 +581,6 @@ pub(crate) async fn record_rejected_integrity_entry(
         diff_fingerprint: digest,
         no_progress_streak: current_streak + 1,
     };
-
     if let Err(e) = integrity_repo.record(params).await {
         tracing::warn!(
             task_id = %task_id,
@@ -632,7 +606,6 @@ pub(crate) async fn record_rejected_integrity_entry(
 /// the existing criterion text at that index is preserved.
 pub fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String {
     let existing: Vec<serde_json::Value> = serde_json::from_str(existing_json).unwrap_or_default();
-
     let merged: Vec<serde_json::Value> = verdicts
         .iter()
         .enumerate()
@@ -653,7 +626,6 @@ pub fn apply_ac_verdicts(existing_json: &str, verdicts: &[AcVerdict]) -> String 
             })
         })
         .collect();
-
     serde_json::to_string(&merged).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -674,14 +646,12 @@ pub(crate) async fn handle_submit_decision(
             return;
         }
     };
-
     let activity_payload = serde_json::json!({
         "decision": decision.decision,
         "rationale": decision.rationale,
         "created_tasks": decision.created_tasks,
     })
     .to_string();
-
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     if let Err(e) = repo
         .log_activity(
@@ -701,8 +671,7 @@ pub(crate) async fn handle_submit_decision(
     }
 }
 
-/// Log per-task planning activity entries and durably record any blocker the
-/// planner declared.
+/// Log per-task planning activity entries and durably record any blocker the planner declared.
 ///
 /// `finalize_task_id` is the planning task the session ran on; its epic owns
 /// any `blocked_on` edges. Each `tasks_reviewed` entry references a real task
@@ -722,7 +691,6 @@ pub(crate) async fn handle_submit_grooming(
             return;
         }
     };
-
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     for entry in &grooming.tasks_reviewed {
         let activity_payload = serde_json::json!({
@@ -730,7 +698,6 @@ pub(crate) async fn handle_submit_grooming(
             "changes": entry.changes,
         })
         .to_string();
-
         if let Err(e) = repo
             .log_activity(
                 Some(&entry.task_id),
@@ -748,7 +715,6 @@ pub(crate) async fn handle_submit_grooming(
             );
         }
     }
-
     // Durably record a planner's "blocked on epic X" conclusion as an epic
     // blocker edge, so the coordinator parks this epic's planning until X
     // closes rather than re-deriving "blocked" via a fresh LLM session on every
@@ -793,7 +759,6 @@ async fn record_declared_epic_blockers(
         );
         return;
     };
-
     let epic_repo =
         djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     for blocker_ref in blocked_on {

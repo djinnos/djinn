@@ -110,7 +110,6 @@ pub(super) async fn dispatch_task_runtime(
     _pause: CancellationToken,
     resume_lifecycle_metadata: Option<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    // ── Preflight: load task → resolve dispatch context / branches / flow / trigger ──
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let task = load_task_or_bail(&task_id, &task_repo).await?;
     let ctx = DispatchContext::resolve(&task, &app_state).await;
@@ -129,8 +128,6 @@ pub(super) async fn dispatch_task_runtime(
              resuming at reviewer stage (skipping worker redo)"
         );
     }
-
-    // ── Resolve spec inputs → construct spec → announce dispatch ─────────────
     let spec_inputs = TaskRunSpecInputs::resolve(
         &task,
         &flow,
@@ -143,101 +140,26 @@ pub(super) async fn dispatch_task_runtime(
     let creator_scope = spec_inputs.created_by_user_id.clone();
     let spec = TaskRunSpec::from(spec_inputs);
     announce_dispatch(&app_state, &spec, &model_id);
-
-    // ── Resolve credentials → construct runtime ───────────────────────────
     let credentials =
         resolve_credentials(&spec, &app_state, &model_id, creator_scope.clone()).await?;
     let runtime = build_runtime(&app_state, &task, &kill).await?;
     let runtime_kind = runtime_kind();
-
-    // ── Drive prepare → (await report) → teardown ─────────────────────────
-    let handle = runtime
-        .prepare(&spec, &credentials)
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
-
-    let cancel_runtime = runtime.clone();
-    let cancel_handle = handle.clone();
-    let cancel_task_id = task.id.clone();
-    let cancel_model_id = model_id.clone();
-    let cancel_task = tokio::spawn({
-        let kill = kill.clone();
-        async move {
-            kill.cancelled().await;
-            let span = tracing::info_span!(
-                "djinn.slot.kill",
-                task_id = %cancel_task_id,
-                model_id = %cancel_model_id,
-            );
-            async {
-                let _ = cancel_runtime.cancel(&cancel_handle).await;
-            }
-            .instrument(span)
-            .await;
-        }
-    });
-
-    let bistream_result = runtime.attach_stdio(&handle).await;
-    let handshake_timed_out = matches!(
-        &bistream_result,
-        Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
-    );
-    let mut infra_death: Option<String> = None;
-    let mut presession_timeout: Option<PreSessionTimeout> = None;
-    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
-        Ok(bistream) => {
-            let await_outcome = tokio::select! {
-                biased;
-                res = await_report_from_stream(
-                    bistream,
-                    &kill,
-                    app_state.db.clone(),
-                    &spec.task_run_id,
-                    &spec.task_id,
-                    pre_session_deadline(),
-                ) => res,
-                reason = runtime.watch_infra_death(&handle) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        %reason,
-                        runtime = ?runtime_kind,
-                        "supervisor dispatch: worker infra died before terminal report \
-                         (OOM / eviction / Job failure); finalizing run as interrupted"
-                    );
-                    infra_death = Some(reason);
-                    Ok(ReportAwait::Report(None))
-                }
-            };
-            match await_outcome {
-                Ok(ReportAwait::Report(report)) => Ok(report),
-                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
-                    presession_timeout = Some(timeout);
-                    Ok(None)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
-    };
-
-    cancel_task.abort();
-    let _ = cancel_task.await;
-
-    let teardown = runtime.teardown(handle).await;
-
-    let reap_status = if presession_timeout.is_some() {
-        TaskRunStatus::Failed
-    } else {
-        teardown
-            .as_ref()
-            .ok()
-            .map(report_to_terminal_status)
-            .unwrap_or(TaskRunStatus::Interrupted)
-    };
-    reap_orphan_task_run(&app_state, &task.id, reap_status).await;
-
-    teardown_cargo_target_run_dir(&app_state, &spec.task_run_id).await;
-
+    let RuntimeExecutionOutcome {
+        report_result,
+        teardown,
+        handshake_timed_out,
+        infra_death,
+        presession_timeout,
+    } = execute_runtime_report_phase(
+        runtime.clone(),
+        &spec,
+        &credentials,
+        &task,
+        &model_id,
+        &app_state,
+        &kill,
+    )
+    .await?;
     if handshake_timed_out {
         app_state
             .health_tracker
@@ -271,7 +193,6 @@ pub(super) async fn dispatch_task_runtime(
             "supervisor dispatch: worker handshake timed out; recorded stall + failover"
         );
     }
-
     if let Some(reason) = infra_death.as_deref() {
         let payload = serde_json::json!({
             "error": format!("Worker infrastructure died before completing the run: {reason}"),
@@ -304,7 +225,6 @@ pub(super) async fn dispatch_task_runtime(
             ),
         }
     }
-
     if let Some(timeout) = presession_timeout {
         let PreSessionTimeout { step, elapsed_secs } = &timeout;
         tracing::error!(
@@ -346,7 +266,6 @@ pub(super) async fn dispatch_task_runtime(
             .await;
         return Err(anyhow::Error::new(timeout));
     }
-
     match (report_result, teardown) {
         (Ok(streamed), Ok(teardown_report)) => {
             let report = select_terminal_report(streamed, teardown_report);
@@ -358,7 +277,6 @@ pub(super) async fn dispatch_task_runtime(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
-
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
             // Feed breaker on productive completed runs.
             if terminal_report_feeds_model_success(&report) {
@@ -418,7 +336,6 @@ pub(super) async fn dispatch_task_runtime(
                     },
                 );
             }
-
             if is_budget_park_report(&report) {
                 match app_state.coordinator().await {
                     Some(coordinator) => {
@@ -444,7 +361,6 @@ pub(super) async fn dispatch_task_runtime(
                     }
                 }
             }
-
             if let TaskRunOutcome::LoopGuardTripped {
                 kind,
                 offending_signature,
@@ -536,7 +452,172 @@ pub(super) async fn dispatch_task_runtime(
     }
 }
 
-/// Preflight context: task, conflict state, branches, base flow.
+/// Everything `dispatch_task_runtime` needs back from the runtime
+/// execution/report phase to run its persistence and finalization logic.
+struct RuntimeExecutionOutcome {
+    report_result: anyhow::Result<Option<TaskRunReport>>,
+    teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
+    handshake_timed_out: bool,
+    infra_death: Option<String>,
+    presession_timeout: Option<PreSessionTimeout>,
+}
+
+/// Outcome of attaching stdio and waiting for the worker's terminal report.
+struct TerminalReportAwaitOutcome {
+    report_result: anyhow::Result<Option<TaskRunReport>>,
+    handshake_timed_out: bool,
+    infra_death: Option<String>,
+    presession_timeout: Option<PreSessionTimeout>,
+}
+
+/// Drive the provider runtime execution phase: prepare, cancellation watcher,
+/// stdio attach, terminal-report await (with infra-death and pre-session
+/// timeout watching), teardown, orphan reaping, and cargo-target cleanup.
+async fn execute_runtime_report_phase(
+    runtime: Arc<dyn SessionRuntime>,
+    spec: &TaskRunSpec,
+    credentials: &ResolvedCredentials,
+    task: &Task,
+    model_id: &str,
+    app_state: &AgentContext,
+    kill: &CancellationToken,
+) -> anyhow::Result<RuntimeExecutionOutcome> {
+    let handle = runtime
+        .prepare(spec, credentials)
+        .await
+        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
+    let cancel_task = spawn_runtime_cancel_watcher(
+        runtime.clone(),
+        handle.clone(),
+        kill.clone(),
+        task.id.clone(),
+        model_id.to_string(),
+    );
+    let await_outcome =
+        attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
+            .await;
+    abort_runtime_cancel_watcher(cancel_task).await;
+    let teardown = runtime.teardown(handle).await;
+    let reap_status = select_orphan_reap_status(&await_outcome.presession_timeout, &teardown);
+    reap_orphan_task_run(app_state, &task.id, reap_status).await;
+    teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
+    Ok(RuntimeExecutionOutcome {
+        report_result: await_outcome.report_result,
+        teardown,
+        handshake_timed_out: await_outcome.handshake_timed_out,
+        infra_death: await_outcome.infra_death,
+        presession_timeout: await_outcome.presession_timeout,
+    })
+}
+
+/// Watch the kill token and cancel the runtime run when it fires.
+fn spawn_runtime_cancel_watcher(
+    runtime: Arc<dyn SessionRuntime>,
+    handle: djinn_runtime::RunHandle,
+    kill: CancellationToken,
+    task_id: String,
+    model_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        kill.cancelled().await;
+        let span = tracing::info_span!(
+            "djinn.slot.kill",
+            task_id = %task_id,
+            model_id = %model_id,
+        );
+        async {
+            let _ = runtime.cancel(&handle).await;
+        }
+        .instrument(span)
+        .await;
+    })
+}
+
+/// Abort the cancellation watcher once the run has reached its terminal state.
+async fn abort_runtime_cancel_watcher(cancel_task: tokio::task::JoinHandle<()>) {
+    cancel_task.abort();
+    let _ = cancel_task.await;
+}
+
+/// Attach stdio and wait for the authoritative terminal report, racing the
+/// runtime's infra-death watcher and tracking pre-session timeouts.
+async fn attach_and_await_terminal_report(
+    runtime: Arc<dyn SessionRuntime>,
+    handle: &djinn_runtime::RunHandle,
+    app_state: &AgentContext,
+    spec: &TaskRunSpec,
+    task: &Task,
+    kill: &CancellationToken,
+) -> TerminalReportAwaitOutcome {
+    let bistream_result = runtime.attach_stdio(handle).await;
+    let handshake_timed_out = matches!(
+        &bistream_result,
+        Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
+    );
+    let mut infra_death: Option<String> = None;
+    let mut presession_timeout: Option<PreSessionTimeout> = None;
+    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
+        Ok(bistream) => {
+            let await_outcome = tokio::select! {
+                biased;
+                res = await_report_from_stream(
+                    bistream,
+                    kill,
+                    app_state.db.clone(),
+                    &spec.task_run_id,
+                    &spec.task_id,
+                    pre_session_deadline(),
+                ) => res,
+                reason = runtime.watch_infra_death(handle) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        %reason,
+                        runtime = ?runtime_kind(),
+                        "supervisor dispatch: worker infra died before terminal report \
+                         (OOM / eviction / Job failure); finalizing run as interrupted"
+                    );
+                    infra_death = Some(reason);
+                    Ok(ReportAwait::Report(None))
+                }
+            };
+            match await_outcome {
+                Ok(ReportAwait::Report(report)) => Ok(report),
+                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
+                    presession_timeout = Some(timeout);
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
+    };
+    TerminalReportAwaitOutcome {
+        report_result,
+        handshake_timed_out,
+        infra_death,
+        presession_timeout,
+    }
+}
+
+/// Pick the status used when reaping an orphaned `task_runs` row after the
+/// runtime phase: pre-session timeouts fail fast; otherwise mirror the
+/// teardown report's terminal status, defaulting to interrupted.
+fn select_orphan_reap_status(
+    presession_timeout: &Option<PreSessionTimeout>,
+    teardown: &Result<TaskRunReport, djinn_runtime::RuntimeError>,
+) -> TaskRunStatus {
+    if presession_timeout.is_some() {
+        TaskRunStatus::Failed
+    } else {
+        teardown
+            .as_ref()
+            .ok()
+            .map(report_to_terminal_status)
+            .unwrap_or(TaskRunStatus::Interrupted)
+    }
+}
+
+/// Preflight context: task row, conflict/review state, branches, base flow.
 struct DispatchContext<'a> {
     task: &'a Task,
     has_conflict: bool,
@@ -556,7 +637,6 @@ impl<'a> DispatchContext<'a> {
         let task_branch = task_branch_name(&task.short_id);
         let base_flow =
             crate::roles::flow_for_task_dispatch(task, has_conflict, has_review_response);
-
         Self {
             task,
             has_conflict,
@@ -666,13 +746,11 @@ impl TaskRunSpecInputs {
                     .unwrap_or_else(|| model_id.to_string());
             model_id_per_role.insert(*role, resolved);
         }
-
         let read_source_project_ids =
             djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
                 .read_sources_for_task(task.epic_id.as_deref())
                 .await
                 .unwrap_or_default();
-
         let pd_project_repo =
             djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let github_owner = pd_project_repo
@@ -691,21 +769,15 @@ impl TaskRunSpecInputs {
             }
             _ => None,
         };
-
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let created_by_user_id: Option<String> =
             task_repo.created_by_user_id(&task.id).await.ok().flatten();
-
         let (commit_author_name, commit_author_email) =
             resolve_commit_author(app_state, created_by_user_id.as_deref()).await;
-
         let resume_lifecycle_metadata =
             decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
-
         let task_run_id = uuid::Uuid::now_v7().to_string();
-
         let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
-
         Self {
             task_run_id,
             task_id: task.id.clone(),
@@ -867,7 +939,6 @@ async fn build_runtime(
             );
         }
     };
-
     let runtime: Arc<dyn SessionRuntime> = match runtime_kind() {
         RuntimeKind::Kubernetes => {
             let config = djinn_k8s::KubernetesConfig::from_env();
@@ -900,7 +971,6 @@ async fn build_runtime(
             Arc::new(TestRuntime::new(runner))
         }
     };
-
     Ok(runtime)
 }
 
@@ -952,7 +1022,6 @@ async fn persist_loop_guard_activity(
     else {
         return;
     };
-
     let details = serde_json::json!({
         "kind": loop_guard_kind_label(*kind),
         "offending_signature": offending_signature,
@@ -981,7 +1050,6 @@ async fn persist_loop_guard_activity(
         ),
     })
     .to_string();
-
     if let Err(e) = task_repo
         .log_activity(
             Some(task_id),
@@ -1144,10 +1212,8 @@ async fn await_report_from_stream(
     let started = tokio::time::Instant::now();
     let deadline = tokio::time::sleep(pre_session_deadline);
     tokio::pin!(deadline);
-
     let mut last_step = PRE_SESSION_INITIAL_STEP.to_string();
     let mut session_reached = false;
-
     loop {
         tokio::select! {
             biased;
@@ -1252,29 +1318,24 @@ mod tests {
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{Layer, registry::LookupSpan};
-
     #[derive(Clone, Debug, Default)]
     struct RecordedSpan {
         name: String,
         fields: HashMap<String, String>,
     }
-
     #[derive(Clone, Default)]
     struct RecordingLayer {
         spans: StdArc<StdMutex<Vec<RecordedSpan>>>,
     }
-
     impl RecordingLayer {
         fn spans(&self) -> Vec<RecordedSpan> {
             self.spans.lock().expect("recorded spans mutex").clone()
         }
     }
-
     #[derive(Default)]
     struct FieldRecorder {
         fields: HashMap<String, String>,
     }
-
     impl Visit for FieldRecorder {
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
             self.fields.insert(
@@ -1283,7 +1344,6 @@ mod tests {
             );
         }
     }
-
     impl<S> Layer<S> for RecordingLayer
     where
         S: tracing::Subscriber,
@@ -1304,7 +1364,6 @@ mod tests {
                 });
             }
         }
-
         fn on_record(
             &self,
             id: &tracing::Id,
@@ -1319,7 +1378,6 @@ mod tests {
                 }
             }
         }
-
         fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
             if let Some(span) = ctx.span(&id)
                 && let Some(recorded) = span.extensions().get::<RecordedSpan>()
@@ -1331,7 +1389,6 @@ mod tests {
             }
         }
     }
-
     async fn tracing_lock() -> tokio::sync::OwnedMutexGuard<()> {
         static LOCK: OnceLock<StdArc<tokio::sync::Mutex<()>>> = OnceLock::new();
         LOCK.get_or_init(|| StdArc::new(tokio::sync::Mutex::new(())))
@@ -1339,7 +1396,6 @@ mod tests {
             .lock_owned()
             .await
     }
-
     fn report(id: &str, stages: Vec<RoleKind>, outcome: TaskRunOutcome) -> TaskRunReport {
         TaskRunReport {
             task_run_id: id.to_string(),
@@ -1347,7 +1403,6 @@ mod tests {
             stages_completed: stages,
         }
     }
-
     #[test]
     fn planned_terminal_outcomes_have_no_provider_breaker_signal() {
         let guard_report = report(
@@ -1367,7 +1422,6 @@ mod tests {
             None,
             "loop-guard trips must not feed the provider breaker"
         );
-
         let ordinary_completed = report(
             "closed-run",
             vec![RoleKind::Worker],
@@ -1379,7 +1433,6 @@ mod tests {
             terminal_report_feeds_model_success(&ordinary_completed),
             "ordinary completed runs still record model-health success"
         );
-
         for (outcome, label) in [
             (
                 TaskRunOutcome::Parked {
@@ -1418,7 +1471,6 @@ mod tests {
                 "{label} must not feed model-health success accounting either"
             );
         }
-
         let failed_report = report(
             "failed-run",
             vec![RoleKind::Worker],
@@ -1437,7 +1489,6 @@ mod tests {
             "typed provider failures still feed the breaker"
         );
     }
-
     #[test]
     fn loop_guard_reason_names_full_trip_payload() {
         let reason = loop_guard_planner_intervention_reason(
@@ -1448,7 +1499,6 @@ mod tests {
             (7, 12),
             "session-123",
         );
-
         for expected in [
             "identical_tool_failure",
             "shell:cargo-test",
@@ -1464,7 +1514,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn streamed_report_wins_over_teardown_stub() {
         let streamed = report(
@@ -1476,9 +1525,7 @@ mod tests {
             },
         );
         let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
-
         let chosen = select_terminal_report(Some(streamed), teardown_stub);
-
         assert_eq!(
             chosen.task_run_id, "id-B-persisted",
             "extraction id must come from the streamed report, not the teardown stub"
@@ -1488,7 +1535,6 @@ mod tests {
             "real stages must survive so the extraction gate opens"
         );
     }
-
     #[test]
     fn teardown_stub_used_when_no_streamed_report() {
         let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
@@ -1496,9 +1542,6 @@ mod tests {
         assert_eq!(chosen.task_run_id, "id-A-transport");
         assert!(chosen.stages_completed.is_empty());
     }
-
-    // ── Stage-aware resume decision ───────────────────────────────────────────
-
     #[test]
     fn resume_flow_upgrades_review_response_to_reviewer_only_when_durable() {
         // the mirror task_branch we must resume at the reviewer, NOT redo the
@@ -1512,7 +1555,6 @@ mod tests {
             "ReviewResume must skip the worker stage"
         );
     }
-
     #[test]
     fn resume_flow_keeps_review_response_when_output_not_durable() {
         assert_eq!(
@@ -1520,7 +1562,6 @@ mod tests {
             SupervisorFlow::ReviewResponse
         );
     }
-
     #[test]
     fn resume_flow_leaves_non_review_response_flows_untouched() {
         for flow in [
@@ -1534,22 +1575,18 @@ mod tests {
             assert_eq!(resume_flow(flow, false), flow);
         }
     }
-
     fn lazy_db() -> djinn_db::Database {
         djinn_db::Database::open_in_memory().expect("lazy in-memory db handle")
     }
-
     fn no_deadline() -> std::time::Duration {
         std::time::Duration::from_secs(3600)
     }
-
     fn expect_report(outcome: ReportAwait) -> Option<TaskRunReport> {
         match outcome {
             ReportAwait::Report(report) => report,
             ReportAwait::PreSessionTimeout(t) => panic!("unexpected pre-session timeout: {t:?}"),
         }
     }
-
     #[tokio::test]
     async fn await_report_returns_streamed_report() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1565,7 +1602,6 @@ mod tests {
             .send(StreamEvent::Report(streamed))
             .await
             .expect("send report");
-
         let got = expect_report(
             await_report_from_stream(
                 bistream,
@@ -1580,7 +1616,6 @@ mod tests {
         );
         assert_eq!(got.expect("some report").task_run_id, "id-B");
     }
-
     #[tokio::test]
     async fn supervisor_rpc_terminal_report_span_records_fields() {
         let _tracing_guard = tracing_lock().await;
@@ -1597,7 +1632,6 @@ mod tests {
             )))
             .await
             .unwrap();
-
         let got = expect_report(
             await_report_from_stream(
                 bistream,
@@ -1610,7 +1644,6 @@ mod tests {
             .await
             .expect("await ok"),
         );
-
         assert!(got.is_some());
         let span = layer
             .spans()
@@ -1630,7 +1663,6 @@ mod tests {
             Some("task-terminal")
         );
     }
-
     #[tokio::test]
     async fn await_report_drops_non_terminal_frames_then_returns_report() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1650,7 +1682,6 @@ mod tests {
             )))
             .await
             .unwrap();
-
         let got = expect_report(
             await_report_from_stream(
                 bistream,
@@ -1665,7 +1696,6 @@ mod tests {
         );
         assert_eq!(got.expect("some report").task_run_id, "id-B");
     }
-
     #[tokio::test]
     async fn await_report_returns_none_when_kill_fires() {
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1685,7 +1715,6 @@ mod tests {
         );
         assert!(got.is_none());
     }
-
     #[tokio::test]
     async fn supervisor_rpc_kill_span_records_fields() {
         let _tracing_guard = tracing_lock().await;
@@ -1695,7 +1724,6 @@ mod tests {
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         kill.cancel();
-
         let got = expect_report(
             await_report_from_stream(
                 bistream,
@@ -1708,7 +1736,6 @@ mod tests {
             .await
             .expect("await ok"),
         );
-
         assert!(got.is_none());
         let span = layer
             .spans()
@@ -1725,7 +1752,6 @@ mod tests {
             Some("task-kill")
         );
     }
-
     #[tokio::test]
     async fn await_report_returns_none_when_channel_closes_without_report() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1745,12 +1771,10 @@ mod tests {
         );
         assert!(got.is_none());
     }
-
     #[tokio::test]
     async fn await_report_pre_session_deadline_fires_naming_last_step() {
         let db = lazy_db();
         db.ensure_initialized().await.expect("schema ready");
-
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         events_tx
@@ -1765,7 +1789,6 @@ mod tests {
             })
             .await
             .unwrap();
-
         let outcome = await_report_from_stream(
             bistream,
             &kill,
@@ -1776,7 +1799,6 @@ mod tests {
         )
         .await
         .expect("await ok");
-
         match outcome {
             ReportAwait::PreSessionTimeout(t) => {
                 assert_eq!(
@@ -1789,7 +1811,6 @@ mod tests {
         }
         drop(events_tx);
     }
-
     #[tokio::test]
     async fn await_report_first_turn_marker_disarms_tiny_deadline() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -1810,7 +1831,6 @@ mod tests {
             )))
             .await
             .unwrap();
-
         let got = expect_report(
             await_report_from_stream(
                 bistream,

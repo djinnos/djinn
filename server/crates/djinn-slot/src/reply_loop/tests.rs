@@ -61,8 +61,6 @@ fn clear_session_budget_env() {
     }
 }
 
-// ── MockLlmProvider ───────────────────────────────────────────────────────
-
 /// Pre-scripted response: text (optional) + tool calls + token counts.
 struct MockResponse {
     text: Option<String>,
@@ -80,11 +78,9 @@ impl MockResponse {
             output_tokens: 10,
         }
     }
-
     fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
         Self::tool_call_with_input(id, name, serde_json::json!({}), input_tokens)
     }
-
     fn tool_call_with_input(
         id: &str,
         name: &str,
@@ -117,7 +113,6 @@ impl MockProvider {
             responses: Arc::new(Mutex::new(responses.into())),
         }
     }
-
     fn remaining(&self) -> usize {
         self.responses.lock().unwrap().len()
     }
@@ -127,7 +122,6 @@ impl LlmProvider for MockProvider {
     fn name(&self) -> &str {
         "mock"
     }
-
     fn stream<'a>(
         &'a self,
         _conversation: &'a Conversation,
@@ -150,7 +144,6 @@ impl LlmProvider for MockProvider {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| MockResponse::text_only("fallback done", 50));
-
             let mut events: Vec<anyhow::Result<StreamEvent>> = vec![];
             if let Some(text) = resp.text {
                 events.push(Ok(StreamEvent::Delta(ContentBlock::Text { text })));
@@ -164,7 +157,6 @@ impl LlmProvider for MockProvider {
                 ..Default::default()
             })));
             events.push(Ok(StreamEvent::Done));
-
             Ok(Box::pin(stream::iter(events))
                 as Pin<
                     Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>,
@@ -172,8 +164,6 @@ impl LlmProvider for MockProvider {
         })
     }
 }
-
-// ── Test helpers ──────────────────────────────────────────────────────────
 
 /// Returns (context, project_path, task_id, session_id, cancel).
 async fn make_context() -> (
@@ -218,8 +208,6 @@ async fn count_persisted_messages(slot_ctx: &crate::host::SlotContext, session_i
         .unwrap_or(0)
 }
 
-// ── extract_stash_content tests ────────────────────────────────────────────
-
 #[test]
 fn extract_stash_content_shell_extracts_stdout() {
     let value = serde_json::json!({
@@ -258,8 +246,6 @@ fn extract_stash_content_non_shell_returns_none() {
     assert!(extract_stash_content("task_list", &value).is_none());
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
-
 /// A single ToolUse turn above the compaction threshold triggers compaction,
 /// persists messages to DB, and replaces the conversation. The session then
 /// continues with the compacted context and ends normally.
@@ -267,7 +253,6 @@ fn extract_stash_content_non_shell_returns_none() {
 async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
     // context_window = 10,000 → threshold = 8,000 tokens
     let context_window = 10_000_i64;
-
     // Turn 1: ToolUse + 8,500 input tokens → above threshold → compaction fires.
     //         Tool dispatch is skipped when compaction fires (conversation replaced).
     // Turn 2: compaction LLM call → summary text returned.
@@ -277,13 +262,11 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
         MockResponse::text_only("Summary: worked on the task using shell tools.", 200),
         MockResponse::text_only("Completed the task.", 300),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -308,24 +291,20 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
         false,
     )
     .await;
-
     // Session should end successfully (compacted + continued).
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
-
     // All 3 mock responses were consumed.
     assert_eq!(
         provider.remaining(),
         0,
         "all mock responses should be consumed"
     );
-
     // Messages were persisted to DB before compaction.
     let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
     assert!(
         persisted > 0,
         "expected session messages persisted before compaction, got 0"
     );
-
     // Conversation was replaced by compaction then continued.
     // Expected: [system, summary_user, ack_assistant, last_user_task,
     //            continue_user, final_assistant] = 6 messages.
@@ -354,7 +333,6 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
 async fn no_compaction_when_sum_large_but_current_context_small() {
     // context_window = 10,000 → threshold = 8,000 tokens
     let context_window = 10_000_i64;
-
     // Turn 1: ToolUse + 7,500 input  (sum=7_500, current=7_500 → below threshold)
     // Turn 2: ToolUse + 7,800 input  (sum=15_300, current=7_800 → below threshold)
     //   With the OLD sum-based check: sum 15,300 > 8,000 → compaction would wrongly fire.
@@ -365,13 +343,11 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
         MockResponse::tool_call("t2", "nonexistent_tool", 7_800),
         MockResponse::text_only("Completed.", 100),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -396,14 +372,12 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(
         provider.remaining(),
         0,
         "all 3 mock responses should be consumed"
     );
-
     // No compaction should have fired. Persisted message count is no
     // longer the signal (the reply loop now persists every turn to the DB
     // regardless of compaction); instead assert the conversation was never
@@ -419,7 +393,6 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
         djinn_provider::message::Role::System,
         "first message should still be the original system prompt (not a summary)"
     );
-
     // Per-turn persistence: every non-system message is durably stored
     // (the system prompt is intentionally skipped).
     let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
@@ -435,7 +408,6 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
 #[tokio::test]
 async fn reactive_compaction_on_context_length_error() {
     let context_window = 10_000_i64;
-
     // Provider behaviour:
     //   • Turn 1: ToolUse + small tokens (below threshold).
     //   • Turn 2 attempt: context_length error mid-stream → reactive compaction triggered.
@@ -448,12 +420,10 @@ async fn reactive_compaction_on_context_length_error() {
         call_count: Arc<Mutex<u32>>,
         inner: MockProvider,
     }
-
     impl LlmProvider for ErrorOnSecondCallProvider {
         fn name(&self) -> &str {
             "mock-error"
         }
-
         fn stream<'a>(
             &'a self,
             conversation: &'a Conversation,
@@ -486,7 +456,6 @@ async fn reactive_compaction_on_context_length_error() {
             }
         }
     }
-
     let inner = MockProvider::new(vec![
         // Call 1: normal ToolUse turn.
         MockResponse::tool_call("t1", "nonexistent_tool", 500),
@@ -500,13 +469,11 @@ async fn reactive_compaction_on_context_length_error() {
         call_count: Arc::new(Mutex::new(0)),
         inner,
     };
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -531,13 +498,11 @@ async fn reactive_compaction_on_context_length_error() {
         false,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "expected ok after reactive compaction, got: {:?}",
         result
     );
-
     // Messages are persisted per-turn (independent of the reactive
     // compaction that fired on the context-length error).
     let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
@@ -572,7 +537,6 @@ fn serialize_llm_input_preserves_system_tools_and_full_history_order() {
         metadata: None,
     });
     conversation.push(Message::user("Second request"));
-
     let tools = vec![serde_json::json!({
         "type": "function",
         "function": {
@@ -581,9 +545,7 @@ fn serialize_llm_input_preserves_system_tools_and_full_history_order() {
             "parameters": {"type": "object"}
         }
     })];
-
     let input = serialize_llm_input(&conversation, &tools);
-
     assert_eq!(input["tools"], serde_json::json!(tools));
     let messages = input["messages"].as_array().expect("messages array");
     assert_eq!(messages[0]["role"], "system");
@@ -605,7 +567,6 @@ fn serialize_llm_input_preserves_parallel_tool_call_order() {
     let mut conversation = Conversation::new();
     conversation.push(Message::system("You are a worker."));
     conversation.push(Message::user("Do three things at once"));
-
     // Assistant returns 3 parallel tool calls in a single message.
     conversation.push(Message {
         role: Role::Assistant,
@@ -628,7 +589,6 @@ fn serialize_llm_input_preserves_parallel_tool_call_order() {
         ],
         metadata: None,
     });
-
     // Tool results come back in a single user message (same order).
     conversation.push(Message {
         role: Role::User,
@@ -651,9 +611,7 @@ fn serialize_llm_input_preserves_parallel_tool_call_order() {
         ],
         metadata: None,
     });
-
     conversation.push(Message::user("Now summarize"));
-
     let tools = vec![serde_json::json!({
         "type": "function",
         "function": {
@@ -662,16 +620,13 @@ fn serialize_llm_input_preserves_parallel_tool_call_order() {
             "parameters": {"type": "object"}
         }
     })];
-
     let input = serialize_llm_input(&conversation, &tools);
     let messages = input["messages"].as_array().expect("messages array");
-
     // system, user, assistant(3 tool_calls), tool(A), tool(B), tool(C), user
     assert_eq!(messages.len(), 7);
     assert_eq!(messages[0]["role"], "system");
     assert_eq!(messages[1]["role"], "user");
     assert_eq!(messages[1]["content"], "Do three things at once");
-
     // Assistant message with 3 tool_calls in order.
     assert_eq!(messages[2]["role"], "assistant");
     let tool_calls = messages[2]["tool_calls"].as_array().expect("tool_calls");
@@ -679,25 +634,19 @@ fn serialize_llm_input_preserves_parallel_tool_call_order() {
     assert_eq!(tool_calls[0]["id"], "tc_a");
     assert_eq!(tool_calls[1]["id"], "tc_b");
     assert_eq!(tool_calls[2]["id"], "tc_c");
-
     // Tool results in matching order.
     assert_eq!(messages[3]["role"], "tool");
     assert_eq!(messages[3]["tool_call_id"], "tc_a");
     assert_eq!(messages[3]["content"], "A");
-
     assert_eq!(messages[4]["role"], "tool");
     assert_eq!(messages[4]["tool_call_id"], "tc_b");
     assert_eq!(messages[4]["content"], "found: bar");
-
     assert_eq!(messages[5]["role"], "tool");
     assert_eq!(messages[5]["tool_call_id"], "tc_c");
     assert_eq!(messages[5]["content"], "[]");
-
     assert_eq!(messages[6]["role"], "user");
     assert_eq!(messages[6]["content"], "Now summarize");
 }
-
-// ── Finalize tool + nudge loop tests ──────────────────────────────────────
 
 fn dummy_tool_schema(name: &str) -> serde_json::Value {
     serde_json::json!({
@@ -760,12 +709,10 @@ async fn run_scripted_reply_loop_with_dispatcher(
         .into_owned();
     let task_id = task.id;
     let session_id = session.id;
-
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider,
@@ -790,7 +737,6 @@ async fn run_scripted_reply_loop_with_dispatcher(
         false,
     )
     .await;
-
     (result, output, conv, slot_ctx, session_id)
 }
 
@@ -799,7 +745,6 @@ async fn run_scripted_reply_loop_with_dispatcher(
 #[tokio::test]
 async fn finalize_tool_call_ends_session_and_captures_payload() {
     let tools = vec![dummy_tool_schema("submit_work")];
-
     let provider = MockProvider::new(vec![MockResponse {
         text: None,
         tool_calls: vec![ContentBlock::ToolUse {
@@ -810,13 +755,11 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         input_tokens: 100,
         output_tokens: 10,
     }]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -841,7 +784,6 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "finalize response consumed");
     assert!(
@@ -860,7 +802,6 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
 #[tokio::test]
 async fn text_only_without_finalize_triggers_nudge_then_fails() {
     let tools = vec![dummy_tool_schema("submit_work")];
-
     // 3 text-only responses → MAX_NUDGE_ATTEMPTS exceeded → error.
     let provider = MockProvider::new(vec![
         MockResponse::text_only("I think I'm done.", 100),
@@ -868,13 +809,11 @@ async fn text_only_without_finalize_triggers_nudge_then_fails() {
         MockResponse::text_only("Yes, definitely done.", 120),
         // The 4th turn is never reached because we fail after 3 nudges.
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -899,7 +838,6 @@ async fn text_only_without_finalize_triggers_nudge_then_fails() {
         false,
     )
     .await;
-
     assert!(result.is_err(), "expected error after nudge exhaustion");
     assert!(
         result
@@ -918,7 +856,6 @@ async fn nudge_count_resets_after_tool_call() {
         dummy_tool_schema("some_tool"),
         dummy_tool_schema("submit_work"),
     ];
-
     let provider = MockProvider::new(vec![
         // Turn 1: text-only → nudge 1
         MockResponse::text_only("hmm", 100),
@@ -938,13 +875,11 @@ async fn nudge_count_resets_after_tool_call() {
             output_tokens: 10,
         },
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -969,7 +904,6 @@ async fn nudge_count_resets_after_tool_call() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "all responses consumed");
     assert!(output.finalize_payload.is_some(), "finalize payload set");
@@ -978,14 +912,11 @@ async fn nudge_count_resets_after_tool_call() {
 #[tokio::test]
 async fn tool_choice_required_for_supported_providers() {
     use std::sync::Mutex;
-
     let tools = vec![dummy_tool_schema("submit_work")];
-
     struct RecordingProvider {
         recorded_choices: Arc<Mutex<Vec<Option<ToolChoice>>>>,
         inner: MockProvider,
     }
-
     impl LlmProvider for RecordingProvider {
         fn name(&self) -> &str {
             "recording"
@@ -1011,7 +942,6 @@ async fn tool_choice_required_for_supported_providers() {
             self.inner.stream(conversation, tools, tool_choice)
         }
     }
-
     let inner = MockProvider::new(vec![
         MockResponse::tool_call("tc1", "nonexistent_tool", 100),
         MockResponse {
@@ -1030,13 +960,11 @@ async fn tool_choice_required_for_supported_providers() {
         recorded_choices: Arc::clone(&recorded),
         inner,
     };
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1061,9 +989,7 @@ async fn tool_choice_required_for_supported_providers() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
-
     let choices = recorded.lock().unwrap();
     assert_eq!(choices.len(), 2, "two turns recorded");
     for (i, choice) in choices.iter().enumerate() {
@@ -1086,8 +1012,6 @@ async fn tool_choice_auto_for_unsupported_providers() {
     assert!(supports_tool_choice_required("anthropic/claude-sonnet-4-5"));
     assert!(supports_tool_choice_required("chatgpt_codex/codex-mini"));
 }
-
-// ── G9: graceful MAX_STEPS wind-down ──────────────────────────────────────
 
 /// Concatenate every text block across all messages with the given role.
 fn role_text(conv: &Conversation, role: djinn_provider::message::Role) -> String {
@@ -1141,7 +1065,6 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
     // explicitly via `max_turns_override` rather than a process-global env
     // var so concurrent tests can't race each other's cap.
     let tools = vec![dummy_tool_schema("submit_work")];
-
     // Turns 1..=3: tool calls keep the loop running up to the cap.
     // Turn 4 (the single granted wind-down turn): text-only summary → ends.
     let provider = MockProvider::new(vec![
@@ -1154,13 +1077,11 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
             130,
         ),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1185,7 +1106,6 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
         false,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "step cap should wind down gracefully, got: {:?}",
@@ -1197,7 +1117,6 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
         0,
         "the single wind-down turn should run (4th response consumed)"
     );
-
     // Exactly ONE wind-down directive was injected (one extra turn, not a loop).
     let injected = conv
         .messages
@@ -1211,7 +1130,6 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
         })
         .count();
     assert_eq!(injected, 1, "wind-down directive injected exactly once");
-
     // The agent's hand-off summary was captured (persisted into the conversation).
     let assistant_text = role_text(&conv, Role::Assistant);
     assert!(
@@ -1228,7 +1146,6 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     // Cap explicitly via `max_turns_override` (no process-global env var,
     // which would race concurrent tests).
     let tools = vec![dummy_tool_schema("submit_work")];
-
     // Turns 1..=3 fill the cap; turn 4 (wind-down) is ALSO a tool call →
     // not terminal → next cap check hard-errors. The MockProvider's
     // text-only fallback is never reached because we error first.
@@ -1263,13 +1180,11 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
             130,
         ),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1294,7 +1209,6 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
         false,
     )
     .await;
-
     assert!(
         result.is_err(),
         "ignoring the wind-down should fall back to the hard error"
@@ -1304,7 +1218,6 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
         err.contains("max turns") && err.contains("wind-down"),
         "error should mention the hard cap and the attempted wind-down, got: {err}"
     );
-
     // Wind-down was injected exactly once even though it was ignored —
     // the extension is strictly one turn, never an unbounded loop.
     let injected = conv
@@ -1330,7 +1243,6 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     install_session_budget_env_with_hard(1_000, 0.5, 0.92);
-
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
     for step in 1..=2 {
@@ -1346,13 +1258,11 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         75,
     ));
     let provider = MockProvider::new(responses);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1377,10 +1287,8 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         false,
     )
     .await;
-
     clear_session_budget_env();
     let _ = &_env_guard;
-
     assert!(
         result.is_ok(),
         "token budget should wind down gracefully, got: {:?}",
@@ -1410,7 +1318,6 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     install_session_budget_env_with_hard(1_000, 0.5, 0.92);
-
     let tools = vec![dummy_tool_schema("missing_tool")];
     let mut responses = Vec::new();
     for step in 1..=3 {
@@ -1422,13 +1329,11 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         ));
     }
     let provider = MockProvider::new(responses);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1453,10 +1358,8 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         false,
     )
     .await;
-
     clear_session_budget_env();
     let _ = &_env_guard;
-
     assert!(
         result.is_err(),
         "ignoring token-budget wind-down should hard-error"
@@ -1502,13 +1405,11 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         MockResponse::tool_call_with_input("tc3", "nonexistent_tool", same_args.clone(), 120),
         MockResponse::tool_call_with_input("tc4", "nonexistent_tool", same_args, 130),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1533,7 +1434,6 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         false,
     )
     .await;
-
     let err = result.expect_err("fourth identical failure should trip typed loop guard");
     let guard_err = err
         .downcast_ref::<LoopGuardError>()
@@ -1544,7 +1444,6 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
     );
     assert_eq!(guard_err.condition.observed, 4);
     assert_eq!(guard_err.condition.threshold, 3);
-
     let user_text = role_text(&conv, Role::User);
     let correction_count = conv
         .messages
@@ -1568,7 +1467,6 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
             && user_text.contains("Do not call this exact tool"),
         "corrective message should name and forbid the exact normalized signature, got: {user_text}"
     );
-
     // The system prompt is intentionally skipped by the reply loop's
     // initial-seed persistence pass, so persisted = conv.messages.len() - 1.
     // The 4th attempt's tool-result message is also not persisted because
@@ -1619,10 +1517,8 @@ async fn permission_denial_tool_failure_trips_on_second_identical_attempt() {
         MockResponse::tool_call_with_input("deny1", "secure_fetch", args.clone(), 100),
         MockResponse::tool_call_with_input("deny2", "secure_fetch", args, 110),
     ]);
-
     let (result, _output, _conv, _slot_ctx, _session_id) =
         run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
-
     let err = result.expect_err("second identical permission denial should trip guard");
     let guard_err = err
         .downcast_ref::<LoopGuardError>()
@@ -1656,10 +1552,8 @@ async fn repeated_assistant_output_signature_trips_on_fourth_repeat() {
         response("a3", 120),
         response("a4", 130),
     ]);
-
     let (result, _output, _conv, _slot_ctx, _session_id) =
         run_scripted_reply_loop(&provider, &tools).await;
-
     let err = result.expect_err("fourth identical assistant output should trip guard");
     let guard_err = err
         .downcast_ref::<LoopGuardError>()
@@ -1688,10 +1582,8 @@ async fn six_consecutive_tool_failures_across_different_signatures_trip_guard() 
             })
             .collect(),
     );
-
     let (result, _output, _conv, _slot_ctx, _session_id) =
         run_scripted_reply_loop(&provider, &tools).await;
-
     let err = result.expect_err("six consecutive failures should trip guard");
     let guard_err = err
         .downcast_ref::<LoopGuardError>()
@@ -1745,10 +1637,8 @@ async fn successful_novel_tool_call_resets_failure_pressure() {
             150,
         ),
     ]);
-
     let (result, output, _conv, _slot_ctx, _session_id) =
         run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
-
     assert!(
         result.is_ok(),
         "post-progress repeated failures should not trip before finalize: {result:?}"
@@ -1783,7 +1673,6 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
             flaky_mcp_handler as test_helpers::ToolHandlerFn,
         )]),
     ));
-
     let mut responses: Vec<MockResponse> = (0..5)
         .map(|idx| {
             MockResponse::tool_call_with_input(
@@ -1818,10 +1707,8 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
         140,
     ));
     let provider = MockProvider::new(responses);
-
     let (result, output, _conv, _slot_ctx, _session_id) =
         run_scripted_reply_loop_with_dispatcher(&provider, &tools, Some(dispatcher)).await;
-
     assert!(
         result.is_ok(),
         "a mixed batch containing progress should reset the consecutive-failure streak: {result:?}"
@@ -1829,8 +1716,6 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert_eq!(provider.remaining(), 0);
 }
-
-// ── rrdr soft budget: one-shot converge reminder ──────────────────────────
 
 /// Helper: count user messages whose text body contains a `<system-reminder>`
 /// tag. Matches both opening and closing tags so the count is robust against
@@ -1922,12 +1807,10 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
     }
-
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
     ];
-
     // Each turn is a distinct tool call (different tool name and id) so the
     // in-loop guard over repeated failing tool-call signatures never trips
     // before the soft-budget injection has had a chance to fire.
@@ -1946,13 +1829,11 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             output_tokens: 5,
         },
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -1985,13 +1866,11 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         false,
     )
     .await;
-
     // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
     clear_session_budget_env();
     // Avoid the `_env_guard` "field never read" warning while still proving
     // the guard was held for the duration of `run_reply_loop`.
     let _ = &_env_guard;
-
     assert!(
         result.is_ok(),
         "soft-budget reminder should not fail the session; got: {:?}",
@@ -2002,7 +1881,6 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
         0,
         "all scripted turns (4) should be consumed: 3 tool calls + 1 finalize"
     );
-
     // Exactly ONE `<system-reminder>` was injected, even though the threshold
     // remained exceeded for the remainder of the session.
     let reminder_count = count_system_reminder_messages(&conv);
@@ -2013,7 +1891,6 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
          <system-reminder> user messages, full conversation:\n{:#?}",
         conv.messages
     );
-
     // The reminder text should match the converge directive contract.
     let reminder_text = role_text(&conv, Role::User);
     assert!(
@@ -2023,7 +1900,6 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             && reminder_text.contains("commit"),
         "reminder must convey the converge/keep/commit message; got: {reminder_text}"
     );
-
     // The reminder is also persisted durably alongside the assistant/tool
     // transcript, not just pushed into the in-memory conversation.
     let repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
@@ -2059,12 +1935,10 @@ async fn soft_budget_below_threshold_no_injection() {
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO");
     }
-
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
     ];
-
     // 5 tool-call turns at 30+10=40 cumulative tokens each → 200 tokens total
     // (well under 750). Then a submit_work finalize.
     //
@@ -2089,13 +1963,11 @@ async fn soft_budget_below_threshold_no_injection() {
             output_tokens: 5,
         },
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2120,18 +1992,15 @@ async fn soft_budget_below_threshold_no_injection() {
         false,
     )
     .await;
-
     // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
     clear_session_budget_env();
     let _ = &_env_guard;
-
     assert!(
         result.is_ok(),
         "session should complete normally below the soft threshold; got: {:?}",
         result
     );
     assert_eq!(provider.remaining(), 0, "all 6 scripted turns consumed");
-
     let reminder_count = count_system_reminder_messages(&conv);
     assert_eq!(
         reminder_count, 0,
@@ -2147,8 +2016,6 @@ async fn soft_budget_below_threshold_no_injection() {
     );
 }
 
-// ── rrdr hard budget: structured wind-down reason ──────────────────────────
-
 #[tokio::test]
 async fn hard_budget_wind_down_captures_budget_summary() {
     let _env_guard = SESSION_BUDGET_ENV_LOCK
@@ -2160,7 +2027,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
         std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
     }
-
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2170,13 +2036,11 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30), // cumulative 90 → hard wind-down before next turn
         MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2201,10 +2065,8 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         false,
     )
     .await;
-
     clear_session_budget_env();
     let _ = &_env_guard;
-
     assert!(
         result.is_ok(),
         "hard budget summary should park cleanly: {result:?}"
@@ -2228,7 +2090,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
     );
     let user_text = role_text(&conv, Role::User);
     assert!(user_text.contains("You are out of steps"));
-
     let stage_outcome = StageOutcome::Parked {
         reason: ParkReason::Budget,
         summary: output.budget_wind_down_summary.clone(),
@@ -2242,7 +2103,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         (SessionStatus::Completed, Some("budget".to_string())),
         "successful budget wind-downs settle as completed budget parks"
     );
-
     handle_budget_park(
         output
             .budget_wind_down_summary
@@ -2256,7 +2116,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         &slot_ctx,
     )
     .await;
-
     let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let entries = repo.list_activity(&task_id).await.unwrap();
     let work_entries: Vec<_> = entries
@@ -2268,7 +2127,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         1,
         "budget summary should be persisted exactly once as normal work_submitted activity"
     );
-
     let payload: serde_json::Value = serde_json::from_str(&work_entries[0].payload).unwrap();
     assert_eq!(
         payload["summary"],
@@ -2279,7 +2137,6 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         remaining_concerns.starts_with("budget-parked:"),
         "remaining concerns should carry the budget-park prefix: {remaining_concerns}"
     );
-
     let (worker_summary, worker_concerns) = extract_worker_context(&Some(entries));
     assert_eq!(
         worker_summary.as_deref(),
@@ -2305,7 +2162,6 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         std::env::remove_var("DJINN_SESSION_BUDGET_WORKER_MAX_TURNS");
         std::env::set_var("DJINN_SESSION_BUDGET_WORKER_HARD_THRESHOLD_RATIO", "0.8");
     }
-
     let tools = vec![
         dummy_tool_schema("submit_work"),
         dummy_tool_schema("worker_tool"),
@@ -2321,13 +2177,11 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         // fallback as a false successful summary.
         MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
     ]);
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2352,10 +2206,8 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         false,
     )
     .await;
-
     clear_session_budget_env();
     let _ = &_env_guard;
-
     let err = result.expect_err("ignored hard-budget wind-down should return typed error");
     assert!(
         err.downcast_ref::<BudgetWindDownIgnored>().is_some(),
@@ -2374,7 +2226,6 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         1,
         "ignored budget wind-down must stop before consuming later fallback text"
     );
-
     let stage_outcome = StageOutcome::Parked {
         reason: ParkReason::Budget,
         summary: None,
@@ -2397,7 +2248,6 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         ),
         other => panic!("expected parked outcome, got {other:?}"),
     }
-
     let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let entries = repo.list_activity(&task_id).await.unwrap();
     assert!(
@@ -2419,16 +2269,13 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
 #[tokio::test]
 async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
     use std::sync::Mutex;
-
     let tools = vec![dummy_tool_schema("submit_work")];
-
     /// Captures the conversation of the first stream call, then defers to a
     /// MockProvider that finalizes so the loop terminates.
     struct CapturingProvider {
         first_conversation: Arc<Mutex<Option<Conversation>>>,
         inner: MockProvider,
     }
-
     impl LlmProvider for CapturingProvider {
         fn name(&self) -> &str {
             "capturing"
@@ -2459,7 +2306,6 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
             self.inner.stream(conversation, tools, tool_choice)
         }
     }
-
     let inner = MockProvider::new(vec![MockResponse {
         text: None,
         tool_calls: vec![ContentBlock::ToolUse {
@@ -2475,10 +2321,8 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         first_conversation: Arc::clone(&first_conversation),
         inner,
     };
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
-
     // Seed a transcript ending in an UNANSWERED assistant tool call, exactly as
     // a prior session's persisted history would on a rework continuation.
     let mut conv = Conversation::new();
@@ -2493,7 +2337,6 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         }],
         metadata: None,
     });
-
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2518,9 +2361,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // The provider must have received a synthesized tool result answering the
     // dangling id — the original assistant call is preserved (context intact).
     let captured = first_conversation
@@ -2551,8 +2392,6 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
     );
 }
 
-// ── Worker submit_work no-progress integrity gate tests ────────────────────
-
 /// Helper: create a git repo with a committed initial file and a dirty
 /// tracked edit so `compute_submission_diff_fingerprint` returns a `Diff`.
 fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
@@ -2560,7 +2399,6 @@ fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
         .prefix("djinn-test-integrity-gate-")
         .tempdir()
         .expect("create temp dir");
-
     let run_git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(args)
@@ -2574,20 +2412,16 @@ fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-
     run_git(&["init"]);
     run_git(&["config", "--local", "user.email", "test@test.com"]);
     run_git(&["config", "--local", "user.name", "Test User"]);
     run_git(&["config", "--local", "commit.gpgsign", "false"]);
-
     std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
     run_git(&["add", "README.md"]);
     run_git(&["commit", "-m", "init"]);
     run_git(&["branch", "-m", "main"]);
-
     // Make a dirty tracked edit so the fingerprint computes a Diff.
     std::fs::write(dir.path().join("README.md"), "hello\ndirty\n").expect("write dirty");
-
     dir
 }
 
@@ -2599,15 +2433,12 @@ fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
 async fn first_no_progress_submit_intercepted_returns_corrective_and_continues() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     // Compute the fingerprint so we can record it as rejected.
     let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
         .await
         .expect("compute fingerprint");
     let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // Record a rejected fingerprint for this task.
     record_rejected_integrity_entry(
         &task_id,
@@ -2618,7 +2449,6 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
         &fingerprint,
     )
     .await;
-
     // Script: turn 1 returns submit_work (guard intercepts), then turns 2-4
     // are text-only which the nudge loop absorbs before returning an error.
     // The important thing is that the guard intercepted on turn 1.
@@ -2632,11 +2462,9 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
         // Turn 2: model responds to the corrective message with text-only.
         MockResponse::text_only("I'll make changes and resubmit.", 100),
     ]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2665,13 +2493,11 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
         false,
     )
     .await;
-
     // The loop may terminate with a nudge-loop error (text-only turns without
     // finalize). That's expected — the guard intercepted the finalize and the
     // model never retried with a changed fingerprint. The key assertions are
     // about the guard behavior, not the loop termination status.
     let _ = result;
-
     // The guard intercepted: finalize_payload and finalize_tool_name must not be set.
     assert!(
         output.finalize_payload.is_none(),
@@ -2683,7 +2509,6 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
         "finalize_tool_name must be None when the guard intercepts; got: {:?}",
         output.finalize_tool_name
     );
-
     // The corrective tool result must be in the conversation.
     let has_corrective = conv.messages.iter().any(|m| {
         m.content.iter().any(|b| {
@@ -2700,7 +2525,6 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
          messages: {:?}",
         conv.messages
     );
-
     // Both mock responses were consumed (guard + text-only final).
     assert_eq!(provider.remaining(), 0);
 }
@@ -2712,22 +2536,17 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
 async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // No rejected fingerprint recorded — the guard should skip comparison.
-
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
         serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
         100,
     )]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2756,9 +2575,7 @@ async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // No rejected fingerprint → guard skipped → finalize proceeds normally.
     assert!(
         output.finalize_payload.is_some(),
@@ -2777,14 +2594,11 @@ async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
 async fn non_worker_role_bypasses_guard() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
         .await
         .expect("compute fingerprint");
     let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // Record a rejected fingerprint — but the guard should not check it
     // because role_name is "planner", not "worker".
     record_rejected_integrity_entry(
@@ -2796,18 +2610,15 @@ async fn non_worker_role_bypasses_guard() {
         &fingerprint,
     )
     .await;
-
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
         serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
         100,
     )]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a planner."));
     conv.push(Message::user("Plan the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2836,9 +2647,7 @@ async fn non_worker_role_bypasses_guard() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // Non-worker role → guard bypassed → finalize proceeds.
     assert!(
         output.finalize_payload.is_some(),
@@ -2857,9 +2666,7 @@ async fn non_worker_role_bypasses_guard() {
 async fn different_fingerprint_allows_finalize() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // Record a rejected fingerprint that is DIFFERENT from the current worktree.
     record_rejected_integrity_entry(
         &task_id,
@@ -2870,18 +2677,15 @@ async fn different_fingerprint_allows_finalize() {
         "sha256:completely-different-fingerprint",
     )
     .await;
-
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
         serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
         100,
     )]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -2910,9 +2714,7 @@ async fn different_fingerprint_allows_finalize() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // Different fingerprint → guard allows → finalize proceeds.
     assert!(
         output.finalize_payload.is_some(),
@@ -2936,7 +2738,6 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
         .prefix("djinn-test-nodiff-guard-")
         .tempdir()
         .expect("create temp dir");
-
     let run_git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(args)
@@ -2950,7 +2751,6 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-
     run_git(&["init"]);
     run_git(&["config", "--local", "user.email", "test@test.com"]);
     run_git(&["config", "--local", "user.name", "Test User"]);
@@ -2960,11 +2760,8 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
     run_git(&["commit", "-m", "init"]);
     run_git(&["branch", "-m", "main"]);
     // No dirty edits — NoDiff.
-
     let worktree_path = dir.path().to_path_buf();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // Record a rejected fingerprint — but the guard should skip because
     // the current worktree is NoDiff.
     record_rejected_integrity_entry(
@@ -2976,18 +2773,15 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
         "sha256:some-fingerprint",
     )
     .await;
-
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
         serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
         100,
     )]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -3016,9 +2810,7 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // NoDiff → guard skipped comparison → finalize proceeds (existing
     // empty-diff safeguards handle empty submissions separately).
     assert!(
@@ -3046,15 +2838,12 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
 async fn second_strike_no_progress_submission_settles_session() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     // Compute the fingerprint so we can record it as rejected.
     let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
         .await
         .expect("compute fingerprint");
     let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     // Record a rejected fingerprint for this task.
     record_rejected_integrity_entry(
         &task_id,
@@ -3065,7 +2854,6 @@ async fn second_strike_no_progress_submission_settles_session() {
         &fingerprint,
     )
     .await;
-
     // Script: turn 1 returns submit_work (first bounce guard intercepts),
     // turn 2 is a text response to the corrective message, then turn 3
     // returns submit_work again (second strike triggers settlement and break).
@@ -3087,11 +2875,9 @@ async fn second_strike_no_progress_submission_settles_session() {
             100,
         ),
     ]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -3120,16 +2906,13 @@ async fn second_strike_no_progress_submission_settles_session() {
         false,
     )
     .await;
-
     // The loop should have exited cleanly (the second strike breaks out).
     let _ = result;
-
     // Second strike: output must be flagged as no_progress_submission.
     assert!(
         output.no_progress_submission,
         "no_progress_submission must be true on second strike; got false"
     );
-
     // The finalize payload must NOT be accepted.
     assert!(
         output.finalize_payload.is_none(),
@@ -3141,7 +2924,6 @@ async fn second_strike_no_progress_submission_settles_session() {
         "finalize_tool_name must be None on second strike; got: {:?}",
         output.finalize_tool_name
     );
-
     // The conversation should contain the corrective tool result from the
     // first bounce.
     let has_corrective = conv.messages.iter().any(|m| {
@@ -3159,7 +2941,6 @@ async fn second_strike_no_progress_submission_settles_session() {
          messages: {:?}",
         conv.messages
     );
-
     // The `no_progress_submission` activity must have been logged.
     let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
     let entries = repo
@@ -3179,7 +2960,6 @@ async fn second_strike_no_progress_submission_settles_session() {
         !entries.is_empty(),
         "no_progress_submission activity must be logged after second strike"
     );
-
     // All mock responses should have been consumed.
     assert_eq!(provider.remaining(), 0);
 }
@@ -3191,15 +2971,12 @@ async fn second_strike_no_progress_submission_settles_session() {
 async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_path_buf();
-
     // Compute the initial fingerprint and record it as rejected.
     let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
         .await
         .expect("compute fingerprint");
     let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
-
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-
     record_rejected_integrity_entry(
         &task_id,
         &slot_ctx,
@@ -3209,22 +2986,18 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
         &fingerprint,
     )
     .await;
-
     // Change the worktree content so the fingerprint is different.
     std::fs::write(worktree_path.join("README.md"), "hello\nchanged content\n")
         .expect("write changed content");
-
     let provider = MockProvider::new(vec![MockResponse::tool_call_with_input(
         "submit-1",
         "submit_work",
         serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
         100,
     )]);
-
     let mut conv = Conversation::new();
     conv.push(Message::system("You are a worker."));
     conv.push(Message::user("Do the task."));
-
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
             provider: &provider,
@@ -3253,9 +3026,7 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
         false,
     )
     .await;
-
     assert!(result.is_ok(), "expected ok, got: {result:?}");
-
     // Different fingerprint → guard allows → finalize proceeds normally.
     assert!(
         !output.no_progress_submission,

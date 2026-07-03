@@ -80,12 +80,10 @@ impl ParsedAgentOutput {
             no_progress_submission: false,
         }
     }
-
     /// Create an empty output (no errors, no feedback).
     pub fn empty() -> Self {
         Self::default()
     }
-
     pub fn ingest_text(&mut self, text: &str) {
         let normalized = text.replace("\\r\\n", "\n").replace("\\n", "\n");
         for raw_line in normalized.lines() {
@@ -93,7 +91,6 @@ impl ParsedAgentOutput {
             if line.is_empty() {
                 continue;
             }
-
             // Extract reviewer feedback if present (still useful for logging).
             if self.captures_feedback
                 && let Some(payload) = marker_payload(&line, "FEEDBACK")
@@ -103,7 +100,6 @@ impl ParsedAgentOutput {
                     self.reviewer_feedback = Some(feedback.to_string());
                 }
             }
-
             if self.runtime_error.is_none()
                 && let Some(error) = extract_runtime_error(&line)
             {

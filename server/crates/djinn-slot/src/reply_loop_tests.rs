@@ -116,7 +116,6 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
     ]]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
@@ -128,7 +127,6 @@ async fn text_only_completion_path_ends_without_nudge_when_no_tools_exist() {
         &cancel,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "expected text-only completion to succeed: {result:?}"
@@ -169,7 +167,6 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -181,7 +178,6 @@ async fn tool_call_execution_adds_tool_result_and_continues_to_next_turn() {
         &cancel,
     )
     .await;
-
     assert!(result.is_ok(), "tool-call path should succeed: {result:?}");
     assert_eq!(
         provider.remaining(),
@@ -217,7 +213,6 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
     ]]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -229,7 +224,6 @@ async fn finalize_tool_detection_ends_loop_without_extra_provider_turn() {
         &cancel,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "finalize tool turn should succeed: {result:?}"
@@ -270,7 +264,6 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -282,7 +275,6 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
         &cancel,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "empty-turn retry + nudge path should succeed: {result:?}"
@@ -318,7 +310,6 @@ async fn max_nudge_abort_returns_clean_error_path() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -330,7 +321,6 @@ async fn max_nudge_abort_returns_clean_error_path() {
         &cancel,
     )
     .await;
-
     let error = result.expect_err("expected clean nudge exhaustion error");
     assert!(
         error
@@ -345,7 +335,6 @@ async fn provider_error_propagates_from_shared_failing_provider() {
     let provider = FailingProvider::new("scripted provider failure for reply loop");
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, _output, _, _, _, _) = run_with_provider(
         &provider,
         &[],
@@ -357,7 +346,6 @@ async fn provider_error_propagates_from_shared_failing_provider() {
         &cancel,
     )
     .await;
-
     let error = result.expect_err("provider failure should propagate");
     assert!(
         error
@@ -392,7 +380,6 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -404,7 +391,6 @@ async fn metadata_drives_streaming_dispatch_for_safe_tools() {
         &cancel,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "metadata-driven dispatch should succeed: {result:?}"
@@ -445,7 +431,6 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -457,7 +442,6 @@ async fn missing_metadata_defaults_to_unsafe_dispatch() {
         &cancel,
     )
     .await;
-
     assert!(
         result.is_ok(),
         "default-unsafe dispatch should succeed: {result:?}"
@@ -508,7 +492,6 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-
     let (result, output, _, _, _, _) = run_with_provider(
         &provider,
         &tools,
@@ -520,7 +503,6 @@ async fn side_query_tools_share_normal_tool_result_turn_and_keep_order() {
         &cancel,
     )
     .await;
-
     assert!(result.is_ok(), "side-query path should succeed: {result:?}");
     assert_eq!(output.finalize_tool_name.as_deref(), Some("submit_work"));
     assert!(matches!(

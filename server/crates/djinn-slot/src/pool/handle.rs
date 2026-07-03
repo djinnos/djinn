@@ -34,7 +34,6 @@ impl SlotPoolHandle {
     pub fn from_raw_sender(sender: mpsc::Sender<PoolMessage>) -> Self {
         Self { sender }
     }
-
     pub fn spawn(
         app_state: SlotContext,
         cancel: CancellationToken,
@@ -44,7 +43,6 @@ impl SlotPoolHandle {
         tokio::spawn(SlotPool::new(receiver, app_state, cancel, config).run());
         Self { sender }
     }
-
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_with_factory(
         app_state: SlotContext,
@@ -58,7 +56,6 @@ impl SlotPoolHandle {
         );
         Self { sender }
     }
-
     async fn request<T>(&self, f: impl FnOnce(Reply<T>) -> PoolMessage) -> Result<T, PoolError> {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -67,7 +64,6 @@ impl SlotPoolHandle {
             .map_err(|_| PoolError::ActorDead)?;
         rx.await.map_err(|_| PoolError::NoResponse)?
     }
-
     pub async fn dispatch(
         &self,
         task_id: &str,
@@ -82,7 +78,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     /// Additive re-dispatch entry point that threads an optional
     /// resume-via-git lifecycle metadata blob (a JSON-serialized
     /// `djinn_runtime::ResumeLifecycleMetadata`) through the slot pipeline
@@ -115,7 +110,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn has_session(&self, task_id: &str) -> Result<bool, PoolError> {
         self.request(|tx| PoolMessage::HasSession {
             task_id: task_id.to_owned(),
@@ -123,7 +117,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn kill_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::KillSession {
             task_id: task_id.to_owned(),
@@ -131,7 +124,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     /// Authoritatively terminate an operator/user-requested running session.
     ///
     /// Unlike [`kill_session`], this synchronously reclaims the task mapping,
@@ -146,7 +138,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     /// Forcibly evict a leaked task→slot mapping whose `Killed`/`Free` event
     /// never arrived (dead/evicted/OOM-killed pod, stuck RPC stream). Unlike
     /// [`kill_session`], this does not depend on the pod responding — it
@@ -159,7 +150,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn pause_session(&self, task_id: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::PauseSession {
             task_id: task_id.to_owned(),
@@ -167,17 +157,14 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn get_status(&self) -> Result<PoolStatus, PoolError> {
         self.request(|tx| PoolMessage::GetStatus { respond_to: tx })
             .await
     }
-
     pub async fn snapshot(&self) -> Result<Vec<DebugSlot>, PoolError> {
         self.request(|tx| PoolMessage::Snapshot { respond_to: tx })
             .await
     }
-
     pub async fn session_for_task(
         &self,
         task_id: &str,
@@ -188,7 +175,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn reconfigure(&self, config: SlotPoolConfig) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::Reconfigure {
             config,
@@ -196,7 +182,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn interrupt_all(&self, reason: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::InterruptAll {
             reason: reason.to_owned(),
@@ -204,7 +189,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     pub async fn interrupt_project(&self, project_id: &str, reason: &str) -> Result<(), PoolError> {
         self.request(|tx| PoolMessage::InterruptProject {
             project_id: project_id.to_owned(),
@@ -213,7 +197,6 @@ impl SlotPoolHandle {
         })
         .await
     }
-
     /// Test-only: inject a live `(token_count, turn_count)` override for a
     /// task so the coordinator's session ceiling logic can observe a runaway
     /// session without a real worker bridging `touch_activity`.

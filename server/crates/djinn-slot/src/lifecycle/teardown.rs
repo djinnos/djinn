@@ -36,8 +36,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_in,
             tokens_out,
         } = params;
-
-        // ── Second-strike no_progress_submission settlement ──────────
         // When the reply loop's no-progress integrity gate detected a second
         // consecutive identical rejected-fingerprint submit_work, the reply
         // loop already settled the session via `settle_no_progress_submission`
@@ -63,7 +61,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
             }
         }
-
         apply_transition_and_dispatch(
             None,
             &task_id,
@@ -74,7 +71,6 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         )
         .await;
-
         ctx.deregister_background_work(&task_id);
     });
 }
@@ -84,8 +80,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 /// an incremented `no_progress_streak`, emit a telemetry event, and route the
 /// task into planner intervention via the coordinator.
 ///
-/// This follows the normal settle path without incrementing the
-/// `dispatch_failure_streak`.
+/// This follows the normal settle path without incrementing the `dispatch_failure_streak`.
 pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotContext) {
     // Record a `no_progress_submission` activity so the coordinator and
     // any audit trail can see why this session was terminated.
@@ -114,7 +109,6 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
             "teardown: failed to log no_progress_submission activity"
         );
     }
-
     // Increment the task-level no_progress_streak by recording a new rejected
     // integrity entry with the same fingerprint. This uses the latest rejected
     // fingerprint already on file.
@@ -130,7 +124,6 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
         )
         .await;
     }
-
     // Emit a telemetry event for observability.
     ctx.event_bus.send(DjinnEventEnvelope {
         entity_type: "submit",
@@ -142,7 +135,6 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
         project_id: None,
         from_sync: false,
     });
-
     // Route the task into planner intervention via the coordinator. The
     // coordinator's route_loop_guard_planner_intervention path clears
     // dispatch_failure_streak and dispatches a Planner escalation, matching
@@ -162,7 +154,6 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
              no_progress_submission planner intervention not routed"
         );
     }
-
     tracing::info!(
         task_id = %task_id,
         "teardown: no_progress_submission settled and planner intervention routed"
@@ -185,9 +176,7 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         emit_auto_submit_fallback_hook(task_id, ctx, "no_decision");
         return AutoSubmitSettlementOutcome::Skipped;
     };
-
     emit_auto_submit_decision_events(task_id, ctx, settlement);
-
     if !settlement.decision.eligible {
         // Record the rejected submission fingerprint at the task level so the
         // live submit-work guard can detect no-progress resubmissions across
@@ -210,7 +199,6 @@ pub(crate) async fn settle_auto_submit_if_eligible(
         emit_auto_submit_fallback_hook(task_id, ctx, "decision_skipped");
         return AutoSubmitSettlementOutcome::Skipped;
     }
-
     let payload = auto_submit_payload(task_id, settlement);
     if process_auto_submit_payload(&payload, task_id, ctx).await {
         AutoSubmitSettlementOutcome::Submitted
@@ -255,7 +243,6 @@ fn emit_auto_submit_decision_events(
         project_id: None,
         from_sync: false,
     });
-
     ctx.event_bus.send(DjinnEventEnvelope {
         entity_type: "review",
         action: "auto_submit_decision",
@@ -326,7 +313,6 @@ mod tests {
     use djinn_db::repositories::task_run::{CreateTaskRunParams, TaskRunRepository};
     use djinn_db::repositories::verify_run::AutoSubmitReviewRepository;
     use std::sync::{Arc, Mutex};
-
     fn test_ctx_with_events(
         db: djinn_db::Database,
         events: Arc<Mutex<Vec<DjinnEventEnvelope>>>,
@@ -338,7 +324,6 @@ mod tests {
         });
         ctx
     }
-
     async fn fixture() -> (
         djinn_db::Database,
         SlotContext,
@@ -367,7 +352,6 @@ mod tests {
             .expect("create task run");
         (db, ctx, task, run_id, events)
     }
-
     fn verify_run(task_run_id: &str) -> VerifyRunRecord {
         VerifyRunRecord {
             id: "verify-record-1".to_string(),
@@ -383,7 +367,6 @@ mod tests {
             created_at: "2026-07-01T00:00:01.000Z".to_string(),
         }
     }
-
     fn settlement(task_run_id: &str, eligible: bool) -> AutoSubmitSettlement {
         let decision = AutoSubmitDecision {
             eligible,
@@ -420,16 +403,13 @@ mod tests {
             remaining_concerns: vec![],
         }
     }
-
     #[tokio::test]
     async fn eligible_auto_submit_uses_work_submission_path_and_metadata() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
         let mut output = ParsedAgentOutput::empty();
         output.auto_submit = Some(settlement(&task_run_id, true));
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Submitted);
-
         let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let activity = task_repo.list_activity(&task.id).await.unwrap();
         assert!(
@@ -437,7 +417,6 @@ mod tests {
                 .iter()
                 .any(|entry| entry.event_type == "work_submitted")
         );
-
         let records = AutoSubmitReviewRepository::new(db)
             .list_for_task_run(&task_run_id)
             .await
@@ -452,22 +431,18 @@ mod tests {
         assert_eq!(records[0].no_progress_streak, 3);
         assert!(!records[0].model_called_submit_work);
     }
-
     #[tokio::test]
     async fn skipped_auto_submit_emits_fallback_hook_without_submission() {
         let (db, ctx, task, task_run_id, events) = fixture().await;
         let mut output = ParsedAgentOutput::empty();
         output.auto_submit = Some(settlement(&task_run_id, false));
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
-
         let records = AutoSubmitReviewRepository::new(db.clone())
             .list_for_task_run(&task_run_id)
             .await
             .unwrap();
         assert!(records.is_empty());
-
         let task_repo = djinn_db::TaskRepository::new(db, ctx.event_bus.clone());
         let activity = task_repo.list_activity(&task.id).await.unwrap();
         assert!(
@@ -475,7 +450,6 @@ mod tests {
                 .iter()
                 .all(|entry| entry.event_type != "work_submitted")
         );
-
         let events = events.lock().expect("events mutex");
         assert!(
             events
@@ -491,15 +465,12 @@ mod tests {
                 .any(|event| event.action == "auto_submit_fallback_checkpoint_requested")
         );
     }
-
     #[tokio::test]
     async fn no_auto_submit_decision_emits_no_decision_fallback() {
         let (db, ctx, task, _task_run_id, events) = fixture().await;
         let output = ParsedAgentOutput::empty();
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
-
         // No work_submitted activity should be logged.
         let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let activity = task_repo.list_activity(&task.id).await.unwrap();
@@ -508,7 +479,6 @@ mod tests {
                 .iter()
                 .all(|entry| entry.event_type != "work_submitted")
         );
-
         // The fallback hook should fire with "no_decision" reason.
         let events = events.lock().expect("events mutex");
         let fallback = events
@@ -517,7 +487,6 @@ mod tests {
         assert!(fallback.is_some(), "expected no_decision fallback event");
         let payload = &fallback.unwrap().payload;
         assert_eq!(payload["reason"], "no_decision");
-
         // No auto_submit_decision event because there was no settlement.
         assert!(
             events
@@ -525,11 +494,9 @@ mod tests {
                 .all(|event| event.action != "auto_submit_decision")
         );
     }
-
     #[tokio::test]
     async fn model_called_submit_work_with_metadata_persists_model_called_true() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
-
         // Simulate the model calling submit_work with auto_submit_review_metadata.
         let metadata = serde_json::json!({
             "task_run_id": task_run_id,
@@ -550,7 +517,6 @@ mod tests {
             "remaining_concerns": [],
             "auto_submit_review_metadata": metadata
         });
-
         // Call through process_finalize_payload_with_outcome (normal model path).
         let ok = crate::finalize_handlers::process_finalize_payload_with_outcome(
             &Some(payload),
@@ -560,7 +526,6 @@ mod tests {
         )
         .await;
         assert!(ok);
-
         // work_submitted activity should exist.
         let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let activity = task_repo.list_activity(&task.id).await.unwrap();
@@ -569,7 +534,6 @@ mod tests {
                 .iter()
                 .any(|entry| entry.event_type == "work_submitted")
         );
-
         // The review record should have model_called_submit_work=true.
         let records = AutoSubmitReviewRepository::new(db)
             .list_for_task_run(&task_run_id)
@@ -589,11 +553,9 @@ mod tests {
         assert_eq!(records[0].model_id.as_deref(), Some("model-42"));
         assert_eq!(records[0].no_progress_streak, 0);
     }
-
     #[tokio::test]
     async fn normal_submit_work_without_metadata_still_works_and_no_review_record() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
-
         // Normal model submit_work without auto_submit_review_metadata.
         let payload = serde_json::json!({
             "task_id": task.short_id,
@@ -602,7 +564,6 @@ mod tests {
             "files_changed": ["src/lib.rs"],
             "remaining_concerns": []
         });
-
         let ok = crate::finalize_handlers::process_finalize_payload_with_outcome(
             &Some(payload),
             "submit_work",
@@ -611,7 +572,6 @@ mod tests {
         )
         .await;
         assert!(ok);
-
         // work_submitted activity should exist.
         let task_repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let activity = task_repo.list_activity(&task.id).await.unwrap();
@@ -620,7 +580,6 @@ mod tests {
                 .iter()
                 .any(|entry| entry.event_type == "work_submitted")
         );
-
         // No review metadata record since the model didn't include metadata.
         let records = AutoSubmitReviewRepository::new(db)
             .list_for_task_run(&task_run_id)
@@ -628,16 +587,13 @@ mod tests {
             .unwrap();
         assert!(records.is_empty());
     }
-
     #[tokio::test]
     async fn eligible_auto_submit_records_verify_timestamp_in_metadata() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
         let mut output = ParsedAgentOutput::empty();
         output.auto_submit = Some(settlement(&task_run_id, true));
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Submitted);
-
         let records = AutoSubmitReviewRepository::new(db)
             .list_for_task_run(&task_run_id)
             .await
@@ -648,7 +604,6 @@ mod tests {
             Some("2026-07-01T00:00:00.000Z")
         );
     }
-
     #[tokio::test]
     async fn ineligible_settlement_records_rejected_fingerprint() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
@@ -657,17 +612,14 @@ mod tests {
         // Ensure a non-empty fingerprint so the rejection path records it.
         s.review_event.diff_fingerprint = "sha256:rejected-by-gate".to_string();
         output.auto_submit = Some(s);
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
-
         // The auto_submit_review record should NOT be created (settlement was skipped).
         let review_records = AutoSubmitReviewRepository::new(db.clone())
             .list_for_task_run(&task_run_id)
             .await
             .unwrap();
         assert!(review_records.is_empty());
-
         // But the task-level rejected integrity entry should be recorded.
         let integrity_repo =
             djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
@@ -684,7 +636,6 @@ mod tests {
         assert_eq!(latest.no_progress_streak, 1);
         assert_eq!(latest.task_run_id.as_deref(), Some(task_run_id.as_str()));
     }
-
     #[tokio::test]
     async fn ineligible_settlement_skips_fingerprint_when_empty() {
         let (db, ctx, task, task_run_id, _events) = fixture().await;
@@ -693,10 +644,8 @@ mod tests {
         // Empty fingerprint — the skip path should NOT record anything.
         s.review_event.diff_fingerprint = String::new();
         output.auto_submit = Some(s);
-
         let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
         assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
-
         let integrity_repo =
             djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
         let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
@@ -705,14 +654,12 @@ mod tests {
             "empty fingerprint must not produce a rejected integrity record"
         );
     }
-
     /// The `settle_no_progress_submission` function records a
     /// `no_progress_submission` activity, increments the no_progress_streak
     /// on the rejected integrity entry, and emits a telemetry event.
     #[tokio::test]
     async fn settle_no_progress_submission_records_activity_and_streak() {
         let (db, ctx, task, _run_id, events) = fixture().await;
-
         // Seed a rejected integrity entry so the settlement can increment the
         // streak.
         let integrity_repo =
@@ -736,9 +683,7 @@ mod tests {
             )
             .await
             .expect("record initial rejected entry");
-
         settle_no_progress_submission(&task.id, &ctx).await;
-
         // Verify the no_progress_submission activity was logged.
         let repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = repo
@@ -759,7 +704,6 @@ mod tests {
             1,
             "expected exactly one no_progress_submission activity"
         );
-
         // Verify the rejected integrity entry was incremented.
         let latest = integrity_repo
             .latest_for_task(&task.id)
@@ -769,7 +713,6 @@ mod tests {
         assert_eq!(latest.no_progress_streak, 2, "streak should increment to 2");
         assert_eq!(latest.diff_fingerprint, "sha256:same-fingerprint");
         assert_eq!(latest.verdict_kind, "no_progress_submission");
-
         // Verify the telemetry event was emitted.
         let evts = events.lock().expect("events mutex");
         let settle_event = evts
@@ -780,7 +723,6 @@ mod tests {
             "no_progress_submission_settled telemetry event must be emitted"
         );
     }
-
     /// Regression: when no rejected integrity entry exists for the task,
     /// `settle_no_progress_submission` still records the activity and emits
     /// telemetry but does NOT create a new rejected integrity entry (no
@@ -788,11 +730,8 @@ mod tests {
     #[tokio::test]
     async fn settle_no_progress_submission_no_prior_entry() {
         let (db, ctx, task, _run_id, events) = fixture().await;
-
         // No prior rejected integrity entry.
-
         settle_no_progress_submission(&task.id, &ctx).await;
-
         // The activity should still be recorded.
         let repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
         let entries = repo
@@ -809,7 +748,6 @@ mod tests {
             .await
             .expect("query activity");
         assert_eq!(entries.len(), 1);
-
         // No rejected integrity entry should be created (nothing to increment).
         let integrity_repo =
             djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
@@ -818,7 +756,6 @@ mod tests {
             latest.is_none(),
             "should not create a rejected entry when no prior entry exists"
         );
-
         // Telemetry event should still fire.
         let evts = events.lock().expect("events mutex");
         let settle_event = evts

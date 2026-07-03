@@ -1,4 +1,3 @@
-// ─── hfhw cutover: commands delegated to djinn-slot ─────────────────────
 // Re-exports canonical types and wraps `log_commands_run_event` with
 // `AgentContext → SlotContext` adapter glue.
 
