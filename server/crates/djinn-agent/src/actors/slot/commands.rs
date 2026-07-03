@@ -2,10 +2,10 @@
 // Re-exports canonical types and wraps `log_commands_run_event` with
 // `AgentContext → SlotContext` adapter glue.
 
-pub use djinn_slot::{SlotCommand, SlotError};
-
 use crate::context::AgentContext;
 use djinn_core::commands::{CommandResult, CommandSpec};
+
+pub use djinn_slot::{SlotCommand, SlotError};
 
 /// Agent-compatible wrapper around `djinn_slot::commands::log_commands_run_event`.
 pub(crate) async fn log_commands_run_event(
@@ -15,6 +15,7 @@ pub(crate) async fn log_commands_run_event(
     results: &[CommandResult],
     app_state: &AgentContext,
 ) {
-    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
-    djinn_slot::commands::log_commands_run_event(task_id, phase, specs, results, &slot_ctx).await;
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::commands::log_commands_run_event(task_id, phase, specs, results, slot_ctx)
+    });
 }

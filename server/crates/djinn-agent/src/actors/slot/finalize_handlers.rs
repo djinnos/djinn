@@ -17,14 +17,14 @@ pub(crate) async fn process_finalize_payload(
     task_id: &str,
     app_state: &AgentContext,
 ) {
-    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
-    djinn_slot::finalize_handlers::process_finalize_payload(
-        payload,
-        finalize_tool_name,
-        task_id,
-        &slot_ctx,
-    )
-    .await;
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::finalize_handlers::process_finalize_payload(
+            payload,
+            finalize_tool_name,
+            task_id,
+            slot_ctx,
+        )
+    });
 }
 
 /// Agent-compatible wrapper around `djinn_slot::finalize_handlers::handle_budget_park`.
@@ -34,8 +34,9 @@ pub(crate) async fn handle_budget_park(
     task_id: &str,
     app_state: &AgentContext,
 ) {
-    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
-    djinn_slot::finalize_handlers::handle_budget_park(summary, details, task_id, &slot_ctx).await;
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::finalize_handlers::handle_budget_park(summary, details, task_id, slot_ctx)
+    });
 }
 
 #[cfg(test)]

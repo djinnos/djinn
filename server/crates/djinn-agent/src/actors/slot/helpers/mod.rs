@@ -37,15 +37,11 @@ pub(crate) async fn build_role_code_graph_context(
     project_path: &str,
     task_paths: &[String],
 ) -> Option<String> {
-    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
-    djinn_slot::helpers::build_role_code_graph_context(
-        role_name,
-        task,
-        &slot_ctx,
-        project_path,
-        task_paths,
-    )
-    .await
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::helpers::build_role_code_graph_context(
+            role_name, task, slot_ctx, project_path, task_paths,
+        )
+    })
 }
 
 /// Agent-compatible wrapper around the canonical djinn-slot reviewer diff helper.
@@ -57,14 +53,9 @@ pub(crate) async fn build_reviewer_diff_context(
     from_sha: Option<&str>,
     to_sha: Option<&str>,
 ) -> Option<String> {
-    let slot_ctx = super::session_extraction::agent_to_slot_context(app_state);
-    djinn_slot::helpers::build_reviewer_diff_context(
-        role_name,
-        task,
-        &slot_ctx,
-        project_path,
-        from_sha,
-        to_sha,
-    )
-    .await
+    crate::with_slot_context!(app_state, |slot_ctx| {
+        djinn_slot::helpers::build_reviewer_diff_context(
+            role_name, task, slot_ctx, project_path, from_sha, to_sha,
+        )
+    })
 }
