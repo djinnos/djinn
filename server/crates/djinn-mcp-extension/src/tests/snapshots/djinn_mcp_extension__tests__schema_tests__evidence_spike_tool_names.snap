@@ -1,0 +1,33 @@
+---
+source: crates/djinn-mcp-extension/src/tests/schema_tests.rs
+expression: names
+---
+[
+  "task_show",
+  "task_list",
+  "task_activity_list",
+  "memory_read",
+  "memory_search",
+  "memory_list",
+  "read",
+  "code_search",
+  "code_graph",
+  "skill_read",
+  "lsp",
+  "ci_job_log",
+  "github_search",
+  "output_view",
+  "output_grep",
+  "epic_show",
+  "epic_tasks",
+  "epic_blockers_list",
+  "epic_blocked_list",
+  "proposal_show",
+  "proposal_debate_list",
+  "memory_build_context",
+  "memory_health",
+  "memory_extracted_audit",
+  "memory_broken_links",
+  "memory_orphans",
+  "submit_work"
+]
