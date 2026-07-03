@@ -260,6 +260,7 @@ pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 /// intervention in the timeline AND serves as the idempotency guard so the
 /// coordinator doesn't re-dispatch a Planner every tick while the task sits at
 /// the same reopen count (or while the Planner intervention is in flight).
+/// The marker payload also stores the `quality_strikes` count for audit.
 pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
 
 /// Number of consecutive worker re-attempts (internal review rejections /

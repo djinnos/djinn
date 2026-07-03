@@ -2,7 +2,7 @@ use super::*;
 use djinn_core::models::CiStatus;
 
 impl CoordinatorActor {
-    // Poll tasks in `pr_review` status: wait for reviewer approval or changes, then merge.
+    // Poll `pr_review` tasks: wait for approval or changes, then merge.
     pub(crate) async fn poll_pr_review_tasks(&mut self) {
         let task_repo = self.task_repo();
         let project_repo = djinn_db::ProjectRepository::new(
@@ -521,13 +521,9 @@ impl CoordinatorActor {
                 continue;
             }
 
-            // ── Repo-derived required-CI reproduction pre-approval gate ─────
-            // Before auto-approving, and before acting on an existing human
-            // approval by moving toward merge, re-run the repo-derived failing
-            // required-check command for any currently/previously failing
-            // durable CI snapshot. A reproduced local failure blocks this tick;
-            // a local pass merely allows the existing review/merge flow to
-            // continue and does not override GitHub CI lifecycle gates.
+            // ── CI reproduction pre-approval gate ───────────────────────────
+            // Before auto-approving, re-run the repo-derived failing
+            // required-check command for any failing durable CI snapshot.
             if let Some(workdir) = latest_task_workdir(&task.id, self.db.clone()).await {
                 match run_ci_reproduction_preflight_gate(
                     &task,
@@ -557,7 +553,13 @@ impl CoordinatorActor {
                             "PR poller: unreproducible required-CI check routing to lead/human intervention"
                         );
                         let handled = self
-                            .route_planner_intervention(&task, "worker", &reason, None)
+                            .route_planner_intervention(
+                                &task,
+                                "worker",
+                                &reason,
+                                None,
+                                task.reopen_count,
+                            )
                             .await;
                         if handled {
                             tracing::info!(
