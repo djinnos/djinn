@@ -137,7 +137,7 @@ export default function Home() {
               </span>
             </div>
 
-            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-light tracking-tight leading-[1.04] mb-8">
+            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-semibold tracking-tight leading-[1.04] mb-8">
               From proposal<br />
               to <em className="stroke-under italic">pull request.</em>
             </h1>
@@ -190,7 +190,7 @@ export default function Home() {
         <section id="pipeline" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="font-mono text-xs text-text-muted mb-3">## pipeline</div>
-            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-16">
+            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-16">
               Every change takes the same road.
             </h2>
 
@@ -206,7 +206,7 @@ export default function Home() {
                     </div>
 
                     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2 mb-3">
-                      <h3 className="font-display text-2xl md:text-3xl font-medium">
+                      <h3 className="font-display text-2xl md:text-3xl font-semibold">
                         <span className="font-mono text-base md:text-lg text-text-muted font-normal mr-3 select-none" aria-hidden>###</span>
                         {stage.name}
                       </h3>
@@ -251,7 +251,7 @@ export default function Home() {
               />
             </div>
             <div className="md:col-span-2">
-              <h3 className="font-display text-2xl md:text-3xl font-medium mb-4">
+              <h3 className="font-display text-2xl md:text-3xl font-semibold mb-4">
                 Approved specs become coordinated work
               </h3>
               <p className="text-text-secondary leading-relaxed">
@@ -269,7 +269,7 @@ export default function Home() {
         <section id="criteria" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="font-mono text-xs text-text-muted mb-3">## acceptance_criteria</div>
-            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-4">
+            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-4">
               What it takes to hand AI the keyboard.
             </h2>
             <p className="text-text-secondary text-lg mb-14 max-w-2xl">
@@ -296,7 +296,7 @@ export default function Home() {
         <section className="px-6 py-20 border-y border-border-faint bg-bg-surface/50">
           <div className="max-w-6xl mx-auto grid md:grid-cols-5 gap-12 items-center">
             <div className="md:col-span-2 order-2 md:order-1">
-              <h3 className="font-display text-2xl md:text-3xl font-medium mb-4">
+              <h3 className="font-display text-2xl md:text-3xl font-semibold mb-4">
                 Agents that know your codebase
               </h3>
               <p className="text-text-secondary leading-relaxed">
@@ -332,7 +332,7 @@ export default function Home() {
                 <span>feedback welcome</span>
               </div>
 
-              <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-5">
+              <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-5">
                 See where the tokens go.
               </h2>
               <p className="text-text-secondary text-lg leading-relaxed max-w-2xl mb-10">
@@ -365,7 +365,7 @@ export default function Home() {
               <GitMerge className="w-3.5 h-3.5" />
               merged
             </div>
-            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-4">
+            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-4">
               Your backlog, merged.
             </h2>
             <p className="text-text-secondary text-lg mb-10 max-w-xl mx-auto">
