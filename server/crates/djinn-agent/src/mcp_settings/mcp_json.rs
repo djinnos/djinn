@@ -15,6 +15,7 @@ struct McpJsonConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct McpServerEntry {
     url: Option<String>,
     command: Option<String>,
@@ -32,21 +33,15 @@ struct McpServerEntry {
 
 impl From<McpServerEntry> for McpServerConfig {
     fn from(entry: McpServerEntry) -> Self {
-        let mut config = Self {
+        Self {
             url: entry.url,
             command: entry.command,
             args: entry.args,
             env: entry.env,
             headers: entry.headers,
-            ..Default::default()
-        };
-        if entry.startup_timeout_ms != 0 {
-            config.startup_timeout_ms = entry.startup_timeout_ms;
+            startup_timeout_ms: entry.startup_timeout_ms,
+            request_timeout_ms: entry.request_timeout_ms,
         }
-        if entry.request_timeout_ms != 0 {
-            config.request_timeout_ms = entry.request_timeout_ms;
-        }
-        config
     }
 }
 

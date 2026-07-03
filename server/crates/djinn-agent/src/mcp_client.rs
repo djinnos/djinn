@@ -118,6 +118,13 @@ struct ResolvedMcpServerConfig {
     request_timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpTransportKind {
+    Http,
+    Stdio,
+    Unsupported,
+}
+
 impl ResolvedMcpServerConfig {
     fn transport_kind(&self) -> McpTransportKind {
         if self.url.is_some() {
