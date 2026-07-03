@@ -723,83 +723,6 @@ pub fn tool_schemas_architect() -> Vec<serde_json::Value> {
     tool_values
 }
 
-/// Tool schemas for Evidence Spike: read-only investigation tools + existing
-/// `submit_work` terminal finalize tool.
-///
-/// Evidence spikes are Architect spike runs, and the existing Architect
-/// lifecycle finalizes via `submit_work`; this profile reuses that finalize
-/// schema. It excludes all repository/database/product mutation tools, PR
-/// creation/merge, shell, and destructive session tools.
-pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
-    let mut tool_values = shared_schemas::shared_base_tool_schemas();
-    // Core read/search/analysis tools.
-    tool_values.push(serialize_tool(tool_read(), read_only()));
-    tool_values.push(serialize_tool(tool_code_search(), open_world_read_only()));
-    tool_values.push(serialize_tool(tool_code_graph(), open_world_read_only()));
-    tool_values.push(serialize_tool(tool_skill_read(), read_only()));
-    tool_values.push(serialize_tool(tool_lsp(), read_only()));
-    tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
-    tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
-    tool_values.push(serialize_tool(tool_output_view(), read_only()));
-    tool_values.push(serialize_tool(tool_output_grep(), read_only()));
-    // Read-only epic inspection tools. Individually constructed — NOT via
-    // `shared_lead_tool_schemas()` which includes mutation tools
-    // (task_create, task_update, epic_update, epic_close).
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_epic_show(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_epic_tasks(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_epic_blockers_list(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_epic_blocked_list(),
-        read_only(),
-    ));
-    // Read-only proposal/debate inspection tools.
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_proposal_show(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_proposal_debate_list(),
-        read_only(),
-    ));
-    // Note: memory_read, memory_search, memory_list are already included
-    // via shared_base_tool_schemas() above — not duplicated here.
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_build_context(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_health(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_extracted_audit(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_broken_links(),
-        read_only(),
-    ));
-    tool_values.push(serialize_tool(
-        shared_schemas::tool_memory_orphans(),
-        read_only(),
-    ));
-    // Terminal finalize path: evidence spikes are still Architect spike runs.
-    tool_values.push(serialize_tool(
-        crate::finalize_tools::tool_submit_work(),
-        mutation(),
-    ));
-    tool_values
-}
-
 /// Tool schemas for Advocate: base + write/edit + memory + proposal tools +
 /// proposal block enrichment tools + submit_work finalize tool.
 ///
@@ -957,5 +880,117 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
         crate::finalize_tools::tool_submit_decision(),
         mutation(),
     ));
+    tool_values
+}
+
+/// Tool schemas for an evidence-spike session: read-only investigation tools
+/// plus the `submit_work` finalize path for evidence findings handoff.
+///
+/// Evidence-spike tasks are created by the Judge demand-evidence tool
+/// (`proposal_refinement_demand_evidence` in epic `6tjy`) and carry the
+/// `refinement-evidence` + `read-only` labels.  They run under the
+/// Architect role but with a severely restricted, read-only/fail-closed
+/// tool surface.
+///
+/// **Allowed:**
+/// - Base read-only tools (read, code_search, lsp, ci_job_log, github_search,
+///   output_view, output_grep, skill_read — but NOT shell).
+/// - Task/epic/memory read-only inspection tools (task_show, task_list,
+///   task_activity_list, memory_read, memory_search, memory_list,
+///   task_blocked_list, epic_show, epic_tasks).
+/// - Memory health/context tools (memory_build_context, memory_health,
+///   memory_extracted_audit, memory_broken_links, memory_orphans).
+/// - Architect-only read tools (code_graph, pr_review_context).
+/// - `submit_work` as the finalize tool for evidence findings handoff.
+///
+/// **Denied (not included):**
+/// - `shell` (destructive — may mutate files/system).
+/// - `write`, `edit`, `apply_patch` (file mutation).
+/// - `task_create`, `task_update`, `task_transition`, `task_comment_add`
+///   (task mutation — except the finalize path).
+/// - `epic_create`, `epic_update`, `epic_close` (epic mutation).
+/// - `memory_write`, `memory_edit`, `memory_move` (memory mutation).
+/// - `role_create` (destructive agent mutation).
+/// - `task_delete_branch`, `task_archive_activity`, `task_reset_counters`,
+///   `task_kill_session` (destructive task admin).
+/// - `request_lead`, `request_planner` (mutation escalation).
+/// - Any proposal/debate mutation tools.
+pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
+    let mut tool_values = Vec::new();
+
+    // ── Read-only inspection tools (from shared_base_tool_schemas) ─────
+    // These are task/activity and memory read-only inspection tools.
+    for value in shared_schemas::shared_base_tool_schemas() {
+        tool_values.push(value);
+    }
+
+    // ── Read-only file/code intelligence tools (from base, NO shell) ──
+    tool_values.push(serialize_tool(tool_read(), read_only()));
+    tool_values.push(serialize_tool(tool_code_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_skill_read(), read_only()));
+    tool_values.push(serialize_tool(tool_lsp(), read_only()));
+    tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_output_view(), read_only()));
+    tool_values.push(serialize_tool(tool_output_grep(), read_only()));
+
+    // ── Architect-only read tools ─────────────────────────────────────
+    tool_values.push(serialize_tool(tool_code_graph(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_pr_review_context(), read_only()));
+
+    // ── Read-only task/epic inspection (from shared_lead, read-only) ──
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_blocked_list(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_tasks(),
+        read_only(),
+    ));
+
+    // ── Read-only memory health/context tools ─────────────────────────
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_health(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_extracted_audit(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_broken_links(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
+
+    // ── Read-only proposal/debate inspection (for context) ────────────
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+
+    // ── Finalize tool: evidence findings submission path ──────────────
+    // This is the ONLY mutation-capable tool allowed — it is the spike's
+    // own completion/handoff path via submit_work.
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_work(),
+        mutation(),
+    ));
+
     tool_values
 }

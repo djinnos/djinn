@@ -52,6 +52,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some(&task.id),
         Some("architect"),
         None,
+        None,
     )
     .await
     .expect("memory_search dispatch should succeed");
@@ -84,6 +85,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
+        None,
         None,
     )
     .await
@@ -119,6 +121,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Some(&task.id),
         Some("architect"),
         None,
+        None,
     )
     .await
     .expect("memory_list dispatch should succeed");
@@ -153,6 +156,7 @@ async fn call_tool_dispatches_memory_ops_through_shared_memory_seam() {
         Path::new(&project_path),
         Some(&task.id),
         Some("architect"),
+        None,
         None,
     )
     .await
@@ -214,6 +218,7 @@ async fn call_tool_architect_dispatches_memory_move_for_proposed_adr_recovery() 
         Some(&task.id),
         Some("architect"),
         None,
+        None,
     )
     .await
     .expect("memory_move dispatch should succeed");
@@ -271,6 +276,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some(&task.id),
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("memory_broken_links dispatch should succeed");
@@ -294,6 +300,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -319,6 +326,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Some(&task.id),
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("memory_orphans dispatch should succeed");
@@ -342,6 +350,7 @@ async fn call_tool_memory_detail_ops_treat_missing_or_empty_folder_as_project_wi
         Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -386,6 +395,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         None,
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("memory_write dispatch should succeed");
@@ -413,6 +423,7 @@ async fn call_tool_memory_singletons_target_canonical_project_root_from_worktree
         &worktree,
         None,
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -483,6 +494,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         None,
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("memory_write dispatch should succeed");
@@ -510,6 +522,7 @@ async fn call_tool_memory_brief_singleton_targets_canonical_project_root_from_wo
         &worktree,
         None,
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -584,6 +597,7 @@ async fn call_tool_dispatches_registered_mcp_tool_success() {
         None,
         Some("worker"),
         Some(&registry),
+        None,
     )
     .await
     .expect("registered MCP tool should dispatch");
@@ -644,6 +658,7 @@ async fn call_tool_memory_current_requirement_targets_canonical_project_root_fro
         &worktree,
         None,
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -717,6 +732,7 @@ async fn call_tool_dispatches_registered_mcp_tool_error() {
         None,
         Some("worker"),
         Some(&registry),
+        None,
     )
     .await
     .expect_err("MCP errors should flow through the normal tool error path");

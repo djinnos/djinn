@@ -41,6 +41,10 @@ pub(crate) struct ReplyLoopContext<'a> {
     pub active_skill_names: &'a [String],
     pub active_mcp_server_names: &'a [String],
     pub max_turns_override: Option<u32>,
+    /// When `true`, the session runs under the evidence-spike read-only
+    /// profile.  The dispatcher enforces allowed_schemas at dispatch time
+    /// as defense-in-depth beyond the stage-time schema restriction.
+    pub is_evidence_spike: bool,
 }
 
 struct AgentToolDispatcher {
@@ -48,6 +52,11 @@ struct AgentToolDispatcher {
     services: &'static dyn djinn_supervisor::SupervisorServices,
     mcp_registry: Option<&'static crate::mcp_client::McpToolRegistry>,
     output_stash: Mutex<OutputStash>,
+    /// When set, only tools whose names appear in these schemas may be
+    /// dispatched.  Used by the evidence-spike runtime profile to enforce
+    /// read-only/fail-closed access at dispatch time (defense-in-depth
+    /// beyond the stage-time schema restriction).
+    allowed_schemas: Option<Vec<serde_json::Value>>,
 }
 
 impl AgentToolDispatcher {
@@ -55,6 +64,7 @@ impl AgentToolDispatcher {
         app_state: &AgentContext,
         services: &dyn djinn_supervisor::SupervisorServices,
         mcp_registry: Option<&crate::mcp_client::McpToolRegistry>,
+        allowed_schemas: Option<Vec<serde_json::Value>>,
     ) -> Self {
         // SAFETY: the dispatcher is created immediately before calling the
         // canonical reply loop and dropped when that call returns. The canonical
@@ -77,6 +87,7 @@ impl AgentToolDispatcher {
             services: services_static,
             mcp_registry: registry_static,
             output_stash: Mutex::new(OutputStash::new()),
+            allowed_schemas,
         }
     }
 }
@@ -122,6 +133,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
             Some(task_id),
             Some(role_name),
             self.mcp_registry,
+            self.allowed_schemas.as_deref(),
         ))
     }
 
@@ -183,13 +195,23 @@ pub(crate) async fn run_reply_loop(
         active_skill_names,
         active_mcp_server_names,
         max_turns_override,
+        is_evidence_spike,
     } = ctx;
 
     let mut slot_ctx = super::host_callbacks::agent_to_reply_loop_slot_context(app_state, services);
+    // Evidence-spike sessions get the restricted tool set as allowed_schemas
+    // for defense-in-depth dispatch-time enforcement.  For normal sessions
+    // this is None (no dispatch-time gate — the full role schema applies).
+    let allowed_for_dispatch = if is_evidence_spike {
+        Some(tools.to_vec())
+    } else {
+        None
+    };
     slot_ctx.tool_dispatcher = Some(Arc::new(AgentToolDispatcher::new(
         app_state,
         services,
         mcp_registry,
+        allowed_for_dispatch,
     )));
 
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
