@@ -850,6 +850,49 @@ mod tests {
     }
 
     #[test]
+    fn task_run_spec_from_demand_evidence_contract_selects_evidence_spike_profile() {
+        // Simulate the TaskRunSpec built for a spike created by the
+        // `proposal_refinement_demand_evidence` contract (labels include
+        // "refinement-evidence" and "read-only"). The selector in
+        // djinn-core::is_evidence_spike must set the flag, and the runtime
+        // spec must carry it through serialization.
+        let mut spec = TaskRunSpec {
+            task_run_id: "run-evidence".to_string(),
+            task_id: "task-evidence".to_string(),
+            project_id: "proj-1".to_string(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".to_string(),
+            task_branch: "djinn/task-evidence".to_string(),
+            flow: SupervisorFlow::Spike,
+            model_id_per_role: HashMap::new(),
+            read_source_project_ids: vec![],
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: true,
+        };
+
+        let bytes = bincode::serialize(&spec).expect("serialize");
+        let back: TaskRunSpec = bincode::deserialize(&bytes).expect("deserialize");
+        assert!(
+            back.is_evidence_spike,
+            "demand-evidence contract spike must carry the evidence-spike profile through the runtime spec"
+        );
+
+        // A normal Architect spike without the read-only marker must round-trip
+        // with the flag unset.
+        spec.is_evidence_spike = false;
+        let bytes2 = bincode::serialize(&spec).expect("serialize");
+        let back2: TaskRunSpec = bincode::deserialize(&bytes2).expect("deserialize");
+        assert!(
+            !back2.is_evidence_spike,
+            "ordinary Architect spike must not be downgraded to evidence-spike profile"
+        );
+    }
+
+    #[test]
     fn task_run_report_bincode_roundtrip() {
         let report = TaskRunReport {
             task_run_id: "run-1".to_string(),
