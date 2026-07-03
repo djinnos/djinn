@@ -12,6 +12,9 @@ pub(crate) mod session_recovery;
 mod task_dispatch;
 mod wave_dispatch;
 
+#[cfg(test)]
+mod lifecycle_integration_tests;
+
 pub(crate) use admission::model_under_user_cap;
 #[cfg(test)]
 #[allow(unused_imports)]
