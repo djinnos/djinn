@@ -20,8 +20,9 @@ pub(crate) use djinn_mcp_extension::tool_defs;
 
 // Re-export the public API so external callers see the same paths as before.
 pub(crate) use djinn_mcp_extension::tool_defs::{
-    tool_schemas_adversary, tool_schemas_advocate, tool_schemas_architect, tool_schemas_judge,
-    tool_schemas_lead, tool_schemas_planner, tool_schemas_reviewer, tool_schemas_worker,
+    tool_schemas_adversary, tool_schemas_advocate, tool_schemas_architect,
+    tool_schemas_evidence_spike, tool_schemas_judge, tool_schemas_lead, tool_schemas_planner,
+    tool_schemas_reviewer, tool_schemas_worker,
 };
 
 // Façade: re-export the public surface of `djinn-mcp-extension` so that
@@ -45,6 +46,12 @@ use crate::mcp_client::McpToolRegistry;
 ///     _ => None,
 /// };
 /// ```
+///
+/// `allowed_schemas`, when provided, restricts the dispatch to only those
+/// tools whose names appear in the schema list.  This is the defense-in-depth
+/// enforcement for the evidence-spike read-only profile: the primary
+/// restriction is at stage time (the LLM only sees read-only tools), but
+/// this gate rejects any mutation tool that reaches dispatch.
 // Public tool-call entrypoint mirroring `dispatch_tool_call`; each arg is a
 // distinct collaborator/context, so a bag struct adds no clarity.
 #[allow(clippy::too_many_arguments)]
@@ -57,6 +64,7 @@ pub(crate) async fn call_tool(
     session_task_id: Option<&str>,
     session_role: Option<&str>,
     mcp_registry: Option<&McpToolRegistry>,
+    allowed_schemas: Option<&[serde_json::Value]>,
 ) -> Result<serde_json::Value, String> {
     let synthetic = serde_json::json!({ "name": name, "arguments": arguments });
 
@@ -68,7 +76,7 @@ pub(crate) async fn call_tool(
         services,
         &synthetic,
         worktree_path,
-        None,
+        allowed_schemas,
         session_task_id,
         session_role,
     )
@@ -85,7 +93,7 @@ pub(crate) async fn call_tool(
                 services,
                 &synthetic,
                 worktree_path,
-                None,
+                allowed_schemas,
                 session_task_id,
                 session_role,
                 mcp_registry,

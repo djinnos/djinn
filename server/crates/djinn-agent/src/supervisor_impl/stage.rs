@@ -817,7 +817,19 @@ pub(crate) async fn execute_stage(
 
     // ── Build the initial conversation ───────────────────────────────────────
     let agent_type = crate::AgentType::parse(runtime_role_name).unwrap_or(crate::AgentType::Worker);
-    let mut tools = crate::roles::tool_schemas_for(agent_type);
+    // Evidence-spike tasks (created by the Judge demand-evidence path in
+    // epic 6tjy) carry the `refinement-evidence` + `read-only` labels and
+    // must run under a restricted read-only/fail-closed tool profile.
+    // Detection is strict: both labels must be present.  Tasks that carry
+    // only one label (or have malformed metadata) fall through to the
+    // normal role tool surface — deny-by-default is enforced by the
+    // restricted profile itself, not by a separate deny gate.
+    let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
+    let mut tools = if is_evidence_spike {
+        crate::extension::tool_schemas_evidence_spike()
+    } else {
+        crate::roles::tool_schemas_for(agent_type)
+    };
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
     }
@@ -864,6 +876,7 @@ pub(crate) async fn execute_stage(
             active_skill_names: &effective_skills,
             active_mcp_server_names: &effective_mcp_servers,
             max_turns_override: None,
+            is_evidence_spike,
         },
         &mut conversation,
         false,

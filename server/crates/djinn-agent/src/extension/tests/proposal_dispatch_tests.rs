@@ -44,6 +44,7 @@ async fn call_tool_dispatches_proposal_update_revises_body() {
         None,
         Some("advocate"),
         None,
+        None,
     )
     .await
     .expect("proposal_update dispatch should succeed (was 'unknown djinn frontend tool')");
@@ -105,6 +106,7 @@ async fn call_tool_dispatches_proposal_block_patch_in_pod() {
         None,
         Some("advocate"),
         None,
+        None,
     )
     .await
     .expect("proposal_block_patch dispatch should succeed (was 'unknown djinn frontend tool')");
@@ -140,6 +142,7 @@ async fn call_tool_dispatches_get_block_catalog_in_pod() {
         Path::new(&project_path),
         None,
         Some("advocate"),
+        None,
         None,
     )
     .await
