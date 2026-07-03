@@ -1085,7 +1085,7 @@ describe("ProposalRefinement", () => {
     // Detected as evidence_failed via needs_evidence fields
     expect(screen.getAllByText("Evidence failed").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/encountered an error/)).toBeInTheDocument();
-    expect(screen.getByText(/fb12/)).toBeInTheDocument();
+    expect(screen.getAllByText(/fb12/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Claim: Database migration is safe/)).toBeInTheDocument();
     // No stale states
     expect(screen.queryByText("Refinement in progress")).not.toBeInTheDocument();

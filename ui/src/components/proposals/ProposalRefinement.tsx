@@ -531,7 +531,7 @@ export function ProposalRefinement({
             non-evidence active states — evidence states render their own
             body sections above. Uses the shared classifier's showInProgress
             flag to determine visibility. */}
-        {status.active && !status.awaiting_review && display.showInProgress && (
+        {status.active && !status.awaiting_review && display.showInProgress && display.kind !== "evidence_received" && (
           <div className="space-y-1 border-t pt-2">
             <Label className="text-xs uppercase text-muted-foreground">
               Refinement in progress
