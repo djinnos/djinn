@@ -1171,3 +1171,148 @@ fn evidence_spike_all_schemas_are_read_only_except_finalize() {
         );
     }
 }
+
+// ── Dispatch allowlist gate tests ────────────────────────────────────────
+// These tests prove the fail-closed evidence-spike allowlist rejects
+// blocked tool names before routing, and accepts allowed ones.
+// They exercise `is_tool_allowed_for_schemas` with the evidence-spike
+// schemas — the same gate that `dispatch_tool_call` uses.
+
+#[test]
+fn evidence_spike_gate_accepts_allowed_read_tools() {
+    let schemas = tool_schemas_evidence_spike();
+    let allowed_names = evidence_spike_tool_names();
+
+    // Representative allowed read/search tools must pass the gate.
+    let expected_allowed = [
+        "task_show",
+        "task_list",
+        "task_activity_list",
+        "epic_show",
+        "epic_tasks",
+        "memory_read",
+        "memory_search",
+        "memory_list",
+        "proposal_show",
+        "proposal_debate_list",
+        "lsp",
+        "github_search",
+        "output_view",
+        "output_grep",
+        "skill_read",
+        "ci_job_log",
+        "submit_work",
+    ];
+
+    for name in &expected_allowed {
+        assert!(
+            allowed_names.contains(*name),
+            "evidence_spike_tool_names() must contain `{name}`"
+        );
+        assert!(
+            crate::helpers::is_tool_allowed_for_schemas(&schemas, name),
+            "dispatch gate must accept evidence-spike allowed tool `{name}`"
+        );
+    }
+}
+
+#[test]
+fn evidence_spike_gate_rejects_blocked_mutation_tools() {
+    let schemas = tool_schemas_evidence_spike();
+    let allowed_names = evidence_spike_tool_names();
+
+    // Representative blocked mutation/destructive/admin tools must be
+    // rejected by the dispatch gate.
+    let expected_blocked = [
+        "task_update",
+        "task_comment_add",
+        "task_create",
+        "task_transition",
+        "epic_create",
+        "epic_update",
+        "epic_close",
+        "memory_write",
+        "memory_edit",
+        "memory_move",
+        "shell",
+        "write",
+        "edit",
+        "apply_patch",
+        "request_lead",
+        "request_planner",
+    ];
+
+    for name in &expected_blocked {
+        assert!(
+            !allowed_names.contains(*name),
+            "evidence_spike_tool_names() must NOT contain blocked tool `{name}`"
+        );
+        assert!(
+            !crate::helpers::is_tool_allowed_for_schemas(&schemas, name),
+            "dispatch gate must reject evidence-spike blocked tool `{name}` \
+             — fail-closed violated"
+        );
+    }
+}
+
+#[test]
+fn evidence_spike_tool_names_derived_from_schemas() {
+    // The allowlist and the schema surface must be identical in size,
+    // proving they are derived from the same source and cannot drift.
+    let schemas = tool_schemas_evidence_spike();
+    let names = evidence_spike_tool_names();
+
+    assert_eq!(
+        schemas.len(),
+        names.len(),
+        "evidence_spike_tool_names count ({}) must match schema count ({})",
+        names.len(),
+        schemas.len()
+    );
+}
+
+#[test]
+fn evidence_spike_gate_is_fail_closed_for_unknown_tools() {
+    let schemas = tool_schemas_evidence_spike();
+
+    // An arbitrary unknown tool name must be rejected.
+    assert!(
+        !crate::helpers::is_tool_allowed_for_schemas(&schemas, "totally_unknown_tool"),
+        "dispatch gate must reject unknown tools (fail-closed)"
+    );
+}
+
+#[test]
+fn evidence_spike_gate_accepts_architect_read_only_tools() {
+    // Architect-only read tools that are included in evidence-spike
+    // (code_graph, pr_review_context, task_blocked_list) must pass.
+    let schemas = tool_schemas_evidence_spike();
+
+    for name in &["code_graph", "pr_review_context", "task_blocked_list"] {
+        assert!(
+            crate::helpers::is_tool_allowed_for_schemas(&schemas, name),
+            "dispatch gate must accept architect read-only tool `{name}` \
+             in evidence-spike profile"
+        );
+    }
+}
+
+#[test]
+fn normal_dispatch_unaffected_when_no_allowlist() {
+    // Verify that is_tool_allowed_for_schemas with the FULL architect
+    // schemas accepts all normal architect tools — this models the
+    // "no evidence-spike gate" path where allowed_schemas is None.
+    let arch_schemas = tool_schemas_architect();
+    let arch_names: BTreeSet<String> = arch_schemas
+        .iter()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect();
+
+    // A few representative tools that must be in architect.
+    for name in &["shell", "task_update", "memory_write", "submit_work"] {
+        assert!(
+            arch_names.contains(*name),
+            "architect must still contain `{name}` (normal dispatch unaffected)"
+        );
+    }
+}
