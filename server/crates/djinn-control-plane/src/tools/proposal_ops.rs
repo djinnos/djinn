@@ -701,6 +701,18 @@ pub struct NeedsEvidenceStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by_task_id: Option<String>,
 
+    // ── Additional structured claim fields (None for legacy claims) ────────
+    /// Why in-session research was insufficient to resolve the claim.
+    /// From the structured claim's `insufficient_in_session_research`.
+    /// `None` when `needs_evidence_claim` is a legacy plain string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insufficient_in_session_research: Option<String>,
+    /// What the evidence spike should produce to resolve the claim.
+    /// From the structured claim's `expected_findings`.
+    /// `None` when `needs_evidence_claim` is a legacy plain string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_findings: Option<String>,
+
     // ── Evidence lifecycle phase (from persisted lifecycle events) ─────────
     /// Current evidence lifecycle phase (awaiting, received, or failed).
     /// Derived from persisted `proposal_revisions` lifecycle events.

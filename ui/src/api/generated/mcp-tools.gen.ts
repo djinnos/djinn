@@ -7439,6 +7439,18 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   created_by_task_id?: string
   /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
+  /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * Current evidence lifecycle phase (awaiting, received, or failed).
    * Derived from persisted `proposal_revisions` lifecycle events.
    * `None` when no lifecycle event has been recorded yet.
@@ -7632,6 +7644,18 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   created_by_task_id?: string
   /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
+  /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * Current evidence lifecycle phase (awaiting, received, or failed).
    * Derived from persisted `proposal_revisions` lifecycle events.
    * `None` when no lifecycle event has been recorded yet.
@@ -7781,6 +7805,18 @@ export namespace ProposalRefinementStatusOutputSchema {
    * The Judge task id that issued the demand.
    */
   created_by_task_id?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
+  /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
   /**
    * Current evidence lifecycle phase (awaiting, received, or failed).
    * Derived from persisted `proposal_revisions` lifecycle events.
@@ -8110,6 +8146,18 @@ export namespace ProposalShowOutputSchema {
    * The Judge task id that issued the demand.
    */
   created_by_task_id?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
+  /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
   /**
    * Current evidence lifecycle phase (awaiting, received, or failed).
    * Derived from persisted `proposal_revisions` lifecycle events.

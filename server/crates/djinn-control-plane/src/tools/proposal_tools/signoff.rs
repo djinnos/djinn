@@ -378,6 +378,8 @@ pub(crate) async fn build_gate_status(
                 round: None,
                 against_revision_seq: None,
                 created_by_task_id: None,
+                insufficient_in_session_research: None,
+                expected_findings: None,
                 evidence_phase: None,
                 failure_reason: None,
             })
