@@ -185,3 +185,384 @@ pub(crate) async fn resolve_role_model_preference(
 
     None
 }
+
+/// Attempt model rotation for a resume dispatch.
+///
+/// When `metadata` indicates a prior session with a recorded `previous_model`
+/// that terminated for a rotation-worthy cause (no-progress checkpoint,
+/// auto-submit deadline, alternate checkpoint ref, or repeated verify loop),
+/// attempts to select a different model from the connected provider catalog.
+///
+/// Returns the rotated model ID, or `current_model_id` unchanged when:
+/// - no resume metadata is present,
+/// - no `previous_model` was recorded,
+/// - the selection reason does not map to a rotation-worthy termination cause,
+/// - no alternate model is available, or
+/// - credentials for the alternate are missing.
+///
+/// Emits a structured `model_rotation` lifecycle-step event via
+/// [`emit_rotation_event`] so observability sees every rotation attempt.
+pub(crate) async fn attempt_resume_model_rotation(
+    task_id: &str,
+    current_model_id: &str,
+    metadata: Option<&djinn_runtime::ResumeLifecycleMetadata>,
+    app_state: &AgentContext,
+) -> String {
+    let Some(metadata) = metadata else {
+        return current_model_id.to_string();
+    };
+
+    let prev_model = match &metadata.previous_model {
+        Some(m) if !m.trim().is_empty() => m.as_str(),
+        _ => return current_model_id.to_string(),
+    };
+
+    let cause = match metadata.selection_reason {
+        Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint) => {
+            RotationTerminationCause::NoProgress
+        }
+        Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted) => {
+            RotationTerminationCause::Deadline
+        }
+        Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef) => {
+            RotationTerminationCause::Flaky
+        }
+        Some(djinn_runtime::ResumeSelectionReason::NewerTaskBranch) => {
+            RotationTerminationCause::RepeatedVerifyLoop
+        }
+        _ => return current_model_id.to_string(),
+    };
+
+    let outcome = resolve_model_with_rotation(task_id, Some(prev_model), cause, app_state).await;
+
+    // Use selected_model() to extract the model id from the outcome before
+    // the match consumes it.
+    let selected = outcome.selected_model().map(str::to_string);
+
+    match outcome {
+        ModelRotationOutcome::Rotated { cause, .. } => {
+            let model = selected.unwrap_or_else(|| current_model_id.to_string());
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %prev_model,
+                selected_model = %model,
+                cause = ?cause,
+                "model_rotation: rotated for resume dispatch"
+            );
+            model
+        }
+        ModelRotationOutcome::Fallback { reason, cause, .. } => {
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %prev_model,
+                reason = ?reason,
+                cause = ?cause,
+                "model_rotation: no alternate available for resume, retaining current model"
+            );
+            current_model_id.to_string()
+        }
+        ModelRotationOutcome::NotApplicable => current_model_id.to_string(),
+    }
+}
+
+// ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
+
+/// Termination causes that should trigger model rotation.
+///
+/// These map to the coordinator-side lifecycle termination reasons from
+/// `j6u1` (no-progress, deadline) and the flaky/repeated-verify-loop
+/// patterns observed by the durable-progress detector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RotationTerminationCause {
+    /// No durable progress for the configured threshold.
+    NoProgress,
+    /// Session hit a deadline/turn/time bound.
+    Deadline,
+    /// Repeated flaky verification command failures.
+    Flaky,
+    /// Repeated verify-loop (command passed then failed or vice versa).
+    RepeatedVerifyLoop,
+}
+
+impl RotationTerminationCause {
+    /// Whether this cause warrants preferring a different model.
+    pub fn should_rotate(self) -> bool {
+        matches!(
+            self,
+            Self::NoProgress | Self::Deadline | Self::Flaky | Self::RepeatedVerifyLoop
+        )
+    }
+}
+
+/// Outcome of a model-rotation attempt.
+#[derive(Debug, Clone)]
+pub(crate) enum ModelRotationOutcome {
+    /// A different model was selected.
+    Rotated {
+        previous_model: String,
+        selected_model: String,
+        cause: RotationTerminationCause,
+    },
+    /// No alternate was available or credentials were missing; the existing
+    /// model is retained with a machine-readable fallback reason.
+    Fallback {
+        previous_model: String,
+        reason: ModelRotationFallbackReason,
+        cause: RotationTerminationCause,
+    },
+    /// Rotation was not applicable (cause does not warrant rotation, or no
+    /// previous model was recorded).
+    NotApplicable,
+}
+
+/// Machine-readable reason model rotation fell back to the existing model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelRotationFallbackReason {
+    /// No other connected provider had any models.
+    NoAlternateAvailable,
+    /// The only alternate models lacked valid credentials.
+    CredentialsMissing,
+    /// No previous model was recorded to rotate away from.
+    NoPreviousModel,
+}
+
+impl ModelRotationOutcome {
+    /// The selected model id, regardless of whether rotation succeeded
+    /// or fell back. Returns `None` for `NotApplicable`.
+    pub(crate) fn selected_model(&self) -> Option<&str> {
+        match self {
+            Self::Rotated { selected_model, .. } => Some(selected_model),
+            Self::Fallback { previous_model, .. } => Some(previous_model),
+            Self::NotApplicable => None,
+        }
+    }
+}
+
+/// Attempt to select a different available model after a no-progress,
+/// deadline, flaky, or repeated-verify-loop termination.
+///
+/// Preserves provider credential resolution and catalog matching behavior:
+/// the function scans connected providers for any model whose `provider/model`
+/// id differs from `previous_model`, returns the first match, and leaves
+/// credential loading to the caller's normal [`resolve_model_and_credential`]
+/// path. If no alternate is available, falls back to `previous_model` and
+/// records a machine-readable [`ModelRotationFallbackReason`].
+///
+/// Emits a `model_rotation` task-lifecycle-step event with the rotation
+/// reason, previous model, selected model or fallback, and termination cause.
+pub(crate) async fn resolve_model_with_rotation(
+    task_id: &str,
+    previous_model: Option<&str>,
+    cause: RotationTerminationCause,
+    app_state: &AgentContext,
+) -> ModelRotationOutcome {
+    let Some(previous_model) = previous_model else {
+        let outcome = ModelRotationOutcome::Fallback {
+            previous_model: String::new(),
+            reason: ModelRotationFallbackReason::NoPreviousModel,
+            cause,
+        };
+        emit_rotation_event(task_id, &outcome, app_state).await;
+        return outcome;
+    };
+
+    if !cause.should_rotate() {
+        let outcome = ModelRotationOutcome::NotApplicable;
+        emit_rotation_event(task_id, &outcome, app_state).await;
+        return outcome;
+    }
+
+    // Scan connected providers for an alternate model. This mirrors the
+    // credential-scoped catalog scan in `resolve_role_model_preference`
+    // but does NOT require a role preference — it picks any available
+    // model that is NOT the previous one.
+    let cred_repo = djinn_provider::repos::CredentialRepository::new(
+        app_state.db.clone(),
+        app_state.event_bus.clone(),
+    );
+    let credentials = match cred_repo
+        .list_for_user(djinn_core::auth_context::current_user_id().as_deref())
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "model_rotation: failed to list credentials; falling back"
+            );
+            let outcome = ModelRotationOutcome::Fallback {
+                previous_model: previous_model.to_string(),
+                reason: ModelRotationFallbackReason::CredentialsMissing,
+                cause,
+            };
+            emit_rotation_event(task_id, &outcome, app_state).await;
+            return outcome;
+        }
+    };
+
+    let provider_ids = app_state.catalog.connected_provider_ids(&credentials);
+    if provider_ids.is_empty() {
+        let outcome = ModelRotationOutcome::Fallback {
+            previous_model: previous_model.to_string(),
+            reason: ModelRotationFallbackReason::CredentialsMissing,
+            cause,
+        };
+        emit_rotation_event(task_id, &outcome, app_state).await;
+        return outcome;
+    }
+
+    // Find the first model that is NOT the previous model.
+    let mut found_alternate: Option<String> = None;
+    let mut any_model_seen = false;
+    for provider_id in &provider_ids {
+        for model in app_state.catalog.list_models(provider_id) {
+            let full_id = format!("{provider_id}/{}", model.id);
+            if full_id == previous_model
+                || model.id == previous_model
+                || model.name == previous_model
+            {
+                continue;
+            }
+            // Verify this provider has a loadable credential before selecting it.
+            if load_provider_credential(provider_id, app_state)
+                .await
+                .is_ok()
+            {
+                found_alternate = Some(full_id);
+                break;
+            }
+            any_model_seen = true;
+        }
+        if found_alternate.is_some() {
+            break;
+        }
+    }
+
+    match found_alternate {
+        Some(selected_model) => {
+            let outcome = ModelRotationOutcome::Rotated {
+                previous_model: previous_model.to_string(),
+                selected_model: selected_model.clone(),
+                cause,
+            };
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %previous_model,
+                selected_model = %selected_model,
+                cause = ?cause,
+                "model_rotation: rotated to alternate model"
+            );
+            emit_rotation_event(task_id, &outcome, app_state).await;
+            outcome
+        }
+        None => {
+            let reason = if any_model_seen {
+                ModelRotationFallbackReason::CredentialsMissing
+            } else {
+                ModelRotationFallbackReason::NoAlternateAvailable
+            };
+            let outcome = ModelRotationOutcome::Fallback {
+                previous_model: previous_model.to_string(),
+                reason,
+                cause,
+            };
+            tracing::info!(
+                task_id = %task_id,
+                previous_model = %previous_model,
+                reason = ?reason,
+                cause = ?cause,
+                "model_rotation: no alternate available, falling back"
+            );
+            emit_rotation_event(task_id, &outcome, app_state).await;
+            outcome
+        }
+    }
+}
+
+/// Emit a structured `model_rotation` task-lifecycle-step event with the
+/// rotation reason, previous model, selected model or fallback, and
+/// termination cause.
+async fn emit_rotation_event(
+    task_id: &str,
+    outcome: &ModelRotationOutcome,
+    app_state: &AgentContext,
+) {
+    let payload = match outcome {
+        ModelRotationOutcome::Rotated {
+            previous_model,
+            selected_model,
+            cause,
+        } => serde_json::json!({
+            "action": "rotated",
+            "previous_model": previous_model,
+            "selected_model": selected_model,
+            "termination_cause": format!("{cause:?}"),
+        }),
+        ModelRotationOutcome::Fallback {
+            previous_model,
+            reason,
+            cause,
+        } => serde_json::json!({
+            "action": "fallback",
+            "previous_model": previous_model,
+            "fallback_reason": format!("{reason:?}"),
+            "termination_cause": format!("{cause:?}"),
+        }),
+        ModelRotationOutcome::NotApplicable => serde_json::json!({
+            "action": "not_applicable",
+        }),
+    };
+
+    app_state
+        .event_bus
+        .send(djinn_core::events::DjinnEventEnvelope::task_lifecycle_step(
+            task_id,
+            "model_rotation",
+            &payload,
+        ));
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    #[test]
+    fn rotation_cause_should_rotate() {
+        assert!(RotationTerminationCause::NoProgress.should_rotate());
+        assert!(RotationTerminationCause::Deadline.should_rotate());
+        assert!(RotationTerminationCause::Flaky.should_rotate());
+        assert!(RotationTerminationCause::RepeatedVerifyLoop.should_rotate());
+    }
+
+    #[test]
+    fn outcome_selected_model_returns_correct_value() {
+        let rotated = ModelRotationOutcome::Rotated {
+            previous_model: "a/old".to_string(),
+            selected_model: "b/new".to_string(),
+            cause: RotationTerminationCause::NoProgress,
+        };
+        assert_eq!(rotated.selected_model(), Some("b/new"));
+
+        let fallback = ModelRotationOutcome::Fallback {
+            previous_model: "a/old".to_string(),
+            reason: ModelRotationFallbackReason::NoAlternateAvailable,
+            cause: RotationTerminationCause::NoProgress,
+        };
+        assert_eq!(fallback.selected_model(), Some("a/old"));
+
+        assert_eq!(ModelRotationOutcome::NotApplicable.selected_model(), None);
+    }
+
+    #[test]
+    fn fallback_reason_distinct() {
+        assert_ne!(
+            ModelRotationFallbackReason::NoAlternateAvailable,
+            ModelRotationFallbackReason::CredentialsMissing
+        );
+        assert_ne!(
+            ModelRotationFallbackReason::CredentialsMissing,
+            ModelRotationFallbackReason::NoPreviousModel
+        );
+    }
+}
