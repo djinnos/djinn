@@ -62,6 +62,10 @@ mod supervisor_runner;
 // ─── Test modules ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod finalize_handlers_fingerprint_tests;
+#[cfg(test)]
+mod finalize_handlers_tests;
+#[cfg(test)]
 mod helpers_tests;
 #[cfg(test)]
 mod llm_extraction_tests;

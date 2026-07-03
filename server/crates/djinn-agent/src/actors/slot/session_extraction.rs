@@ -1,61 +1,10 @@
-// djinn:allow-oversize — legacy module over size-guard threshold; split when touched substantively.
-// ─── hfhw cutover: session extraction delegated to djinn-slot ────────────
-//
-// The full session extraction implementation (structural taxonomy, LLM
-// distillation, co-access flush, `run_extraction_backfill`) now lives in
-// `djinn_slot::session_extraction`.
-//
-// This module is a thin adapter.  The public `run_extraction_backfill` entry
-// point converts `AgentContext` → `SlotContext` and delegates to
-// `djinn_slot::run_extraction_backfill`.
-//
-// The old production implementation (1700+ lines of direct `sqlx` queries,
-// structural extraction, LLM extraction callout, and helper functions) has
-// been removed from `djinn-agent`.  It is no longer production-reachable.
-//
-// Public types (`ExtractionQuality`, `SessionTaxonomy`, etc.) are re-exported
-// from `djinn-slot`.  Test-only functions (`extract_session_signals`)
-// are gated behind `#[cfg(test)]`.
+// Session extraction shim: converts AgentContext → SlotContext and delegates
+// to canonical djinn-slot extraction. Extraction host callbacks keep
+// non-extraction operations no-op while resolving credentials through the
+// normal AgentContext-backed loader.
 
 use crate::context::AgentContext;
 
-// ─── Re-exports from djinn-slot ──────────────────────────────────────────
-// Types used by `llm_extraction.rs` and its tests.  The implementations
-// now live in `djinn-slot`; these re-exports keep `crate::actors::slot::session_extraction::*`
-// paths resolving for agent-internal callers.
-
-#[cfg(test)]
-#[allow(unused_imports)]
-// retained for agent facade compatibility tests; canonical home is djinn-slot
-pub use djinn_slot::{ExtractionQuality, SessionTaxonomy};
-// Only needed by llm_extraction_tests; suppressed in non-test builds to avoid
-// unused-import warnings from clippy -D warnings.
-#[cfg(test)]
-#[allow(unused_imports)]
-// retained for agent facade compatibility tests; canonical home is djinn-slot
-pub use djinn_slot::extract_session_signals;
-
-// `run_structural_extraction` is re-exported from djinn-slot but takes
-// `SlotContext`.  We provide a thin adapter that accepts `AgentContext`
-// for tests that still construct the agent-side context.
-#[cfg(test)]
-#[allow(dead_code)] // retained for agent facade compatibility tests; canonical home is djinn-slot
-pub(crate) async fn run_structural_extraction(
-    session_id: String,
-    messages: Vec<djinn_core::message::Message>,
-    app_state: AgentContext,
-) -> Option<SessionTaxonomy> {
-    let slot_ctx = agent_to_slot_context(&app_state);
-    djinn_slot::run_structural_extraction(session_id, messages, slot_ctx).await
-}
-
-/// Host callbacks for the extraction adapter.
-///
-/// Extraction uses the normal slot-side model-resolution path, which delegates
-/// credential loading through [`djinn_slot::host::SlotHostCallbacks`]. Keep the
-/// non-extraction callbacks as no-ops, but preserve the `AgentContext` required
-/// to reuse the dispatch-side credential loader (including OAuth refresh and
-/// credential-vault fallback behavior).
 struct ExtractionCallbacks(AgentContext);
 
 fn agent_credential_to_slot(
@@ -116,8 +65,6 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
         &self,
         _ctx: &djinn_slot::host::SlotContext,
     ) -> djinn_control_plane::McpState {
-        // Not invoked during extraction backfill.  Only `db` and `event_bus`
-        // are used by the extraction path.
         unreachable!("build_mcp_state not available in extraction backfill adapter")
     }
 
@@ -196,11 +143,8 @@ impl djinn_slot::host::SlotHostCallbacks for ExtractionCallbacks {
     }
 }
 
-/// Convert `AgentContext` → `SlotContext` for extraction backfill.
-///
-/// Maps the shared service-handle fields and installs extraction host callbacks
-/// that keep non-extraction operations no-op while resolving provider
-/// credentials through the normal AgentContext-backed loader.
+/// Convert `AgentContext` → `SlotContext` for extraction backfill and lifecycle
+/// adapters that need a `SlotContext` with extraction-compatible host callbacks.
 pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
     djinn_slot::host::SlotContext {
         db: agent.db.clone(),
@@ -218,6 +162,23 @@ pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::S
         callbacks: std::sync::Arc::new(ExtractionCallbacks(agent.clone())),
         tool_dispatcher: None,
     }
+}
+
+/// One-shot recovery sweep that backfills post-session knowledge extraction
+/// over completed-but-unextracted task-runs. Called from the server boot path.
+pub async fn run_extraction_backfill(app_state: AgentContext) {
+    let slot_ctx = agent_to_slot_context(&app_state);
+    djinn_slot::run_extraction_backfill(slot_ctx).await;
+}
+
+/// Server-side post-task-run knowledge extraction (thin adapter).
+pub(crate) async fn run_post_session_extraction(
+    task_id: String,
+    task_run_id: String,
+    app_state: AgentContext,
+) {
+    let slot_ctx = agent_to_slot_context(&app_state);
+    djinn_slot::run_post_session_extraction(task_id, task_run_id, slot_ctx).await;
 }
 
 #[cfg(test)]
@@ -258,21 +219,29 @@ mod tests {
         }
     }
 
-    /// Regression: prove the live post-session extraction entrypoint reaches
-    /// slot-side credential resolution through the real `agent_to_slot_context`
-    /// / `ExtractionCallbacks` adapter — not through an injected-provider
-    /// helper or a direct unit call to `resolve_provider_credential`.
-    ///
-    /// Sets up minimal DB fixtures (project, task, session with messages and a
-    /// stored credential), calls `run_post_session_extraction` (the real agent
-    /// entrypoint), and asserts that:
-    /// 1. `resolve_model_and_credential` emits a `credential_loading` lifecycle
-    ///    event (proving the model-resolution → credential-loading path ran).
-    /// 2. Structural extraction completed (event_taxonomy stored on session).
-    ///
-    /// The LLM call itself fails gracefully (fake key, no network); the proof
-    /// is that the credential-resolution callback was invoked through the real
-    /// adapter seam, not bypassed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extraction_credential_errors_include_provider_context() {
+        let db = Database::open_in_memory().expect("db");
+        db.ensure_initialized().await.expect("init db");
+        let agent = crate::test_helpers::agent_context_from_db(db, CancellationToken::new());
+        let slot_ctx = agent_to_slot_context(&agent);
+
+        let err = match slot_ctx
+            .callbacks
+            .resolve_provider_credential("missing-provider", &slot_ctx)
+            .await
+        {
+            Ok(_) => panic!("missing credential should fail"),
+            Err(err) => err,
+        };
+
+        assert!(err.contains("missing-provider"), "error was: {err}");
+        assert!(
+            !err.contains("not available in extraction backfill"),
+            "error was: {err}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn post_session_extraction_reaches_credential_resolution_through_real_adapter() {
         use std::sync::Arc;
@@ -281,7 +250,6 @@ mod tests {
         use djinn_core::message::{ContentBlock, Message, Role};
         use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
 
-        // ── 1. DB + fixtures ────────────────────────────────────────────
         let db = Database::open_in_memory().expect("db");
         db.ensure_initialized().await.expect("init db");
         let noop = EventBus::noop();
@@ -291,8 +259,6 @@ mod tests {
         let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
         let task_run_id = uuid::Uuid::now_v7().to_string();
-
-        // Create the task_run row so the session's FK constraint is satisfied.
         let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
         task_run_repo
             .create(djinn_db::CreateTaskRunParams {
@@ -322,7 +288,6 @@ mod tests {
             .await
             .expect("create session");
 
-        // ≥2 messages so structural extraction runs
         let msg_repo = SessionMessageRepository::new(db.clone(), noop.clone());
         msg_repo
             .insert_messages_batch(
@@ -344,15 +309,12 @@ mod tests {
             .await
             .expect("insert messages");
 
-        // Store credential for "anthropic" — the real ExtractionCallbacks
-        // adapter will load this through the agent-side credential loader.
         let credential_repo = CredentialRepository::new(db.clone(), noop.clone());
         credential_repo
             .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-extraction", None)
             .await
             .expect("store credential");
 
-        // ── 2. AgentContext with capturing event bus ────────────────────
         let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let events_clone = captured_events.clone();
@@ -364,14 +326,8 @@ mod tests {
             crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
         agent.event_bus = capturing_bus;
 
-        // ── 3. Invoke the real entrypoint ───────────────────────────────
         super::run_post_session_extraction(task.id.clone(), task_run_id.clone(), agent).await;
 
-        // ── 4. Assert credential_loading lifecycle event was emitted ────
-        // `resolve_model_and_credential` emits this event before calling
-        // `load_provider_credential` → `ctx.callbacks.resolve_provider_credential`.
-        // Its presence proves the real adapter/callback seam was exercised.
-        // Clone the events so we can drop the lock before any `.await`.
         let events: Vec<_> = captured_events.lock().unwrap().clone();
         let credential_loading = events.iter().find(|e| {
             e.entity_type == "lifecycle"
@@ -394,7 +350,6 @@ mod tests {
             "credential_loading event must reference the anthropic provider"
         );
 
-        // ── 5. Structural extraction completed ─────────────────────────
         let taxonomy_json = session_repo
             .get_event_taxonomy_json(&session.id)
             .await
@@ -406,47 +361,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn extraction_credential_errors_include_provider_context() {
-        let db = Database::open_in_memory().expect("db");
-        db.ensure_initialized().await.expect("init db");
-        let agent = crate::test_helpers::agent_context_from_db(db, CancellationToken::new());
-        let slot_ctx = agent_to_slot_context(&agent);
-
-        let err = match slot_ctx
-            .callbacks
-            .resolve_provider_credential("missing-provider", &slot_ctx)
-            .await
-        {
-            Ok(_) => panic!("missing credential should fail"),
-            Err(err) => err,
-        };
-
-        assert!(err.contains("missing-provider"), "error was: {err}");
-        assert!(
-            !err.contains("not available in extraction backfill"),
-            "error was: {err}"
-        );
-    }
-
-    /// Regression: prove the boot-time extraction backfill entrypoint reaches
-    /// slot-side credential resolution through the real `agent_to_slot_context`
-    /// / `ExtractionCallbacks` adapter — not through an injected-provider
-    /// helper or a direct unit call to `resolve_provider_credential`.
-    ///
-    /// Sets up minimal DB fixtures (project, task, completed task-run, session
-    /// with messages and a stored credential), calls `run_extraction_backfill`
-    /// (the real agent boot-time backfill entrypoint), and asserts that:
-    /// 1. The backfill candidate query picks up the completed-but-unextracted
-    ///    task-run session.
-    /// 2. `resolve_model_and_credential` emits a `credential_loading` lifecycle
-    ///    event (proving the model-resolution → credential-loading path ran
-    ///    through the real adapter seam).
-    /// 3. Structural extraction completed (event_taxonomy stored on session).
-    ///
-    /// The LLM call itself fails gracefully (fake key, no network); the proof
-    /// is that the credential-resolution callback was invoked through the real
-    /// adapter seam via the backfill candidate traversal, not bypassed.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extraction_backfill_reaches_credential_resolution_through_real_adapter() {
         use std::sync::Arc;
 
@@ -454,7 +368,6 @@ mod tests {
         use djinn_core::message::{ContentBlock, Message, Role};
         use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
 
-        // ── 1. DB + fixtures ────────────────────────────────────────────
         let db = Database::open_in_memory().expect("db");
         db.ensure_initialized().await.expect("init db");
         let noop = EventBus::noop();
@@ -464,9 +377,6 @@ mod tests {
         let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
 
         let task_run_id = uuid::Uuid::now_v7().to_string();
-
-        // Create a COMPLETED task_run so the backfill candidate query
-        // (`list_unextracted_completed_candidates`) picks it up.
         let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
         task_run_repo
             .create(djinn_db::CreateTaskRunParams {
@@ -481,8 +391,6 @@ mod tests {
             .await
             .expect("create completed task_run");
 
-        // Session linked to the completed task_run, with event_taxonomy NULL
-        // (the default) so the backfill query considers it unextracted.
         let session_repo = SessionRepository::new(db.clone(), noop.clone());
         let session = session_repo
             .create(CreateSessionParams {
@@ -498,7 +406,6 @@ mod tests {
             .await
             .expect("create session");
 
-        // ≥2 messages so structural extraction runs
         let msg_repo = SessionMessageRepository::new(db.clone(), noop.clone());
         msg_repo
             .insert_messages_batch(
@@ -520,15 +427,12 @@ mod tests {
             .await
             .expect("insert messages");
 
-        // Store credential for "anthropic" — the real ExtractionCallbacks
-        // adapter will load this through the agent-side credential loader.
         let credential_repo = CredentialRepository::new(db.clone(), noop.clone());
         credential_repo
             .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-backfill", None)
             .await
             .expect("store credential");
 
-        // ── 2. AgentContext with capturing event bus ────────────────────
         let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let events_clone = captured_events.clone();
@@ -540,18 +444,8 @@ mod tests {
             crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
         agent.event_bus = capturing_bus;
 
-        // ── 3. Invoke the real backfill entrypoint ─────────────────────
-        // This is the boot-time recovery sweep. It queries
-        // `list_unextracted_completed_candidates()`, finds our completed
-        // task-run, and delegates to `run_post_session_extraction` which
-        // exercises the full `agent_to_slot_context` → callback seam.
         super::run_extraction_backfill(agent).await;
 
-        // ── 4. Assert credential_loading lifecycle event was emitted ────
-        // `resolve_model_and_credential` emits this event before calling
-        // `load_provider_credential` → `ctx.callbacks.resolve_provider_credential`.
-        // Its presence proves the real adapter/callback seam was exercised
-        // through the backfill candidate traversal path.
         let events: Vec<_> = captured_events.lock().unwrap().clone();
         let credential_loading = events.iter().find(|e| {
             e.entity_type == "lifecycle"
@@ -574,7 +468,6 @@ mod tests {
             "credential_loading event must reference the anthropic provider"
         );
 
-        // ── 5. Structural extraction completed ─────────────────────────
         let taxonomy_json = session_repo
             .get_event_taxonomy_json(&session.id)
             .await
@@ -584,28 +477,4 @@ mod tests {
             "structural extraction must store event_taxonomy on the session"
         );
     }
-}
-
-/// One-shot recovery sweep that backfills post-session knowledge extraction
-/// over completed-but-unextracted task-runs.
-///
-/// This is the public entry point called from the server boot path.
-/// It delegates to `djinn_slot::run_extraction_backfill` after converting
-/// the `AgentContext` into a `SlotContext`.
-pub async fn run_extraction_backfill(app_state: AgentContext) {
-    let slot_ctx = agent_to_slot_context(&app_state);
-    djinn_slot::run_extraction_backfill(slot_ctx).await;
-}
-
-/// Server-side post-task-run knowledge extraction (thin adapter).
-///
-/// Converts `AgentContext` → `SlotContext` and delegates to
-/// `djinn_slot::run_post_session_extraction`.
-pub(crate) async fn run_post_session_extraction(
-    task_id: String,
-    task_run_id: String,
-    app_state: AgentContext,
-) {
-    let slot_ctx = agent_to_slot_context(&app_state);
-    djinn_slot::run_post_session_extraction(task_id, task_run_id, slot_ctx).await;
 }

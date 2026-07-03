@@ -77,6 +77,7 @@ fn make_ctx() -> TaskContext {
         code_graph_context: None,
         reviewer_diff_context: None,
         ci_blocking_directive: None,
+        worker_resume_note: None,
     }
 }
 
@@ -1070,5 +1071,65 @@ fn sa4x_directive_text_identical_across_worker_and_reviewer() {
     assert_eq!(
         worker_body, reviewer_body,
         "BLOCKING directive body must be identical for worker and reviewer"
+    );
+}
+
+// ── Worker resume note (y8pv / 48ru) ───────────────────────────────────────
+
+#[test]
+fn worker_resume_section_appears_when_note_present() {
+    let task = make_task();
+    let ctx = TaskContext {
+        worker_resume_note: Some(
+            "**Resuming from prior session.** prior session `s1`; checkpoint `abc123`; \
+             terminated: no-progress checkpoint; prev model `anthropic/claude-opus-4.7`; \
+             last progress: Implemented core feature; verify: `cargo test`"
+                .into(),
+        ),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        prompt.contains("## Resume Context"),
+        "worker prompt should include Resume Context section when note is present"
+    );
+    assert!(prompt.contains("Resuming from prior session"));
+    assert!(prompt.contains("abc123"));
+    assert!(prompt.contains("claude-opus-4.7"));
+    assert!(
+        !prompt.contains("{{worker_resume_section}}"),
+        "placeholder should be replaced"
+    );
+}
+
+#[test]
+fn worker_resume_section_omitted_when_note_absent() {
+    let task = make_task();
+    let ctx = make_ctx(); // worker_resume_note: None
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("## Resume Context"),
+        "prompt should not include Resume Context section when note is None"
+    );
+    assert!(
+        !prompt.contains("{{worker_resume_section}}"),
+        "placeholder should be replaced with empty string"
+    );
+}
+
+#[test]
+fn worker_resume_section_omitted_when_note_is_whitespace() {
+    let task = make_task();
+    let ctx = TaskContext {
+        worker_resume_note: Some("   ".into()),
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("## Resume Context"),
+        "prompt should not include Resume Context for whitespace-only note"
     );
 }

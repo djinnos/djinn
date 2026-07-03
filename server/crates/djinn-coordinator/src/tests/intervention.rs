@@ -2092,10 +2092,12 @@ fn failure_and_stall_escalation_thresholds_are_distinct() {
         FAILURE_ESCALATION_THRESHOLD, 3,
         "provider-error failure escalation fires on the third consecutive strike"
     );
-    assert!(
-        FAILURE_ESCALATION_THRESHOLD > STALL_CANCEL_ESCALATION_THRESHOLD,
-        "failure streak escalates one rung later than the stall streak"
-    );
+    const {
+        assert!(
+            FAILURE_ESCALATION_THRESHOLD > STALL_CANCEL_ESCALATION_THRESHOLD,
+            "failure streak escalates one rung later than the stall streak"
+        )
+    };
 }
 
 /// Three consecutive provider-error FAILED sessions without durable status

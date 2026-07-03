@@ -1,14 +1,29 @@
 // Create/read/import/export/list/update/block-patch/delete CRUD tools for the
 // global Proposals layer.
 //
-// This submodule owns the read/list/create/import/export surface plus the
-// update/block-patch/delete mutation tools and the cohesive list-summary
-// shaping used by `proposal_list`. The composed-gate helpers
-// (`evaluate_composed_gate`, `build_gate_status`), the small response
-// constructors (`err_single`), and the shared model helpers
-// (`graduated_epic_models`, `parse_ac_items`, `proposal_not_found_error`,
-// `target_models`) stay in the parent `mod.rs` as `pub(super)` and are
-// re-used here via `super::`.
+// This submodule owns the create/import/export/show/list/update/block-patch/
+// delete mutation surface plus target add/remove and the cohesive list/show/
+// target response shaping used by those tools.
+//
+// CRUD/target ownership checklist for task xpj0:
+// - moved here: `proposal_add_target`, `proposal_remove_target`,
+//   `target_models`, `finish_targets`, and `graduated_epic_models`;
+// - already owned here: create/import/export/show/list tools; update/delete/
+//   block-patch moved here from the py7d sibling slice;
+// - tests for the CRUD concern live in `create_tests.rs` so this production
+//   module stays under the Server Size Guard threshold;
+// - intentionally shared in `mod.rs`: composed gate/readiness helpers and
+//   `err_single`/`err_show` response constructors used by later feedback,
+//   signoff, lifecycle, and refinement slices.
+//
+// Debate-trail and refinement-status data fetches in `proposal_show`:
+// `proposal_show` fetches the debate trail (`repo.debate_trail`) and refinement
+// status (`refinement_tools::build_refinement_status`) as part of the show
+// response assembly. These are thin CRUD data fetches — not debate/refinement
+// glue — so they remain here alongside the other show response fields (targets,
+// feedback, revisions, signoffs, epics). The `refinement_active` field mapping
+// in list summary construction is likewise a response-shaping concern.
+//
 
 use std::borrow::Cow;
 
@@ -26,15 +41,19 @@ use crate::tools::proposal_blocks::{
     parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
-    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalListSummary, ProposalModel,
-    ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListSummary,
+    ProposalModel, ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
+    ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
     validate_ac_count, validate_design, validate_limit, validate_mdx_body, validate_offset,
     validate_proposal_create_status, validate_proposal_status, validate_sort, validate_title,
 };
-use djinn_db::{ProjectRepository, ProposalListQuery, ProposalListSummaryRow, ProposalRepository};
+use djinn_db::{
+    EpicRepository, ProjectRepository, ProposalListQuery, ProposalListSummaryRow,
+    ProposalRepository,
+};
 
 use super::mdx::{
     ProposalBlockPatchParams, apply_block_patch, parse_proposal_mdx, split_proposal_mdx_frontmatter,
@@ -43,8 +62,97 @@ use super::mdx::{
 // Re-import shared helpers kept in `mod.rs` as `pub(super)`.
 use super::{
     build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
-    graduated_epic_models, parse_ac_items, proposal_not_found_error, target_models,
+    parse_ac_items, proposal_not_found_error,
 };
+
+// ── Target/show response helpers ─────────────────────────────────────────────
+
+/// List a proposal's targets and resolve each project id to an `owner/repo`
+/// slug + name for display chips.
+pub(super) async fn target_models(
+    proposal_repo: &ProposalRepository,
+    project_repo: &ProjectRepository,
+    proposal_id: &str,
+) -> Result<Vec<ProposalTargetModel>, String> {
+    let targets = proposal_repo
+        .targets(proposal_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(targets.len());
+    for t in &targets {
+        let mut m = ProposalTargetModel::from(t);
+        if let Ok(Some(p)) = project_repo.get(&t.project_id).await {
+            m.project_path = Some(format!("{}/{}", p.github_owner, p.github_repo));
+            m.project_name = Some(p.name);
+        }
+        out.push(m);
+    }
+    Ok(out)
+}
+/// Resolve a proposal's graduated epics to `{epic_short_id, project_path,
+/// status}` display models.
+pub(super) async fn graduated_epic_models(
+    repo: &ProposalRepository,
+    epic_repo: &EpicRepository,
+    project_repo: &ProjectRepository,
+    proposal_id: &str,
+    latest_revision_seq: i32,
+    pending_reconcile: bool,
+) -> Result<Vec<ProposalEpicModel>, String> {
+    let links = repo
+        .graduated_epics(proposal_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let reconciliations = repo
+        .latest_epic_reconciliations(proposal_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(links.len());
+    for (epic_id, project_id) in links {
+        let Some(epic) = epic_repo.get(&epic_id).await.ok().flatten() else {
+            continue;
+        };
+        let reconciled_at_revision_seq = reconciliations.get(&epic_id).copied();
+        let needs_reconcile = pending_reconcile
+            && reconciled_at_revision_seq
+                .map(|seq| seq < latest_revision_seq)
+                .unwrap_or(false);
+        let project_path = match project_repo.get(&project_id).await {
+            Ok(Some(p)) => format!("{}/{}", p.github_owner, p.github_repo),
+            _ => project_id.clone(),
+        };
+        out.push(ProposalEpicModel {
+            epic_id,
+            epic_short_id: epic.short_id,
+            epic_title: epic.title,
+            epic_emoji: epic.emoji,
+            project_path,
+            status: epic.status,
+            reconciled_at_revision_seq,
+            needs_reconcile,
+        });
+    }
+    Ok(out)
+}
+pub(super) fn err_targets(error: impl Into<String>) -> ProposalTargetsResponse {
+    ProposalTargetsResponse {
+        targets: None,
+        error: Some(error.into()),
+    }
+}
+async fn finish_targets(
+    repo: &ProposalRepository,
+    project_repo: &ProjectRepository,
+    proposal_id: &str,
+) -> Json<ProposalTargetsResponse> {
+    match target_models(repo, project_repo, proposal_id).await {
+        Ok(targets) => Json(ProposalTargetsResponse {
+            targets: Some(targets),
+            error: None,
+        }),
+        Err(e) => Json(err_targets(e)),
+    }
+}
 
 // ── List response (NamedListResponse boilerplate, mirrors EpicListResponse) ──
 
@@ -196,6 +304,16 @@ pub struct ProposalListParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ProposalTargetParams {
+    /// Proposal UUID or short_id.
+    pub id: String,
+    /// Target project: UUID or owner/repo slug (must be registered).
+    pub project: String,
+    /// `primary` (a write-target, default) or `reference` (read-only context).
+    pub role: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ProposalUpdateParams {
     /// Proposal UUID or short_id.
     pub id: String,
@@ -217,7 +335,7 @@ pub struct ProposalDeleteParams {
     pub id: String,
 }
 
-// ── Tool router: create / import / export / show / list / update / block-patch / delete ──
+// ── Tool router: create / import / export / show / list / update / block-patch / delete / target ──
 
 #[tool_router(router = proposal_create_tool_router, vis = "pub(super)")]
 impl DjinnMcpServer {
@@ -709,6 +827,73 @@ impl DjinnMcpServer {
         ))
     }
 
+    /// Add (or re-role) a target project on a proposal.
+    #[tool(
+        description = "Add a target project to a proposal (or change its role if already present). `project` is a UUID or owner/repo slug; `role` is `primary` (default) or `reference`. This is the re-target capability — editable at any time. Returns the proposal's updated target list."
+    )]
+    pub async fn proposal_add_target(
+        &self,
+        Parameters(p): Parameters<ProposalTargetParams>,
+    ) -> Json<ProposalTargetsResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_targets(proposal_not_found_error(&p.id)));
+        };
+        if let Err(e) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_targets(e));
+        }
+        let role = p.role.as_deref().unwrap_or("primary");
+        if !matches!(role, "primary" | "reference") {
+            return Json(err_targets(format!(
+                "invalid role: {role:?} (expected primary or reference)"
+            )));
+        }
+        let project_id = match project_repo.resolve(&p.project).await {
+            Ok(Some(id)) => id,
+            _ => return Json(err_targets(format!("project not found: {}", p.project))),
+        };
+        if let Err(e) = repo.add_target(&proposal.id, &project_id, role).await {
+            return Json(err_targets(e.to_string()));
+        }
+        finish_targets(&repo, &project_repo, &proposal.id).await
+    }
+
+    /// Remove a target project from a proposal.
+    #[tool(
+        description = "Remove a target project from a proposal. `project` is a UUID or owner/repo slug. No-op if it wasn't a target. Returns the proposal's updated target list."
+    )]
+    pub async fn proposal_remove_target(
+        &self,
+        Parameters(p): Parameters<ProposalTargetParams>,
+    ) -> Json<ProposalTargetsResponse> {
+        let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
+        let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
+        let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
+            return Json(err_targets(proposal_not_found_error(&p.id)));
+        };
+        if let Err(e) = self
+            .gate_proposal_edit(proposal.author_user_id.as_deref())
+            .await
+        {
+            return Json(err_targets(e));
+        }
+        // Fall back to the raw value so a stale target can still be removed.
+        let project_id = project_repo
+            .resolve(&p.project)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| p.project.clone());
+        if let Err(e) = repo.remove_target(&proposal.id, &project_id).await {
+            return Json(err_targets(e.to_string()));
+        }
+        finish_targets(&repo, &project_repo, &proposal.id).await
+    }
+
     /// Update a proposal's editable fields.
     #[tool(
         description = "Update a proposal (by UUID or short_id): title, body, acceptance_criteria, status (draft|shared|ready|archived|superseded), and superseded_by. Only provided fields change."
@@ -931,353 +1116,7 @@ impl DjinnMcpServer {
     }
 }
 
-// ── Tests: list-summary tribunal/gate behavior ───────────────────────────────
-
 #[cfg(test)]
-mod list_summary_tests {
-    use crate::server::DjinnMcpServer;
-    use crate::state::stubs::test_mcp_state;
-    use djinn_core::events::EventBus;
-    use djinn_db::{
-        Database, ProjectRepository, ProposalCreateInput, ProposalDebateTrailCreateInput,
-        ProposalRepository,
-    };
-
-    /// A well-formed body that passes all deterministic readiness checks.
-    fn ready_body() -> &'static str {
-        r#"
-# Problem
-Users cannot do X.
-
-# Scope
-In scope: Y. Out of scope: Z.
-
-# Objectives
-- Deliver A
-
-## File map
-```file-map
-    src/main.rs
-```
-
-# Dependencies
-Blocked by service C.
-
-# Open Questions
-What happens if D fails?
-"#
-    }
-
-    async fn test_server() -> (DjinnMcpServer, Database) {
-        let db = Database::open_in_memory().unwrap();
-        db.ensure_initialized().await.unwrap();
-        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
-    }
-
-    /// Pull the `list_summary` object for a given proposal id out of a
-    /// `proposal_list` response.
-    fn summary_for<'a>(
-        list: &'a serde_json::Value,
-        proposal_id: &str,
-    ) -> Option<&'a serde_json::Value> {
-        list.get("proposals")?
-            .as_array()?
-            .iter()
-            .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(proposal_id))
-            .and_then(|p| p.get("list_summary"))
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proposal_list_surfaces_tribunal_and_gate_summary() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let project_repo = ProjectRepository::new(db.clone(), EventBus::noop());
-        let project = project_repo
-            .create("svc-list-sum", "test", "svc-list-sum-repo")
-            .await
-            .unwrap();
-
-        // Messy: empty body (fails DoR), no target, active refinement, one
-        // blocking objection, and a judge needs-work verdict.
-        let messy = repo
-            .create(ProposalCreateInput {
-                title: "Messy",
-                body: "just some text",
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-        repo.record_refinement_lifecycle(&messy.id, "refinement_start", None)
-            .await
-            .unwrap();
-        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
-            proposal_id: &messy.id,
-            kind: "objection",
-            body: "unbounded scope",
-            blocking: true,
-            agent_role: "adversary",
-            author_kind: "agent",
-            author_model: Some("m"),
-            source_task_id: None,
-            against_revision_seq: 1,
-            round: 2,
-            body_metadata: None,
-        })
-        .await
-        .unwrap();
-        repo.add_debate_trail_entry(ProposalDebateTrailCreateInput {
-            proposal_id: &messy.id,
-            kind: "verdict",
-            body: "verdict: needs-work",
-            blocking: true,
-            agent_role: "judge",
-            author_kind: "agent",
-            author_model: Some("m"),
-            source_task_id: None,
-            against_revision_seq: 1,
-            round: 2,
-            body_metadata: None,
-        })
-        .await
-        .unwrap();
-
-        // Clean: DoR-passing body, a target, refinement converged awaiting
-        // review, an approving verdict, no blocking objections.
-        let clean = repo
-            .create(ProposalCreateInput {
-                title: "Clean",
-                body: ready_body(),
-                acceptance_criteria: Some(r#"[{"criterion":"API returns 200","met":false}]"#),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-        repo.add_target(&clean.id, &project.id, "primary")
-            .await
-            .unwrap();
-        repo.record_refinement_lifecycle(&clean.id, "refinement_start", None)
-            .await
-            .unwrap();
-        repo.record_refinement_lifecycle(&clean.id, "refinement_awaiting_review", None)
-            .await
-            .unwrap();
-
-        let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50 }))
-            .await
-            .unwrap();
-        assert!(
-            list.get("error").is_none(),
-            "proposal_list failed: {:?}",
-            list.get("error")
-        );
-
-        let m = summary_for(&list, &messy.id).expect("messy has a list_summary");
-        assert_eq!(m["refinement_active"], serde_json::json!(true));
-        assert_eq!(m["awaiting_review"], serde_json::json!(false));
-        assert_eq!(m["current_round"], serde_json::json!(2));
-        assert_eq!(m["needs_evidence"], serde_json::json!(false));
-        assert_eq!(m["dor_ready"], serde_json::json!(false));
-        assert_eq!(m["gate_ready"], serde_json::json!(false));
-        assert_eq!(
-            m["unresolved_blocking_count"],
-            serde_json::json!(1),
-            "the judge verdict row must be excluded from the objection count"
-        );
-
-        let c = summary_for(&list, &clean.id).expect("clean has a list_summary");
-        assert_eq!(c["refinement_active"], serde_json::json!(true));
-        assert_eq!(c["awaiting_review"], serde_json::json!(true));
-        assert_eq!(c["dor_ready"], serde_json::json!(true));
-        assert_eq!(c["gate_ready"], serde_json::json!(true));
-        assert_eq!(c["unresolved_blocking_count"], serde_json::json!(0));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proposal_list_omits_summary_for_terminal_proposals() {
-        let (server, db) = test_server().await;
-        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
-        let done = repo
-            .create(ProposalCreateInput {
-                title: "Shipped",
-                body: ready_body(),
-                acceptance_criteria: Some("[]"),
-                status: None,
-                body_format: None,
-            })
-            .await
-            .unwrap();
-        repo.set_status(&done.id, "done").await.unwrap();
-
-        let list = server
-            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 50 }))
-            .await
-            .unwrap();
-        let entry = list
-            .get("proposals")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(done.id.as_str()))
-            })
-            .expect("proposal present in list");
-        assert!(
-            entry.get("list_summary").is_none(),
-            "terminal proposals must not carry a list_summary (chips hidden)"
-        );
-    }
-}
-
-// ── Schema-lean regression tests ──────────────────────────────────────────
-//
-// Guard `ProposalCreateParams` and `ProposalUpdateParams` against accidental
-// inlining of block vocabulary (tags, field schemas, catalog enums). Clients
-// discover vocabulary via `get_block_catalog` / `proposal_blocks`, then
-// submit proposal bodies through the existing `body` + `body_format` fields.
-
-#[cfg(test)]
-mod schema_lean_tests {
-    use schemars::schema_for;
-    use serde_json::Value;
-
-    /// Recursively collect every string value reachable from `value`.
-    fn collect_strings(value: &Value, out: &mut Vec<String>) {
-        match value {
-            Value::String(s) => out.push(s.clone()),
-            Value::Array(arr) => {
-                for item in arr {
-                    collect_strings(item, out);
-                }
-            }
-            Value::Object(map) => {
-                for v in map.values() {
-                    collect_strings(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Assert that the serialized JSON schema does not mention any of the
-    /// given forbidden terms.  A single traversal collects all string values
-    /// (keys, enum entries, titles, descriptions, …) and a linear scan
-    /// checks every one.
-    fn assert_schema_excludes_terms(schema: &Value, forbidden: &[&str], context: &str) {
-        let mut strings = Vec::new();
-        collect_strings(schema, &mut strings);
-        for term in forbidden {
-            for s in &strings {
-                assert!(
-                    !s.contains(term),
-                    "{context} schema unexpectedly contains forbidden term \
-                     \"{term}\" in string value \"{s}\""
-                );
-            }
-        }
-    }
-
-    /// Terms that must never appear in a proposal write-schema.  These
-    /// cover: generic vocabulary field names, concrete MDX block tags, and
-    /// block-field/enum concepts.
-    const FORBIDDEN_BLOCK_TERMS: &[&str] = &[
-        // generic vocabulary surface
-        "block_types",
-        "catalog",
-        "blocks",
-        // concrete MDX block tags (must match proposal_block_catalog.json)
-        "AnnotatedCode",
-        "ApiEndpoint",
-        "Callout",
-        "Checklist",
-        "Columns",
-        "Decisions",
-        "Diagram",
-        "Diff",
-        "FileTree",
-        "JsonExplorer",
-        "QuestionForm",
-        "RichText",
-        "Tabs",
-        "Wireframe",
-        // kebab-case type identifiers
-        "annotated-code",
-        "api-endpoint",
-        "callout",
-        "checklist",
-        "columns",
-        "decisions",
-        "diagram",
-        "diff",
-        "file-tree",
-        "json-explorer",
-        "question-form",
-        "rich-text",
-        "tabs",
-        "wireframe",
-        // block enum / field schema vocabulary
-        "BlockType",
-        "ProposalBlock",
-    ];
-
-    /// Expected top-level properties for `ProposalCreateParams`.
-    const CREATE_ALLOWED_PROPS: &[&str] = &[
-        "title",
-        "body",
-        "acceptance_criteria",
-        "target_projects",
-        "status",
-        "body_format",
-    ];
-
-    /// Expected top-level properties for `ProposalUpdateParams`.
-    const UPDATE_ALLOWED_PROPS: &[&str] = &[
-        "id",
-        "title",
-        "body",
-        "acceptance_criteria",
-        "status",
-        "superseded_by",
-        "body_format",
-    ];
-
-    #[test]
-    fn proposal_create_params_schema_is_lean_and_excludes_block_vocabulary() {
-        let schema = schema_for!(super::ProposalCreateParams);
-        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
-
-        // Verify allowed properties.
-        let props = json["properties"]
-            .as_object()
-            .expect("ProposalCreateParams schema should have properties object");
-        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
-        assert_eq!(
-            prop_keys, CREATE_ALLOWED_PROPS,
-            "ProposalCreateParams properties drifted: got {prop_keys:?}, \
-             expected {CREATE_ALLOWED_PROPS:?}"
-        );
-
-        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalCreateParams");
-    }
-
-    #[test]
-    fn proposal_update_params_schema_is_lean_and_excludes_block_vocabulary() {
-        let schema = schema_for!(super::ProposalUpdateParams);
-        let json: Value = serde_json::to_value(&schema).expect("schema serializes");
-
-        // Verify allowed properties.
-        let props = json["properties"]
-            .as_object()
-            .expect("ProposalUpdateParams schema should have properties object");
-        let prop_keys: Vec<&str> = props.keys().map(String::as_str).collect();
-        assert_eq!(
-            prop_keys, UPDATE_ALLOWED_PROPS,
-            "ProposalUpdateParams properties drifted: got {prop_keys:?}, \
-             expected {UPDATE_ALLOWED_PROPS:?}"
-        );
-
-        assert_schema_excludes_terms(&json, FORBIDDEN_BLOCK_TERMS, "ProposalUpdateParams");
-    }
+mod create_tests {
+    include!("create_tests.rs");
 }

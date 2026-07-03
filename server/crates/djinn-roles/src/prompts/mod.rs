@@ -123,6 +123,16 @@ pub struct TaskContext {
     /// `None` when CI is not failing, when no remediation baseline exists,
     /// or when failures are advisory-only.
     pub ci_blocking_directive: Option<String>,
+
+    // ── Worker resume note (y8pv / 48ru) ──────────────────────────────────────
+    /// One-line resume note injected into worker prompt context after a
+    /// recoverable termination / resume-source selection. Contains prior
+    /// session ID, checkpoint SHA or submit/review ID, previous model,
+    /// termination reason, last durable-progress summary, and a suggested
+    /// verification command when available. `None` when this is not a
+    /// resume dispatch or the role does not receive worker-resume
+    /// instructions.
+    pub worker_resume_note: Option<String>,
 }
 
 // ─── Renderer ─────────────────────────────────────────────────────────────────
@@ -221,6 +231,18 @@ pub fn render_prompt_for_role(
         "{{ci_blocking_directive_section}}",
         &ci_blocking_directive_section,
     );
+
+    // y8pv / 48ru: worker resume note injected after a recoverable
+    // termination / resume-source selection. Only populated for worker
+    // dispatch where resume metadata is present; other roles see an empty
+    // section so the template placeholder vanishes cleanly.
+    let worker_resume_section = match &ctx.worker_resume_note {
+        Some(text) if !text.trim().is_empty() => {
+            format!("## Resume Context\n\n{text}\n")
+        }
+        _ => String::new(),
+    };
+    out = out.replace("{{worker_resume_section}}", &worker_resume_section);
 
     let epic_context_section = match &ctx.epic_context {
         Some(text) if !text.trim().is_empty() => format!("## Epic Context\n\n{text}\n"),

@@ -38,7 +38,8 @@ pub use task::{
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use user_settings::{ModelLane, ModelLanes, UserSettings};
 pub use verify_run::{
-    AutoSubmitReviewRecord, AutoSubmitTriggerReason, VerifyResult, VerifyRunRecord, VerifySource,
+    AutoSubmitReviewRecord, AutoSubmitTriggerReason, RejectedVerdictKind,
+    TaskRejectedSubmissionIntegrityRecord, VerifyResult, VerifyRunRecord, VerifySource,
 };
 
 /// Parse a JSON array string (e.g. '["a","b"]') into a `Vec<String>`.

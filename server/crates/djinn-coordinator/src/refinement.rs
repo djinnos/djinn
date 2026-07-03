@@ -374,6 +374,13 @@ impl RefinementLoopState {
         self.phase = RefinementPhase::AwaitingEvidence;
     }
 
+    /// Resume after a linked evidence spike has produced valid findings. The
+    /// next tribunal action must be the Advocate so the findings can be used to
+    /// answer the current objections before Judge adjudication continues.
+    pub fn resume_after_evidence_received(&mut self) {
+        self.phase = RefinementPhase::AdvocateRevision;
+    }
+
     /// Park the loop for human review (converged or escalated). Records the
     /// reason for display but does NOT complete — the human still acts.
     pub fn escalate(&mut self, reason: StopReason) {
@@ -1063,6 +1070,24 @@ mod tests {
             "round must not advance on needs-evidence"
         );
         assert!(state.is_awaiting_evidence());
+    }
+
+    #[test]
+    fn evidence_received_resumes_at_advocate_without_advancing_round() {
+        let mut state = RefinementLoopState::with_config("p1", 0, test_config());
+        state.process_adversary_pass(&AdversaryPassResult {
+            objections: vec![blocking_objection("Need external proof")],
+            explicit_dry: false,
+        });
+        state.record_advocate_revision(1);
+        state.record_needs_evidence();
+        assert_eq!(state.phase, RefinementPhase::AwaitingEvidence);
+
+        state.resume_after_evidence_received();
+
+        assert_eq!(state.phase, RefinementPhase::AdvocateRevision);
+        assert_eq!(state.current_round, 1);
+        assert_eq!(state.current_revision_seq, 1);
     }
 
     // ── Revision event metadata builder ──────────────────────────────────

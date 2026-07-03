@@ -1,4 +1,6 @@
 use rmcp::model::Tool as RmcpTool;
+use std::collections::BTreeSet;
+
 use rmcp::object;
 
 use crate::shared_schemas::{self, ToolSafetyAnnotations};
@@ -881,4 +883,139 @@ pub fn tool_schemas_judge() -> Vec<serde_json::Value> {
         mutation(),
     ));
     tool_values
+}
+
+/// Tool schemas for an evidence-spike session: read-only investigation tools
+/// plus the `submit_work` finalize path for evidence findings handoff.
+///
+/// Evidence-spike tasks are created by the Judge demand-evidence tool
+/// (`proposal_refinement_demand_evidence` in epic `6tjy`) and carry the
+/// `refinement-evidence` + `read-only` labels.  They run under the
+/// Architect role but with a severely restricted, read-only/fail-closed
+/// tool surface.
+///
+/// **Allowed:**
+/// - Base read-only tools (read, code_search, lsp, ci_job_log, github_search,
+///   output_view, output_grep, skill_read — but NOT shell).
+/// - Task/epic/memory read-only inspection tools (task_show, task_list,
+///   task_activity_list, memory_read, memory_search, memory_list,
+///   task_blocked_list, epic_show, epic_tasks).
+/// - Memory health/context tools (memory_build_context, memory_health,
+///   memory_extracted_audit, memory_broken_links, memory_orphans).
+/// - Architect-only read tools (code_graph, pr_review_context).
+/// - `submit_work` as the finalize tool for evidence findings handoff.
+///
+/// **Denied (not included):**
+/// - `shell` (destructive — may mutate files/system).
+/// - `write`, `edit`, `apply_patch` (file mutation).
+/// - `task_create`, `task_update`, `task_transition`, `task_comment_add`
+///   (task mutation — except the finalize path).
+/// - `epic_create`, `epic_update`, `epic_close` (epic mutation).
+/// - `memory_write`, `memory_edit`, `memory_move` (memory mutation).
+/// - `role_create` (destructive agent mutation).
+/// - `task_delete_branch`, `task_archive_activity`, `task_reset_counters`,
+///   `task_kill_session` (destructive task admin).
+/// - `request_lead`, `request_planner` (mutation escalation).
+/// - Any proposal/debate mutation tools.
+pub fn tool_schemas_evidence_spike() -> Vec<serde_json::Value> {
+    let mut tool_values = Vec::new();
+
+    // ── Read-only inspection tools (from shared_base_tool_schemas) ─────
+    // These are task/activity and memory read-only inspection tools.
+    for value in shared_schemas::shared_base_tool_schemas() {
+        tool_values.push(value);
+    }
+
+    // ── Read-only file/code intelligence tools (from base, NO shell) ──
+    tool_values.push(serialize_tool(tool_read(), read_only()));
+    tool_values.push(serialize_tool(tool_code_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_skill_read(), read_only()));
+    tool_values.push(serialize_tool(tool_lsp(), read_only()));
+    tool_values.push(serialize_tool(tool_ci_job_log(), read_only()));
+    tool_values.push(serialize_tool(tool_github_search(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_output_view(), read_only()));
+    tool_values.push(serialize_tool(tool_output_grep(), read_only()));
+
+    // ── Architect-only read tools ─────────────────────────────────────
+    tool_values.push(serialize_tool(tool_code_graph(), open_world_read_only()));
+    tool_values.push(serialize_tool(tool_pr_review_context(), read_only()));
+
+    // ── Read-only task/epic inspection (from shared_lead, read-only) ──
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_task_blocked_list(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_epic_tasks(),
+        read_only(),
+    ));
+
+    // ── Read-only memory health/context tools ─────────────────────────
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_build_context(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_health(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_extracted_audit(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_broken_links(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_memory_orphans(),
+        read_only(),
+    ));
+
+    // ── Read-only proposal/debate inspection (for context) ────────────
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_show(),
+        read_only(),
+    ));
+    tool_values.push(serialize_tool(
+        shared_schemas::tool_proposal_debate_list(),
+        read_only(),
+    ));
+
+    // ── Finalize tool: evidence findings submission path ──────────────
+    // This is the ONLY mutation-capable tool allowed — it is the spike's
+    // own completion/handoff path via submit_work.
+    tool_values.push(serialize_tool(
+        crate::finalize_tools::tool_submit_work(),
+        mutation(),
+    ));
+
+    tool_values
+}
+
+/// Canonical allowlist of tool names permitted in the evidence-spike
+/// read-only profile.
+///
+/// Derived from [`tool_schemas_evidence_spike`] to guarantee the allowlist
+/// and the schema surface cannot drift.  Callers that need to gate dispatch
+/// at runtime (fail-closed) should use this set rather than re-parsing
+/// schemas.
+///
+/// This is the single source of truth for the evidence-spike allowlist;
+/// schema generation and dispatch enforcement both reference this function
+/// so they cannot drift apart.
+pub fn evidence_spike_tool_names() -> BTreeSet<String> {
+    tool_schemas_evidence_spike()
+        .iter()
+        .filter_map(|schema| {
+            schema
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .collect()
 }

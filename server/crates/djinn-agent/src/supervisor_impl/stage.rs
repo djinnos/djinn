@@ -73,14 +73,16 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_telemetry_meta, default_base_url, resolved_needs_base_url,
+    build_provider_from_resolved, build_telemetry_meta_with_attribution, default_base_url,
+    resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
-    ModelResolutionError, resolve_model_and_credential,
+    ModelResolutionError, attempt_resume_model_rotation, resolve_model_and_credential,
 };
 use crate::actors::slot::lifecycle::prompt_context::{
     PromptContext, PromptContextInputs, ReadSourceInfo, assemble_prompt_context,
+    build_worker_resume_note,
 };
 use crate::actors::slot::lifecycle::role_overrides::{
     ResolvedRoleOverrides, resolve_role_overrides,
@@ -532,6 +534,8 @@ pub(crate) async fn execute_stage(
         runtime_role = %runtime_role.config().name,
         specialist_overrode_runtime_role,
         has_conflict_context = conflict_ctx.is_some(),
+        is_evidence_spike = spec.is_evidence_spike,
+        tool_profile = if spec.is_evidence_spike { "evidence_spike" } else { "standard" },
         workspace = %worktree_path.display(),
         "Supervisor stage: starting"
     );
@@ -559,6 +563,24 @@ pub(crate) async fn execute_stage(
                 }
             }
         }
+    };
+
+    // ── Model rotation for resume (y8pv / 48ru) ────────────────────────────
+    // When resume metadata indicates the prior session used a specific model
+    // that terminated for a rotation-worthy cause (no-progress, deadline,
+    // flaky, or repeated verify-loop), attempt to select a different model
+    // from the connected catalog. Falls back to the current model when
+    // rotation is not applicable or no alternate is available.
+    let model_id = if provider_override.is_some() {
+        model_id
+    } else {
+        attempt_resume_model_rotation(
+            &task.short_id,
+            &model_id,
+            spec.resume_lifecycle_metadata.as_ref(),
+            agent_context,
+        )
+        .await
     };
 
     // ── Model + credential ───────────────────────────────────────────────────
@@ -645,6 +667,21 @@ pub(crate) async fn execute_stage(
     // projects so the prompt can advertise them (and check out their files
     // read-only for direct inspection during a migration).
     let read_sources = advertise_read_sources(spec, agent_context).await;
+    // y8pv / 48ru: build a one-line worker resume note from the coordinator-
+    // selected resume lifecycle metadata. Only injected for worker dispatch;
+    // non-worker roles receive no resume instructions.
+    let worker_resume_note = build_worker_resume_note(
+        runtime_role.config().name,
+        spec.resume_lifecycle_metadata.as_ref(),
+    );
+    if worker_resume_note.is_some() {
+        tracing::info!(
+            task_id = %task.short_id,
+            task_run_id = %task_run_id,
+            role = %runtime_role_name,
+            "Supervisor stage: injected worker resume note"
+        );
+    }
     // Coarse pre-session progress marker for the host-side liveness deadline:
     // model/credential/MCP/skill resolution and prompt assembly happen here,
     // before any session row exists.
@@ -665,6 +702,7 @@ pub(crate) async fn execute_stage(
         resolved_skills: &resolved_skills,
         app_state: agent_context,
         read_sources: &read_sources,
+        worker_resume_note: worker_resume_note.as_deref(),
     })
     .await;
 
@@ -732,7 +770,8 @@ pub(crate) async fn execute_stage(
     } else {
         let resolved = resolved
             .expect("resolved model credential must be populated when provider_override is absent");
-        let telemetry_meta = build_telemetry_meta(runtime_role_name, &task.id);
+        let telemetry_meta =
+            build_telemetry_meta_with_attribution(runtime_role_name, &task.id, None, None);
         // Look up the API base URL only for API-key providers (OAuth configs
         // carry their own). Soft fallback to `default_base_url` on a missing
         // catalog entry / empty URL, matching the pre-Phase-6b behaviour.
@@ -780,7 +819,21 @@ pub(crate) async fn execute_stage(
 
     // ── Build the initial conversation ───────────────────────────────────────
     let agent_type = crate::AgentType::parse(runtime_role_name).unwrap_or(crate::AgentType::Worker);
-    let mut tools = crate::roles::tool_schemas_for(agent_type);
+    // Evidence-spike tasks (created by the Judge demand-evidence path in
+    // epic 6tjy) carry the `refinement-evidence` + `read-only` labels and
+    // must run under a restricted read-only/fail-closed tool profile.
+    // The profile was resolved at dispatch time and propagated via
+    // `TaskRunSpec::is_evidence_spike`.  Detection is strict: both labels
+    // must be present.  Tasks that carry only one label (or have malformed
+    // metadata) fall through to the normal role tool surface —
+    // deny-by-default is enforced by the restricted profile itself, not by
+    // a separate deny gate.
+    let is_evidence_spike = spec.is_evidence_spike;
+    let mut tools = if is_evidence_spike {
+        crate::extension::tool_schemas_evidence_spike()
+    } else {
+        crate::roles::tool_schemas_for(agent_type)
+    };
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
     }
@@ -827,6 +880,7 @@ pub(crate) async fn execute_stage(
             active_skill_names: &effective_skills,
             active_mcp_server_names: &effective_mcp_servers,
             max_turns_override: None,
+            is_evidence_spike,
         },
         &mut conversation,
         false,

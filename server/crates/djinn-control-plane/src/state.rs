@@ -34,7 +34,7 @@ pub struct McpState {
     runtime: Arc<dyn RuntimeOps>,
     git: Arc<dyn GitOps>,
     repo_graph: Arc<dyn RepoGraphOps>,
-    /// Bridge into `djinn_agent::actors::slot::memory_enrichment`. `None` when
+    /// Bridge into `djinn_slot::memory_enrichment` (via the `djinn_agent::actors::slot` facade). `None` when
     /// the server wires a context without the enrichment subsystem (test
     /// harnesses, off-server contexts). The MCP tool degrades to a clear
     /// "not configured" error in that case.

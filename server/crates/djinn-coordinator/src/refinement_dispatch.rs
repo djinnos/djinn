@@ -207,7 +207,7 @@ impl CoordinatorActor {
     /// consumption, or `pool.dispatch()`. At-cap phases defer non-terminally
     /// so the state machine retries on the next tick. Failed paths clear the
     /// reservation so no slot leaks.
-    async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
+    pub(crate) async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
         let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
             return;
         };
@@ -609,12 +609,71 @@ impl CoordinatorActor {
             }
         }
     }
+
+    /// Resume a refinement loop after a linked evidence spike completed with
+    /// valid findings. This clears the durable evidence block through the
+    /// substrate helper, advances the in-memory loop to the Advocate, then
+    /// dispatches only if the normal administrative gates permit it.
+    pub(super) async fn resume_refinement_after_evidence_received(
+        &mut self,
+        proposal_id: &str,
+        spike_task_id: &str,
+    ) {
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+
+        match proposal_repo.clear_needs_evidence_spike(proposal_id).await {
+            Ok(proposal) => {
+                tracing::info!(
+                    proposal_id = %proposal_id,
+                    spike_task_id = %spike_task_id,
+                    "Cleared linked evidence spike after valid findings receipt"
+                );
+
+                if let Some(state) = self.active_refinements.get_mut(proposal_id) {
+                    state.resume_after_evidence_received();
+                } else {
+                    tracing::debug!(
+                        proposal_id = %proposal_id,
+                        spike_task_id = %spike_task_id,
+                        "Evidence received for proposal without in-memory refinement loop; startup re-drive owns recovery"
+                    );
+                    return;
+                }
+
+                let lifecycle_state = self.derive_proposal_evidence_lifecycle(&proposal).await;
+                if matches!(lifecycle_state, EvidenceLifecycleState::PausedOrFrozen) {
+                    tracing::info!(
+                        proposal_id = %proposal_id,
+                        spike_task_id = %spike_task_id,
+                        build_frozen = proposal.build_frozen,
+                        "Evidence findings received; refinement is waiting on manual pause/freeze gate before Advocate resume"
+                    );
+                    return;
+                }
+
+                self.dispatch_next_refinement_phase(proposal_id).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal_id,
+                    spike_task_id = %spike_task_id,
+                    error = %e,
+                    "Failed to clear linked evidence spike after valid findings receipt"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 #[path = "refinement_cap_tests.rs"]
-mod refinement_cap_tests;
+pub(crate) mod refinement_cap_tests;
 
 #[cfg(test)]
 #[path = "refinement_dor_status_tests.rs"]
 mod refinement_dor_status_tests;
+
+#[cfg(test)]
+#[path = "refinement_evidence_resume_tests.rs"]
+mod refinement_evidence_resume_tests;

@@ -471,6 +471,8 @@ pub async fn build_refinement_status(
             round,
             against_revision_seq,
             created_by_task_id,
+            insufficient_in_session_research,
+            expected_findings,
         ) = if let Some(ref c) = parsed_claim {
             (
                 c.question.clone(),
@@ -480,10 +482,22 @@ pub async fn build_refinement_status(
                 Some(c.round),
                 Some(c.against_revision_seq),
                 Some(c.created_by_task_id.clone()),
+                Some(c.insufficient_in_session_research.clone()),
+                Some(c.expected_findings.clone()),
             )
         } else {
             // Legacy plain-string claim or empty.
-            (raw_claim.to_string(), None, None, None, None, None, None)
+            (
+                raw_claim.to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
         };
 
         // Derive the evidence lifecycle phase from persisted lifecycle events.
@@ -549,6 +563,8 @@ pub async fn build_refinement_status(
             round,
             against_revision_seq,
             created_by_task_id,
+            insufficient_in_session_research,
+            expected_findings,
             evidence_phase,
             failure_reason,
         })

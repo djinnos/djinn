@@ -1,11 +1,13 @@
 //! Lifecycle teardown: delegates to host callbacks.
 use crate::finalize_handlers::{
     process_auto_submit_payload, process_finalize_payload_with_outcome,
+    record_rejected_integrity_entry,
 };
 use crate::host::SlotContext;
 use crate::output_parser::{AutoSubmitSettlement, ParsedAgentOutput};
 use crate::roles_support::AgentRole;
 use djinn_core::events::DjinnEventEnvelope;
+use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
 use std::sync::Arc;
 
 pub(crate) struct PostSessionParams {
@@ -35,20 +37,31 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
             tokens_out,
         } = params;
 
-        let model_called_submit_work =
-            final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
-        if model_called_submit_work {
-            if final_result_ok {
-                let _ = process_finalize_payload_with_outcome(
-                    &final_output.finalize_payload,
-                    final_output.finalize_tool_name.as_deref().unwrap_or(""),
-                    &task_id,
-                    &ctx,
-                )
-                .await;
-            }
+        // ── Second-strike no_progress_submission settlement ──────────
+        // When the reply loop's no-progress integrity gate detected a second
+        // consecutive identical rejected-fingerprint submit_work, the reply
+        // loop already settled the session via `settle_no_progress_submission`
+        // (activity logging, streak increment, planner intervention routing).
+        // Teardown just skips normal finalize and auto-submit processing and
+        // does NOT increment the dispatch_failure_streak.
+        if final_output.no_progress_submission {
+            // Settlement already completed in the reply loop; nothing to do.
         } else {
-            let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
+            let model_called_submit_work =
+                final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());
+            if model_called_submit_work {
+                if final_result_ok {
+                    let _ = process_finalize_payload_with_outcome(
+                        &final_output.finalize_payload,
+                        final_output.finalize_tool_name.as_deref().unwrap_or(""),
+                        &task_id,
+                        &ctx,
+                    )
+                    .await;
+                }
+            } else {
+                let _ = settle_auto_submit_if_eligible(&task_id, &ctx, &final_output).await;
+            }
         }
 
         apply_transition_and_dispatch(
@@ -64,6 +77,96 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 
         ctx.deregister_background_work(&task_id);
     });
+}
+
+/// Settle a second-strike no-progress submission: record the
+/// `no_progress_submission` activity, persist a rejected integrity entry with
+/// an incremented `no_progress_streak`, emit a telemetry event, and route the
+/// task into planner intervention via the coordinator.
+///
+/// This follows the normal settle path without incrementing the
+/// `dispatch_failure_streak`.
+pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotContext) {
+    // Record a `no_progress_submission` activity so the coordinator and
+    // any audit trail can see why this session was terminated.
+    let repo = djinn_db::TaskRepository::new(ctx.db.clone(), ctx.event_bus.clone());
+    let payload = serde_json::json!({
+        "reason": "no_progress_submission",
+        "detail": "Second consecutive identical rejected-fingerprint submit_work \
+                   intercepted by the submission integrity gate. Worker submitted \
+                   the same diff as the latest rejected submission without making \
+                   substantive changes. Routing to planner intervention.",
+    })
+    .to_string();
+    if let Err(e) = repo
+        .log_activity(
+            Some(task_id),
+            "system",
+            "worker",
+            "no_progress_submission",
+            &payload,
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task_id,
+            error = %e,
+            "teardown: failed to log no_progress_submission activity"
+        );
+    }
+
+    // Increment the task-level no_progress_streak by recording a new rejected
+    // integrity entry with the same fingerprint. This uses the latest rejected
+    // fingerprint already on file.
+    let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(ctx.db.clone());
+    if let Ok(Some(latest)) = integrity_repo.latest_for_task(task_id).await {
+        record_rejected_integrity_entry(
+            task_id,
+            ctx,
+            "no_progress_submission",
+            None,
+            None,
+            &latest.diff_fingerprint,
+        )
+        .await;
+    }
+
+    // Emit a telemetry event for observability.
+    ctx.event_bus.send(DjinnEventEnvelope {
+        entity_type: "submit",
+        action: "no_progress_submission_settled",
+        payload: serde_json::json!({
+            "task_id": task_id,
+        }),
+        id: Some(task_id.to_string()),
+        project_id: None,
+        from_sync: false,
+    });
+
+    // Route the task into planner intervention via the coordinator. The
+    // coordinator's route_loop_guard_planner_intervention path clears
+    // dispatch_failure_streak and dispatches a Planner escalation, matching
+    // the existing a8pv contract.
+    if let Some(trigger) = ctx.coordinator_trigger.as_ref() {
+        let reason = format!(
+            "Second-strike no_progress_submission: worker submitted the same \
+             rejected-fingerprint diff twice consecutively without making \
+             substantive changes (task {task_id}). Routing to Planner for \
+             decompose / rescope / close decision."
+        );
+        trigger.try_route_no_progress_intervention(task_id, &reason);
+    } else {
+        tracing::warn!(
+            task_id = %task_id,
+            "teardown: no coordinator_trigger available; \
+             no_progress_submission planner intervention not routed"
+        );
+    }
+
+    tracing::info!(
+        task_id = %task_id,
+        "teardown: no_progress_submission settled and planner intervention routed"
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +189,24 @@ pub(crate) async fn settle_auto_submit_if_eligible(
     emit_auto_submit_decision_events(task_id, ctx, settlement);
 
     if !settlement.decision.eligible {
+        // Record the rejected submission fingerprint at the task level so the
+        // live submit-work guard can detect no-progress resubmissions across
+        // task runs. The settlement's diff_fingerprint was already computed by
+        // the auto-submit gate.
+        let fp = &settlement.review_event.diff_fingerprint;
+        if !fp.is_empty() {
+            let verdict_kind =
+                auto_submit_trigger_to_rejected_verdict(&settlement.decision.trigger_reason);
+            crate::finalize_handlers::record_rejected_integrity_entry(
+                task_id,
+                ctx,
+                verdict_kind.as_str(),
+                None,
+                Some(&settlement.task_run_id),
+                fp,
+            )
+            .await;
+        }
         emit_auto_submit_fallback_hook(task_id, ctx, "decision_skipped");
         return AutoSubmitSettlementOutcome::Skipped;
     }
@@ -157,6 +278,25 @@ fn emit_auto_submit_fallback_hook(task_id: &str, ctx: &SlotContext, reason: &'st
         project_id: None,
         from_sync: false,
     });
+}
+
+/// Map an auto-submit trigger reason to the corresponding rejected verdict
+/// kind for task-level integrity recording.
+fn auto_submit_trigger_to_rejected_verdict(
+    trigger: &djinn_core::models::AutoSubmitTriggerReason,
+) -> djinn_core::models::RejectedVerdictKind {
+    match trigger {
+        djinn_core::models::AutoSubmitTriggerReason::NoProgress => {
+            djinn_core::models::RejectedVerdictKind::NoProgress
+        }
+        djinn_core::models::AutoSubmitTriggerReason::Looping => {
+            djinn_core::models::RejectedVerdictKind::Looping
+        }
+        djinn_core::models::AutoSubmitTriggerReason::SoftDeadline => {
+            djinn_core::models::RejectedVerdictKind::SoftDeadline
+        }
+        _ => djinn_core::models::RejectedVerdictKind::Other,
+    }
 }
 
 pub(crate) async fn apply_transition_and_dispatch(
@@ -507,5 +647,183 @@ mod tests {
             records[0].verify_timestamp.as_deref(),
             Some("2026-07-01T00:00:00.000Z")
         );
+    }
+
+    #[tokio::test]
+    async fn ineligible_settlement_records_rejected_fingerprint() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+        let mut output = ParsedAgentOutput::empty();
+        let mut s = settlement(&task_run_id, false);
+        // Ensure a non-empty fingerprint so the rejection path records it.
+        s.review_event.diff_fingerprint = "sha256:rejected-by-gate".to_string();
+        output.auto_submit = Some(s);
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
+
+        // The auto_submit_review record should NOT be created (settlement was skipped).
+        let review_records = AutoSubmitReviewRepository::new(db.clone())
+            .list_for_task_run(&task_run_id)
+            .await
+            .unwrap();
+        assert!(review_records.is_empty());
+
+        // But the task-level rejected integrity entry should be recorded.
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        let latest = integrity_repo
+            .latest_for_task(&task.id)
+            .await
+            .unwrap()
+            .expect("ineligible settlement must record rejected fingerprint");
+        assert_eq!(latest.diff_fingerprint, "sha256:rejected-by-gate");
+        assert_eq!(
+            latest.verdict_kind,
+            djinn_core::models::RejectedVerdictKind::Other.as_str()
+        );
+        assert_eq!(latest.no_progress_streak, 1);
+        assert_eq!(latest.task_run_id.as_deref(), Some(task_run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ineligible_settlement_skips_fingerprint_when_empty() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+        let mut output = ParsedAgentOutput::empty();
+        let mut s = settlement(&task_run_id, false);
+        // Empty fingerprint — the skip path should NOT record anything.
+        s.review_event.diff_fingerprint = String::new();
+        output.auto_submit = Some(s);
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
+
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
+        assert!(
+            latest.is_none(),
+            "empty fingerprint must not produce a rejected integrity record"
+        );
+    }
+
+    /// The `settle_no_progress_submission` function records a
+    /// `no_progress_submission` activity, increments the no_progress_streak
+    /// on the rejected integrity entry, and emits a telemetry event.
+    #[tokio::test]
+    async fn settle_no_progress_submission_records_activity_and_streak() {
+        let (db, ctx, task, _run_id, events) = fixture().await;
+
+        // Seed a rejected integrity entry so the settlement can increment the
+        // streak.
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(
+                db.clone(),
+            );
+        let entry_id = uuid::Uuid::now_v7().to_string();
+        integrity_repo
+            .record(
+                djinn_db::repositories::verify_run::RecordTaskRejectedSubmissionParams {
+                    id: &entry_id,
+                    task_id: &task.id,
+                    task_run_id: None,
+                    review_id: None,
+                    verdict_kind: "reviewer_reject",
+                    activity_id: None,
+                    rejected_at: "2026-07-01T00:00:00Z",
+                    diff_fingerprint: "sha256:same-fingerprint",
+                    no_progress_streak: 1,
+                },
+            )
+            .await
+            .expect("record initial rejected entry");
+
+        settle_no_progress_submission(&task.id, &ctx).await;
+
+        // Verify the no_progress_submission activity was logged.
+        let repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = repo
+            .query_activity(djinn_db::repositories::task::ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some("no_progress_submission".to_string()),
+                actor_role: None,
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 10,
+                offset: 0,
+            })
+            .await
+            .expect("query activity");
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one no_progress_submission activity"
+        );
+
+        // Verify the rejected integrity entry was incremented.
+        let latest = integrity_repo
+            .latest_for_task(&task.id)
+            .await
+            .unwrap()
+            .expect("should have a rejected integrity entry");
+        assert_eq!(latest.no_progress_streak, 2, "streak should increment to 2");
+        assert_eq!(latest.diff_fingerprint, "sha256:same-fingerprint");
+        assert_eq!(latest.verdict_kind, "no_progress_submission");
+
+        // Verify the telemetry event was emitted.
+        let evts = events.lock().expect("events mutex");
+        let settle_event = evts
+            .iter()
+            .find(|e| e.action == "no_progress_submission_settled");
+        assert!(
+            settle_event.is_some(),
+            "no_progress_submission_settled telemetry event must be emitted"
+        );
+    }
+
+    /// Regression: when no rejected integrity entry exists for the task,
+    /// `settle_no_progress_submission` still records the activity and emits
+    /// telemetry but does NOT create a new rejected integrity entry (no
+    /// fingerprint to use).
+    #[tokio::test]
+    async fn settle_no_progress_submission_no_prior_entry() {
+        let (db, ctx, task, _run_id, events) = fixture().await;
+
+        // No prior rejected integrity entry.
+
+        settle_no_progress_submission(&task.id, &ctx).await;
+
+        // The activity should still be recorded.
+        let repo = djinn_db::TaskRepository::new(db.clone(), ctx.event_bus.clone());
+        let entries = repo
+            .query_activity(djinn_db::repositories::task::ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some("no_progress_submission".to_string()),
+                actor_role: None,
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 10,
+                offset: 0,
+            })
+            .await
+            .expect("query activity");
+        assert_eq!(entries.len(), 1);
+
+        // No rejected integrity entry should be created (nothing to increment).
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
+        assert!(
+            latest.is_none(),
+            "should not create a rejected entry when no prior entry exists"
+        );
+
+        // Telemetry event should still fire.
+        let evts = events.lock().expect("events mutex");
+        let settle_event = evts
+            .iter()
+            .find(|e| e.action == "no_progress_submission_settled");
+        assert!(settle_event.is_some());
     }
 }

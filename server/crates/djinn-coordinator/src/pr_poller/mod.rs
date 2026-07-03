@@ -77,6 +77,7 @@ mod conversation_resolution;
 mod installation;
 pub(crate) mod pr_cleanup;
 mod pr_commands;
+mod pr_rejection_fingerprint;
 mod pr_review_handlers;
 mod pr_review_watcher;
 mod pr_watcher;

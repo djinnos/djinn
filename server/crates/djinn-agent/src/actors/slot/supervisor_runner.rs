@@ -11,7 +11,7 @@ use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
     BiStream, LoopGuardKind, ProviderFailureClass, ResolvedCredentials, ResumeLifecycleMetadata,
-    RunHandle, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
+    SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
 };
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
@@ -33,23 +33,12 @@ fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tra
     )
 }
 
-/// Default pre-session liveness deadline: how long stage init has to reach the
-/// first reply-loop session/turn before the run is failed fast.
-///
-/// 8 minutes — comfortably above a legitimately slow setup (a cold cargo target
-/// seed can take ~2 min, plus workspace clone + context/prompt assembly) but
-/// far under the orphan reaper's ~15-min catch and the 3h in-pod soft deadline.
-/// Overridable via `DJINN_PRESESSION_DEADLINE_SECS` (0 / unparseable → default).
+/// Pre-session liveness deadline (8 min default; override via `DJINN_PRESESSION_DEADLINE_SECS`).
 const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
 
-/// Initial step label used before the worker emits its first stage marker —
-/// the window right after the handshake while the in-pod supervisor creates the
-/// `task_runs` row and begins setup.
+/// Step label before the worker emits its first stage marker.
 const PRE_SESSION_INITIAL_STEP: &str = "run_create";
 
-/// How often the pre-session watchdog re-checks the DB for a session row when
-/// the deadline fires (the DB is the authoritative disarm signal; the stream
-/// markers only name the step).
 fn pre_session_deadline() -> std::time::Duration {
     let secs = std::env::var("DJINN_PRESESSION_DEADLINE_SECS")
         .ok()
@@ -80,13 +69,7 @@ enum ReportAwait {
     PreSessionTimeout(PreSessionTimeout),
 }
 
-/// Persist and surface a credential revocation after a run hit a 401.
-///
-/// Marks the stored credential for the run's provider revoked (the F5-safe
-/// source of truth the provider catalog reads) and emits a `credential_revoked`
-/// event so the UI can prompt a reconnect live. Best-effort: any failure here is
-/// logged, never propagated (the run already failed). `owner` is the task
-/// creator's user id (`None` for org-shared credentials).
+/// Best-effort: mark credential revoked and emit event after a 401.
 async fn surface_credential_revocation(
     app_state: &AgentContext,
     owner: Option<&str>,
@@ -95,9 +78,6 @@ async fn surface_credential_revocation(
     let Ok((provider_id, _model_name)) = parse_model_id(model_id) else {
         return;
     };
-    // The stored credential's provider id for an OAuth provider is the merged
-    // child (e.g. "openai" → "chatgpt_codex"); for API-key providers it is the
-    // provider id itself.
     let cred_provider = djinn_provider::catalog::builtin::resolve_oauth_provider(&provider_id)
         .map(|s| s.to_string())
         .unwrap_or(provider_id);
@@ -124,30 +104,10 @@ async fn surface_credential_revocation(
     }
 }
 
-/// Host-side dispatch logic — called from
-/// [`host_callbacks::AgentDispatchCallbacks::run_task_dispatch`].
+/// Host-side dispatch: resolve task -> build spec -> construct runtime -> drive lifecycle.
 ///
-/// Resolves `(task, flow, base_branch, task_branch, trigger)` from the task
-/// row + ambient dispatch context, builds a [`TaskRunSpec`], then:
-///
-/// - on [`RuntimeKind::Kubernetes`]: constructs a
-///   [`djinn_k8s::KubernetesRuntime`] and drives `prepare → teardown` — the
-///   worker Pod connects back to djinn-server's TCP listener (bound at boot)
-///   and streams events through `serve_on_tcp`'s dispatch.  The supervisor
-///   body runs *inside the Pod*; the final `TaskRunReport` is synthesized
-///   from the Job's terminal state during `teardown`.
-/// - on [`RuntimeKind::Test`]: constructs a [`TestRuntime`] wrapping a
-///   [`SupervisorTaskRunner`] — the supervisor runs in-process and the
-///   terminal report rides the in-memory `BiStream`.
-///
-/// Returns:
-/// - `Ok(())` on any terminal runtime outcome.  The slot actor treats that as
-///   `SlotEvent::Free`; the supervisor has already written the
-///   task_run/session/task rows, so there is nothing else for the slot to do.
-/// - `Err(..)` only for infra-level setup failures the runtime cannot
-///   express through a `TaskRunReport` (task lookup failed, mirror not
-///   configured, runtime construction error).  The slot actor logs the
-///   error and still emits `SlotEvent::Free`.
+/// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
+/// `Err` = infra setup failure the runtime can't express via `TaskRunReport`.
 pub(super) async fn dispatch_task_runtime(
     task_id: String,
     _project_path: String,
@@ -188,7 +148,7 @@ pub(super) async fn dispatch_task_runtime(
     )
     .await;
     let creator_scope = spec_inputs.created_by_user_id.clone();
-    let spec = build_task_run_spec(spec_inputs);
+    let spec = TaskRunSpec::from(spec_inputs);
     announce_dispatch(&app_state, &spec, &model_id);
 
     // ── Resolve credentials → construct runtime ───────────────────────────
@@ -215,15 +175,7 @@ pub(super) async fn dispatch_task_runtime(
     )
     .await?;
 
-    // D2: a worker that never completed its startup handshake (image-pull
-    // failure, unschedulable, crash-loop) was torn down above. Treat it as an
-    // infra stall: trip the breaker so dispatch fails over off this model, and
-    // mark the task's failure as a throttle so the coordinator spares it from the
-    // terminal MAX_DISPATCH_FAILURES streak (A3) and redispatches with backoff
-    // rather than immediately re-hanging on the same model.
     if handshake_timed_out {
-        // An infra handshake failure is a genuine "this model/backend is bad
-        // right now" signal (not a quota throttle), so escalate the cooldown cap.
         app_state
             .health_tracker
             .record_stall(creator_scope.as_deref(), &model_id, true);
@@ -257,20 +209,6 @@ pub(super) async fn dispatch_task_runtime(
         );
     }
 
-    // The infra-death watch fired before any terminal report: the worker Job/Pod
-    // died out-of-band (OOM SIGKILL, node eviction, BackoffLimitExceeded). Surface
-    // the REAL reason where operators look and finalize the orphaned `running`
-    // session row promptly — without this the session lingered `running` (with a
-    // live-looking but half-open RPC connection) until the 30-min idle stall
-    // reaper collected it as a generic "stall", losing the OOM attribution.
-    //
-    // Deliberately does NOT feed the model circuit-breaker: an OOM / eviction /
-    // Job failure is an INFRA death, not evidence the model is bad (mirrors the
-    // zombie-session backstop's reasoning — tripping the breaker here would
-    // auto-disable the often-only model for the whole scope on a memory pinch).
-    // The orphan `task_runs` row was already reaped above; releasing the task for
-    // redispatch is handled by the coordinator's stuck-task reconciler once the
-    // slot frees (this fn returns), exactly as for any other slot-freeing exit.
     if let Some(reason) = infra_death.as_deref() {
         let payload = serde_json::json!({
             "error": format!("Worker infrastructure died before completing the run: {reason}"),
@@ -286,11 +224,6 @@ pub(super) async fn dispatch_task_runtime(
                 &payload,
             )
             .await;
-        // Finalize any orphaned `running` session row for this task (status →
-        // interrupted, ended_at set). Idempotent: only touches `running` rows,
-        // so it can't double-finalize a row a late TerminalReport already
-        // flipped to `completed`, and it races harmlessly with the coordinator's
-        // zombie/stall reapers (same single-statement UPDATE-where-running).
         let session_repo =
             djinn_db::SessionRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         match session_repo.interrupt_running_for_task(&task.id).await {
@@ -309,13 +242,6 @@ pub(super) async fn dispatch_task_runtime(
         }
     }
 
-    // Pre-session stage-init deadline breached: the run never reached its first
-    // reply-loop turn within the bounded window. The Job was torn down above
-    // and the `starting` task_run row reaped as Failed. Surface the typed,
-    // step-named failure where operators look, feed the breaker as a stall so
-    // dispatch fails over and the coordinator spares the terminal
-    // MAX_DISPATCH_FAILURES streak (this is an infra/setup wedge, not the
-    // task's fault), and return the typed error so host logs name the step.
     if let Some(timeout) = presession_timeout {
         let PreSessionTimeout { step, elapsed_secs } = &timeout;
         tracing::error!(
@@ -360,10 +286,6 @@ pub(super) async fn dispatch_task_runtime(
 
     match (report_result, teardown) {
         (Ok(streamed), Ok(teardown_report)) => {
-            // Prefer the streamed terminal report — it carries the real run id
-            // and the stages the in-pod supervisor actually completed. The
-            // teardown report is a stub fallback for the no-report case (worker
-            // died before emitting), which still feeds the orphan reap above.
             let report = select_terminal_report(streamed, teardown_report);
             tracing::info!(
                 task_id = %task.short_id,
@@ -373,61 +295,18 @@ pub(super) async fn dispatch_task_runtime(
                 runtime = ?runtime_kind,
                 "supervisor dispatch: task-run complete"
             );
-            // The worker stage completed and the in-pod supervisor fired
-            // `submit_task_review` (in_progress → needs_task_review) directly —
-            // the pre-PR verification gate was removed, so there is no host-side
-            // verification pipeline to arm here. The coordinator's next dispatch
-            // pass picks up the `needs_task_review` task and runs the reviewer.
 
             persist_loop_guard_activity(&task_repo, &task.id, &report).await;
-            // Feed the model circuit-breaker on a productive run. A terminal
-            // outcome that maps to `Completed` (PR opened / closed / escalated)
-            // with at least one completed stage means the model produced tokens
-            // and drove the flow to a terminal state — a clear "this model is
-            // healthy" signal. `record_success` resets the consecutive-failure
-            // counter and clears any expired cooldown, so a model that recovers
-            // isn't needlessly held in failover. We key on the dispatch-level
-            // `model_id` (the one the coordinator's `is_available` gate selects
-            // and would re-select), matching what `record_stall`/`record_failure`
-            // trip on the stall path. We deliberately do NOT reset on
-            // Interrupted/Failed/empty runs (those aren't evidence of recovery).
+            // Feed breaker on productive completed runs.
             if terminal_report_feeds_model_success(&report) {
                 app_state
                     .health_tracker
                     .record_success(creator_scope.as_deref(), &model_id);
             }
-            // Symmetric to `record_success`: feed the breaker when a stage
-            // failed FAST on a typed provider error that produced no token
-            // stall. The coordinator's stall detector only catches sessions that
-            // hang; a fast rejection (bad/expired credential, a request the
-            // provider keeps rejecting, repeated 5xx, a throttle answered with a
-            // 4xx instead of a hang) exits cleanly and was previously invisible
-            // to the breaker — so dispatch kept re-selecting a model that is
-            // structurally broken for this user. `stage.rs` classified the
-            // typed `ProviderError` (which lives only in-pod and can't ride the
-            // report frame) into a `ProviderFailureClass`; map it back here onto
-            // the SAME knobs the coordinator's stall path uses, keyed on the
-            // SAME `creator_scope` as `record_success` so the trip is scoped to
-            // this task's creator, not global:
-            //   - Throttle  → `record_stall`   (rate-limit: immediate failover,
-            //     cooldown outlasts the task's redispatch ladder; mirrors the
-            //     coordinator's throttle→stall intent).
-            //   - Failure   → `record_failure` (auth/invalid/5xx/invalid-output:
-            //     gentler, trips only after repeats — a one-off may be transient).
-            // A hard `Transport` death folds into `Failure` in `stage.rs` so a
-            // model that dies instantly on every dispatch trips the gentle
-            // consecutive-failure breaker (a one-off blip is absorbed by the next
-            // successful run's `record_success`). ContextOverflow / EmptyCompletion
-            // and untyped errors still classify to `None` and are deliberately NOT
-            // fed (reactive compaction / empty-turn backoff handle those;
-            // non-provider errors must not over-trip the breaker).
+            // Feed breaker on fast provider failures (throttle, auth, 5xx).
             if let Some(class) = provider_failure_class_for_report(&report) {
                 let (is_throttle, retry_after_ms) = match class {
                     djinn_runtime::ProviderFailureClass::Throttle { retry_after_ms } => {
-                        // A throttle (rate-limit / Codex empty-200 account quota)
-                        // resets on a clock, not on model health — trip for
-                        // immediate failover but do NOT escalate the cooldown cap
-                        // (`escalate = false`); only genuine failures ratchet it.
                         app_state.health_tracker.record_stall(
                             creator_scope.as_deref(),
                             &model_id,
@@ -442,24 +321,8 @@ pub(super) async fn dispatch_task_runtime(
                         (false, None)
                     }
                     djinn_runtime::ProviderFailureClass::AuthInvalid => {
-                        // A 401 on an OAuth-backed credential (chatgpt_codex /
-                        // githubcopilot) is usually a mid-run ACCESS-TOKEN
-                        // EXPIRY, not a dead credential: the worker pod holds a
-                        // static token snapshot with no in-pod refresh (the wire
-                        // format carries only the bearer token), so a run that
-                        // outlives the access token's TTL 401s even though the
-                        // refresh token is still valid. Try a host-side silent
-                        // refresh FIRST — only a refresh that itself fails
-                        // (`invalid_grant`) or a non-OAuth API key is a true
-                        // revocation.
+                        // Try silent OAuth refresh first; only mark revoked if refresh fails.
                         if refresh_oauth_credential_after_401(&model_id, &app_state).await {
-                            // Recovered: the refreshed token is persisted, so the
-                            // next dispatch resumes on it. Fail this run over
-                            // WITHOUT escalating the cooldown cap and WITHOUT
-                            // marking the credential revoked — `escalate = false`
-                            // keeps `disable_ttl_trips` from ratcheting, while the
-                            // stall floor still prevents an instant re-select of
-                            // the just-failed pod before the new token is live.
                             app_state.health_tracker.record_stall(
                                 creator_scope.as_deref(),
                                 &model_id,
@@ -467,14 +330,7 @@ pub(super) async fn dispatch_task_runtime(
                             );
                             (true, None)
                         } else {
-                            // Genuinely dead credential — trip the breaker
-                            // IMMEDIATELY (like a throttle) so dispatch fails over
-                            // to the user's next model at once, and persist +
-                            // surface the revocation so the owner is told to
-                            // reconnect (F5-safe row + live event). Escalate the
-                            // cooldown cap: unlike a quota throttle, a dead
-                            // credential is a genuine model-health problem that
-                            // should stay demoted longer the more it keeps failing.
+                            // Dead credential: trip breaker immediately + surface revocation.
                             app_state.health_tracker.record_stall(
                                 creator_scope.as_deref(),
                                 &model_id,
@@ -486,27 +342,11 @@ pub(super) async fn dispatch_task_runtime(
                                 &model_id,
                             )
                             .await;
-                            // Throttle-like for the per-task redispatch ladder: a
-                            // dead credential must never march the task to terminal
-                            // force-close. With a healthy fallback the breaker hold
-                            // makes dispatch fail over; with none the task parks
-                            // until the owner reconnects (which clears the breaker
-                            // via the credential-updated event).
                             (true, None)
                         }
                     }
                 };
-                // Side-channel for the coordinator's per-task redispatch logic
-                // (A3/A6). The breaker above is keyed per `(scope, model)`; the
-                // coordinator's terminal-failure streak + escalating cooldown are
-                // keyed per task and observed only via the task reappearing as
-                // dispatch-ready (it never sees this report directly). Stash the
-                // last failure class — and any provider-stated retry-after — under
-                // the task id on the SHARED `HealthTracker` (the same Arc instance
-                // the coordinator holds as `self.health`) so the streak/cooldown
-                // sites can consult it: a Throttle must not march a healthy task to
-                // terminal close (A3), and a provider reset floors the cooldown so
-                // a multi-hour quota window isn't probed on the fixed ladder (A6).
+                // Per-task failure signal for coordinator redispatch logic (A3/A6).
                 app_state.health_tracker.note_task_provider_failure(
                     &task.id,
                     djinn_provider::catalog::health::TaskFailureSignal {
@@ -532,10 +372,6 @@ pub(super) async fn dispatch_task_runtime(
                                 "supervisor dispatch: failed to clear budget-park dispatch state"
                             );
                         }
-                        // `ClearPlannedDispatchCompletion` routes through the
-                        // no-mover disposition call site after clearing stale
-                        // dispatch markers. Avoid sending a second message for
-                        // the same settled run.
                     }
                     None => {
                         tracing::debug!(
@@ -599,15 +435,7 @@ pub(super) async fn dispatch_task_runtime(
                     }
                 }
             }
-            // Phase 2.2: post-session knowledge extraction. Fire-and-forget on
-            // the long-lived server (it owns the embedding model + Qdrant, so
-            // notes created here get embedded; worker pods are ephemeral and
-            // lack that config). Gated on real work having run — skip
-            // interrupted/empty runs so we don't burn an LLM call on nothing.
-            // `report.task_run_id` is the canonical id the sessions were
-            // written under, so `run_post_session_extraction` matches them.
-            // Extraction is fully isolated: any failure is logged and never
-            // affects the task-run outcome.
+            // Fire-and-forget post-session knowledge extraction.
             if !report.stages_completed.is_empty() {
                 let app_state_ext = app_state.clone();
                 let task_id_ext = task.id.clone();
@@ -645,6 +473,8 @@ pub(super) async fn dispatch_task_runtime(
     }
 }
 
+/// Everything `dispatch_task_runtime` needs back from the runtime
+/// execution/report phase to run its persistence and finalization logic.
 struct RuntimeExecutionOutcome {
     report_result: anyhow::Result<Option<TaskRunReport>>,
     teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
@@ -653,6 +483,7 @@ struct RuntimeExecutionOutcome {
     presession_timeout: Option<PreSessionTimeout>,
 }
 
+/// Outcome of attaching stdio and waiting for the worker's terminal report.
 struct TerminalReportAwaitOutcome {
     report_result: anyhow::Result<Option<TaskRunReport>>,
     handshake_timed_out: bool,
@@ -660,6 +491,9 @@ struct TerminalReportAwaitOutcome {
     presession_timeout: Option<PreSessionTimeout>,
 }
 
+/// Drive the provider runtime execution phase: prepare, cancellation watcher,
+/// stdio attach, terminal-report await (with infra-death and pre-session
+/// timeout watching), teardown, orphan reaping, and cargo-target cleanup.
 async fn execute_runtime_report_phase(
     runtime: Arc<dyn SessionRuntime>,
     spec: &TaskRunSpec,
@@ -669,14 +503,17 @@ async fn execute_runtime_report_phase(
     app_state: &AgentContext,
     kill: &CancellationToken,
 ) -> anyhow::Result<RuntimeExecutionOutcome> {
-    let handle = prepare_runtime(runtime.as_ref(), spec, credentials).await?;
+    let handle = runtime
+        .prepare(spec, credentials)
+        .await
+        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
+
     let cancel_task = spawn_runtime_cancel_watcher(
         runtime.clone(),
         handle.clone(),
         kill.clone(),
         task.id.clone(),
         model_id.to_string(),
-        spec.task_run_id.clone(),
     );
 
     let await_outcome =
@@ -685,10 +522,12 @@ async fn execute_runtime_report_phase(
 
     abort_runtime_cancel_watcher(cancel_task).await;
 
-    let teardown = teardown_runtime(runtime.as_ref(), handle).await;
+    let teardown = runtime.teardown(handle).await;
+
     let reap_status = select_orphan_reap_status(&await_outcome.presession_timeout, &teardown);
     reap_orphan_task_run(app_state, &task.id, reap_status).await;
-    cleanup_cargo_target_for_run(app_state, &spec.task_run_id).await;
+
+    teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
 
     Ok(RuntimeExecutionOutcome {
         report_result: await_outcome.report_result,
@@ -699,24 +538,13 @@ async fn execute_runtime_report_phase(
     })
 }
 
-async fn prepare_runtime(
-    runtime: &dyn SessionRuntime,
-    spec: &TaskRunSpec,
-    credentials: &ResolvedCredentials,
-) -> anyhow::Result<RunHandle> {
-    runtime
-        .prepare(spec, credentials)
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))
-}
-
+/// Watch the kill token and cancel the runtime run when it fires.
 fn spawn_runtime_cancel_watcher(
     runtime: Arc<dyn SessionRuntime>,
-    handle: RunHandle,
+    handle: djinn_runtime::RunHandle,
     kill: CancellationToken,
     task_id: String,
     model_id: String,
-    session_id: String,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         kill.cancelled().await;
@@ -725,77 +553,72 @@ fn spawn_runtime_cancel_watcher(
             task_id = %task_id,
             model_id = %model_id,
         );
-        async move {
-            tracing::info!(
-                event = "slot.runtime_cancel",
-                task_id = %task_id,
-                model_id = %model_id,
-            );
-            let rpc_span = supervisor_rpc_span("kill", &session_id, &task_id);
-            async move {
-                tracing::info!(
-                    event = "supervisor.rpc.cancel",
-                    op = "kill",
-                    session_id = %session_id,
-                    task_id = %task_id,
-                );
-                let _ = runtime.cancel(&handle).await;
-            }
-            .instrument(rpc_span)
-            .await;
+        async {
+            let _ = runtime.cancel(&handle).await;
         }
         .instrument(span)
         .await;
     })
 }
 
+/// Abort the cancellation watcher once the run has reached its terminal state.
 async fn abort_runtime_cancel_watcher(cancel_task: tokio::task::JoinHandle<()>) {
     cancel_task.abort();
     let _ = cancel_task.await;
 }
 
+/// Attach stdio and wait for the authoritative terminal report, racing the
+/// runtime's infra-death watcher and tracking pre-session timeouts.
 async fn attach_and_await_terminal_report(
     runtime: Arc<dyn SessionRuntime>,
-    handle: &RunHandle,
+    handle: &djinn_runtime::RunHandle,
     app_state: &AgentContext,
     spec: &TaskRunSpec,
     task: &Task,
     kill: &CancellationToken,
 ) -> TerminalReportAwaitOutcome {
-    // Consume the worker's terminal report off the BiStream. For BOTH runtimes
-    // `attach_stdio` bridges the worker's RPC events — including the final
-    // `WorkerEvent::TerminalReport` — onto `events_rx`, so the report we read
-    // here carries the REAL run id + the stages the in-pod supervisor actually
-    // completed. This is the authoritative result; teardown is only the stub
-    // fallback when the worker died before it could emit a report.
     let bistream_result = runtime.attach_stdio(handle).await;
     let handshake_timed_out = matches!(
         &bistream_result,
         Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
     );
-
-    let mut infra_death = None;
-    let mut presession_timeout = None;
-    let report_result = match bistream_result {
-        Ok(bistream) => match await_terminal_report_or_infra_death(
-            runtime, handle, bistream, app_state, spec, task, kill,
-        )
-        .await
-        {
-            Ok(TerminalReportSelection::Report(report)) => Ok(report),
-            Ok(TerminalReportSelection::InfraDeath(reason)) => {
-                infra_death = Some(reason);
-                Ok(None)
+    let mut infra_death: Option<String> = None;
+    let mut presession_timeout: Option<PreSessionTimeout> = None;
+    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
+        Ok(bistream) => {
+            let await_outcome = tokio::select! {
+                biased;
+                res = await_report_from_stream(
+                    bistream,
+                    kill,
+                    app_state.db.clone(),
+                    &spec.task_run_id,
+                    &spec.task_id,
+                    pre_session_deadline(),
+                ) => res,
+                reason = runtime.watch_infra_death(handle) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        %reason,
+                        runtime = ?runtime_kind(),
+                        "supervisor dispatch: worker infra died before terminal report \
+                         (OOM / eviction / Job failure); finalizing run as interrupted"
+                    );
+                    infra_death = Some(reason);
+                    Ok(ReportAwait::Report(None))
+                }
+            };
+            match await_outcome {
+                Ok(ReportAwait::Report(report)) => Ok(report),
+                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
+                    presession_timeout = Some(timeout);
+                    Ok(None)
+                }
+                Err(e) => Err(e),
             }
-            Ok(TerminalReportSelection::PreSessionTimeout(timeout)) => {
-                presession_timeout = Some(timeout);
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        },
+        }
         Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
     };
-
     TerminalReportAwaitOutcome {
         report_result,
         handshake_timed_out,
@@ -804,64 +627,14 @@ async fn attach_and_await_terminal_report(
     }
 }
 
-enum TerminalReportSelection {
-    Report(Option<TaskRunReport>),
-    InfraDeath(String),
-    PreSessionTimeout(PreSessionTimeout),
-}
-
-async fn await_terminal_report_or_infra_death(
-    runtime: Arc<dyn SessionRuntime>,
-    handle: &RunHandle,
-    bistream: BiStream,
-    app_state: &AgentContext,
-    spec: &TaskRunSpec,
-    task: &Task,
-    kill: &CancellationToken,
-) -> anyhow::Result<TerminalReportSelection> {
-    tokio::select! {
-        biased;
-        res = await_report_from_stream(
-            bistream,
-            kill,
-            app_state.db.clone(),
-            &spec.task_run_id,
-            &spec.task_id,
-            pre_session_deadline(),
-        ) => match res? {
-            ReportAwait::Report(report) => Ok(TerminalReportSelection::Report(report)),
-            ReportAwait::PreSessionTimeout(timeout) => {
-                Ok(TerminalReportSelection::PreSessionTimeout(timeout))
-            }
-        },
-        reason = runtime.watch_infra_death(handle) => {
-            tracing::warn!(
-                task_id = %task.short_id,
-                %reason,
-                runtime = ?runtime_kind(),
-                "supervisor dispatch: worker infra died before terminal report \
-                 (OOM / eviction / Job failure); finalizing run as interrupted"
-            );
-            Ok(TerminalReportSelection::InfraDeath(reason))
-        }
-    }
-}
-
-async fn teardown_runtime(
-    runtime: &dyn SessionRuntime,
-    handle: RunHandle,
-) -> Result<TaskRunReport, djinn_runtime::RuntimeError> {
-    runtime.teardown(handle).await
-}
-
+/// Pick the status used when reaping an orphaned `task_runs` row after the
+/// runtime phase: pre-session timeouts fail fast; otherwise mirror the
+/// teardown report's terminal status, defaulting to interrupted.
 fn select_orphan_reap_status(
     presession_timeout: &Option<PreSessionTimeout>,
     teardown: &Result<TaskRunReport, djinn_runtime::RuntimeError>,
 ) -> TaskRunStatus {
     if presession_timeout.is_some() {
-        // A stage-init hang is a definite failure of THIS run — mark it Failed
-        // (not the generic Interrupted stub) so the `starting` row is flipped
-        // terminal and the coordinator redispatches promptly.
         TaskRunStatus::Failed
     } else {
         teardown
@@ -872,16 +645,7 @@ fn select_orphan_reap_status(
     }
 }
 
-async fn cleanup_cargo_target_for_run(app_state: &AgentContext, task_run_id: &str) {
-    teardown_cargo_target_run_dir(app_state, task_run_id).await;
-}
-
-/// Context captured during the preflight phase of `dispatch_task_runtime`.
-///
-/// Holds the task row, the conflict/review context, the resolved branches, and
-/// the base flow selected by the planner-style `flow_for_task_dispatch` helper.
-/// Keeping these values together makes the "effective flow" decision a pure
-/// function over the context plus an optional durability probe.
+/// Preflight context: task row, conflict/review state, branches, base flow.
 struct DispatchContext<'a> {
     task: &'a Task,
     has_conflict: bool,
@@ -892,11 +656,6 @@ struct DispatchContext<'a> {
 
 impl<'a> DispatchContext<'a> {
     /// Resolve the dispatch context for a task.
-    ///
-    /// Loads the conflict/review context, resolves the target and task branches,
-    /// and selects the base supervisor flow. The durability probe itself is kept
-    /// separate (see `resolve_effective_flow`) so that this struct stays cheap to
-    /// construct and testable without a mirror.
     async fn resolve(task: &'a Task, app_state: &'a AgentContext) -> Self {
         let conflict_ctx = conflict_context_for_dispatch(&task.id, app_state).await;
         let has_conflict = conflict_ctx.is_some();
@@ -917,16 +676,8 @@ impl<'a> DispatchContext<'a> {
     }
 }
 
-/// Probe whether a `ReviewResponse` task's worker output is durable on the mirror.
-///
-/// Only `ReviewResponse` can be upgraded to `ReviewResume`; for every other flow
-/// the mirror is irrelevant and we return `false` immediately. When the probe
-/// applies, the mirror must report that the task branch exists and carries commits
-/// beyond the merge-base with `base_branch`.
-///
-/// The probe is bounded by a 10-second timeout and is conservative on any failure
-/// (missing mirror, timeout, error) so that a stale read never skips real worker
-/// work. Logs match the original `dispatch_task_runtime` warning shape.
+/// For `ReviewResponse`, probe the mirror to see if worker output is durable.
+/// Conservative on any failure (timeout -> keep full redo).
 async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentContext) -> bool {
     if !matches!(ctx.base_flow, SupervisorFlow::ReviewResponse) {
         return false;
@@ -934,13 +685,6 @@ async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentConte
     let Some(mirror) = app_state.mirror.as_ref() else {
         return false;
     };
-    // This runs in the dispatch path. The durability probe is a few
-    // git subprocesses against the mirror (read-only, no lock), but a
-    // wedged git op (a locked / huge mirror) would otherwise stall the
-    // dispatch pass — and with multiple ReviewResponse candidates per
-    // pass that latency is sequential. Bound it: a timeout (or any
-    // probe failure) conservatively yields `false`, i.e. keep the full
-    // worker redo rather than risk skipping it on a stale read.
     match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         mirror.branch_ahead_of_base(&ctx.task.project_id, &ctx.task_branch, &ctx.base_branch),
@@ -1018,10 +762,10 @@ struct TaskRunSpecInputs {
     commit_author_email: Option<String>,
     resume_lifecycle_metadata: Option<ResumeLifecycleMetadata>,
     created_by_user_id: Option<String>,
+    is_evidence_spike: bool,
 }
 
 impl TaskRunSpecInputs {
-    /// Resolve the inputs required to build a `TaskRunSpec`.
     async fn resolve(
         task: &Task,
         flow: &SupervisorFlow,
@@ -1030,8 +774,6 @@ impl TaskRunSpecInputs {
         model_id: &str,
         resume_lifecycle_metadata: Option<serde_json::Value>,
     ) -> Self {
-        // Per-role model map: each role resolves its own preferred model,
-        // falling back to the dispatch-level model id when no preference is set.
         let mut model_id_per_role: HashMap<RoleKind, String> = HashMap::new();
         for role in flow.role_sequence() {
             let resolved =
@@ -1041,15 +783,12 @@ impl TaskRunSpecInputs {
             model_id_per_role.insert(*role, resolved);
         }
 
-        // Read-only multi-repo sources from the task's epic. Non-fatal: an error
-        // just yields no read sources (feature degrades to plain single-repo).
         let read_source_project_ids =
             djinn_db::EpicRepository::new(app_state.db.clone(), app_state.event_bus.clone())
                 .read_sources_for_task(task.epic_id.as_deref())
                 .await
                 .unwrap_or_default();
 
-        // Private-dependency credentials for the worker Pod (best-effort).
         let pd_project_repo =
             djinn_db::ProjectRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let github_owner = pd_project_repo
@@ -1069,27 +808,19 @@ impl TaskRunSpecInputs {
             _ => None,
         };
 
-        // Resolve the task's creator (used for credential scoping and commit
-        // author identity). The `Task` model doesn't surface this column, so read
-        // it through the repository layer. A lookup error is non-fatal: we just
-        // resolve org-shared / fall back to the bot identity.
         let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
         let created_by_user_id: Option<String> =
             task_repo.created_by_user_id(&task.id).await.ok().flatten();
 
-        // Resolve the commit-author identity (Vercel-friendly attribution).
         let (commit_author_name, commit_author_email) =
             resolve_commit_author(app_state, created_by_user_id.as_deref()).await;
 
-        // The slot pipeline hands us a JSON-encoded `ResumeLifecycleMetadata`
-        // blob. Decode it into the typed mirror so it lands on the spec as
-        // `Option<ResumeLifecycleMetadata>` rather than as a generic
-        // `serde_json::Value`. A `None` input or a corrupt blob yields `None`
-        // and is logged as a warning.
         let resume_lifecycle_metadata =
             decode_resume_lifecycle_metadata(resume_lifecycle_metadata, &task.id);
 
         let task_run_id = uuid::Uuid::now_v7().to_string();
+
+        let is_evidence_spike = djinn_core::models::task::is_evidence_spike(&task.labels);
 
         Self {
             task_run_id,
@@ -1107,42 +838,34 @@ impl TaskRunSpecInputs {
             commit_author_email,
             resume_lifecycle_metadata,
             created_by_user_id,
+            is_evidence_spike,
         }
     }
 }
 
-/// Build a [`TaskRunSpec`] from resolved inputs.
-fn build_task_run_spec(inputs: TaskRunSpecInputs) -> TaskRunSpec {
-    TaskRunSpec {
-        task_run_id: inputs.task_run_id,
-        task_id: inputs.task_id,
-        project_id: inputs.project_id,
-        trigger: inputs.trigger,
-        base_branch: inputs.base_branch,
-        task_branch: inputs.task_branch,
-        flow: inputs.flow,
-        model_id_per_role: inputs.model_id_per_role,
-        read_source_project_ids: inputs.read_source_project_ids,
-        github_owner: inputs.github_owner,
-        github_install_token: inputs.github_install_token,
-        commit_author_name: inputs.commit_author_name,
-        commit_author_email: inputs.commit_author_email,
-        resume_lifecycle_metadata: inputs.resume_lifecycle_metadata,
+impl From<TaskRunSpecInputs> for TaskRunSpec {
+    fn from(inputs: TaskRunSpecInputs) -> Self {
+        Self {
+            task_run_id: inputs.task_run_id,
+            task_id: inputs.task_id,
+            project_id: inputs.project_id,
+            trigger: inputs.trigger,
+            base_branch: inputs.base_branch,
+            task_branch: inputs.task_branch,
+            flow: inputs.flow,
+            model_id_per_role: inputs.model_id_per_role,
+            read_source_project_ids: inputs.read_source_project_ids,
+            github_owner: inputs.github_owner,
+            github_install_token: inputs.github_install_token,
+            commit_author_name: inputs.commit_author_name,
+            commit_author_email: inputs.commit_author_email,
+            resume_lifecycle_metadata: inputs.resume_lifecycle_metadata,
+            is_evidence_spike: inputs.is_evidence_spike,
+        }
     }
 }
 
-/// Resolve the commit-author identity for the task branch.
-///
-/// Commits the supervisor creates on the task branch are authored as the
-/// task's CREATOR, not an anonymous bot. GitHub's per-user no-reply email
-/// `<github_id>+<github_login>@users.noreply.github.com` links the commit
-/// to that account, so it shows under the human's name AND Vercel's
-/// deployment-author check (which rejects commits whose author email
-/// matches no GitHub account) authorizes the build. The PR is still OPENED
-/// by the App (`djinn-bot[bot]`), so the creator can review/approve their
-/// own commits. A NULL creator (legacy system tasks) — or a user row we
-/// can't read — leaves these None; the supervisor then falls back to the
-/// bot identity (those PRs don't clear Vercel's author check anyway).
+/// Resolve commit-author identity (task creator's GitHub no-reply email for Vercel compatibility).
 async fn resolve_commit_author(
     app_state: &AgentContext,
     created_by_user_id: Option<&str>,
@@ -1169,11 +892,6 @@ async fn resolve_commit_author(
     }
 }
 
-/// Decode the JSON-encoded `ResumeLifecycleMetadata` blob into the typed mirror.
-///
-/// A `None` input or a corrupt blob yields `None` and is logged as a warning
-/// — the spec keeps the legacy default-off path (no resume metadata) so dispatch
-/// semantics stay unchanged.
 fn decode_resume_lifecycle_metadata(
     value: Option<serde_json::Value>,
     task_id: &str,
@@ -1195,13 +913,6 @@ fn decode_resume_lifecycle_metadata(
     }
 }
 
-/// Emit `session.dispatched` the instant the run is dispatched — before the
-/// pod even boots — so the UI shows the task as "starting" immediately,
-/// instead of the old derived "setting up" pseudo-status. The in-pod
-/// supervisor creates the `task_runs` row as `starting` shortly after; this
-/// event is the live nudge (F5 refetch resolves the same state from
-/// `task_show`/`task_list`, which surface the `starting` run). The first
-/// reply-loop `session.started` upgrades it to `running`.
 fn announce_dispatch(app_state: &AgentContext, spec: &TaskRunSpec, model_id: &str) {
     let agent_type = spec
         .flow
@@ -1219,16 +930,7 @@ fn announce_dispatch(app_state: &AgentContext, spec: &TaskRunSpec, model_id: &st
         ));
 }
 
-/// Resolve per-role provider credentials under `SESSION_USER_ID = task creator`.
-///
-/// The host pulls every role's credential from the vault (or OAuth token store)
-/// and returns them for shipping into the worker Pod. Fast-fail on resolution
-/// errors so the operator sees a clean dispatch-time failure in session logs
-/// instead of a Pod that crash-loops because the model client can't authenticate.
-///
-/// The whole resolution loop runs under `SESSION_USER_ID = task creator` so
-/// every `load_provider_credential` → `get_decrypted` (and the codex/copilot
-/// OAuth token loads) resolves that user's private credential first.
+/// Resolve per-role provider credentials (scoped to task creator).
 async fn resolve_credentials(
     spec: &TaskRunSpec,
     app_state: &AgentContext,
@@ -1255,11 +957,6 @@ async fn resolve_credentials(
                         "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
                     )
                 })?;
-            // OAuth configs (codex/copilot) hardcode a provider-default model;
-            // stamp the resolved per-role model so the worker — which uses this
-            // snapshot directly and never runs the live `cfg.model_id =
-            // resolved.model_name` override — requests the user's configured
-            // model instead of e.g. `gpt-5.1-codex`.
             credentials.insert(*role, cred.with_model_id(&model_name).to_serializable());
         }
         Ok::<(), anyhow::Error>(())
@@ -1329,18 +1026,7 @@ async fn build_runtime(
     Ok(runtime)
 }
 
-/// Stage-aware-resume decision seam: given the flow the coordinator routed to
-/// and whether the worker's output is durably present on the mirror task_branch,
-/// pick the flow the run actually executes.
-///
-/// Only `ReviewResponse` (the worker→reviewer re-entry, reached exclusively from
-/// `needs_task_review`/`in_task_review` where the worker already submitted) is a
-/// candidate for the reviewer-only `ReviewResume` upgrade, and only when the
-/// worker output is durable. Every other flow — and `ReviewResponse` without
-/// durable output — passes through unchanged so an absent/empty task_branch
-/// falls back to the full worker redo. Kept as a pure free function so the
-/// "resume at reviewer vs redo worker" choice is unit-testable without a DB or
-/// mirror.
+/// If `ReviewResponse` and worker output is durable, upgrade to `ReviewResume`.
 fn resume_flow(base_flow: SupervisorFlow, worker_output_durable: bool) -> SupervisorFlow {
     if matches!(base_flow, SupervisorFlow::ReviewResponse) && worker_output_durable {
         SupervisorFlow::ReviewResume
@@ -1486,14 +1172,6 @@ fn report_to_terminal_status(report: &TaskRunReport) -> TaskRunStatus {
     }
 }
 
-/// Choose the authoritative terminal report for a completed dispatch.
-///
-/// The streamed worker report (when present) wins: it carries the canonical
-/// run id the sessions were persisted under and the stages actually completed.
-/// The runtime's teardown report is a stub fallback used only when the worker
-/// died before emitting a report. Keeping this as a named function makes the
-/// "streamed id beats teardown id" invariant — the one that gates post-session
-/// extraction — directly testable.
 fn select_terminal_report(
     streamed: Option<TaskRunReport>,
     teardown: TaskRunReport,
@@ -1517,10 +1195,7 @@ async fn reap_orphan_task_run(
                  (in-pod supervisor never sent terminal RPC)"
             );
         }
-        Ok(None) => {
-            // Common path: the in-pod supervisor's terminal RPC already
-            // flipped the row. Nothing to do.
-        }
+        Ok(None) => {}
         Err(e) => {
             tracing::warn!(
                 task_id = %task_id,
@@ -1531,13 +1206,6 @@ async fn reap_orphan_task_run(
     }
 }
 
-/// Best-effort host-side teardown of a terminal task-run's private Cargo
-/// target dir, covering the SIGKILL case the in-pod Drop guard misses.
-///
-/// The host shares the worker's cache PVC, so it can delete the dir directly.
-/// The root is resolved from the [`AgentContext`] (falling back to the
-/// canonical host path) so we never operate on the Job-pod `/cache` convention,
-/// which is not mounted in the server pod.
 async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &str) {
     let root = app_state
         .cargo_target_runs_root
@@ -1612,10 +1280,6 @@ async fn await_report_from_stream(
     pre_session_deadline: std::time::Duration,
 ) -> anyhow::Result<ReportAwait> {
     let started = tokio::time::Instant::now();
-    // Pre-session watchdog: fires once at the deadline; the `if !session_reached`
-    // guard disables the arm as soon as we observe the first turn, so a normal
-    // (even slow) setup is never killed. Pinned so the already-elapsed future is
-    // not polled again after disarm.
     let deadline = tokio::time::sleep(pre_session_deadline);
     tokio::pin!(deadline);
 
@@ -1641,24 +1305,15 @@ async fn await_report_from_stream(
                 return Ok(ReportAwait::Report(None));
             }
             _ = &mut deadline, if !session_reached => {
-                // Authoritative DB double-check before failing: the worker may
-                // have created the session without us seeing a stream marker
-                // (older image, dropped frame). Only a genuine no-session hang
-                // trips the deadline.
                 let session_repo =
                     djinn_db::SessionRepository::new(db.clone(), djinn_core::events::EventBus::new(|_| {}));
                 match session_repo.exists_for_task_run(task_run_id).await {
                     Ok(true) => {
-                        // A session exists — first turn was reached; disarm and
-                        // keep awaiting the terminal report.
                         session_reached = true;
                         continue;
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        // Fail open on a DB error: don't kill a possibly-live run
-                        // just because the backstop query flaked. Disarm and let
-                        // the coarse reapers handle any genuine hang.
                         tracing::warn!(
                             task_id = %task_id,
                             task_run_id = %task_run_id,
@@ -1702,7 +1357,6 @@ async fn await_report_from_stream(
                         return Ok(ReportAwait::Report(Some(report)));
                     }
                     Some(StreamEvent::StageStep { step }) => {
-                        // The reply-loop marker (or any reply-loop activity)
                         // means the first turn is reached — disarm the deadline.
                         if step == djinn_runtime::STAGE_STEP_FIRST_TURN {
                             session_reached = true;
@@ -1715,10 +1369,8 @@ async fn await_report_from_stream(
                         | StreamEvent::FinalizePayload { .. }
                         | StreamEvent::StageOutcome { .. },
                     ) => {
-                        // Any reply-loop event proves the session is live.
                         session_reached = true;
                     }
-                    // Channel closed without a terminal report — the supervisor
                     // path persists state as a side effect; the caller uses the
                     // teardown stub for the terminal status.
                     None => return Ok(ReportAwait::Report(None)),
@@ -1951,11 +1603,6 @@ mod tests {
         }
     }
 
-    /// The regression guard: the host's transport/teardown id (A) and the
-    /// in-pod/persisted id (B) differ. Post-session extraction must key off the
-    /// streamed report (B), under which the sessions were actually written —
-    /// NOT the teardown stub (A), which matches no persisted row. Before this
-    /// fix the K8s path used the stub, silently disabling extraction.
     #[test]
     fn streamed_report_wins_over_teardown_stub() {
         let streamed = report(
@@ -1980,8 +1627,6 @@ mod tests {
         );
     }
 
-    /// No streamed report (worker died before emitting) → fall back to the
-    /// teardown stub so the orphan-reap terminal status is still applied.
     #[test]
     fn teardown_stub_used_when_no_streamed_report() {
         let teardown_stub = report("id-A-transport", vec![], TaskRunOutcome::Interrupted);
@@ -1994,11 +1639,7 @@ mod tests {
 
     #[test]
     fn resume_flow_upgrades_review_response_to_reviewer_only_when_durable() {
-        // The regression target: a reviewer-stage pod kill leaves the task at
-        // needs_task_review (worker already submitted), which routes to
-        // ReviewResponse (worker→reviewer). With the worker's commits durable on
         // the mirror task_branch we must resume at the reviewer, NOT redo the
-        // worker.
         assert_eq!(
             resume_flow(SupervisorFlow::ReviewResponse, true),
             SupervisorFlow::ReviewResume
@@ -2012,8 +1653,6 @@ mod tests {
 
     #[test]
     fn resume_flow_keeps_review_response_when_output_not_durable() {
-        // No durable worker output (task_branch missing / not ahead of base, or
-        // no mirror) → fall back to the full worker redo. Safety guard.
         assert_eq!(
             resume_flow(SupervisorFlow::ReviewResponse, false),
             SupervisorFlow::ReviewResponse
@@ -2022,8 +1661,6 @@ mod tests {
 
     #[test]
     fn resume_flow_leaves_non_review_response_flows_untouched() {
-        // Only ReviewResponse is a resume candidate. Durability is irrelevant for
-        // every other flow — they must pass through unchanged regardless.
         for flow in [
             SupervisorFlow::NewTask,
             SupervisorFlow::ConflictRetry,
@@ -2036,22 +1673,14 @@ mod tests {
         }
     }
 
-    /// Lazy (unconnected) Postgres handle for the await tests below. The pool
-    /// is `connect_lazy_with`, so this never touches the network unless a query
-    /// runs — and with `no_deadline()` the pre-session watchdog never fires, so
-    /// none of these tests query the DB.
     fn lazy_db() -> djinn_db::Database {
         djinn_db::Database::open_in_memory().expect("lazy in-memory db handle")
     }
 
-    /// A deadline far beyond any test's wall-clock so the pre-session watchdog
-    /// arm never fires — isolates the report/kill/close behaviour.
     fn no_deadline() -> std::time::Duration {
         std::time::Duration::from_secs(3600)
     }
 
-    /// Unwrap the terminal-report arm, panicking on an unexpected pre-session
-    /// timeout.
     fn expect_report(outcome: ReportAwait) -> Option<TaskRunReport> {
         match outcome {
             ReportAwait::Report(report) => report,
@@ -2177,8 +1806,6 @@ mod tests {
 
     #[tokio::test]
     async fn await_report_returns_none_when_kill_fires() {
-        // Sender kept alive so recv() would otherwise pend forever — kill must
-        // bound the wait.
         let (bistream, _events_tx, _requests_rx) = BiStream::new_in_memory(8);
         let kill = CancellationToken::new();
         kill.cancel();
@@ -2257,16 +1884,9 @@ mod tests {
         assert!(got.is_none());
     }
 
-    /// Pre-session deadline (DB-backed): with no session row for the run and no
-    /// `reply_loop` marker, the watchdog fires a typed `PreSessionTimeout`
-    /// naming the last stage step seen — here `context_build`. Tiny deadline;
-    /// the event sender is kept alive so `recv()` would otherwise pend forever
-    /// (proving the deadline, not the stream close, is what bounds the wait).
     #[tokio::test]
     async fn await_report_pre_session_deadline_fires_naming_last_step() {
         let db = lazy_db();
-        // Materialise the schema so `exists_for_task_run` returns Ok(false)
-        // (real query, no matching session) rather than fail-open on a DB error.
         db.ensure_initialized().await.expect("schema ready");
 
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);
@@ -2308,9 +1928,6 @@ mod tests {
         drop(events_tx);
     }
 
-    /// A `reply_loop` marker disarms the deadline even when it is tiny, and the
-    /// subsequent terminal report is still returned — proving a normal (even
-    /// slow) setup is never spuriously killed once the first turn is reached.
     #[tokio::test]
     async fn await_report_first_turn_marker_disarms_tiny_deadline() {
         let (bistream, events_tx, _requests_rx) = BiStream::new_in_memory(8);

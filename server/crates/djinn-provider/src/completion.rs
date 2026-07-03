@@ -601,8 +601,8 @@ mod tests {
                 include_str!("completion.rs"),
             ),
             (
-                "djinn-agent/src/actors/slot/llm_extraction.rs",
-                include_str!("../../djinn-agent/src/actors/slot/llm_extraction.rs"),
+                "djinn-slot/src/llm_extraction.rs",
+                include_str!("../../djinn-slot/src/llm_extraction.rs"),
             ),
             (
                 "djinn-control-plane/src/tools/memory_tools/summaries.rs",
