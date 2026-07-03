@@ -515,7 +515,13 @@ impl CoordinatorActor {
 
             self.review_stuck_sha_first_seen.remove(&task.id);
             let handled = self
-                .route_planner_intervention(&task, "reviewer", &reason, Some(&sections_text))
+                .route_planner_intervention(
+                    &task,
+                    "reviewer",
+                    &reason,
+                    Some(&sections_text),
+                    task.reopen_count,
+                )
                 .await;
             if handled {
                 tracing::warn!(
