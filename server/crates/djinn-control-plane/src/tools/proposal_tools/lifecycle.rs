@@ -12,7 +12,9 @@
 // Lifecycle tools call signoff/readiness helpers from `signoff.rs` (re-exported
 // through `super`) via `evaluate_composed_gate`.  No readiness or debate logic
 // is duplicated here — the composed gate evaluation is the single call-through
-// point.
+// point. Debate-trail blocking checks and refinement-stop authority are
+// evaluated inside `evaluate_composed_gate` in signoff.rs (see that module's
+// header for the co-location rationale).
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::{Deserialize, Serialize};

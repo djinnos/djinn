@@ -15,6 +15,13 @@
 // a standalone `debate.rs` module because the debate checks are not cohesive
 // without the surrounding gate evaluation context — they are evaluated as
 // part of a single pass over DoR + tribunal conditions.
+//
+// Refinement-loop ownership: `build_gate_status` calls
+// `crate::tools::refinement_tools::build_refinement_status` to populate the
+// adversary dry count — a thin call-through, not standalone refinement glue.
+// The human-authority helpers check for `refinement_stop` lifecycle events
+// (`current_human_accept_authority`), which is a signoff-readiness concern.
+// Neither warrants a separate `refinement.rs` module.
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
