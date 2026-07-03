@@ -535,6 +535,7 @@ pub(super) async fn completions_handler_impl(
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
                 reasoning_effort: None,
+                tool_schema_compat: None,
             }
         }
     };
@@ -1362,6 +1363,7 @@ async fn generate_chat_title(
                 provider_headers: Default::default(),
                 capabilities: capabilities_for_provider(&provider_id),
                 reasoning_effort: None,
+                tool_schema_compat: None,
             }
         }
     };
