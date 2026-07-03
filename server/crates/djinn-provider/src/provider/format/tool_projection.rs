@@ -243,26 +243,26 @@ fn rewrite_gemini_recursive(schema: &mut Value) {
     //    into `{"type": "string", "description": "... (one of: ...)", ...}` so the
     //    values are preserved as human-readable guidance without the unsupported
     //    enum keyword.
-    if let Some("string") = obj.get("type").and_then(|v| v.as_str()) {
-        if let Some(Value::Array(values)) = obj.remove("enum") {
-            let joined = values
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-                .join(", ");
-            if !joined.is_empty() {
-                let existing = obj
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let desc = if existing.is_empty() {
-                    format!("Must be one of: {joined}.")
-                } else {
-                    format!("{existing} Must be one of: {joined}.")
-                };
-                obj.insert("description".to_string(), Value::String(desc));
-            }
+    if let Some("string") = obj.get("type").and_then(|v| v.as_str())
+        && let Some(Value::Array(values)) = obj.remove("enum")
+    {
+        let joined = values
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !joined.is_empty() {
+            let existing = obj
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let desc = if existing.is_empty() {
+                format!("Must be one of: {joined}.")
+            } else {
+                format!("{existing} Must be one of: {joined}.")
+            };
+            obj.insert("description".to_string(), Value::String(desc));
         }
     }
 
@@ -303,10 +303,14 @@ fn rewrite_gemini_recursive(schema: &mut Value) {
                 let preserved_title = obj.get("title").cloned();
                 let preserved_desc = obj.get("description").cloned();
                 *obj = inner.clone();
-                if obj.get("title").is_none() && let Some(t) = preserved_title {
+                if obj.get("title").is_none()
+                    && let Some(t) = preserved_title
+                {
                     obj.insert("title".to_string(), t);
                 }
-                if obj.get("description").is_none() && let Some(d) = preserved_desc {
+                if obj.get("description").is_none()
+                    && let Some(d) = preserved_desc
+                {
                     obj.insert("description".to_string(), d);
                 }
             }
@@ -525,10 +529,14 @@ fn flatten_top_level_anyof(schema: &mut Value) {
                 let preserved_title = obj.get("title").cloned();
                 let preserved_desc = obj.get("description").cloned();
                 *obj = inner_obj.clone();
-                if obj.get("title").is_none() && let Some(t) = preserved_title {
+                if obj.get("title").is_none()
+                    && let Some(t) = preserved_title
+                {
                     obj.insert("title".to_string(), t);
                 }
-                if obj.get("description").is_none() && let Some(d) = preserved_desc {
+                if obj.get("description").is_none()
+                    && let Some(d) = preserved_desc
+                {
                     obj.insert("description".to_string(), d);
                 }
             }
@@ -1028,11 +1036,7 @@ mod tests {
             "required": ["name"],
             "additionalProperties": false
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert_eq!(output["type"], "object");
         assert!(output["properties"]["name"].get("type").is_some());
@@ -1051,11 +1055,7 @@ mod tests {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "const": "nope"
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert!(output.get("unevaluatedProperties").is_none());
         assert!(output.get("$schema").is_none());
@@ -1074,11 +1074,7 @@ mod tests {
                 }
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let child = &output["properties"]["child"];
         assert!(child.get("unevaluatedProperties").is_none());
@@ -1093,11 +1089,7 @@ mod tests {
             "type": "string",
             "enum": ["red", "green", "blue"]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert!(output.get("enum").is_none());
         assert_eq!(output["type"], "string");
@@ -1114,11 +1106,7 @@ mod tests {
             "description": "Pick a color.",
             "enum": ["red", "green"]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let desc = output["description"].as_str().unwrap();
         assert!(desc.starts_with("Pick a color."));
@@ -1134,11 +1122,7 @@ mod tests {
                 "color": { "type": "string", "enum": ["a", "b"] }
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let color = &output["properties"]["color"];
         assert!(color.get("enum").is_none());
@@ -1156,11 +1140,7 @@ mod tests {
             },
             "required": ["a", "b", "c"]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let required = output["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
@@ -1176,11 +1156,7 @@ mod tests {
             },
             "required": ["b"]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert!(output.get("required").is_none());
     }
@@ -1197,11 +1173,7 @@ mod tests {
                 }
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let child = &output["properties"]["child"];
         let required = child["required"].as_array().unwrap();
@@ -1219,11 +1191,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert!(output.get("anyOf").is_none());
         assert_eq!(output["type"], "string");
@@ -1239,11 +1207,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         let branches = output["anyOf"].as_array().unwrap();
         assert_eq!(branches.len(), 2);
@@ -1260,11 +1224,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::Gemini),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::Gemini), FormatFamily::OpenAI);
 
         assert_eq!(output["description"], "Maybe a string");
         assert_eq!(output["type"], "string");
@@ -1279,11 +1239,7 @@ mod tests {
             "type": "object",
             "required": ["name"]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert!(output.get("properties").is_some());
         assert!(output["properties"].is_object());
@@ -1301,11 +1257,7 @@ mod tests {
                 }
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         let user = &output["properties"]["user"];
         assert!(user.get("properties").is_some());
@@ -1321,11 +1273,7 @@ mod tests {
                 "required": ["x"]
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert!(output["items"]["properties"].is_object());
     }
@@ -1338,11 +1286,7 @@ mod tests {
                 "name": { "type": "string" }
             }
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert_eq!(output["properties"]["name"]["type"], "string");
     }
@@ -1357,11 +1301,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert!(output.get("anyOf").is_none());
         assert_eq!(output["type"], "object");
@@ -1379,11 +1319,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         let branches = output["anyOf"].as_array().unwrap();
         assert_eq!(branches.len(), 2);
@@ -1398,11 +1334,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert_eq!(output["type"], "null");
         assert_eq!(output["nullable"], true);
@@ -1417,11 +1349,7 @@ mod tests {
                 { "type": "null" }
             ]
         });
-        let output = project(
-            schema,
-            Some(ToolSchemaCompat::OpenAi),
-            FormatFamily::OpenAI,
-        );
+        let output = project(schema, Some(ToolSchemaCompat::OpenAi), FormatFamily::OpenAI);
 
         assert_eq!(output["type"], "object");
         assert!(output["properties"].is_object());
