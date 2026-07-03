@@ -39,13 +39,13 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
 
         // ── Second-strike no_progress_submission settlement ──────────
         // When the reply loop's no-progress integrity gate detected a second
-        // consecutive identical rejected-fingerprint submit_work, settle the
-        // session as a typed no_progress_submission and route into planner
-        // intervention via the coordinator. This skips normal finalize and
-        // auto-submit processing and does NOT increment the
-        // dispatch_failure_streak.
+        // consecutive identical rejected-fingerprint submit_work, the reply
+        // loop already settled the session via `settle_no_progress_submission`
+        // (activity logging, streak increment, planner intervention routing).
+        // Teardown just skips normal finalize and auto-submit processing and
+        // does NOT increment the dispatch_failure_streak.
         if final_output.no_progress_submission {
-            settle_no_progress_submission(&task_id, &ctx).await;
+            // Settlement already completed in the reply loop; nothing to do.
         } else {
             let model_called_submit_work =
                 final_output.finalize_tool_name.as_deref() == Some(role.finalize_tool_name());

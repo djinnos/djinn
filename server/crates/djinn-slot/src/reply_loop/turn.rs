@@ -16,6 +16,8 @@ use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, 
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
 
+use crate::lifecycle::teardown::settle_no_progress_submission;
+
 use super::budget::{
     SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
 };
@@ -1138,8 +1140,11 @@ pub async fn run_reply_loop(
                         // Second consecutive identical no-progress submit.
                         // Settle the session as a typed no_progress_submission
                         // — do NOT accept the finalize payload and do NOT
-                        // inject a corrective. Break out of the loop so
-                        // lifecycle teardown routes into planner intervention.
+                        // inject a corrective. Log the activity, increment
+                        // the no_progress_streak, and route into planner
+                        // intervention via the normal settle path. Break out
+                        // of the loop so lifecycle teardown skips re-settlement.
+                        settle_no_progress_submission(task_id, slot_ctx).await;
                         output.no_progress_submission = true;
                         tracing::warn!(
                             task_id = %task_id,
