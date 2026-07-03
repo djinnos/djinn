@@ -124,16 +124,17 @@ export default function Home() {
         <section className="relative px-6 pt-32 pb-24 md:pt-44 overflow-hidden">
           <div className="absolute inset-0 blueprint -z-10" />
 
-          <div className="max-w-4xl mx-auto text-center">
-            {/* Proposal frontmatter */}
-            <div className="rise rise-1 mb-9">
-              <div className="inline-block text-left font-mono text-xs text-text-muted leading-loose">
-                <div aria-hidden>---</div>
-                <div>proposal: <span className="text-brand-purple">#0001</span></div>
-                <div>targets: <span className="text-text-secondary">all_of_your_repos</span></div>
-                <div>status: <span className="text-status-pass">signed_off</span></div>
-                <div aria-hidden>---</div>
-              </div>
+          <div className="max-w-4xl mx-auto">
+            {/* Proposal file header */}
+            <div className="rise rise-1 font-mono text-xs text-text-muted flex flex-wrap items-center gap-x-3 gap-y-2 mb-10">
+              <span className="text-text-secondary">proposal</span>
+              <span className="text-brand-purple">#0001</span>
+              <span aria-hidden>·</span>
+              <span>targets: all_of_your_repos</span>
+              <span aria-hidden>·</span>
+              <span>
+                status: <span className="text-status-pass">signed_off</span>
+              </span>
             </div>
 
             <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-light tracking-tight leading-[1.04] mb-8">
@@ -141,31 +142,26 @@ export default function Home() {
               to <em className="stroke-under italic">pull request.</em>
             </h1>
 
-            <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl mx-auto leading-relaxed mb-9">
+            <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl leading-relaxed mb-10">
               Your team proposes and approves the work. AI agents build it,
               on your cluster, with your models, behind your review.
             </p>
 
-            {/* Sign-off task list */}
-            <div className="rise rise-4 mb-11">
-              <div className="inline-block text-left font-mono text-xs space-y-2.5">
-                <div>
-                  <span className="text-status-pass">- [x]</span>{" "}
-                  <span className="text-text-secondary">signed off · product</span>
-                </div>
-                <div>
-                  <span className="text-status-pass">- [x]</span>{" "}
-                  <span className="text-text-secondary">signed off · engineering</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-status-warn">- [ ]</span>
-                  <span className="text-text-secondary">building · djinn</span>
-                  <span className="dot dot-pulse bg-status-warn" />
-                </div>
-              </div>
+            {/* Sign-off chips, markdown checkboxes inside */}
+            <div className="rise rise-4 flex flex-wrap gap-2.5 mb-12">
+              <span className="chip text-status-pass">
+                <span className="select-none" aria-hidden>[x]</span> signed off · product
+              </span>
+              <span className="chip text-status-pass">
+                <span className="select-none" aria-hidden>[x]</span> signed off · engineering
+              </span>
+              <span className="chip text-status-warn">
+                <span className="select-none" aria-hidden>[ ]</span> building · djinn
+                <span className="dot dot-pulse bg-status-warn" />
+              </span>
             </div>
 
-            <div className="rise rise-5 flex justify-center">
+            <div className="rise rise-5 flex justify-start">
               <HeroActions />
             </div>
           </div>
@@ -325,12 +321,15 @@ export default function Home() {
         <section id="next" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="rounded-xl border border-dashed border-border p-8 md:p-12">
-              <div className="font-mono text-xs text-text-muted leading-loose mb-8">
-                <div aria-hidden>---</div>
-                <div>proposal: <span className="text-brand-purple">#0002</span></div>
-                <div>status: <span className="text-status-warn">draft</span></div>
-                <div>feedback: <span className="text-text-secondary">welcome</span></div>
-                <div aria-hidden>---</div>
+              <div className="font-mono text-xs text-text-muted flex flex-wrap items-center gap-x-3 gap-y-2 mb-8">
+                <span className="text-text-secondary">proposal</span>
+                <span className="text-brand-purple">#0002</span>
+                <span aria-hidden>·</span>
+                <span>
+                  status: <span className="text-status-warn">draft</span>
+                </span>
+                <span aria-hidden>·</span>
+                <span>feedback welcome</span>
               </div>
 
               <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-5">
