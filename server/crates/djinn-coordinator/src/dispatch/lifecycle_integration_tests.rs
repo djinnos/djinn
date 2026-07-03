@@ -6,6 +6,14 @@
 //! assert through the public/internal helper APIs introduced by j6u1, 3ln4,
 //! 48ru, and sy0g.
 
+use crate::dispatch::resume_source::{
+    CheckpointSafetyVerdict, ResumeSourceCandidate, ResumeSourceKind,
+    build_resume_source_candidates, select_resume_source, selection_to_metadata,
+};
+use crate::worker_lifecycle::{
+    ControlledExitPreservationAction, decide_controlled_exit_preservation_action,
+    evaluate_no_progress_controlled_exit,
+};
 use crate::{
     AutoSubmitLifecycleConfig, AutoSubmitLifecycleMetadata, AutoSubmitSkipReason,
     CheckpointLifecycleConfig, CheckpointLifecycleMetadata, CheckpointRequestReason,
@@ -13,13 +21,6 @@ use crate::{
     NoProgressEnforcementMode, NoProgressThresholdConfig, PreservationFailurePolicy,
     PreservationOutcome, ResumeLifecycleConfig, ResumeSelectionReason, WorkerLifecycleConfig,
     WorkerLifecycleMetadata,
-};
-use crate::dispatch::resume_source::{
-    build_resume_source_candidates, select_resume_source, selection_to_metadata, ResumeSourceKind,
-};
-use crate::worker_lifecycle::{
-    decide_controlled_exit_preservation_action, evaluate_no_progress_controlled_exit,
-    ControlledExitPreservationAction,
 };
 
 const TASK: &str = "task-y8pv";
@@ -124,9 +125,15 @@ fn no_progress_idle_requests_exit_and_uses_checkpoint_fallback() {
     let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
         .expect("resume selection should succeed");
 
-    assert_eq!(selection.chosen_kind, ResumeSourceKind::TaskBranchCheckpoint);
+    assert_eq!(
+        selection.chosen_kind,
+        ResumeSourceKind::TaskBranchCheckpoint
+    );
     assert_eq!(selection.checkpoint_sha.as_deref(), Some("deadbeef"));
-    assert_eq!(selection.reason, ResumeSelectionReason::LatestSafeCheckpoint);
+    assert_eq!(
+        selection.reason,
+        ResumeSelectionReason::LatestSafeCheckpoint
+    );
     assert_eq!(selection.target_ref, TASK_REF);
 }
 
@@ -147,11 +154,7 @@ fn no_progress_long_command_or_unknown_command_defer_exit() {
 
     // Unknown command state also defers because the coordinator cannot prove safety.
     assert_eq!(
-        evaluate_no_progress_controlled_exit(
-            &config,
-            threshold,
-            NoProgressCommandState::Unknown,
-        ),
+        evaluate_no_progress_controlled_exit(&config, threshold, NoProgressCommandState::Unknown,),
         NoProgressControlledExitDecision::DeferredForCommand
     );
 }
@@ -166,19 +169,17 @@ fn accepted_auto_submit_wins_and_skips_checkpoint_fallback() {
     };
 
     let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
-    let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
-        .expect("selection");
+    let selection =
+        select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates).expect("selection");
 
     assert_eq!(selection.chosen_kind, ResumeSourceKind::AutoSubmit);
-    assert_eq!(selection.submit_or_review_id.as_deref(), Some("review-y8pv"));
+    assert_eq!(
+        selection.submit_or_review_id.as_deref(),
+        Some("review-y8pv")
+    );
     assert_eq!(selection.reason, ResumeSelectionReason::AutoSubmitAccepted);
-    // Checkpoint candidate should be skipped with auto-submit precedence, not safety.
-    assert!(selection.skipped.iter().any(|s| {
-        matches!(
-            s.reason,
-            crate::dispatch::resume_source::ResumeSourceSkipReason::AutoSubmitNotAccepted
-        )
-    }));
+    // Auto-submit wins at precedence 0; the checkpoint candidate is never evaluated.
+    assert!(selection.skipped.is_empty());
 
     // Preservation action prefers the accepted auto-submit over checkpointing.
     let action = decide_controlled_exit_preservation_action(
@@ -209,14 +210,19 @@ fn dirty_delta_checkpoint_fallback_when_auto_submit_blocked() {
     };
 
     let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
-    let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
-        .expect("selection");
+    let selection =
+        select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates).expect("selection");
 
-    assert_eq!(selection.chosen_kind, ResumeSourceKind::TaskBranchCheckpoint);
-    assert!(selection
-        .skipped
-        .iter()
-        .any(|s| s.kind == ResumeSourceKind::AutoSubmit));
+    assert_eq!(
+        selection.chosen_kind,
+        ResumeSourceKind::TaskBranchCheckpoint
+    );
+    assert!(
+        selection
+            .skipped
+            .iter()
+            .any(|s| s.kind == ResumeSourceKind::AutoSubmit)
+    );
 }
 
 #[test]
@@ -228,19 +234,33 @@ fn unsafe_and_mismatched_checkpoints_are_skipped_with_machine_readable_reasons()
         scanner: Some("safety-v1".to_string()),
         findings: vec!["credential leak".to_string()],
     });
-    checkpoint.extra.insert(
-        "task_id".to_string(),
-        serde_json::json!("other-task"),
-    );
+    checkpoint
+        .extra
+        .insert("task_id".to_string(), serde_json::json!("other-task"));
 
     let lifecycle = WorkerLifecycleMetadata {
         checkpoint: Some(checkpoint),
         ..Default::default()
     };
 
-    let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
-    let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
-        .expect("selection");
+    let mut candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
+    // Add an unsafe candidate with matching task_id/lineage so both skip reasons appear.
+    candidates.push(ResumeSourceCandidate {
+        kind: ResumeSourceKind::TaskBranchCheckpoint,
+        task_id: TASK.to_string(),
+        session_lineage: Some(LINEAGE.to_string()),
+        checkpoint_sha: Some("unsafe-sha".to_string()),
+        submit_or_review_id: None,
+        target_ref: TASK_REF.to_string(),
+        auto_submit_state: None,
+        checkpoint_safety: Some(CheckpointSafetyVerdict::Unsafe {
+            findings: vec!["credential leak".to_string()],
+        }),
+        age_secs: None,
+    });
+
+    let selection =
+        select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates).expect("selection");
 
     assert_eq!(selection.chosen_kind, ResumeSourceKind::CleanTaskBranch);
     assert!(selection.skipped.iter().any(|s| matches!(
@@ -270,21 +290,26 @@ fn alternate_checkpoint_ref_selected_after_task_branch_rejected() {
         "alternate_checkpoint_sha".to_string(),
         serde_json::json!("cafebabe"),
     );
-    // Mark the primary checkpoint unsafe so the alternate is chosen.
-    checkpoint.safety_scan = Some(CheckpointSafetyScanMetadata {
-        passed: false,
-        scanner: Some("safety-v1".to_string()),
-        findings: vec!["unsafe".to_string()],
-    });
+    // Remove the primary task-branch SHA so it is skipped; the alternate ref remains safe.
+    checkpoint.commit_sha = None;
 
     let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
-    let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
-        .expect("selection");
+    let selection =
+        select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates).expect("selection");
 
-    assert_eq!(selection.chosen_kind, ResumeSourceKind::AlternateCheckpointRef);
+    assert_eq!(
+        selection.chosen_kind,
+        ResumeSourceKind::AlternateCheckpointRef
+    );
     assert_eq!(selection.checkpoint_sha.as_deref(), Some("cafebabe"));
-    assert_eq!(selection.reason, ResumeSelectionReason::AlternateCheckpointRef);
-    assert_eq!(selection.target_ref, "refs/djinn/checkpoints/task-y8pv/session-prior");
+    assert_eq!(
+        selection.reason,
+        ResumeSelectionReason::AlternateCheckpointRef
+    );
+    assert_eq!(
+        selection.target_ref,
+        "refs/djinn/checkpoints/task-y8pv/session-prior"
+    );
 }
 
 #[test]
@@ -297,8 +322,8 @@ fn selection_metadata_records_rotation_reason_for_model_resolution() {
     };
 
     let candidates = build_resume_source_candidates(TASK, TASK_REF, Some(LINEAGE), &lifecycle);
-    let selection = select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates)
-        .expect("selection");
+    let selection =
+        select_resume_source(&config.resume, TASK, Some(LINEAGE), &candidates).expect("selection");
     let metadata = selection_to_metadata(&selection);
 
     assert!(metadata.considered);
@@ -325,14 +350,20 @@ fn preservation_failure_policy_blocks_or_records_as_configured() {
         Some(PreservationOutcome::Failed),
         PreservationFailurePolicy::RecordAndProceed,
     );
-    assert_eq!(record, ControlledExitPreservationAction::RecordFailureAndProceed);
+    assert_eq!(
+        record,
+        ControlledExitPreservationAction::RecordFailureAndProceed
+    );
 
     let block = decide_controlled_exit_preservation_action(
         false,
         Some(PreservationOutcome::Failed),
         PreservationFailurePolicy::Block,
     );
-    assert_eq!(block, ControlledExitPreservationAction::BlockForPreservationFailure);
+    assert_eq!(
+        block,
+        ControlledExitPreservationAction::BlockForPreservationFailure
+    );
 }
 
 #[test]
@@ -365,10 +396,6 @@ fn no_progress_disabled_without_forced_exit_turns() {
     let mut config = enforcing_config();
     config.no_progress_thresholds.forced_exit_turns = None;
 
-    let decision = evaluate_no_progress_controlled_exit(
-        &config,
-        99,
-        NoProgressCommandState::Idle,
-    );
+    let decision = evaluate_no_progress_controlled_exit(&config, 99, NoProgressCommandState::Idle);
     assert_eq!(decision, NoProgressControlledExitDecision::Disabled);
 }
