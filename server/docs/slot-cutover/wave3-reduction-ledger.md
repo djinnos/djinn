@@ -448,6 +448,48 @@ Environment limitations:
 
 ---
 
+## Repair: current baseline for serialized Wave 4 cleanup
+
+> Appended by task `019f26bb-d57b-7060-9522-b205eade0428` (0ug8) — Restore Wave 4 slot reduction proof artifact and repair ledger baseline.
+
+### Why the ledger needed repair
+
+The cumulative Wave 3 summary above records a final combined count of **37,445** lines (agent slot 8,370; `djinn-slot` 29,075). However, fresh HEAD counts in this planning session show:
+
+```bash
+find server/crates/djinn-agent/src/actors/slot -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-agent/src/actors/slot server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+```
+
+| Tree | Wave 3 ledger | Fresh HEAD | Delta |
+|---|---|---:|---:|
+| `server/crates/djinn-agent/src/actors/slot` | 8,370 | **8,370** | 0 |
+| `server/crates/djinn-slot/src` | 29,075 | **29,361** | **+286** |
+| **Combined** | **37,445** | **37,731** | **+286** |
+
+The discrepancy is entirely in `djinn-slot/src`: the ledger's `29,075` figure was accurate at the time `z6fl` measured it, but subsequent canonical `djinn-slot` growth (tests, helpers, or extraction backfill) added 286 lines before this serialized cleanup wave began. This repair establishes the trustworthy baseline for Wave 4.
+
+### Current baseline (Wave 4 starting point)
+
+| Metric | Value |
+|---|---|
+| `server/crates/djinn-agent/src/actors/slot` | **8,370** lines |
+| `server/crates/djinn-slot/src` | **29,361** lines |
+| **Combined** | **37,731** lines |
+| Original baseline | **45,312** lines |
+| Target | **≤ 30,312** lines |
+| Reduction so far | **7,581** lines |
+| **Remaining shortfall** | **7,419** lines |
+
+### Implication for later slices
+
+Later Wave 4 slices should measure from **37,731 combined lines** and the per-tree baselines **8,370 / 29,361**. The remaining shortfall is **7,419 lines**, which is larger than the 7,133-line shortfall recorded at the end of Wave 3. This is not a regression in cleanup progress; it reflects honest growth in the canonical `djinn-slot` crate that was the intended destination of the extraction. Any slice claiming progress must show genuine line reduction from the repaired baseline, not metric gaming.
+
+The repaired baseline is also recorded in the Wave 4 plan artifact: `server/docs/slot-cutover/wave4-host-contract-reduction-plan.md`.
+
+---
+
 ## Cumulative Wave 3 summary
 
 ### Scoped line counts
