@@ -20,16 +20,215 @@
 
 [[entries]]
 capability = "git"
-path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
-matcher = "git2::"
-owner = "team/capability-guard-self-test"
-rationale = "Synthetic allowlist fixture for the shared guard self-test."
-expires = "2099-12-31"
+	path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
+	matcher = "git2::"
+	owner = "team/capability-guard-self-test"
+	rationale = "Synthetic allowlist fixture for the shared guard self-test."
+	expires = "2099-12-31"
 
 [[entries]]
 capability = "git"
-path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
-matcher = "git2::"
-owner = "team/capability-guard-self-test"
-rationale = "Synthetic allowlist fixture for the shared guard self-test."
-expires = "2099-12-31"
+	path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
+	matcher = "git2::"
+	owner = "team/capability-guard-self-test"
+	rationale = "Synthetic allowlist fixture for the shared guard self-test."
+	expires = "2099-12-31"
+
+# ── Baseline git capability allowlist entries ─────────────────────────────
+# These entries pre-allowlist existing git usage outside djinn-git/ so the
+# guard runs cleanly today.  They will be cleaned up as crates migrate to
+# djinn-git (tracked by epic fztz).
+
+# djinn-agent-worker
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent-worker/src/checkpoint.rs"
+	matcher = "tokio::process::Command::new(\"git\")"
+	owner = "team/agent-worker"
+	rationale = "Pre-existing git shell-out for checkpoint operations; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/mod.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/agent-worker"
+	rationale = "Pre-existing git shell-out for checkpoint safety checks; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/tests.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/agent-worker"
+	rationale = "Pre-existing git shell-out in checkpoint safety tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent-worker/src/main.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/agent-worker"
+	rationale = "Pre-existing git shell-out in agent worker main; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent-worker/src/main.rs"
+	matcher = "tokio::process::Command::new(\"git\")"
+	owner = "team/agent-worker"
+	rationale = "Pre-existing async git shell-out in agent worker main; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-agent
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent/src/actors/slot/lifecycle/prompt_context.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/agent"
+	rationale = "Pre-existing git shell-out for prompt context; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-agent/tests/phase1_supervisor.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/agent"
+	rationale = "Pre-existing git shell-out in supervisor tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-control-plane
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-control-plane/src/tools/memory_tools/mod.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/control-plane"
+	rationale = "Pre-existing git shell-out for memory tools; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-control-plane/src/tools/pr_review_tools.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/control-plane"
+	rationale = "Pre-existing git shell-out for PR review tools; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-control-plane/src/tools/project_tools/lifecycle_ops.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/control-plane"
+	rationale = "Pre-existing git shell-out for project lifecycle ops; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-coordinator
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-coordinator/src/dispatch/retry.rs"
+	matcher = "git2::"
+	owner = "team/coordinator"
+	rationale = "Pre-existing libgit2 usage for retry dispatch; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-coordinator/src/tests/mod.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/coordinator"
+	rationale = "Pre-existing git shell-out in coordinator tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-graph
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-graph/src/canonical_graph.rs"
+	matcher = "tokio::process::Command::new(\"git\")"
+	owner = "team/graph"
+	rationale = "Pre-existing async git shell-out for canonical graph; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-graph/src/coupling_index.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/graph"
+	rationale = "Pre-existing git shell-out for coupling index; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-graph/src/git_diff.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/graph"
+	rationale = "Pre-existing git shell-out for git diff operations; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-graph/src/index_tree.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/graph"
+	rationale = "Pre-existing git shell-out for index tree; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-k8s
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-k8s/src/graph_warmer.rs"
+	matcher = "tokio::process::Command::new(\"git\")"
+	owner = "team/k8s"
+	rationale = "Pre-existing async git shell-out for graph warmer; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-slot
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-slot/src/finalize_handlers_fingerprint_tests.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/slot"
+	rationale = "Pre-existing git shell-out in fingerprint tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-slot/src/reply_loop/tests.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/slot"
+	rationale = "Pre-existing git shell-out in reply loop tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-stack
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-stack/src/detect.rs"
+	matcher = "git2::"
+	owner = "team/stack"
+	rationale = "Pre-existing libgit2 usage for stack detection; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-supervisor
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-supervisor/src/lib.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/supervisor"
+	rationale = "Pre-existing git shell-out in supervisor; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+# djinn-workspace
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-workspace/src/workspace.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/workspace"
+	rationale = "Pre-existing git shell-out for workspace operations; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-workspace/tests/smoke.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/workspace"
+	rationale = "Pre-existing git shell-out in workspace smoke tests; to be migrated to djinn-git."
+	cleanup_issue = "epic/fztz"
