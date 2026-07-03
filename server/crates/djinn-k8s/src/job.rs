@@ -175,6 +175,7 @@ pub const VOLUME_WORKSPACE: &str = "workspace";
 /// (resolved via [`crate::sidecar::resolve_image_services`]); each is injected
 /// as a native sidecar and its connection string exported to the worker as the
 /// preset's env var. Pass an empty slice for no injected services.
+#[allow(clippy::too_many_arguments)]
 pub fn build_task_run_job(
     config: &KubernetesConfig,
     task_run_id: &Uuid,
@@ -183,16 +184,38 @@ pub fn build_task_run_job(
     project_image_tag: &str,
     services: &[BackingServiceSpec],
     policy: Option<&djinn_stack::environment::CargoCachePolicy>,
+    is_evidence_spike: bool,
 ) -> Job {
     let task_run_id_str = task_run_id.to_string();
     let labels = job_labels(&task_run_id_str);
     let job_name = format!("djinn-taskrun-{task_run_id}");
 
+    // Evidence-spike runs receive no backing-service connection env vars —
+    // the worker has no business reaching product databases/queues for a
+    // read-only investigation.  The `services` slice is still passed in for
+    // the normal path; here we select an empty slice for evidence spikes so
+    // sidecar_conn_env produces nothing.
+    let effective_services: &[BackingServiceSpec] = if is_evidence_spike { &[] } else { services };
+
+    // Evidence-spike runs mount durable repository/cache resources
+    // read-only so that a tool-surface bug cannot mutate the host mirror
+    // or shared build cache.  The workspace emptyDir remains ephemeral —
+    // it dies with the Pod and never touches a durable PVC.
+    //
+    // NOTE: the emptyDir workspace mount itself stays mutable because the
+    // supervisor/worktree bootstrap requires a writable TMPDIR to start.
+    // This is the narrow exception — the durable PVCs (mirror, cache) are
+    // the mutation-proof surface, and the emptyDir is per-Pod ephemeral
+    // storage that cannot leak writes outside the container boundary.
+    let mirror_read_only = is_evidence_spike;
+    let cache_read_only = is_evidence_spike;
+
     // Worker env carries the base task-run knobs plus the connection env var(s)
     // per injected backing service (e.g. DATABASE_URL + TEST_POSTGRES_URL →
-    // 127.0.0.1:5432). A preset may declare more than one name.
+    // 127.0.0.1:5432). A preset may declare more than one name.  Evidence-spike
+    // runs use `effective_services` (empty) so no DB connection env is injected.
     let mut worker_env = build_task_run_env(config, &task_run_id_str, project_id, policy);
-    worker_env.extend(services.iter().flat_map(sidecar_conn_env));
+    worker_env.extend(effective_services.iter().flat_map(sidecar_conn_env));
 
     let container = Container {
         name: "worker".to_string(),
@@ -213,13 +236,22 @@ pub fn build_task_run_job(
         volume_mounts: Some(vec![
             volume_mount(VOLUME_SPEC, SPEC_MOUNT_DIR, Some(true)),
             volume_mount(VOLUME_AUTH_TOKEN, TOKEN_MOUNT_DIR, Some(true)),
-            // Mirror PVC is mounted RW so the worker can push the
-            // task_branch back to the mirror before delegating open_pr.
-            // The mirror PVC is ReadWriteMany (deploy/helm/djinn/values.yaml)
-            // so concurrent workers writing distinct, uniquely-named
-            // task_branches do not conflict.
-            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(false)),
-            volume_mount(VOLUME_CACHE, CACHE_MOUNT_DIR, None),
+            // Mirror PVC: mounted RW for normal workers (push task_branch
+            // before delegating open_pr) but RO for evidence-spike runs
+            // where write access to the host mirror is a safety violation.
+            volume_mount(VOLUME_MIRROR, MIRROR_MOUNT_DIR, Some(mirror_read_only)),
+            // Cache PVC: default mutable for normal workers (cargo builds write
+            // to private per-run target dirs under /cache).  For evidence-spike
+            // runs, explicitly read-only — no build artifacts should persist.
+            // The None (non-evidence) path preserves the original manifest shape.
+            volume_mount(
+                VOLUME_CACHE,
+                CACHE_MOUNT_DIR,
+                if is_evidence_spike { Some(true) } else { None },
+            ),
+            // Workspace emptyDir: always mutable.  Ephemeral per-Pod
+            // storage — dies with the Pod.  See the `mirror_read_only`
+            // comment above for why this narrow exception is safe.
             volume_mount(VOLUME_WORKSPACE, WORKSPACE_MOUNT_DIR, None),
             crate::env_config::env_config_volume_mount(),
         ]),
@@ -293,11 +325,11 @@ pub fn build_task_run_job(
             name: VOLUME_MIRROR.to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: config.mirror_pvc.clone(),
-                // RW so the worker can push its task_branch back to the
-                // mirror before delegating open_pr. See the matching
-                // VolumeMount comment above for the cross-Pod safety
-                // argument.
-                read_only: Some(false),
+                // RW for normal workers (push task_branch before delegating
+                // open_pr); RO for evidence-spike runs to enforce the
+                // read-only isolation contract at the K8s volume boundary.
+                // See the matching VolumeMount comment above.
+                read_only: Some(mirror_read_only),
             }),
             ..Volume::default()
         },
@@ -305,7 +337,7 @@ pub fn build_task_run_job(
             name: VOLUME_CACHE.to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
                 claim_name: config.cache_pvc.clone(),
-                read_only: Some(false),
+                read_only: Some(cache_read_only),
             }),
             ..Volume::default()
         },
@@ -319,15 +351,19 @@ pub fn build_task_run_job(
     // Backing-service sidecars share a Memory /dev/shm (Postgres needs more than
     // the 64Mi default). Added only when services are injected so the manifest
     // is byte-identical to the pre-feature shape for service-less projects.
-    if !services.is_empty() {
+    // Evidence-spike runs always skip sidecars — `effective_services` is empty
+    // when `is_evidence_spike` is true, so this block is a no-op.
+    if !effective_services.is_empty() {
         volumes.push(sidecar_dshm_volume());
     }
 
     // Each declared backing service becomes a native sidecar (initContainer +
     // restartPolicy: Always). `None` when there are none, keeping the manifest
-    // unchanged for projects without injected services.
-    let init_containers = (!services.is_empty()).then(|| {
-        services
+    // unchanged for projects without injected services.  For evidence-spike
+    // runs, `effective_services` is empty so no sidecar init containers are
+    // injected — the read-only investigation must not start product databases.
+    let init_containers = (!effective_services.is_empty()).then(|| {
+        effective_services
             .iter()
             .map(|s| sidecar_container(config, s))
             .collect::<Vec<_>>()
@@ -759,6 +795,7 @@ mod tests {
             project_image,
             &[],
             None,
+            false,
         );
 
         // Metadata.
@@ -1042,6 +1079,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
 
         let pod = job
@@ -1082,6 +1120,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
 
         let pod = job
@@ -1457,6 +1496,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
         let second_job = build_task_run_job(
             &cfg,
@@ -1466,6 +1506,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
 
         let first_envs = task_run_job_envs(&first_job);
@@ -1530,6 +1571,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
 
         let pod = job
@@ -1577,6 +1619,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             &[],
             None,
+            false,
         );
         let bare_pod = bare
             .spec
@@ -1606,6 +1649,7 @@ mod tests {
             "registry.example:5000/djinn-project-p:abc123def456",
             std::slice::from_ref(&postgres),
             None,
+            false,
         );
         let pod = job
             .spec
@@ -1727,6 +1771,301 @@ mod tests {
         assert!(
             worker_target.starts_with("/cache/cargo-target-runs/"),
             "worker CARGO_TARGET_DIR must be a private per-run dir"
+        );
+    }
+
+    // ── Evidence-spike K8s runtime isolation ──────────────────────────────
+    //
+    // These tests assert that evidence-spike task-run jobs fail closed at
+    // the container boundary: durable PVC mounts are read-only, no
+    // backing-service sidecars or connection env vars are injected, and the
+    // manifest differs from the normal worker path in exactly the expected
+    // isolation fields.  Normal (non-evidence-spike) jobs must remain
+    // unchanged — the existing test `builds_task_run_job_manifest` already
+    // pins that baseline.
+
+    /// Evidence-spike runs must mount the mirror PVC read-only so a
+    /// tool-surface bug cannot write task branches or mutate the host
+    /// mirror.  This asserts both the VolumeMount and the PVC source.
+    #[test]
+    fn evidence_spike_mirror_mounted_read_only() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-spike",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+            None,
+            true, // is_evidence_spike
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
+
+        // Mirror mount must be read-only.
+        let mirror_mount = mounts
+            .iter()
+            .find(|m| m.name == VOLUME_MIRROR)
+            .expect("mirror mount present");
+        assert_eq!(
+            mirror_mount.read_only,
+            Some(true),
+            "evidence-spike mirror mount must be read-only"
+        );
+
+        // PVC source must also be read-only.
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let mirror_vol = volumes
+            .iter()
+            .find(|v| v.name == VOLUME_MIRROR)
+            .expect("mirror volume present");
+        let pvc = mirror_vol
+            .persistent_volume_claim
+            .as_ref()
+            .expect("mirror volume is PVC");
+        assert_eq!(
+            pvc.read_only,
+            Some(true),
+            "evidence-spike mirror PVC source must be read-only"
+        );
+    }
+
+    /// Evidence-spike runs must mount the cache PVC read-only — no build
+    /// artifacts should be persisted to the shared cache.
+    #[test]
+    fn evidence_spike_cache_mounted_read_only() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-spike",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+            None,
+            true,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
+
+        let cache_mount = mounts
+            .iter()
+            .find(|m| m.name == VOLUME_CACHE)
+            .expect("cache mount present");
+        assert_eq!(
+            cache_mount.read_only,
+            Some(true),
+            "evidence-spike cache mount must be read-only"
+        );
+
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let cache_vol = volumes
+            .iter()
+            .find(|v| v.name == VOLUME_CACHE)
+            .expect("cache volume present");
+        let pvc = cache_vol
+            .persistent_volume_claim
+            .as_ref()
+            .expect("cache volume is PVC");
+        assert_eq!(
+            pvc.read_only,
+            Some(true),
+            "evidence-spike cache PVC source must be read-only"
+        );
+    }
+
+    /// The workspace emptyDir must remain mutable even for evidence spikes —
+    /// it is ephemeral per-Pod storage that dies with the container.
+    #[test]
+    fn evidence_spike_workspace_stays_mutable() {
+        let cfg = KubernetesConfig::for_testing();
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-spike",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            &[],
+            None,
+            true,
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+        let container = &pod.containers[0];
+        let mounts = container.volume_mounts.as_ref().expect("volume_mounts set");
+
+        let ws_mount = mounts
+            .iter()
+            .find(|m| m.name == VOLUME_WORKSPACE)
+            .expect("workspace mount present");
+        assert_eq!(
+            ws_mount.read_only, None,
+            "workspace emptyDir must remain mutable (not read-only) for evidence spikes"
+        );
+    }
+
+    /// Evidence-spike runs must not receive backing-service sidecars even
+    /// when the caller passes a service slice — the builder filters them
+    /// out so no product DB/queue is started.
+    #[test]
+    fn evidence_spike_suppresses_backing_service_sidecars() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+
+        // Even with a service declared, evidence-spike must suppress it.
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-spike",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+            None,
+            true, // is_evidence_spike
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+
+        // No init containers (no sidecar).
+        assert!(
+            pod.init_containers.is_none(),
+            "evidence-spike must not inject backing-service sidecars"
+        );
+
+        // No svc-dshm volume.
+        assert!(
+            !pod.volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|v| v.name == crate::sidecar::SIDECAR_DSHM_VOLUME),
+            "evidence-spike must not add svc-dshm volume"
+        );
+
+        // No connection env var exported.
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert!(
+            !envs.contains_key("TEST_POSTGRES_URL"),
+            "evidence-spike must not export DB connection env vars"
+        );
+    }
+
+    /// Regression guard: a normal (non-evidence-spike) job with a service
+    /// injected still gets the sidecar and connection env var — the
+    /// evidence-spike path must not have altered normal behavior.
+    #[test]
+    fn normal_job_with_service_unaffected_by_evidence_spike_path() {
+        let cfg = KubernetesConfig::for_testing();
+        let postgres = BackingServiceSpec {
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            cpu_request: "100m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "500m".into(),
+            memory_limit: "512Mi".into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "TEST_POSTGRES_URL".into(),
+        };
+
+        let job = build_task_run_job(
+            &cfg,
+            &Uuid::now_v7(),
+            "proj-xyz",
+            "djinn-taskrun-normal",
+            "registry.example:5000/djinn-project-p:abc123def456",
+            std::slice::from_ref(&postgres),
+            None,
+            false, // NOT evidence spike
+        );
+        let pod = job
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .expect("pod spec set");
+
+        // Sidecar IS injected for normal runs.
+        let inits = pod.init_containers.as_ref().expect("init_containers set");
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].name, "svc-postgres");
+
+        // Connection env var IS present.
+        let worker = &pod.containers[0];
+        let envs: BTreeMap<&str, &str> = worker
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_deref().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            envs.get("TEST_POSTGRES_URL").copied(),
+            Some("postgres://postgres:postgres@127.0.0.1:5432/app_test")
+        );
+
+        // Mirror and cache PVCs are RW.
+        let volumes = pod.volumes.as_ref().expect("volumes set");
+        let mirror_vol = volumes
+            .iter()
+            .find(|v| v.name == VOLUME_MIRROR)
+            .expect("mirror volume present");
+        assert_eq!(
+            mirror_vol
+                .persistent_volume_claim
+                .as_ref()
+                .unwrap()
+                .read_only,
+            Some(false),
+            "normal job mirror PVC must be read-write"
+        );
+        let cache_vol = volumes
+            .iter()
+            .find(|v| v.name == VOLUME_CACHE)
+            .expect("cache volume present");
+        assert_eq!(
+            cache_vol
+                .persistent_volume_claim
+                .as_ref()
+                .unwrap()
+                .read_only,
+            Some(false),
+            "normal job cache PVC must be read-write"
         );
     }
 }
