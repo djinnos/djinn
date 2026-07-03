@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 
 import type { BlockProps } from "./types";
+import { unwrapExprValue } from "./exprAttr";
 import { DiagramFallback } from "./DiagramFallback";
 import { SandboxedHtmlFrame } from "./SandboxedHtmlFrame";
 
@@ -22,26 +23,6 @@ const MermaidDiagram = lazy(() =>
  *   - anything else (e.g. `plantuml`, for which we have no client renderer):
  *     routed to the same graceful copy-source fallback instead of dumping raw.
  */
-/** Unwrap an MDX expression-attribute value that the parser stores verbatim:
- *  `source={`…`}` / `source={"…"}` arrive here as a template-literal or quoted
- *  string (delimiters included). Strip a single matching pair so mermaid sees
- *  the raw source, not a leading backtick. */
-function unwrapExprValue(s: string): string {
-  const t = s.trim();
-  if (t.length >= 2) {
-    const open = t[0];
-    const close = t[t.length - 1];
-    if (
-      (open === "`" && close === "`") ||
-      (open === '"' && close === '"') ||
-      (open === "'" && close === "'")
-    ) {
-      return t.slice(1, -1);
-    }
-  }
-  return s;
-}
-
 /** A diagram's source comes from the `source` schema field (preferred) or the
  *  block children. The `source` attribute is the form agents author with
  *  (`<Diagram type="mermaid" source={`…`} />`); reading children only — as this
