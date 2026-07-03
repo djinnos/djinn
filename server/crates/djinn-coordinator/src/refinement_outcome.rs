@@ -695,6 +695,10 @@ impl CoordinatorActor {
             )
             .await
         {
+            if is_already_closed_refinement_close_error(&e) {
+                // Idempotent no-op: the task was already closed — nothing to do.
+                return;
+            }
             tracing::warn!(
                 task_id = %task_id,
                 error = %e,
@@ -943,5 +947,42 @@ impl CoordinatorActor {
             &ac_items,
             target_count,
         ))
+    }
+}
+
+/// Returns `true` when the repository error indicates the task was already closed
+/// at the time `ForceClose` was attempted. This is the only idempotent close case
+/// — all other [`djinn_db::Error::InvalidTransition`] messages remain real failures
+/// that must surface as warnings.
+fn is_already_closed_refinement_close_error(error: &djinn_db::Error) -> bool {
+    matches!(
+        error,
+        djinn_db::Error::InvalidTransition(msg) if msg == "task is already closed"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_already_closed_refinement_close_error ----
+
+    #[test]
+    fn force_close_already_closed_returns_true() {
+        let error = djinn_db::Error::InvalidTransition("task is already closed".to_owned());
+        assert!(is_already_closed_refinement_close_error(&error));
+    }
+
+    #[test]
+    fn force_close_other_invalid_transition_returns_false() {
+        let error =
+            djinn_db::Error::InvalidTransition("release is only valid from in_progress".to_owned());
+        assert!(!is_already_closed_refinement_close_error(&error));
+    }
+
+    #[test]
+    fn force_close_non_transition_error_returns_false() {
+        let error = djinn_db::Error::Internal("something broke".to_owned());
+        assert!(!is_already_closed_refinement_close_error(&error));
     }
 }

@@ -615,6 +615,7 @@ impl RepoGraphBridge {
         file_glob: Option<&str>,
         limit: usize,
     ) -> Result<Vec<HotspotEntry>, String> {
+        use djinn_db::CommitFileChangeRepository;
         use djinn_graph::repo_graph::RepoGraphNodeKind;
         use std::collections::BTreeMap;
 
@@ -625,49 +626,38 @@ impl RepoGraphBridge {
         )
         .await?;
 
-        // Churn via git log, single invocation. Use git's relative-date
-        // syntax ("N days ago") — that side-steps dragging in chrono just
-        // for a date subtraction while still giving git a stable bound.
+        // Fetch windowed churn from the DB-backed commit_file_changes table.
+        // This removes the live git checkout dependency from hotspots.
         let days = window_days.clamp(1, 365);
-        let (project_root, _idx) =
-            djinn_graph::canonical_graph::normalize_graph_query_paths(&ctx.clone_path);
+        let since = shared::since_days_to_cutoff(Some(days));
+        let churn_repo = CommitFileChangeRepository::new(self.state.db().clone());
+        let churn_rows = churn_repo
+            .churn(&ctx.id, 500, since.as_deref())
+            .await
+            .map_err(|e| format!("hotspots churn lookup: {e}"))?;
+
         let mut churn: BTreeMap<String, usize> = BTreeMap::new();
-        match std::process::Command::new("git")
-            .current_dir(&project_root)
-            .args([
-                "log",
-                "--name-only",
-                "--pretty=format:",
-                &format!("--since={days} days ago"),
-            ])
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    *churn.entry(trimmed.to_string()).or_insert(0) += 1;
-                }
+        for row in &churn_rows {
+            if row.commit_count < 0 {
+                continue;
             }
-            Ok(out) => {
-                tracing::warn!(
-                    project_id = %ctx.id,
-                    status = %out.status,
-                    "hotspots: git log returned non-zero; returning empty result",
+            churn.insert(row.file_path.clone(), row.commit_count as usize);
+        }
+
+        // If the selected window has no churn, perform an all-time availability
+        // check. All-time rows present means valid zero churn for the window;
+        // no all-time rows means churn data has not been harvested yet.
+        if churn.is_empty() {
+            let all_time_rows = churn_repo
+                .churn(&ctx.id, 1, None)
+                .await
+                .map_err(|e| format!("hotspots churn lookup: {e}"))?;
+            if all_time_rows.is_empty() {
+                return Err(
+                    "hotspots churn unavailable: no commit_file_changes rows for project; run mirror churn harvest".into(),
                 );
-                return Ok(Vec::new());
             }
-            Err(e) => {
-                tracing::warn!(
-                    project_id = %ctx.id,
-                    error = %e,
-                    "hotspots: git log failed; returning empty result",
-                );
-                return Ok(Vec::new());
-            }
+            return Ok(Vec::new());
         }
 
         // Build per-file centrality (Σ PR of owned symbols) and top-symbol list.

@@ -13,9 +13,9 @@
 
 <p align="center">
   <a href="https://youtu.be/f-S3ju-GjCs"><strong>Demo video</strong></a> ·
-  <a href="#quick-start-local"><strong>Quick start</strong></a> ·
+  <a href="#how-it-works"><strong>How it works</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
-  <a href="#deploy-kubernetes"><strong>Deploy</strong></a> ·
+  <a href="#deploy"><strong>Deploy</strong></a> ·
   <a href="https://djinnai.io"><strong>Website</strong></a>
 </p>
 
@@ -63,13 +63,13 @@ The `djinn-server` control plane is the single source of truth: the web UI, Clau
   it            sign off       parallel        rejects loop back
 ```
 
-1. **Propose** — Anyone writes a proposal: a problem, a goal, acceptance criteria. Proposals are global, collaborative specs that can target any number of projects. Use the editor, or open a proposal-scoped chat and let Djinn draft and refine the spec with you.
-2. **Review & sign off** — The team leaves feedback on the spec; the author (or Djinn) addresses it revision by revision. Reviewers sign off, and sign-offs go stale if the spec changes after, so approval always means *this* version.
-3. **Build** — Graduating a proposal turns it into epics and tasks. The coordinator dispatches ready tasks by priority and dependency order, gated by each user's per-model concurrency limit. Each task-run executes in its own Kubernetes Job, in a per-project devcontainer image, with an isolated git workspace. Changed your mind mid-build? Freeze or abort, edit the spec, re-sign, re-graduate.
-4. **AI review** — A reviewer agent checks the work against the proposal's acceptance criteria; rejected work loops back for another pass.
-5. **Pull request** — Approved work is pushed and a PR is opened via your GitHub App. You review, you merge.
+1. **Propose** — anyone writes a spec: a problem, a goal, acceptance criteria. In the editor, or by letting Djinn draft it with you in chat.
+2. **Review & sign off** — feedback lands revision by revision; sign-offs go stale if the spec changes after, so approval always means *this* version.
+3. **Build** — graduation decomposes the proposal into epics and tasks, dispatched by priority and dependency order, each in its own Kubernetes Job. Freeze or abort mid-build to rework the spec and go again.
+4. **AI review** — a reviewer agent checks the work against the acceptance criteria; rejections loop back.
+5. **Pull request** — approved work opens a PR via your GitHub App. You review, you merge.
 
-Prefer to skip the ceremony? Tasks and epics can also be created directly on the board: the proposal layer is governance you opt into, not a gate you can't route around.
+Prefer to skip the ceremony? Tasks and epics can also be created directly on the board — the proposal layer is governance you opt into, not a gate you can't route around.
 
 ## Architecture
 
@@ -99,61 +99,9 @@ Djinn is a Rust control plane (`djinn-server`) that acts as a Kubernetes control
    └───────────────────────────────────────────────────┘
 ```
 
-**Components**
+Each task routes to an **agent role** by type — Architect (read-only spikes), Planner, Developer, Reviewer, Lead — and Djinn runs its own LLM agent loop (no external runtime), resolving the model per task with precedence **user → project → global** from a live [models.dev](https://models.dev) catalog. The only admission control is each user's per-model concurrency cap.
 
-| Component | Role |
-|-----------|------|
-| `djinn-server` | Control plane: HTTP API, embedded UI, MCP endpoint, OAuth server, proposal pipeline, task coordinator, slot pool, repo mirror fetcher, per-project image controller, worker RPC listener. |
-| `djinn-agent-worker` | Runs inside each task-run pod. Drives the agent role sequence stage-by-stage against an isolated `/workspace`, streaming results back over RPC. |
-| Postgres 16 | All state — proposals, tasks, epics, sessions, notes, users, encrypted credentials, code-graph cache (JSONB throughout). |
-| Qdrant | Vector store for code-chunk and note embeddings (semantic + hybrid search). |
-| BuildKit + registry | Builds a per-project devcontainer image (from detected stack) that every task-run for that project runs in. |
-
-**Agent roles** — Each task is routed to a role based on its type:
-
-- **Architect** — read-only consultant for spikes; deep structural reasoning, no board changes.
-- **Planner** — owns planning, decomposition, and review-grooming tasks.
-- **Developer** — does the code change, commits, and pushes to the project mirror.
-- **Reviewer** — judges the work against acceptance criteria; approves or sends it back.
-- **Lead** — handles escalations and interventions.
-
-**Model routing** — Djinn runs its own LLM agent loop (no external runtime). Models are resolved per task with precedence **user → project → global**, drawn from a live [models.dev](https://models.dev) catalog. The slot pool is elastic; the sole admission control is each user's per-model concurrency cap.
-
-## Quick start (local)
-
-The full stack runs in a local [kind](https://kind.sigs.k8s.io) cluster, orchestrated by [Tilt](https://tilt.dev). One command brings up the cluster, registry, server, Postgres, Qdrant, the image pipeline, and a self-hosted Langfuse for tracing.
-
-**Prerequisites:** Docker, [kind](https://kind.sigs.k8s.io), `kubectl`, [Helm](https://helm.sh), [Tilt](https://tilt.dev), [pnpm](https://pnpm.io) (Node), and `openssl`.
-
-The image pipeline runs BuildKit rootless via user namespaces. On the host (kind inherits host sysctls):
-
-```sh
-sudo sysctl -w kernel.unprivileged_userns_clone=1
-sudo sysctl -w user.max_user_namespaces=28633   # or higher
-```
-
-Then, from the repo root:
-
-```bash
-tilt up
-```
-
-Tilt bootstraps the kind cluster (`djinn`) + a local registry, builds `djinn-server` and `djinn-agent-worker`, embeds the freshly built UI, installs the Helm chart, and port-forwards:
-
-| Port | Service |
-|------|---------|
-| `:3000` | djinn API + web UI |
-| `:8443` | worker RPC |
-| `:5432` | Postgres |
-| `:6333` / `:6334` | Qdrant (HTTP / gRPC) |
-| `:5000` | Langfuse dashboard |
-| `:9091` | MinIO console |
-
-Open the UI at **http://127.0.0.1:3000**. `tilt down` removes the Helm release but leaves the cluster up; `kind delete cluster --name djinn` tears it down completely.
-
-> The heavy build steps (`djinn-binaries`, `djinn-ui-dist`, runtime base image) are **manual** triggers in the Tilt UI — hit refresh on `djinn-binaries` to recompile after Rust changes; the server image and pod roll follow automatically.
-
-## Deploy (Kubernetes — a single VPS counts)
+## Deploy
 
 djinn is Kubernetes-native — it dispatches every agent run as a Job/Pod — so it
 needs a cluster. But **"a cluster" can be one cheap VPS**: [k3s](https://k3s.io)
@@ -170,59 +118,39 @@ helm upgrade --install djinn deploy/helm/djinn \
   -f my-values.yaml    # bundled Postgres/Qdrant/registry, ingress host, secrets
 ```
 
-The same one chart covers every environment — the only thing that changes is
-whether the backing services are bundled or managed:
+One chart covers every environment — the only thing that changes is whether the
+backing services are bundled or managed. Pick your path:
 
-- **Local** — `tilt up` brings up the whole stack in kind ([Quick start](#quick-start-local)).
-- **Single node / self-hosted / VPS** — everything bundled on a one-box k3s cluster ([guide](docs/DEPLOYMENT.md#single-node--self-hosted--vps), including the exact bundled values and a turnkey Ansible reference).
-- **Any managed or self-managed cluster (EKS / GKE / AKS / kubeadm)** — external Postgres/registry, cloud identity, GitOps.
+| Environment | Guide |
+|-------------|-------|
+| Single VPS — everything bundled, TLS via Let's Encrypt | [docs/deploy/vps.md](docs/deploy/vps.md) |
+| Managed cluster (EKS / GKE / AKS) — RDS/Cloud SQL, ECR/GAR/ACR, cloud identity, GitOps | [docs/deploy/kubernetes.md](docs/deploy/kubernetes.md) |
+| Every knob — external Postgres, registries, secrets, storage, scheduling | [docs/deploy/configuration.md](docs/deploy/configuration.md) |
+| Overview — requirements, what's bundled vs swappable, how upgrades work | [docs/deploy](docs/deploy/README.md) |
 
-`helm upgrade --install` handles fresh installs and upgrades alike — migrations
-run automatically in the server's migrate initContainer.
+**Or let your AI do it.** Paste this into Claude Code, Cursor, or any agent
+with shell access to your target machine:
 
-**→ Full guide, per-environment values, and the production/EKS overlay: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).**
+```
+Fetch https://raw.githubusercontent.com/djinnos/djinn/main/docs/deploy/AGENT.md and follow it to deploy Djinn for me.
+```
 
-## Features
+The agent interviews you (VPS or existing cluster, domain, keys), runs the
+install phase by phase with verification checkpoints, and hands you a working
+URL. `helm upgrade --install` handles fresh installs and upgrades alike —
+migrations run automatically in the server's migrate initContainer.
 
-### 📋 Proposals: specs, not prompts
+Just want a quick local test (or to hack on Djinn itself)? `tilt up` brings
+the whole stack up in a local kind cluster, built from source — see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Work starts as a written, reviewable spec with acceptance criteria, targeting one project or many. Feedback threads, revision history, and stale-aware sign-offs give product and engineering a shared artifact to argue about *before* tokens are spent. Graduate it to build; freeze or abort mid-build to rework the spec and go again.
+## Beyond the pipeline
 
-### ⚡ Parallel execution
-
-Each task-run is an isolated Kubernetes Job in its own workspace. Run many agents at once across many repos; scale by adding nodes, not terminal tabs.
-
-### 📁 Multi-project
-
-Microservices, monorepos, many repositories — Djinn manages them all. Each project gets its own devcontainer image (built from auto-detected stack), task board, code graph, and knowledge base. A single proposal can drive changes across several of them.
-
-### 🔀 Your models, mixed & matched
-
-Djinn owns its own agent loop and talks to providers directly: Anthropic, OpenAI, Google, Fireworks, ChatGPT/Codex and GitHub Copilot (OAuth), Vertex AI, Bedrock, Azure OpenAI, plus any OpenAI-compatible endpoint from the models.dev catalog. Use one model for coding, another for reviews, another for research — configured per user, per project, and per role.
-
-### 🧠 Persistent memory
-
-Decisions, patterns, and architectural rules live in a searchable, DB-backed knowledge base of linked notes (`[[wikilinks]]`). Agents extract what they learn from each task and carry it into the next. Hybrid lexical + semantic search keeps the right context in front of every agent.
-
-### 🔍 Code intelligence
-
-A per-project **code graph** built from SCIP indexers across 8 languages powers impact analysis, dependency cycles, coupling hubs, dead-symbol detection, and complexity metrics (cognitive + cyclomatic). Agents query it over MCP; you explore it visually in the UI.
-
-### 👥 Multi-user
-
-Self-hosted for your whole team. Each user logs in via GitHub, brings their own provider credentials (encrypted at rest, with org-shared fallback), and has private chat — over a shared board. Every task runs under a real user with their model limits. Admins can manage users and act on their behalf.
-
-### ✅ Built-in review
-
-AI reviewers check each task against the proposal's acceptance criteria. You review the finished work and decide when to merge.
-
-## What's next: see where the tokens go
-
-AI engineering spend is opaque almost everywhere; Djinn's pipeline makes it attributable. Because every session belongs to a task, every task to an epic, and every epic to a proposal under a real user, we're building the visibility layer on top:
-
-- **Spend attribution** — tokens and cost per proposal, per project, per model, per user, per role.
-- **Value delivered** — proposals shipped, PRs merged, rework loops, review pass rates: cost next to outcome, not in a separate billing console.
-- **Tracing built in** — every agent session already streams to [Langfuse](https://langfuse.com); the next step is rolling those traces up into answers a team lead can act on.
+- **Multi-project** — microservices, monorepos, many repositories. Each project gets its own devcontainer image (auto-detected stack), task board, code graph, and knowledge base; one proposal can drive changes across several.
+- **Your models, mixed & matched** — Anthropic, OpenAI, Google, Vertex, Bedrock, Azure, Fireworks, ChatGPT/Codex and Copilot via OAuth, plus any OpenAI-compatible endpoint from the models.dev catalog. One model for coding, another for review — per user, per project, per role.
+- **Persistent memory** — a searchable, DB-backed knowledge base of linked notes. Agents extract what they learn from each task and carry it into the next.
+- **Code intelligence** — a per-project code graph (SCIP, 8 languages): impact analysis, dependency cycles, coupling hubs, dead symbols, complexity. Queryable over MCP, explorable in the UI.
+- **Multi-user** — GitHub login, per-user encrypted provider credentials with org-shared fallback, private chat over a shared board, per-user concurrency caps, admin role.
 
 ## Connect your tools
 
@@ -270,26 +198,14 @@ claude mcp add --transport http djinn https://<your-host>/mcp
 
 ## Configuration
 
-- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed correctly. Login is federated through the same App.
+- **[Configuration reference](docs/deploy/configuration.md)** — every chart knob: external Postgres (RDS/Cloud SQL), managed registries, secrets delivery, storage, task-run scheduling, Langfuse.
+- **[GitHub App setup](docs/GITHUB_APP_SETUP.md)** — connect the server to a GitHub App so repo operations (clone, push, PRs) run under installation tokens and commits are attributed correctly. Login is federated through the same App — or use the one-click manifest flow on the sign-in screen.
 - **Providers** — bootstrap API keys via `secrets.providers.*`, or have each user connect their own under Settings → Models (including OAuth providers like ChatGPT/Codex and Copilot).
 - **Credential vault** — provider credentials are encrypted with AES-256-GCM using the key in `secrets.vaultKey.key`. Keep it stable across upgrades or existing credentials become undecryptable.
 
 ## Development
 
-The Rust workspace lives in `server/` (binary `djinn-server` plus ~16 crates under `server/crates/`); the web client is in `ui/` (React + Vite + TypeScript, pnpm). The UI is compiled into the server binary via `rust-embed`, and the TypeScript MCP types are generated from the server's live tool schemas (`pnpm --dir ui mcp:types`).
-
-Tests run against a dedicated throwaway Postgres (not the dev cluster), started via Docker Compose on `:5433`:
-
-```bash
-docker compose up -d postgres-test   # test-only Postgres
-make test                            # djinn-db tests
-make test-all                        # whole workspace (cargo nextest)
-make sqlx-check                      # fail if the offline sqlx cache is stale
-```
-
-The workspace `.cargo/config.toml` defaults `DATABASE_URL` and `DJINN_TEST_DATABASE_URL` to the `:5433` instance. `make test-all` rebuilds the `djinn_test_template` database and then mirrors the merge-queue/full-suite nextest command: `cd server && cargo nextest run --workspace --all-targets --all-features --profile ci`. The PR-time fast gate is intentionally cheaper (`cargo nextest ... --no-run` plus clippy); DB-backed test execution runs in the merge queue/manual workflow.
-
-The lifecycle/concurrency regressions for the vjs6 incidents (dispatch-cap races, slot-pool lifecycle event races, `execution_kill_task` kill/cancel settlement, and reopen/intervention chaos) are part of that unfiltered `profile ci` full-suite path and must remain enabled. They use in-process TestRuntime/template-Postgres or in-memory helpers, not kind/k8s; stripped-down worker pods without Postgres/template setup may be unable to run them locally. See [`docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md`](docs/LIFECYCLE_CONCURRENCY_TEST_INVENTORY.md) for the focused filters and rationale.
+Rust workspace in `server/`, React UI in `ui/`, embedded into the server binary. `tilt up` is the whole dev loop; the local stack, workspace layout, test setup, and CI notes are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Community
 
