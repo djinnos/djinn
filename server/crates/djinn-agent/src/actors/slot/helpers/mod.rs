@@ -6,22 +6,11 @@ use djinn_provider::repos::CredentialRepository;
 mod feedback;
 pub mod provider_resolution;
 
-// b7pe: code-context and reviewer-diff tests now live canonically in
-// `djinn-slot/src/helpers/tests.rs`.  This module is retained for future
-// host-only adapter tests.
-#[cfg(test)]
-mod tests;
-
-// Re-export context-free code-context helpers directly from the canonical
-// djinn-slot implementation. The graph-dependent helpers below keep the
-// agent-facing `AgentContext` signature and only adapt to `SlotContext`.
 #[allow(unused_imports)]
 pub(crate) use djinn_slot::helpers::{
     derive_task_scope_paths, format_knowledge_notes, is_role_auto_code_context_enabled,
 };
 #[allow(unused_imports)]
-// Thin adapter layer: context-free functions re-exported from djinn_slot,
-// context-dependent async functions wrapped with AgentContext → SlotContext.
 pub(crate) use feedback::{
     COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
     conflict_context_for_dispatch, default_target_branch, extract_worker_context,
@@ -37,8 +26,7 @@ pub use provider_resolution::{
 };
 #[allow(unused_imports)]
 pub(crate) use provider_resolution::{
-    build_provider_from_resolved, build_telemetry_meta, build_telemetry_meta_with_attribution,
-    resolved_needs_base_url,
+    build_provider_from_resolved, build_telemetry_meta_with_attribution, resolved_needs_base_url,
 };
 
 /// Agent-compatible wrapper around the canonical djinn-slot code graph context helper.
