@@ -10,6 +10,8 @@ use crate::output_parser::ParsedAgentOutput;
 use djinn_compaction::{CompactionContext, compact_conversation, needs_compaction};
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::SessionMessageRepository;
+use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
+use djinn_git::{SubmissionDiffFingerprint, compute_submission_diff_fingerprint};
 use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
 use djinn_provider::provider::LlmProvider;
 use djinn_provider::provider::telemetry;
@@ -102,6 +104,134 @@ fn corrective_message_for_loop_guard(condition: &LoopGuardCondition) -> Message 
          failing signature again will terminate the session through the loop guard.",
         observed = condition.observed,
     ))
+}
+
+/// Check if a worker's `submit_work` finalize call should be intercepted because
+/// the current submission diff fingerprint matches the latest rejected fingerprint
+/// for this task.
+///
+/// Returns `Some(corrective_text)` when the first identical no-progress submit is
+/// detected — the caller should inject the corrective tool result and continue the
+/// reply loop instead of finalizing. Returns `None` when:
+/// - The role is not a worker or the primary finalize tool is not `submit_work`
+/// - No latest rejected fingerprint exists (no-comparison path; telemetry only)
+/// - The current fingerprint differs from the latest rejected (new content accepted)
+/// - Fingerprint computation fails (existing empty-diff safeguards remain intact)
+async fn check_worker_submit_no_progress_guard(
+    role_name: &str,
+    primary_finalize: &str,
+    task_id: &str,
+    worktree_path: &std::path::Path,
+    slot_ctx: &SlotContext,
+) -> Option<String> {
+    // Gate only worker `submit_work` finalize calls.
+    if role_name != "worker" || primary_finalize != "submit_work" {
+        return None;
+    }
+
+    // Load the latest rejected fingerprint for this task.
+    let rejected_repo = TaskRejectedSubmissionIntegrityRepository::new(slot_ctx.db.clone());
+    let latest_rejected = match rejected_repo.latest_for_task(task_id).await {
+        Ok(record) => record,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "submit_integrity: failed to load latest rejected fingerprint; \
+                 skipping comparison (existing empty-diff safeguards remain)"
+            );
+            return None;
+        }
+    };
+
+    let Some(rejected) = latest_rejected else {
+        tracing::debug!(
+            task_id = %task_id,
+            "submit_integrity: no latest rejected fingerprint for task; \
+             skipping comparison (no-comparison historical path)"
+        );
+        return None;
+    };
+
+    // Compute the current complete submission diff fingerprint.
+    let current_fp = match compute_submission_diff_fingerprint(worktree_path).await {
+        Ok(SubmissionDiffFingerprint::Diff(digest)) => {
+            tracing::info!(
+                task_id = %task_id,
+                fingerprint_len = digest.fingerprint.len(),
+                changed_paths = ?digest.changed_paths,
+                "submit_integrity: computed current submission fingerprint"
+            );
+            digest.fingerprint
+        }
+        Ok(SubmissionDiffFingerprint::NoDiff(no_diff)) => {
+            tracing::info!(
+                task_id = %task_id,
+                worktree_path = %worktree_path.display(),
+                merge_base = ?no_diff.merge_base,
+                canonical_diff_len = no_diff.canonical_diff_len,
+                "submit_integrity: no diff in worktree for fingerprint; \
+                 existing empty-diff safeguards will apply"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                worktree_path = %worktree_path.display(),
+                error = %e,
+                "submit_integrity: failed to compute submission fingerprint; \
+                 skipping comparison (existing empty-diff safeguards remain)"
+            );
+            return None;
+        }
+    };
+
+    // Compare current fingerprint with latest rejected.
+    if current_fp == rejected.diff_fingerprint {
+        tracing::warn!(
+            task_id = %task_id,
+            rejected_at = %rejected.rejected_at,
+            rejected_fingerprint = %rejected.diff_fingerprint,
+            no_progress_streak = rejected.no_progress_streak,
+            "submit_integrity: worker submit_work matches latest rejected fingerprint; \
+             intercepting first no-progress submit with corrective tool result"
+        );
+        Some(format!(
+            "Your submission was intercepted: the diff fingerprint of your current \
+             worktree is identical to the latest rejected submission for this task \
+             (rejected at {rejected_at}). You have not made substantive changes since \
+             the rejection. You MUST make meaningful code changes before calling \
+             submit_work again. Review the rejection feedback, address the issues, \
+             and modify actual source files before resubmitting.",
+            rejected_at = rejected.rejected_at,
+        ))
+    } else {
+        tracing::info!(
+            task_id = %task_id,
+            current_fingerprint = %current_fp,
+            rejected_fingerprint = %rejected.diff_fingerprint,
+            "submit_integrity: current fingerprint differs from latest rejected; \
+             allowing submit_work to proceed"
+        );
+        None
+    }
+}
+
+/// Extract the `tool_use_id` from the first `ContentBlock::ToolUse` whose name
+/// matches `target_name`.
+fn find_tool_use_id<'a>(tool_calls: &'a [ContentBlock], target_name: &str) -> Option<&'a str> {
+    tool_calls.iter().find_map(|tc| {
+        if let ContentBlock::ToolUse { id, name, .. } = tc {
+            if name == target_name {
+                Some(id.as_str())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    })
 }
 
 fn tool_result_text(content: &[ContentBlock]) -> String {
@@ -912,6 +1042,44 @@ pub async fn run_reply_loop(
                         continue;
                     }
                 }
+            }
+
+            // ── Worker submit_work no-progress integrity gate ────────────────
+            // Before accepting a worker's finalize payload, check whether the
+            // current worktree diff fingerprint matches the latest rejected
+            // fingerprint for this task. On the first identical no-progress
+            // submit, return a corrective tool result and continue the session
+            // so the worker can make substantive changes.
+            let primary_finalize = finalize_tool_names.first().copied().unwrap_or("");
+            if !turn_tool_calls.is_empty()
+                && let Some(corrective_text) = check_worker_submit_no_progress_guard(
+                    role_name,
+                    primary_finalize,
+                    task_id,
+                    worktree_path,
+                    slot_ctx,
+                )
+                .await
+                && let Some(tool_use_id) = find_tool_use_id(&turn_tool_calls, primary_finalize)
+            {
+                let corrective_result = ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: corrective_text,
+                    }],
+                    is_error: true,
+                };
+                let result_msg = Message {
+                    role: Role::User,
+                    content: vec![corrective_result],
+                    metadata: None,
+                };
+                persist_session_message(&msg_repo, session_id, task_id, &result_msg).await;
+                conversation.push(result_msg);
+                // Skip finalize and tool dispatch for this turn; the
+                // loop will continue and the worker will see the
+                // corrective message.
+                continue;
             }
 
             // ── Finalize-tool detection (ADR-036) ────────────────────────────
