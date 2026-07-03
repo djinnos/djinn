@@ -121,67 +121,70 @@ export default function Home() {
       <main className="relative">
 
         {/* ——— Hero: the proposal header ——— */}
-        <section className="relative px-6 pt-36 pb-24 md:pt-48 overflow-hidden">
+        <section className="relative px-6 pt-32 pb-24 md:pt-44 overflow-hidden">
           <div className="absolute inset-0 blueprint -z-10" />
 
-          <div className="max-w-4xl mx-auto">
-            {/* Proposal frontmatter */}
-            <div className="rise rise-1 font-mono text-xs text-text-muted leading-loose mb-10">
-              <div aria-hidden>---</div>
-              <div>proposal: <span className="text-brand-purple">#0001</span></div>
-              <div>targets: <span className="text-text-secondary">all_of_your_repos</span></div>
-              <div>status: <span className="text-status-pass">signed_off</span></div>
-              <div aria-hidden>---</div>
-            </div>
-
-            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-light tracking-tight leading-[1.04] mb-8">
-              From proposal<br />
-              to <em className="stroke-under italic">pull request.</em>
-            </h1>
-
-            <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl leading-relaxed mb-10">
-              Your team proposes and approves the work. AI agents build it,
-              on your cluster, with your models, behind your review.
-            </p>
-
-            {/* Sign-off task list */}
-            <div className="rise rise-4 font-mono text-xs space-y-2.5 mb-12">
-              <div>
-                <span className="text-status-pass">- [x]</span>{" "}
-                <span className="text-text-secondary">signed off · product</span>
+          <div className="max-w-6xl mx-auto grid lg:grid-cols-2 gap-14 lg:gap-16 items-center">
+            {/* Left: the proposal */}
+            <div>
+              {/* Proposal frontmatter */}
+              <div className="rise rise-1 font-mono text-xs text-text-muted leading-loose mb-8">
+                <div aria-hidden>---</div>
+                <div>proposal: <span className="text-brand-purple">#0001</span></div>
+                <div>targets: <span className="text-text-secondary">all_of_your_repos</span></div>
+                <div>status: <span className="text-status-pass">signed_off</span></div>
+                <div aria-hidden>---</div>
               </div>
-              <div>
-                <span className="text-status-pass">- [x]</span>{" "}
-                <span className="text-text-secondary">signed off · engineering</span>
+
+              <h1 className="rise rise-2 font-display text-5xl md:text-6xl xl:text-7xl font-light tracking-tight leading-[1.06] mb-8">
+                From proposal<br />
+                to <em className="stroke-under italic">pull request.</em>
+              </h1>
+
+              <p className="rise rise-3 text-lg md:text-xl text-text-secondary leading-relaxed mb-8">
+                Your team proposes and approves the work. AI agents build it,
+                on your cluster, with your models, behind your review.
+              </p>
+
+              {/* Sign-off task list */}
+              <div className="rise rise-4 font-mono text-xs space-y-2.5 mb-10">
+                <div>
+                  <span className="text-status-pass">- [x]</span>{" "}
+                  <span className="text-text-secondary">signed off · product</span>
+                </div>
+                <div>
+                  <span className="text-status-pass">- [x]</span>{" "}
+                  <span className="text-text-secondary">signed off · engineering</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-status-warn">- [ ]</span>
+                  <span className="text-text-secondary">building · djinn</span>
+                  <span className="dot dot-pulse bg-status-warn" />
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-status-warn">- [ ]</span>
-                <span className="text-text-secondary">building · djinn</span>
-                <span className="dot dot-pulse bg-status-warn" />
+
+              <div className="rise rise-5 flex justify-start">
+                <HeroActions />
               </div>
             </div>
 
-            <div className="rise rise-5 flex justify-start">
-              <HeroActions />
-            </div>
-          </div>
-
-          {/* Demo video as a window */}
-          <div className="rise rise-5 mt-20 max-w-5xl mx-auto window">
-            <div className="window-bar">
-              <span className="dot bg-accent-coral/70" />
-              <span className="dot bg-status-warn/70" />
-              <span className="dot bg-status-pass/70" />
-              <span className="ml-3">djinn — first look · demo</span>
-            </div>
-            <div className="aspect-video">
-              <iframe
-                src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
-                title="Djinn — first look demo"
-                className="w-full h-full"
-                allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowFullScreen
-              />
+            {/* Right: the first-look demo */}
+            <div className="rise rise-5 window">
+              <div className="window-bar">
+                <span className="dot bg-accent-coral/70" />
+                <span className="dot bg-status-warn/70" />
+                <span className="dot bg-status-pass/70" />
+                <span className="ml-3">djinn — first look · demo</span>
+              </div>
+              <div className="aspect-video">
+                <iframe
+                  src="https://www.youtube-nocookie.com/embed/f-S3ju-GjCs"
+                  title="Djinn — first look demo"
+                  className="w-full h-full"
+                  allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
             </div>
           </div>
         </section>
