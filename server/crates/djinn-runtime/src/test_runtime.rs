@@ -428,6 +428,7 @@ mod tests {
             commit_author_name: None,
             commit_author_email: None,
             resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
         }
     }
 
