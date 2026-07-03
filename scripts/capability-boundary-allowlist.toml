@@ -212,15 +212,6 @@ capability = "git"
 # so the guard runs cleanly today.  They will be cleaned up as crates migrate to
 # djinn-provider (tracked by epic fztz).
 
-# djinn-control-plane
-[[entries]]
-capability = "http"
-	path = "server/crates/djinn-control-plane/src/toolchain_versions.rs"
-	matcher = "reqwest::Client"
-	owner = "team/control-plane"
-	rationale = "Pre-existing reqwest::Client usage for toolchain version fetching; to be migrated to djinn-provider."
-	cleanup_issue = "epic/fztz"
-
 # server
 [[entries]]
 capability = "http"
@@ -259,15 +250,6 @@ cleanup_issue = "epic/fztz"
 # These entries pre-allowlist existing Kubernetes client/object access outside
 # djinn-k8s/ so the guard runs cleanly today.  They will be cleaned up as crates
 # migrate to djinn-k8s (tracked by epic fztz).
-
-# djinn-agent
-[[entries]]
-capability = "k8s"
-path = "server/crates/djinn-agent/src/runtime_bridge.rs"
-matcher = "kube::"
-owner = "team/agent"
-rationale = "Pre-existing kube::Client usage for token review validation; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
 
 # djinn-image-controller
 [[entries]]
@@ -332,5 +314,5 @@ capability = "k8s"
 path = "server/src/server/state/mod.rs"
 matcher = "kube::"
 owner = "team/server"
-rationale = "Pre-existing kube::Client construction for image controller, graph warmer, and RPC token review wiring; to be migrated to djinn-k8s."
+rationale = "Pre-existing kube::Client construction for image controller and graph warmer runtime wiring; the RPC token review path has moved behind djinn-k8s."
 cleanup_issue = "epic/fztz"

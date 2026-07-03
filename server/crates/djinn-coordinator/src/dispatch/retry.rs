@@ -1,13 +1,11 @@
+// djinn:allow-oversize — park telemetry + quality-strike guard logic pushed file past the byte threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::ReopenClass;
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
-
-fn record_task_parked_metric() {
-    djinn_telemetry::task::increment_parked();
-}
 
 /// Which kind of remediation task to create for a stuck source task.
 ///
@@ -625,7 +623,7 @@ impl CoordinatorActor {
             )
             .await;
             self.park_source_open(&task.id, &reason).await;
-            record_task_parked_metric();
+            self.record_task_parked_metric(task, quality_strikes).await;
             return true;
         }
 
@@ -753,6 +751,55 @@ impl CoordinatorActor {
             .await?;
 
         Ok(())
+    }
+
+    /// Emit the parked-task telemetry metric with strike-class breakdown labels.
+    ///
+    /// Fetches the task's reopen ledger from the DB to derive
+    /// `quality_strikes`, `merge_conflict_reopens`, and `superseded_reopens`.
+    /// Falls back to the passed `quality_strikes` hint on DB errors so the
+    /// metric is never silently swallowed.
+    async fn record_task_parked_metric(
+        &self,
+        task: &djinn_core::models::Task,
+        quality_strikes_hint: i64,
+    ) {
+        let (quality, merge_conflict, superseded) =
+            match self.task_repo().recent_reopen_ledger(&task.id, 200).await {
+                Ok(ledger) => {
+                    let mut quality: i64 = 0;
+                    let mut merge_conflict: i64 = 0;
+                    let mut superseded: i64 = 0;
+                    for entry in &ledger {
+                        match entry.reopen_class {
+                            ReopenClass::MergeConflict => merge_conflict += 1,
+                            ReopenClass::Superseded => superseded += 1,
+                            _ => {
+                                // review_rejected, merge_queue_failed, other
+                                // are all quality strikes.
+                                quality += 1;
+                            }
+                        }
+                    }
+                    (quality, merge_conflict, superseded)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: recent_reopen_ledger failed for park telemetry; \
+                         using passed quality_strikes hint"
+                    );
+                    (quality_strikes_hint, 0i64, 0i64)
+                }
+            };
+
+        djinn_telemetry::task::increment_parked_labeled(
+            quality,
+            merge_conflict,
+            superseded,
+            task.reopen_count,
+        );
     }
 
     /// Dispatch a Planner escalation: create a review task, add a comment linking it
@@ -1114,30 +1161,54 @@ impl CoordinatorActor {
 
 #[cfg(test)]
 mod telemetry_tests {
-    use super::record_task_parked_metric;
-
+    /// Verify that the labeled parked-task metric renders with the expected
+    /// strike-class breakdown labels.
     #[test]
-    fn planner_second_strike_park_metric_records_after_terminal_close() {
+    fn labeled_park_metric_renders_strike_class_labels() {
         djinn_telemetry::init().unwrap();
-        let before = djinn_telemetry::render().unwrap();
-        let parked_before = unlabelled_metric_value(&before, "djinn_tasks_parked_total");
 
-        record_task_parked_metric();
+        djinn_telemetry::task::increment_parked_labeled(3, 1, 2, 7);
 
         let rendered = djinn_telemetry::render().unwrap();
-        assert_eq!(
-            unlabelled_metric_value(&rendered, "djinn_tasks_parked_total"),
-            parked_before + 1.0
-        );
+        let line = rendered
+            .lines()
+            .find(|l| {
+                l.starts_with("djinn_tasks_parked_total")
+                    && l.contains("quality_strikes=\"3\"")
+                    && l.contains("merge_conflict_reopens=\"1\"")
+                    && l.contains("superseded_reopens=\"2\"")
+                    && l.contains("raw_reopen_count=\"7\"")
+            })
+            .expect("labeled park metric line not found");
+        let value: f64 = line
+            .rsplit_once(' ')
+            .and_then(|(_, v)| v.parse().ok())
+            .expect("metric value parses");
+        assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
     }
 
-    fn unlabelled_metric_value(rendered: &str, metric: &str) -> f64 {
-        rendered
+    /// Compatibility wrapper emits the counter with zero-valued labels.
+    #[test]
+    fn unlabeled_park_metric_emits_zero_labels() {
+        djinn_telemetry::init().unwrap();
+
+        djinn_telemetry::task::increment_parked();
+
+        let rendered = djinn_telemetry::render().unwrap();
+        let line = rendered
             .lines()
-            .find_map(|line| {
-                let (name, value) = line.split_once(' ')?;
-                (name == metric).then(|| value.parse::<f64>().expect("metric value parses"))
+            .find(|l| {
+                l.starts_with("djinn_tasks_parked_total")
+                    && l.contains("quality_strikes=\"0\"")
+                    && l.contains("merge_conflict_reopens=\"0\"")
+                    && l.contains("superseded_reopens=\"0\"")
+                    && l.contains("raw_reopen_count=\"0\"")
             })
-            .unwrap_or_else(|| panic!("missing metric {metric} in:\n{rendered}"))
+            .expect("zero-labeled park metric line not found");
+        let value: f64 = line
+            .rsplit_once(' ')
+            .and_then(|(_, v)| v.parse().ok())
+            .expect("metric value parses");
+        assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
     }
 }

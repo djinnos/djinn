@@ -1,4 +1,7 @@
 use super::*;
+use crate::prompts::{
+    COMPACTION_SUMMARY_END_MARKER, FULL_COMPACTION_CONTINUATION, PARTIAL_COMPACTION_CONTINUATION,
+};
 use djinn_provider::message::ContentBlock;
 
 #[test]
@@ -897,4 +900,247 @@ fn deterministic_compact_over_budget_pruning_removes_oldest_pairs() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Anchor preservation tests for overflow retry (drop_oldest_message_groups)
+// and deterministic fallback (deterministic_compact).
+// ---------------------------------------------------------------------------
+
+/// Helper: build a message sequence with a compaction summary anchor pair at a
+/// given position after the system message, followed by regular conversation.
+fn messages_with_anchor(anchor_after: usize, continuation: &str) -> Vec<Message> {
+    let mut msgs = vec![Message::system("You are a coding agent.")];
+    // Insert regular messages before the anchor position.
+    for i in 0..anchor_after {
+        msgs.push(Message::user(format!("pre-anchor user {i}")));
+        msgs.push(Message::assistant(format!("pre-anchor resp {i}")));
+    }
+    // Anchor pair.
+    msgs.push(Message::user(format!(
+        "Summary of earlier work{COMPACTION_SUMMARY_END_MARKER}"
+    )));
+    msgs.push(Message::assistant(continuation));
+    // Regular messages after anchor.
+    for i in 0..5 {
+        msgs.push(Message::user(format!("post-anchor task {i}")));
+        msgs.push(Message::assistant(format!("post-anchor response {i}")));
+    }
+    msgs
+}
+
+/// `drop_oldest_message_groups` must never remove a full-compaction summary
+/// anchor pair when it sits at the head (right after system).
+#[test]
+fn drop_oldest_message_groups_preserves_full_summary_anchor_at_head() {
+    let mut messages = messages_with_anchor(0, FULL_COMPACTION_CONTINUATION);
+    let original_len = messages.len();
+
+    drop_oldest_message_groups(&mut messages, 0.5);
+
+    // System preserved.
+    assert_eq!(messages[0].role, Role::System);
+    // Anchor pair preserved.
+    let anchor = crate::prompts::extract_prior_summary(&messages);
+    assert!(
+        anchor.is_some(),
+        "full-compaction anchor must survive drop_oldest_message_groups"
+    );
+    let (_, si, ci) = anchor.unwrap();
+    assert_eq!(messages[si].role, Role::User);
+    assert_eq!(messages[ci].text_content(), FULL_COMPACTION_CONTINUATION);
+    // Messages were actually dropped.
+    assert!(messages.len() < original_len);
+}
+
+/// Same test but for a partial-compaction anchor.
+#[test]
+fn drop_oldest_message_groups_preserves_partial_summary_anchor_at_head() {
+    let mut messages = messages_with_anchor(0, PARTIAL_COMPACTION_CONTINUATION);
+
+    drop_oldest_message_groups(&mut messages, 0.5);
+
+    let anchor = crate::prompts::extract_prior_summary(&messages);
+    assert!(
+        anchor.is_some(),
+        "partial-compaction anchor must survive drop_oldest_message_groups"
+    );
+    let (_, _, ci) = anchor.unwrap();
+    assert_eq!(messages[ci].text_content(), PARTIAL_COMPACTION_CONTINUATION);
+}
+
+/// Repeated `drop_oldest_message_groups` calls (as happen in the overflow-retry
+/// loop) must never remove the anchor, even after several rounds.
+#[test]
+fn drop_oldest_message_groups_keeps_anchor_across_repeated_drops() {
+    let mut messages = messages_with_anchor(0, FULL_COMPACTION_CONTINUATION);
+
+    for round in 1..=COMPACTION_OVERFLOW_MAX_RETRIES + 1 {
+        drop_oldest_message_groups(&mut messages, COMPACTION_OVERFLOW_DROP_FRACTION);
+        let anchor = crate::prompts::extract_prior_summary(&messages);
+        assert!(
+            anchor.is_some(),
+            "anchor must survive round {round} of repeated drops"
+        );
+        // System must always be first.
+        assert_eq!(messages[0].role, Role::System);
+    }
+}
+
+/// When the anchor is not at the head but preceded by some older groups, those
+/// groups should be dropped first and the anchor should survive.
+#[test]
+fn drop_oldest_message_groups_preserves_mid_position_anchor() {
+    // Anchor after 3 regular groups (6 messages).
+    let mut messages = messages_with_anchor(3, FULL_COMPACTION_CONTINUATION);
+    let original_len = messages.len();
+
+    drop_oldest_message_groups(&mut messages, 0.5);
+
+    let anchor = crate::prompts::extract_prior_summary(&messages);
+    assert!(
+        anchor.is_some(),
+        "mid-position anchor must survive dropping"
+    );
+    assert!(messages.len() < original_len);
+}
+
+/// When there are no non-anchor messages to drop, the function should be a
+/// no-op (not remove the anchor to satisfy the drop budget).
+#[test]
+fn drop_oldest_message_groups_no_drop_when_only_anchor_and_system() {
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user(format!("summary{COMPACTION_SUMMARY_END_MARKER}")),
+        Message::assistant(FULL_COMPACTION_CONTINUATION),
+    ];
+    let before = messages.len();
+    drop_oldest_message_groups(&mut messages, 0.5);
+    assert_eq!(messages.len(), before, "nothing should be dropped");
+}
+
+// ---------------------------------------------------------------------------
+// deterministic_compact anchor preservation tests.
+// ---------------------------------------------------------------------------
+
+/// `deterministic_compact` must retain the prior-summary anchor text and
+/// continuation under a budget that requires trimming, instead of replacing
+/// long-horizon context with only a generic compaction notice.
+#[test]
+fn deterministic_compact_keeps_prior_summary_anchor() {
+    let mut messages = messages_with_anchor(0, FULL_COMPACTION_CONTINUATION);
+    // Add a few more messages so there's content to trim.
+    for i in 0..4 {
+        messages.push(Message::user(format!("extra task {i}")));
+        messages.push(Message::assistant(format!("extra resp {i}")));
+    }
+
+    // Budget: system + 200 overhead + anchor + a few recent messages but NOT all.
+    let sys_chars = estimate_message_chars(&messages[0]);
+    // The anchor pair is at indices 1, 2 in the full messages (rest indices 0, 1).
+    let anchor_chars = estimate_message_chars(&messages[1]) + estimate_message_chars(&messages[2]);
+    let recent_chars: usize = messages[messages.len() - 2..]
+        .iter()
+        .map(estimate_message_chars)
+        .sum();
+    let budget = sys_chars + 200 + anchor_chars + recent_chars + 20;
+
+    let result = deterministic_compact(&messages, budget);
+
+    // System is first.
+    assert_eq!(result[0].role, Role::System);
+
+    // The anchor must be present in the result.
+    let anchor = crate::prompts::extract_prior_summary(&result);
+    assert!(
+        anchor.is_some(),
+        "deterministic_compact must preserve the summary anchor"
+    );
+    let (text, _si, ci) = anchor.unwrap();
+    assert!(
+        text.contains("Summary of earlier work"),
+        "anchor text must be preserved: {text}"
+    );
+    assert_eq!(result[ci].text_content(), FULL_COMPACTION_CONTINUATION);
+
+    // No generic compaction notice (the anchor provides the context).
+    let has_generic_notice = result
+        .iter()
+        .any(|m| m.text_content().contains("Context compacted"));
+    assert!(
+        !has_generic_notice,
+        "generic notice must be absent when anchor provides context"
+    );
+}
+
+/// Under a very tight budget, `deterministic_compact` must still prefer the
+/// anchor over the generic notice.
+#[test]
+fn deterministic_compact_anchor_under_tight_budget() {
+    let messages = messages_with_anchor(0, FULL_COMPACTION_CONTINUATION);
+
+    // Budget just enough for system + anchor + notice overhead, nothing else.
+    let sys_chars = estimate_message_chars(&messages[0]);
+    let anchor_chars = estimate_message_chars(&messages[1]) + estimate_message_chars(&messages[2]);
+    let budget = sys_chars + 200 + anchor_chars + 10; // tight
+
+    let result = deterministic_compact(&messages, budget);
+
+    assert_eq!(result[0].role, Role::System);
+    let anchor = crate::prompts::extract_prior_summary(&result);
+    assert!(
+        anchor.is_some(),
+        "anchor must survive even under a very tight budget"
+    );
+}
+
+/// When a conversation has a partial-compaction anchor, deterministic compaction
+/// should also preserve it.
+#[test]
+fn deterministic_compact_preserves_partial_compaction_anchor() {
+    let messages = messages_with_anchor(0, PARTIAL_COMPACTION_CONTINUATION);
+
+    let sys_chars = estimate_message_chars(&messages[0]);
+    let anchor_chars = estimate_message_chars(&messages[1]) + estimate_message_chars(&messages[2]);
+    let budget = sys_chars + 200 + anchor_chars + 10;
+
+    let result = deterministic_compact(&messages, budget);
+
+    let anchor = crate::prompts::extract_prior_summary(&result);
+    assert!(
+        anchor.is_some(),
+        "partial-compaction anchor must be preserved by deterministic_compact"
+    );
+    let (_, _, ci) = anchor.unwrap();
+    assert_eq!(result[ci].text_content(), PARTIAL_COMPACTION_CONTINUATION);
+}
+
+/// System-message preservation and tool-use/orphan-freedom invariants must
+/// still hold when an anchor is present.
+#[test]
+fn deterministic_compact_anchor_preserves_system_and_no_orphans() {
+    let mut messages = messages_with_anchor(0, FULL_COMPACTION_CONTINUATION);
+    // Insert tool-use/tool-result pair after anchor.
+    messages.push(tool_use_msg("det_c1", "bash"));
+    messages.push(tool_result_msg("det_c1", "output"));
+    messages.push(Message::assistant("done"));
+
+    let sys_chars = estimate_message_chars(&messages[0]);
+    let anchor_chars = estimate_message_chars(&messages[1]) + estimate_message_chars(&messages[2]);
+    // Budget for system + anchor + the last tool pair + "done" but not earlier messages.
+    let last_three: usize = messages[messages.len() - 3..]
+        .iter()
+        .map(estimate_message_chars)
+        .sum();
+    let budget = sys_chars + 200 + anchor_chars + last_three + 20;
+
+    let result = deterministic_compact(&messages, budget);
+
+    // System preserved.
+    assert_eq!(result[0].role, Role::System);
+    // No orphaned tool results.
+    assert!(
+        find_orphaned_tool_result(&result).is_none(),
+        "no orphaned tool results when anchor is preserved"
+    );
 }
