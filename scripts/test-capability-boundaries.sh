@@ -19,6 +19,9 @@ ALLOWLIST="$SCRIPT_DIR/capability-boundary-allowlist.toml"
 FIXTURE_BASE="server/crates/djinn_capability_guard_fixture"
 
 cleanup() {
+    if [ -n "${ALLOWLIST_ORIG:-}" ] && [ -f "$ALLOWLIST_ORIG" ]; then
+        cp -- "$ALLOWLIST_ORIG" "$ALLOWLIST"
+    fi
     rm -rf -- "$REPO_ROOT/$FIXTURE_BASE" 2>/dev/null || true
     if [ -n "${LOG_DIR:-}" ] && [ -d "$LOG_DIR" ]; then
         rm -rf -- "$LOG_DIR"
@@ -239,6 +242,9 @@ pub fn allowed_repo(path: &str) -> git2::Repository {
 FIXTURE
 
 ALLOWED_PATH="$FIXTURE_BASE/src/allowed.rs"
+
+ALLOWLIST_ORIG="$LOG_DIR/allowlist.orig"
+cp -- "$ALLOWLIST" "$ALLOWLIST_ORIG"
 cat >> "$ALLOWLIST" <<EOF
 
 [[entries]]

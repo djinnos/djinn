@@ -172,7 +172,11 @@ allowlist_error() {
 
 allowlist_awk() {
     awk '
-        /^[[:space:]]*\[\[entries\]\][[:space:]]*$/ { entry++; reset() }
+        /^[[:space:]]*\[\[entries\]\][[:space:]]*$/ {
+            if (entry > 0) validate_entry()
+            entry++
+            reset()
+        }
         function reset() {
             capability=""; path=""; matcher=""; owner=""; rationale=""
             expires=""; cleanup_issue=""
