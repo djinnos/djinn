@@ -10,15 +10,18 @@
 // per primary target (the existing single-repo-write execution engine).
 //
 // Submodule layout:
-// - `create.rs` / `create_tests.rs`: CRUD/import/export/list/target tools
+// - `create.rs` / `create_tests.rs`: CRUD/import/export/show/list/target tools
 // - `feedback.rs`: feedback add/resolve tools
-// - `signoff.rs` / `signoff_tests.rs`: signoff/clear tools and readiness/
-//   composed-gate helpers (including debate-trail gate logic)
-// - `lifecycle.rs`: graduate, stop-build, reconcile, build-teardown helpers
+// - `signoff.rs` / `signoff_tests.rs` / `tribunal_tests.rs`: signoff/clear tools,
+//   readiness/composed-gate helpers (including debate-trail gate logic), and
+//   tribunal regression tests
+// - `lifecycle.rs` / `graduation_readiness_tests.rs`: graduate, stop-build,
+//   reconcile, build-teardown helpers and graduation readiness tests
 // - `mdx.rs`: MDX/block-patch parsing helpers (including native-skill
 //   provenance fields on block-patch params)
-// - mod.rs: shared response/error constructors, permission gates, and
-//   router composition
+// - mod.rs / `end_to_end_planner_tests.rs`: shared response/error constructors,
+//   permission gates, router composition, and cross-cutting end-to-end planner
+//   regressions
 //
 // Refinement-loop / debate-trail ownership decision (subtask 5z0q):
 //
@@ -155,6 +158,8 @@ pub(super) fn err_single(error: impl Into<String>) -> ProposalSingleResponse {
 
 // End-to-end planner refinement loop tests — extracted to
 // `end_to_end_planner_tests.rs` to meet the 1500-line file-size guard.
+// These are the only remaining cross-cutting regressions in `proposal_tools/`;
+// they span create, update, signoff, and lifecycle tools.
 #[cfg(test)]
 include!("end_to_end_planner_tests.rs");
 

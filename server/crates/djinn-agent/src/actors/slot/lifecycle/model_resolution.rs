@@ -548,10 +548,7 @@ mod rotation_tests {
             map_resume_selection_reason_to_rotation_cause(Some(R::NewerTaskBranch)),
             Some(RotationTerminationCause::RepeatedVerifyLoop)
         );
-        assert_eq!(
-            map_resume_selection_reason_to_rotation_cause(None),
-            None
-        );
+        assert_eq!(map_resume_selection_reason_to_rotation_cause(None), None);
         assert_eq!(
             map_resume_selection_reason_to_rotation_cause(Some(R::CleanTaskBranchFallback)),
             None

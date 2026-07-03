@@ -8,7 +8,7 @@ use crate::context::AgentContext;
 use crate::roles::AgentRole;
 use crate::task_merge::interrupt_paused_worker_session;
 
-use super::retry::retry_task_transition_on_locked;
+use djinn_slot::lifecycle::retry::retry_task_transition_on_locked;
 
 pub(crate) struct PostSessionParams {
     pub(crate) task_id: String,
