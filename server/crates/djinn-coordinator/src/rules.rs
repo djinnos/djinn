@@ -187,9 +187,9 @@ impl CoordinatorActor {
     ///
     /// This is intentionally narrow: it only observes the live task event path,
     /// delegates classification/idempotency to the repository primitive, and
-    /// does not clear the evidence link or resume tribunal work.
+    /// resumes the in-process tribunal only after a valid receipt is recorded.
     pub(super) async fn persist_terminal_linked_spike_evidence_from_closed_task(
-        &self,
+        &mut self,
         task: &djinn_core::models::Task,
     ) {
         if task.status != "closed" {
@@ -237,12 +237,16 @@ impl CoordinatorActor {
             )
             .await
         {
-            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => tracing::info!(
-                proposal_id = %proposal.id,
-                spike_task_id = %task.id,
-                outcome = "EvidenceReceived",
-                "CoordinatorActor: recorded linked evidence spike receipt"
-            ),
+            Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceReceived) => {
+                tracing::info!(
+                    proposal_id = %proposal.id,
+                    spike_task_id = %task.id,
+                    outcome = "EvidenceReceived",
+                    "CoordinatorActor: recorded linked evidence spike receipt"
+                );
+                self.resume_refinement_after_evidence_received(&proposal.id, &task.id)
+                    .await;
+            }
             Ok(TerminalLinkedEvidenceSpikeOutcome::EvidenceFailed { reason }) => tracing::info!(
                 proposal_id = %proposal.id,
                 spike_task_id = %task.id,
@@ -2462,12 +2466,15 @@ mod tests {
             .await,
             0
         );
-        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(
-            still_linked.linked_spike_task_id.as_deref(),
-            Some(spike_task.id.as_str())
+        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            after_receipt.linked_spike_task_id.is_none(),
+            "linked spike must be cleared after valid evidence receipt"
         );
-        assert!(still_linked.needs_evidence_claim.is_some());
+        assert!(
+            after_receipt.needs_evidence_claim.is_none(),
+            "needs-evidence claim must be cleared after valid evidence receipt"
+        );
         assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 
@@ -2515,12 +2522,15 @@ mod tests {
             1,
             "closed task_created events should follow the same linked-spike evidence path"
         );
-        let still_linked = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
-        assert_eq!(
-            still_linked.linked_spike_task_id.as_deref(),
-            Some(spike_task.id.as_str())
+        let after_receipt = proposal_repo.get(&proposal.id).await.unwrap().unwrap();
+        assert!(
+            after_receipt.linked_spike_task_id.is_none(),
+            "linked spike must be cleared after valid evidence receipt via task_created event"
         );
-        assert!(still_linked.needs_evidence_claim.is_some());
+        assert!(
+            after_receipt.needs_evidence_claim.is_none(),
+            "needs-evidence claim must be cleared after valid evidence receipt via task_created event"
+        );
         assert_eq!(tribunal_task_count(&task_repo, &closed.project_id).await, 0);
     }
 
