@@ -27,7 +27,9 @@ const PIPELINE = [
     n: "03",
     name: "Build",
     status: { label: "agents running", tone: "warn" },
-    body: "Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated Kubernetes Job, in a per-project devcontainer, using the models you configured: per user, per project, per role.",
+    body: (
+      <>Graduation turns the spec into epics and tasks. Agents work in parallel, each in its own isolated <code className="tick">Kubernetes Job</code>, in a per-project <code className="tick">devcontainer</code>, using the models you configured: per user, per project, per role.</>
+    ),
     log: [
       ["$", "kubectl get jobs -n djinn"],
       [" ", "djinn-taskrun-9f2c   Running    api: add usage rollup"],
@@ -50,7 +52,9 @@ const CRITERIA = [
   },
   {
     title: "Your cloud",
-    body: "Self-hosted on any Kubernetes; a single VPS running k3s is enough. One Helm chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.",
+    body: (
+      <>Self-hosted on any Kubernetes; a single VPS running <code className="tick">k3s</code> is enough. One <code className="tick">Helm</code> chart bundles Postgres, Qdrant, and the registry on one box, or plugs into EKS / GKE / AKS.</>
+    ),
   },
   {
     title: "Your models",
@@ -58,7 +62,9 @@ const CRITERIA = [
   },
   {
     title: "Parallel by default",
-    body: "Every task runs as an isolated Kubernetes Job in its own git workspace. The coordinator dispatches by priority and dependency order, capped per user and per model.",
+    body: (
+      <>Every task runs as an isolated <code className="tick">Kubernetes Job</code> in its own <code className="tick">git</code> workspace. The coordinator dispatches by priority and dependency order, capped per user and per model.</>
+    ),
   },
   {
     title: "Multi-project, multi-user",
@@ -119,21 +125,18 @@ export default function Home() {
           <div className="absolute inset-0 blueprint -z-10" />
 
           <div className="max-w-4xl mx-auto">
-            {/* Proposal file header */}
-            <div className="rise rise-1 font-mono text-xs text-text-muted flex flex-wrap items-center gap-x-3 gap-y-2 mb-10">
-              <span className="text-text-secondary">proposal</span>
-              <span className="text-brand-purple">#0001</span>
-              <span aria-hidden>·</span>
-              <span>targets: all_of_your_repos</span>
-              <span aria-hidden>·</span>
-              <span>
-                status: <span className="text-status-pass">signed_off</span>
-              </span>
+            {/* Proposal frontmatter */}
+            <div className="rise rise-1 font-mono text-xs text-text-muted leading-loose mb-10">
+              <div aria-hidden>---</div>
+              <div>proposal: <span className="text-brand-purple">#0001</span></div>
+              <div>targets: <span className="text-text-secondary">all_of_your_repos</span></div>
+              <div>status: <span className="text-status-pass">signed_off</span></div>
+              <div aria-hidden>---</div>
             </div>
 
-            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-semibold tracking-tight leading-[1.04] mb-8">
+            <h1 className="rise rise-2 font-display text-5xl md:text-7xl lg:text-[5.25rem] font-light tracking-tight leading-[1.04] mb-8">
               From proposal<br />
-              to <em className="stroke-under not-italic md:italic">pull request.</em>
+              to <em className="stroke-under italic">pull request.</em>
             </h1>
 
             <p className="rise rise-3 text-lg md:text-xl text-text-secondary max-w-2xl leading-relaxed mb-10">
@@ -141,17 +144,21 @@ export default function Home() {
               on your cluster, with your models, behind your review.
             </p>
 
-            {/* Sign-off row */}
-            <div className="rise rise-4 flex flex-wrap gap-2.5 mb-12">
-              <span className="chip text-status-pass">
-                <Check className="w-3 h-3" /> signed off — product
-              </span>
-              <span className="chip text-status-pass">
-                <Check className="w-3 h-3" /> signed off — engineering
-              </span>
-              <span className="chip text-status-warn">
-                <span className="dot dot-pulse bg-status-warn" /> building — djinn
-              </span>
+            {/* Sign-off task list */}
+            <div className="rise rise-4 font-mono text-xs space-y-2.5 mb-12">
+              <div>
+                <span className="text-status-pass">- [x]</span>{" "}
+                <span className="text-text-secondary">signed off · product</span>
+              </div>
+              <div>
+                <span className="text-status-pass">- [x]</span>{" "}
+                <span className="text-text-secondary">signed off · engineering</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-status-warn">- [ ]</span>
+                <span className="text-text-secondary">building · djinn</span>
+                <span className="dot dot-pulse bg-status-warn" />
+              </div>
             </div>
 
             <div className="rise rise-5 flex justify-start">
@@ -183,7 +190,7 @@ export default function Home() {
         <section id="pipeline" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="font-mono text-xs text-text-muted mb-3">## pipeline</div>
-            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-16">
+            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-16">
               Every change takes the same road.
             </h2>
 
@@ -199,7 +206,8 @@ export default function Home() {
                     </div>
 
                     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2 mb-3">
-                      <h3 className="font-display text-2xl md:text-3xl font-semibold">
+                      <h3 className="font-display text-2xl md:text-3xl font-medium">
+                        <span className="font-mono text-base md:text-lg text-text-muted font-normal mr-3 select-none" aria-hidden>###</span>
                         {stage.name}
                       </h3>
                       <StatusChip label={stage.status.label} tone={stage.status.tone} />
@@ -243,7 +251,7 @@ export default function Home() {
               />
             </div>
             <div className="md:col-span-2">
-              <h3 className="font-display text-2xl md:text-3xl font-semibold mb-4">
+              <h3 className="font-display text-2xl md:text-3xl font-medium mb-4">
                 Approved specs become coordinated work
               </h3>
               <p className="text-text-secondary leading-relaxed">
@@ -261,7 +269,7 @@ export default function Home() {
         <section id="criteria" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="font-mono text-xs text-text-muted mb-3">## acceptance_criteria</div>
-            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-4">
+            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-4">
               What it takes to hand AI the keyboard.
             </h2>
             <p className="text-text-secondary text-lg mb-14 max-w-2xl">
@@ -271,8 +279,8 @@ export default function Home() {
             <div className="grid sm:grid-cols-2 gap-x-12 gap-y-10">
               {CRITERIA.map((c, i) => (
                 <div key={i} className="flex gap-4">
-                  <span className="font-mono text-status-pass text-sm pt-1 select-none" aria-hidden>
-                    [x]
+                  <span className="font-mono text-status-pass text-sm pt-1 select-none whitespace-nowrap" aria-hidden>
+                    - [x]
                   </span>
                   <div>
                     <h3 className="font-semibold text-lg mb-1.5">{c.title}</h3>
@@ -288,7 +296,7 @@ export default function Home() {
         <section className="px-6 py-20 border-y border-border-faint bg-bg-surface/50">
           <div className="max-w-6xl mx-auto grid md:grid-cols-5 gap-12 items-center">
             <div className="md:col-span-2 order-2 md:order-1">
-              <h3 className="font-display text-2xl md:text-3xl font-semibold mb-4">
+              <h3 className="font-display text-2xl md:text-3xl font-medium mb-4">
                 Agents that know your codebase
               </h3>
               <p className="text-text-secondary leading-relaxed">
@@ -313,18 +321,15 @@ export default function Home() {
         <section id="next" className="px-6 py-28">
           <div className="max-w-4xl mx-auto">
             <div className="rounded-xl border border-dashed border-border p-8 md:p-12">
-              <div className="font-mono text-xs text-text-muted flex flex-wrap items-center gap-x-3 gap-y-2 mb-8">
-                <span className="text-text-secondary">proposal</span>
-                <span className="text-brand-purple">#0002</span>
-                <span aria-hidden>·</span>
-                <span>
-                  status: <span className="text-status-warn">draft</span>
-                </span>
-                <span aria-hidden>·</span>
-                <span>feedback welcome</span>
+              <div className="font-mono text-xs text-text-muted leading-loose mb-8">
+                <div aria-hidden>---</div>
+                <div>proposal: <span className="text-brand-purple">#0002</span></div>
+                <div>status: <span className="text-status-warn">draft</span></div>
+                <div>feedback: <span className="text-text-secondary">welcome</span></div>
+                <div aria-hidden>---</div>
               </div>
 
-              <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-5">
+              <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-5">
                 See where the tokens go.
               </h2>
               <p className="text-text-secondary text-lg leading-relaxed max-w-2xl mb-10">
@@ -357,7 +362,7 @@ export default function Home() {
               <GitMerge className="w-3.5 h-3.5" />
               merged
             </div>
-            <h2 className="font-display text-3xl md:text-5xl font-semibold tracking-tight mb-4">
+            <h2 className="font-display text-3xl md:text-5xl font-normal tracking-tight mb-4">
               Your backlog, merged.
             </h2>
             <p className="text-text-secondary text-lg mb-10 max-w-xl mx-auto">
