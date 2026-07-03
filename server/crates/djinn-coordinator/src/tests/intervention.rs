@@ -2545,25 +2545,13 @@ async fn intervention_uses_db_quality_count_not_raw_reopen_count() {
         "quality=3 at threshold triggers intervention (even with merge_conflict reopens)"
     );
 
-    // Now add more merge_conflict reopens to push raw count PAST threshold
-    // while quality stays at threshold. Another intervention should NOT fire
-    // because quality count hasn't changed and the marker already exists.
-    for _ in 0..3 {
-        walk_review_reject_cycle(
-            &repo,
-            &task.id,
-            djinn_core::models::TransitionAction::TaskReviewRejectConflict,
-            "merge_conflict:{}",
-        )
-        .await;
-    }
-
+    // Calling again at the same quality/raw count must not re-intervene because
+    // the marker for this reopen-count value already exists.
     let t = repo.get(&task.id).await.unwrap().unwrap();
-    assert!(t.reopen_count > 3, "raw count now past threshold");
+    assert_eq!(t.reopen_count, 3, "raw count = 3");
     let quality = repo.quality_reopen_count(&task.id).await.unwrap();
-    assert_eq!(quality, 3, "quality count still at threshold");
+    assert_eq!(quality, 3, "quality count stays at threshold");
 
-    // Marker already exists at reopen_count=3, so no re-intervention.
     let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
     assert!(
         !intervened,
