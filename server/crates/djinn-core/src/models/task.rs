@@ -3,6 +3,86 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+// ── ReopenClass ──────────────────────────────────────────────────────────────
+
+/// Typed classification of a reopen-like transition.
+///
+/// Persisted in status-transition activity payloads as `"reopen_class"` so the
+/// repository layer can compute quality-strike counts without re-deriving
+/// semantics from the action/status pair.  Historical activity rows that lack
+/// the field are read as [`ReopenClass::Other`] (conservative default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReopenClass {
+    /// Reviewer rejected the implementation (TaskReviewReject,
+    /// TaskReviewRejectStale, PrChangesRequested).
+    ReviewRejected,
+    /// Merge queue or CI failed (PrCiFailed).
+    MergeQueueFailed,
+    /// Merge conflict detected (TaskReviewRejectConflict, PrConflict,
+    /// LeadApproveConflict).  These do NOT increment raw `reopen_count` and
+    /// are excluded from quality-strike counts.
+    MergeConflict,
+    /// Task was superseded by newer work.
+    Superseded,
+    /// Catch-all for reopen events whose specific class is unknown or
+    /// missing from the activity payload (historical default).
+    Other,
+}
+
+impl ReopenClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReviewRejected => "review_rejected",
+            Self::MergeQueueFailed => "merge_queue_failed",
+            Self::MergeConflict => "merge_conflict",
+            Self::Superseded => "superseded",
+            Self::Other => "other",
+        }
+    }
+
+    /// Parse from a wire string.  Unknown values resolve to
+    /// [`ReopenClass::Other`] (conservative).
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "review_rejected" => Self::ReviewRejected,
+            "merge_queue_failed" => Self::MergeQueueFailed,
+            "merge_conflict" => Self::MergeConflict,
+            "superseded" => Self::Superseded,
+            _ => Self::Other,
+        }
+    }
+
+    /// Returns `true` when this class counts as a quality strike
+    /// (i.e. should be included in `quality_reopen_count`).
+    pub fn is_quality_strike(&self) -> bool {
+        matches!(
+            self,
+            Self::ReviewRejected | Self::MergeQueueFailed | Self::Other
+        )
+    }
+}
+
+impl std::fmt::Display for ReopenClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A single entry in the typed reopen ledger returned by
+/// [`TaskRepository::recent_reopen_ledger`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReopenLedgerEntry {
+    /// The classified reopen cause.
+    pub reopen_class: ReopenClass,
+    /// ISO-8601 timestamp when this reopen was recorded.
+    pub created_at: String,
+    /// Status the task transitioned from.
+    pub from_status: String,
+    /// Free-form reason attached to the transition, if any.
+    pub reason: Option<String>,
+}
+
 // ── CiStatus ──────────────────────────────────────────────────────────────────
 
 /// Required-CI status for the current PR head.
@@ -566,6 +646,9 @@ pub struct TransitionApply {
     pub record_intervention: bool,
     /// Value for `event_type` in the activity log entry.
     pub activity_type: &'static str,
+    /// Typed classification of the reopen cause, persisted in the activity
+    /// payload as `"reopen_class"`.  `None` for non-reopen-like transitions.
+    pub reopen_class: Option<ReopenClass>,
 }
 
 impl Default for TransitionApply {
@@ -583,6 +666,7 @@ impl Default for TransitionApply {
             clear_merge_conflict_metadata: false,
             record_intervention: false,
             activity_type: "status_changed",
+            reopen_class: None,
         }
     }
 }
@@ -652,6 +736,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 increment_reopen: true,
+                reopen_class: Some(ReopenClass::ReviewRejected),
                 // continuation_count handled by circuit breaker (reset if progress, increment if stale)
                 ..Default::default()
             }
@@ -665,6 +750,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Open),
                 increment_reopen: true,
                 increment_continuation: true,
+                reopen_class: Some(ReopenClass::ReviewRejected),
                 ..Default::default()
             }
         }
@@ -677,6 +763,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
                 set_merge_conflict_metadata: true,
+                reopen_class: Some(ReopenClass::MergeConflict),
                 ..Default::default()
             }
         }
@@ -711,6 +798,7 @@ pub fn compute_transition(
                 reset_continuation: true,
                 clear_closed_at: true,
                 clear_close_reason: true,
+                reopen_class: Some(ReopenClass::Other),
                 ..Default::default()
             }
         }
@@ -818,6 +906,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
                 set_merge_conflict_metadata: true,
+                reopen_class: Some(ReopenClass::MergeConflict),
                 ..Default::default()
             }
         }
@@ -847,6 +936,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 increment_reopen: true,
+                reopen_class: Some(ReopenClass::MergeQueueFailed),
                 ..Default::default()
             }
         }
@@ -862,6 +952,7 @@ pub fn compute_transition(
                 to_status: Some(TaskStatus::Open),
                 reset_continuation: true,
                 set_merge_conflict_metadata: true,
+                reopen_class: Some(ReopenClass::MergeConflict),
                 ..Default::default()
             }
         }
@@ -891,6 +982,7 @@ pub fn compute_transition(
             TransitionApply {
                 to_status: Some(TaskStatus::Open),
                 increment_reopen: true,
+                reopen_class: Some(ReopenClass::ReviewRejected),
                 ..Default::default()
             }
         }
@@ -1552,5 +1644,142 @@ mod tests {
     fn is_evidence_spike_normal_task_labels_is_false() {
         assert!(!is_evidence_spike(r#"["bug","priority:high"]"#));
         assert!(!is_evidence_spike(r#"["human-review-hold"]"#));
+    }
+
+    // ── ReopenClass unit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn reopen_class_parse_round_trip() {
+        for class in [
+            ReopenClass::ReviewRejected,
+            ReopenClass::MergeQueueFailed,
+            ReopenClass::MergeConflict,
+            ReopenClass::Superseded,
+            ReopenClass::Other,
+        ] {
+            let s = class.as_str();
+            assert_eq!(ReopenClass::parse(s), class, "round-trip for {s}");
+        }
+    }
+
+    #[test]
+    fn reopen_class_unknown_parses_to_other() {
+        assert_eq!(ReopenClass::parse("bogus"), ReopenClass::Other);
+        assert_eq!(ReopenClass::parse(""), ReopenClass::Other);
+    }
+
+    #[test]
+    fn reopen_class_quality_strike_membership() {
+        assert!(ReopenClass::ReviewRejected.is_quality_strike());
+        assert!(ReopenClass::MergeQueueFailed.is_quality_strike());
+        assert!(ReopenClass::Other.is_quality_strike());
+        assert!(!ReopenClass::MergeConflict.is_quality_strike());
+        assert!(!ReopenClass::Superseded.is_quality_strike());
+    }
+
+    #[test]
+    fn reopen_class_serde_round_trip() {
+        for class in [
+            ReopenClass::ReviewRejected,
+            ReopenClass::MergeQueueFailed,
+            ReopenClass::MergeConflict,
+            ReopenClass::Superseded,
+            ReopenClass::Other,
+        ] {
+            let json = serde_json::to_string(&class).unwrap();
+            let parsed: ReopenClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, class);
+        }
+    }
+
+    #[test]
+    fn reopen_class_on_review_reject_transitions() {
+        let reject = compute_transition(
+            &TransitionAction::TaskReviewReject,
+            &TaskStatus::InTaskReview,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reject.reopen_class, Some(ReopenClass::ReviewRejected));
+
+        let stale = compute_transition(
+            &TransitionAction::TaskReviewRejectStale,
+            &TaskStatus::InTaskReview,
+            None,
+        )
+        .unwrap();
+        assert_eq!(stale.reopen_class, Some(ReopenClass::ReviewRejected));
+
+        let changes = compute_transition(
+            &TransitionAction::PrChangesRequested,
+            &TaskStatus::PrReview,
+            None,
+        )
+        .unwrap();
+        assert_eq!(changes.reopen_class, Some(ReopenClass::ReviewRejected));
+    }
+
+    #[test]
+    fn reopen_class_on_conflict_transitions() {
+        let conflict = compute_transition(
+            &TransitionAction::TaskReviewRejectConflict,
+            &TaskStatus::InTaskReview,
+            None,
+        )
+        .unwrap();
+        assert_eq!(conflict.reopen_class, Some(ReopenClass::MergeConflict));
+        assert!(!conflict.increment_reopen);
+
+        let pr_conflict =
+            compute_transition(&TransitionAction::PrConflict, &TaskStatus::Approved, None).unwrap();
+        assert_eq!(pr_conflict.reopen_class, Some(ReopenClass::MergeConflict));
+        assert!(!pr_conflict.increment_reopen);
+
+        let lead_conflict = compute_transition(
+            &TransitionAction::LeadApproveConflict,
+            &TaskStatus::InLeadIntervention,
+            None,
+        )
+        .unwrap();
+        assert_eq!(lead_conflict.reopen_class, Some(ReopenClass::MergeConflict));
+        assert!(!lead_conflict.increment_reopen);
+    }
+
+    #[test]
+    fn reopen_class_on_pr_ci_failed() {
+        let ci_failed =
+            compute_transition(&TransitionAction::PrCiFailed, &TaskStatus::PrDraft, None).unwrap();
+        assert_eq!(ci_failed.reopen_class, Some(ReopenClass::MergeQueueFailed));
+        assert!(ci_failed.increment_reopen);
+    }
+
+    #[test]
+    fn reopen_class_on_generic_reopen() {
+        let reopen =
+            compute_transition(&TransitionAction::Reopen, &TaskStatus::Closed, None).unwrap();
+        assert_eq!(reopen.reopen_class, Some(ReopenClass::Other));
+        assert!(reopen.increment_reopen);
+    }
+
+    #[test]
+    fn reopen_class_omitted_for_non_reopen_transitions() {
+        let start = compute_transition(&TransitionAction::Start, &TaskStatus::Open, None).unwrap();
+        assert!(start.reopen_class.is_none());
+
+        let close =
+            compute_transition(&TransitionAction::Close, &TaskStatus::InProgress, None).unwrap();
+        assert!(close.reopen_class.is_none());
+
+        let release =
+            compute_transition(&TransitionAction::Release, &TaskStatus::InProgress, None).unwrap();
+        assert!(release.reopen_class.is_none());
+
+        let park = compute_transition(
+            &TransitionAction::ParkForRemediation,
+            &TaskStatus::PrDraft,
+            None,
+        )
+        .unwrap();
+        assert!(park.reopen_class.is_none());
     }
 }
