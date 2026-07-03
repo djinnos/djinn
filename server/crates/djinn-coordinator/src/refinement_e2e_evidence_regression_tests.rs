@@ -803,15 +803,16 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
     let proposal_repo = ProposalRepository::new(db.clone(), EventBus::noop());
 
     // Seed an active Advocate task that completes *after* AwaitingEvidence is
-    // already recorded.
+    // already recorded.  Mimic production: `issue_type = "refinement"` with
+    // `agent_type` set separately via `update_agent_type`.
     let advocate_task_id = task_repo
         .create_in_project(
             &fixture.project_id,
             None,
             "Advocate for refinement",
             "Advocate the proposal",
+            "",
             "refinement",
-            "advocate",
             0,
             "worker",
             Some("open"),
@@ -820,6 +821,10 @@ async fn sibling_refinement_completions_after_awaiting_evidence_do_not_enqueue_e
         .await
         .expect("create advocate task")
         .id;
+    task_repo
+        .update_agent_type(&advocate_task_id, Some("advocate"))
+        .await
+        .expect("set advocate agent type");
 
     // Record AwaitingEvidence lifecycle event.
     proposal_repo

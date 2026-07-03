@@ -78,7 +78,7 @@ mod recover_terminal_linked_spike_evidence;
 mod reentrance;
 #[allow(dead_code)]
 pub(crate) mod refinement;
-mod refinement_dispatch;
+pub(crate) mod refinement_dispatch;
 #[cfg(test)]
 mod refinement_e2e_evidence_regression_tests;
 mod refinement_outcome;
