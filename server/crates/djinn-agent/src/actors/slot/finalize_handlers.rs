@@ -1,12 +1,10 @@
-// ─── hfhw cutover: finalize_handlers delegated to djinn-slot ────────────
-//
 // Re-exports canonical finalize types and wraps the two async entry points
 // with `AgentContext → SlotContext` adapter glue.
 
 #[cfg(test)]
-pub(crate) use djinn_slot::finalize_types::AcVerdict;
-#[cfg(test)]
 pub(crate) use djinn_slot::finalize_handlers::apply_ac_verdicts;
+#[cfg(test)]
+pub(crate) use djinn_slot::finalize_types::AcVerdict;
 
 use crate::context::AgentContext;
 
@@ -43,7 +41,31 @@ pub(crate) async fn handle_budget_park(
 mod tests {
     use super::*;
     use crate::test_helpers;
-    use djinn_db::TaskRepository;
+    use djinn_db::{Database, TaskRepository};
+
+    struct FinalizeFixtures {
+        db: Database,
+        ctx: crate::context::AgentContext,
+        task: djinn_core::models::Task,
+    }
+
+    impl FinalizeFixtures {
+        async fn new() -> Self {
+            let db = test_helpers::create_test_db();
+            let ctx = test_helpers::agent_context_from_db(
+                db.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let project = test_helpers::create_test_project(&db).await;
+            let epic = test_helpers::create_test_epic(&db, &project.id).await;
+            let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+            Self { db, ctx, task }
+        }
+
+        fn repo(&self) -> TaskRepository {
+            TaskRepository::new(self.db.clone(), self.ctx.event_bus.clone())
+        }
+    }
 
     // ── apply_ac_verdicts ────────────────────────────────────────────────────
 
@@ -97,25 +119,16 @@ mod tests {
 
     #[tokio::test]
     async fn budget_park_logs_extractor_compatible_work_submitted() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
+        let f = FinalizeFixtures::new().await;
         handle_budget_park(
             "completed A; B remains",
             "budget-triggered wind-down summary captured",
-            &task.id,
-            &ctx,
+            &f.task.id,
+            &f.ctx,
         )
         .await;
 
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let work_entries: Vec<_> = entries
             .iter()
             .filter(|e| e.event_type == "work_submitted")
@@ -132,51 +145,30 @@ mod tests {
 
     #[tokio::test]
     async fn budget_park_empty_summary_skips_activity() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        handle_budget_park("   ", "ignored", &task.id, &ctx).await;
-
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let f = FinalizeFixtures::new().await;
+        handle_budget_park("   ", "ignored", &f.task.id, &f.ctx).await;
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         assert!(entries.iter().all(|e| e.event_type != "work_submitted"));
     }
 
     #[tokio::test]
     async fn submit_work_logs_activity_with_summary_and_files() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({
-            "task_id": task.short_id,
+            "task_id": f.task.short_id,
             "commit_title": "feat: implement the feature",
             "summary": "implemented the feature",
             "files_changed": ["src/main.rs", "src/lib.rs"],
             "remaining_concerns": ["needs perf testing"]
         }));
+        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
 
-        process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
-
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let work_entry = entries.iter().find(|e| e.event_type == "work_submitted");
         assert!(
             work_entry.is_some(),
             "expected work_submitted activity entry"
         );
-
         let body: serde_json::Value = serde_json::from_str(&work_entry.unwrap().payload).unwrap();
         assert_eq!(body["summary"], "implemented the feature");
         assert_eq!(body["files_changed"][0], "src/main.rs");
@@ -185,27 +177,17 @@ mod tests {
 
     #[tokio::test]
     async fn budget_park_submit_work_activity_surfaces_unchanged() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({
-            "task_id": task.short_id,
+            "task_id": f.task.short_id,
             "commit_title": "park budget summary",
             "summary": "finished the safe subset before parking",
             "files_changed": ["src/lib.rs"],
             "remaining_concerns": ["budget-parked: finish the follow-up UI snapshot"]
         }));
+        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
 
-        process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
-
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let work_entry = entries
             .iter()
             .find(|entry| entry.event_type == "work_submitted")
@@ -220,45 +202,26 @@ mod tests {
 
     #[tokio::test]
     async fn submit_work_malformed_payload_does_not_crash() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        // Missing required "summary" field.
-        let payload = Some(serde_json::json!({"task_id": task.id}));
-        // Should not panic.
-        process_finalize_payload(&payload, "submit_work", &task.id, &ctx).await;
+        let f = FinalizeFixtures::new().await;
+        let payload = Some(serde_json::json!({"task_id": f.task.id}));
+        process_finalize_payload(&payload, "submit_work", &f.task.id, &f.ctx).await;
     }
 
     // ── process_finalize_payload: submit_review ──────────────────────────────
 
     #[tokio::test]
     async fn submit_review_atomically_sets_ac_from_criteria_array() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        // Seed AC with met=false.
-        TaskRepository::new(db.clone(), ctx.event_bus.clone())
+        let f = FinalizeFixtures::new().await;
+        TaskRepository::new(f.db.clone(), f.ctx.event_bus.clone())
             .set_acceptance_criteria(
-                &task.id,
+                &f.task.id,
                 r#"[{"criterion":"write tests","met":false},{"criterion":"passes ci","met":false}]"#,
             )
             .await
             .unwrap();
 
         let payload = Some(serde_json::json!({
-            "task_id": task.id,
+            "task_id": f.task.id,
             "verdict": "approved",
             "acceptance_criteria": [
                 {"criterion": "write tests", "met": true},
@@ -266,12 +229,9 @@ mod tests {
             ],
             "feedback": null
         }));
+        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
 
-        process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-        // AC should be updated in the DB.
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let updated = repo.get(&task.id).await.unwrap().unwrap();
+        let updated = f.repo().get(&f.task.id).await.unwrap().unwrap();
         let ac: Vec<serde_json::Value> =
             serde_json::from_str(&updated.acceptance_criteria).unwrap();
         assert_eq!(ac[0]["met"], true);
@@ -280,29 +240,18 @@ mod tests {
 
     #[tokio::test]
     async fn submit_review_logs_verdict_activity() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({
-            "task_id": task.id,
+            "task_id": f.task.id,
             "verdict": "rejected",
             "acceptance_criteria": [],
             "feedback": "missing edge case handling"
         }));
+        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
 
-        process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let entry = entries.iter().find(|e| e.event_type == "review_submitted");
         assert!(entry.is_some(), "expected review_submitted activity entry");
-
         let body: serde_json::Value = serde_json::from_str(&entry.unwrap().payload).unwrap();
         assert_eq!(body["verdict"], "rejected");
         assert_eq!(body["feedback"], "missing edge case handling");
@@ -310,44 +259,25 @@ mod tests {
 
     #[tokio::test]
     async fn submit_review_malformed_payload_does_not_crash() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        // "verdict" is required but missing.
-        let payload = Some(serde_json::json!({"task_id": task.id}));
-        process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
+        let f = FinalizeFixtures::new().await;
+        let payload = Some(serde_json::json!({"task_id": f.task.id}));
+        process_finalize_payload(&payload, "submit_review", &f.task.id, &f.ctx).await;
     }
 
     // ── process_finalize_payload: submit_decision ────────────────────────────
 
     #[tokio::test]
     async fn submit_decision_logs_decision_activity() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({
-            "task_id": task.id,
+            "task_id": f.task.id,
             "decision": "reopen",
             "rationale": "scope was too broad",
             "created_tasks": []
         }));
+        process_finalize_payload(&payload, "submit_decision", &f.task.id, &f.ctx).await;
 
-        process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
-
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-        let entries = repo.list_activity(&task.id).await.unwrap();
+        let entries = f.repo().list_activity(&f.task.id).await.unwrap();
         let entry = entries
             .iter()
             .find(|e| e.event_type == "decision_submitted");
@@ -355,7 +285,6 @@ mod tests {
             entry.is_some(),
             "expected decision_submitted activity entry"
         );
-
         let body: serde_json::Value = serde_json::from_str(&entry.unwrap().payload).unwrap();
         assert_eq!(body["decision"], "reopen");
         assert_eq!(body["rationale"], "scope was too broad");
@@ -363,33 +292,20 @@ mod tests {
 
     #[tokio::test]
     async fn submit_decision_malformed_payload_does_not_crash() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        // "decision" is required but missing.
-        let payload = Some(serde_json::json!({"task_id": task.id}));
-        process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
+        let f = FinalizeFixtures::new().await;
+        let payload = Some(serde_json::json!({"task_id": f.task.id}));
+        process_finalize_payload(&payload, "submit_decision", &f.task.id, &f.ctx).await;
     }
 
     // ── process_finalize_payload: submit_grooming ────────────────────────────
 
     #[tokio::test]
     async fn submit_grooming_logs_per_task_activity_entries() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        let project = test_helpers::create_test_project(&db).await;
-        let epic = test_helpers::create_test_epic(&db, &project.id).await;
-        let task1 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-        let task2 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+        let f = FinalizeFixtures::new().await;
+        let project = test_helpers::create_test_project(&f.db).await;
+        let epic = test_helpers::create_test_epic(&f.db, &project.id).await;
+        let task1 = test_helpers::create_test_task(&f.db, &project.id, &epic.id).await;
+        let task2 = test_helpers::create_test_task(&f.db, &project.id, &epic.id).await;
 
         let payload = Some(serde_json::json!({
             "tasks_reviewed": [
@@ -398,13 +314,10 @@ mod tests {
             ],
             "summary": "groomed 2 tasks"
         }));
-
-        // Planner is project-scoped; pass synthetic task_id.
         let synthetic_id = format!("project:{}:planner", project.id);
-        process_finalize_payload(&payload, "submit_grooming", &synthetic_id, &ctx).await;
+        process_finalize_payload(&payload, "submit_grooming", &synthetic_id, &f.ctx).await;
 
-        let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
-
+        let repo = f.repo();
         let entries1 = repo.list_activity(&task1.id).await.unwrap();
         let e1 = entries1.iter().find(|e| e.event_type == "planning_entry");
         assert!(e1.is_some(), "expected planning_entry for task1");
@@ -421,41 +334,23 @@ mod tests {
 
     #[tokio::test]
     async fn submit_grooming_malformed_payload_does_not_crash() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-
-        // tasks_reviewed items missing required "action" field — SubmitGrooming itself
-        // has tasks_reviewed as #[serde(default)] Vec, so malformed items are the issue.
-        // Since tasks_reviewed has #[serde(default)], this will succeed with empty vec.
-        // Test a completely invalid payload type instead.
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!("not-an-object"));
-        process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &ctx).await;
+        process_finalize_payload(&payload, "submit_grooming", "project:x:planner", &f.ctx).await;
     }
 
     // ── no-op cases ──────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn none_payload_is_a_noop() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
-        // Should not panic or error.
-        process_finalize_payload(&None, "submit_work", "any-task-id", &ctx).await;
+        let f = FinalizeFixtures::new().await;
+        process_finalize_payload(&None, "submit_work", "any-task-id", &f.ctx).await;
     }
 
     #[tokio::test]
     async fn unknown_finalize_tool_is_a_noop() {
-        let db = test_helpers::create_test_db();
-        let ctx = test_helpers::agent_context_from_db(
-            db.clone(),
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let f = FinalizeFixtures::new().await;
         let payload = Some(serde_json::json!({"anything": "here"}));
-        process_finalize_payload(&payload, "submit_unknown", "any-task-id", &ctx).await;
+        process_finalize_payload(&payload, "submit_unknown", "any-task-id", &f.ctx).await;
     }
 }

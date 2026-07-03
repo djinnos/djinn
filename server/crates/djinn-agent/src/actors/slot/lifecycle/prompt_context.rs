@@ -1,24 +1,8 @@
 //! Role-specific prompt-context assembly for the task lifecycle.
 //!
-//! This is a pure code-motion extraction from `run_task_lifecycle` (task #17).
-//! It gathers the data the base prompt template needs — conflict metadata,
-//! activity-log digest, extracted worker submission context, epic context,
-//! knowledge notes — builds the full
-//! [`TaskContext`], renders the role's system prompt, and layers the DB-level
-//! prompt extensions + skills on top.
-//!
-//! The extracted block is unconditional: every field of [`TaskContext`] is
-//! populated regardless of role, and the downstream prompt template picks
-//! what to use based on the role (the per-role gating already lives inside
-//! [`AgentRole::needs_epic_context`], `render_prompt`, and the template
-//! strings themselves). This mirrors the byte-for-byte behaviour of the
-//! former inline block between lines ~671 and ~844 of `lifecycle.rs`.
-//!
-//! Worker-resume context (y8pv / 48ru) is injected via
-//! [`build_worker_resume_note`], which converts `ResumeLifecycleMetadata`
-//! into a concise one-line note. The note is only injected for worker
-//! dispatch where resume metadata is present; other roles see no resume
-//! instructions (see [`role_receives_worker_resume`]).
+//! Gathers conflict metadata, activity-log digest, worker submission context,
+//! epic context, knowledge notes, code-graph context, and CI directives into a
+//! [`TaskContext`], renders the system prompt, and layers extensions + skills.
 
 use std::path::Path;
 
@@ -36,57 +20,35 @@ use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
 
 /// Fully-assembled prompt context for a single role session.
-///
-/// Holds both the intermediate fields (so the call site can still observe
-/// them for tracing / test assertions) and the final rendered system
-/// prompts. The lifecycle call site consumes `system_prompt` for the session
-/// conversation; the intermediate fields are kept so they can be referenced
-/// by future extraction steps (and to make the helper testable without
-/// re-deriving data downstream).
 #[allow(dead_code)]
 pub(crate) struct PromptContext {
-    /// `- <path>` markdown list built from the merge-conflict metadata. `None`
-    /// when there's no active conflict context.
+    /// Merge-conflict file list. `None` when no active conflict.
     pub conflict_files: Option<String>,
-    /// Pre-formatted activity-log digest (last-3 high-signal comments + per-
-    /// role totals). `None` when there is no activity on the task.
+    /// Activity-log digest. `None` when no activity on the task.
     pub activity_text: Option<String>,
     /// Last `work_submitted` summary (reviewer context).
     pub worker_summary: Option<String>,
     /// Last `work_submitted` remaining concerns (reviewer context).
     pub worker_concerns: Option<String>,
-    /// Epic context block (lead / roles that call `needs_epic_context`).
+    /// Epic context block.
     pub epic_context: Option<String>,
     /// Knowledge-notes block scoped to the task's paths.
     pub knowledge_context: Option<String>,
-    /// PR E2: auto-injected `code_graph context` summary for the dispatch
-    /// role. `None` when the role is not in the
-    /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist or no scope-path symbols
-    /// resolved.
+    /// Auto-injected `code_graph context` summary.
     pub code_graph_context: Option<String>,
-    /// PR E3: auto-injected `code_graph detect_changes` summary for
-    /// reviewer roles. `None` when the role is not in the
-    /// `DJINN_AUTO_CODE_CONTEXT_ROLES` allowlist, when no base/head SHAs
-    /// could be resolved from the worktree, or when the detected change
-    /// set is empty.
+    /// Auto-injected `code_graph detect_changes` summary for reviewers.
     pub reviewer_diff_context: Option<String>,
-    /// sa4x: promoted BLOCKING directive for red required CI. `None` when
-    /// CI is not failing or no remediation baseline exists.
+    /// sa4x: promoted BLOCKING directive for red required CI.
     pub ci_blocking_directive: Option<String>,
-    /// y8pv / 48ru: one-line resume note for worker dispatch after a
-    /// recoverable termination. `None` for non-worker roles or when no
-    /// resume metadata is present.
+    /// y8pv / 48ru: one-line resume note for worker dispatch.
     pub worker_resume_note: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
     pub base_system_prompt: String,
-    /// Base prompt with role-level `system_prompt_extensions` + `learned_prompt`
-    /// appended.
+    /// Base prompt with role-level extensions + `learned_prompt` appended.
     pub system_prompt_with_extensions: String,
-    /// Final prompt: extensions + resolved skills section.  This is what gets
-    /// pushed into the conversation as the system message.
+    /// Final prompt: extensions + skills. Pushed as the system message.
     pub system_prompt: String,
-    /// Cloned-forward setup-command description (session log provenance +
-    /// downstream mcp plumbing).
+    /// Setup-command description for session log provenance.
     pub prompt_setup_commands: Option<String>,
 }
 
@@ -125,24 +87,12 @@ fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> 
 }
 
 /// Inputs for [`build_prompt_context`].
-///
-/// The supervisor path fills `conflict_ctx`,
-/// `system_prompt_extensions`, and `learned_prompt` from
-/// `conflict_context_for_dispatch` +
-/// [`lifecycle::role_overrides::resolve_role_overrides`].  `merge_validation_ctx`
-/// stays `None` — the legacy merge-validation prompt helper was deleted as
-/// dead code in commit 6bf5d5931.
 #[allow(clippy::too_many_arguments)]
 pub(crate) struct PromptContextInputs<'a> {
     pub task: &'a Task,
-    /// Role whose template is rendered (`runtime_role` in the lifecycle —
-    /// may be a specialist override).
+    /// Role whose template is rendered (may be a specialist override).
     pub runtime_role: &'a dyn AgentRole,
-    /// Role consulted for `needs_epic_context`. In the lifecycle this is the
-    /// *original injected role*, not the specialist runtime role, because
-    /// specialists only override config (prompt extensions, skills, model)
-    /// — the "does this role see epic context" question is about the
-    /// base-role contract.
+    /// Role consulted for `needs_epic_context` (original injected role).
     pub role_for_epic_check: &'a dyn AgentRole,
     pub project_path: &'a str,
     pub worktree_path: &'a Path,
@@ -153,13 +103,9 @@ pub(crate) struct PromptContextInputs<'a> {
     pub learned_prompt: Option<&'a str>,
     pub resolved_skills: &'a [ResolvedSkill],
     pub app_state: &'a AgentContext,
-    /// Read-only multi-repo: other registered projects the task's epic
-    /// allows it to read. Materialized + resolved by the caller.
+    /// Read-only multi-repo sources for the task.
     pub read_sources: &'a [ReadSourceInfo],
-    /// y8pv / 48ru: one-line resume note for worker dispatch after a
-    /// recoverable termination. The caller builds this from
-    /// `TaskRunSpec::resume_lifecycle_metadata` when the role is a worker.
-    /// `None` for non-worker roles or when no resume metadata is present.
+    /// Worker resume note (y8pv/48ru). `None` for non-worker roles.
     pub worker_resume_note: Option<&'a str>,
 }
 

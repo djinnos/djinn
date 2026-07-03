@@ -83,18 +83,8 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 .await;
         }
         if final_result_ok && let Some(scraped) = final_output.runtime_error.as_deref() {
-            // `runtime_error` is a HEURISTIC scrape of the model's own assistant
-            // text (`ParsedAgentOutput::ingest_text` captures any line containing
-            // `error:` / `panicked at` / `thread '` / `fatal:`). On an otherwise
-            // successful session that line is very often model narration
-            // ("Actually, looking at the error: ...") rather than a real failure.
-            // Recording that raw prose as the terminal `error` polluted triage:
-            // failure clustering and repeat-signature loop guards (see
-            // `stable_error_signature`) ingested chain-of-thought instead of a
-            // stable failure class (ecji). Record a TYPED event instead — a stable
-            // `error_class` + `error` message — and keep the raw model line only in
-            // a clearly-labeled, truncated `model_excerpt` context field, never as
-            // the error itself.
+            // Record a TYPED event with stable `error_class` — raw model prose
+            // goes in `model_excerpt`, never as the `error` itself (ecji).
             let payload = serde_json::json!({
                 "error_class": "model_reported_runtime_error",
                 "error": "Model narration referenced a runtime error during an otherwise-successful session",
@@ -113,19 +103,7 @@ pub(crate) fn spawn_post_session_work(params: PostSessionParams) {
                 .await;
         }
 
-        // K8s flow: the djinn-supervisor stage loop is the SOLE transition
-        // authority. The legacy role.on_complete() returned post-session
-        // transition actions that raced with the supervisor
-        // body's Start / submit_task_review / task_review_approve calls,
-        // including legacy on_complete racing with submit_task_review and
-        // bouncing the task back to `open` because the worker pod has no
-        // MirrorManager. Pass None so
-        // apply_transition_and_dispatch only does its trigger-next-dispatch
-        // bookkeeping and the no-op log.
-        //
-        // `final_error` and `final_result_ok` are intentionally unused here
-        // for the same reason — the supervisor body decides ReviewerRejected
-        // / VerifierFailed / Failed and fires the matching transition itself.
+        // Pass None: the supervisor stage loop is the sole transition authority.
         let _ = final_result_ok;
         let _ = &final_error;
 

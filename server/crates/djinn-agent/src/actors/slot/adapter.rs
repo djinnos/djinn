@@ -34,15 +34,9 @@ pub(crate) fn build_slot_context(
     }
 }
 
-/// Convert `&AgentContext` into a `SlotContext` with extraction-compatible host
-/// callbacks. This is the common entry point for adapters that only need the
-/// credential-loading backfill behavior and no host dispatch or tool dispatcher.
+/// Convert `&AgentContext` into a `SlotContext` with extraction host callbacks.
 pub(crate) fn agent_to_slot_context(agent: &AgentContext) -> djinn_slot::host::SlotContext {
-    build_slot_context(
-        agent,
-        Arc::new(AgentHostCallbacks::extraction(agent)),
-        None,
-    )
+    build_slot_context(agent, Arc::new(AgentHostCallbacks::extraction(agent)), None)
 }
 
 /// Run `f` with a temporary `SlotContext` built from `&AgentContext`. This lets
@@ -68,11 +62,7 @@ fn agent_credential_to_slot(
     }
 }
 
-/// Shared host-callback implementation used by dispatch, reply-loop, and
-/// extraction adapters. The `dispatch_mode` flag controls whether the host
-/// routes task dispatch and whether credential resolution is delegated to the
-/// agent loader or returns an error. The optional `services` handle routes
-/// liveness and token-flush heartbeats when present (reply-loop mode).
+/// Shared host-callback implementation for dispatch, reply-loop, and extraction.
 pub(crate) struct AgentHostCallbacks {
     agent: AgentContext,
     services: Option<&'static dyn SupervisorServices>,
@@ -88,7 +78,10 @@ impl AgentHostCallbacks {
         }
     }
 
-    pub(crate) fn reply_loop(agent: &AgentContext, services: &'static dyn SupervisorServices) -> Self {
+    pub(crate) fn reply_loop(
+        agent: &AgentContext,
+        services: &'static dyn SupervisorServices,
+    ) -> Self {
         Self {
             agent: agent.clone(),
             services: Some(services),

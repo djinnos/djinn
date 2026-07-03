@@ -39,7 +39,11 @@ pub(crate) async fn build_role_code_graph_context(
 ) -> Option<String> {
     crate::with_slot_context!(app_state, |slot_ctx| {
         djinn_slot::helpers::build_role_code_graph_context(
-            role_name, task, slot_ctx, project_path, task_paths,
+            role_name,
+            task,
+            slot_ctx,
+            project_path,
+            task_paths,
         )
     })
 }
@@ -55,7 +59,12 @@ pub(crate) async fn build_reviewer_diff_context(
 ) -> Option<String> {
     crate::with_slot_context!(app_state, |slot_ctx| {
         djinn_slot::helpers::build_reviewer_diff_context(
-            role_name, task, slot_ctx, project_path, from_sha, to_sha,
+            role_name,
+            task,
+            slot_ctx,
+            project_path,
+            from_sha,
+            to_sha,
         )
     })
 }

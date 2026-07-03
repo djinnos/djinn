@@ -1,7 +1,7 @@
 use crate::context::AgentContext;
 use djinn_supervisor::SupervisorServices;
 
-use super::adapter::{build_slot_context, AgentHostCallbacks};
+use super::adapter::{AgentHostCallbacks, build_slot_context};
 
 /// Build a dispatch-pathway [`djinn_slot::host::SlotContext`] from an [`AgentContext`].
 pub(crate) fn agent_to_dispatch_slot_context(

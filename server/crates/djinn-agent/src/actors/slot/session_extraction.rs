@@ -1,7 +1,5 @@
 // Session extraction shim: converts AgentContext → SlotContext and delegates
-// to canonical djinn-slot extraction. Extraction host callbacks keep
-// non-extraction operations no-op while resolving credentials through the
-// normal AgentContext-backed loader.
+// to canonical djinn-slot extraction.
 
 use crate::context::AgentContext;
 
@@ -31,6 +29,154 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct ExtractionFixtures {
+        db: Database,
+        session_id: String,
+        captured_events:
+            std::sync::Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>>,
+    }
+
+    /// Common setup: DB, project/epic/task, task_run, session + messages,
+    /// credential, event-capturing bus, and dispatch to the extraction fn.
+    async fn setup_extraction_fixtures(
+        credential_key: &str,
+        credential_value: &str,
+        task_run_status: Option<&str>,
+        action: &str,
+    ) -> ExtractionFixtures {
+        use djinn_core::events::EventBus;
+        use djinn_core::message::{ContentBlock, Message, Role};
+        use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
+        use std::sync::Arc;
+
+        let db = Database::open_in_memory().expect("db");
+        db.ensure_initialized().await.expect("init db");
+        let noop = EventBus::noop();
+
+        let project = crate::test_helpers::create_test_project(&db).await;
+        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+
+        let task_run_id = uuid::Uuid::now_v7().to_string();
+        djinn_db::TaskRunRepository::new(db.clone())
+            .create(djinn_db::CreateTaskRunParams {
+                id: &task_run_id,
+                project_id: &project.id,
+                task_id: &task.id,
+                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
+                status: task_run_status,
+                workspace_path: None,
+                mirror_ref: None,
+            })
+            .await
+            .expect("create task_run");
+
+        let session_repo = SessionRepository::new(db.clone(), noop.clone());
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "anthropic/claude-sonnet-4-20250514",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: Some(&task_run_id),
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+        let session_id = session.id.clone();
+        SessionMessageRepository::new(db.clone(), noop.clone())
+            .insert_messages_batch(
+                &session.id,
+                &task.id,
+                &[
+                    Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::text("I'll help with that.")],
+                        metadata: None,
+                    },
+                    Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::text("Thanks!")],
+                        metadata: None,
+                    },
+                ],
+            )
+            .await
+            .expect("insert messages");
+
+        CredentialRepository::new(db.clone(), noop.clone())
+            .set_with_owner("anthropic", credential_key, credential_value, None)
+            .await
+            .expect("store credential");
+
+        let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = captured_events.clone();
+        let capturing_bus = EventBus::new(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        let mut agent =
+            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+        agent.event_bus = capturing_bus;
+
+        match action {
+            "post_session" => {
+                run_post_session_extraction(task.id.clone(), task_run_id.clone(), agent).await;
+            }
+            "backfill" => run_extraction_backfill(agent).await,
+            _ => panic!("unknown action: {action}"),
+        }
+
+        ExtractionFixtures {
+            db,
+            session_id,
+            captured_events,
+        }
+    }
+
+    fn assert_credential_loading_event(
+        f: &ExtractionFixtures,
+        expected_provider: &str,
+        label: &str,
+    ) {
+        let events = f.captured_events.lock().unwrap().clone();
+        let cred_evt = events.iter().find(|e| {
+            e.entity_type == "lifecycle"
+                && e.action == "step"
+                && e.payload.get("step").and_then(|v| v.as_str()) == Some("credential_loading")
+        });
+        assert!(
+            cred_evt.is_some(),
+            "expected credential_loading lifecycle event from {label}; events: {events:?}"
+        );
+        assert_eq!(
+            cred_evt
+                .unwrap()
+                .payload
+                .get("detail")
+                .and_then(|d| d.get("provider_id"))
+                .and_then(|v| v.as_str()),
+            Some(expected_provider),
+        );
+    }
+
+    async fn assert_taxonomy_stored(f: &ExtractionFixtures) {
+        use djinn_db::SessionRepository;
+        let session_repo =
+            SessionRepository::new(f.db.clone(), djinn_core::events::EventBus::noop());
+        let taxonomy_json = session_repo
+            .get_event_taxonomy_json(&f.session_id)
+            .await
+            .expect("get taxonomy");
+        assert!(
+            taxonomy_json.is_some(),
+            "structural extraction must store event_taxonomy"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extraction_callbacks_resolve_credentials_through_agent_loader() {
@@ -87,237 +233,31 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn post_session_extraction_reaches_credential_resolution_through_real_adapter() {
-        use std::sync::Arc;
-
-        use djinn_core::events::EventBus;
-        use djinn_core::message::{ContentBlock, Message, Role};
-        use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
-
-        let db = Database::open_in_memory().expect("db");
-        db.ensure_initialized().await.expect("init db");
-        let noop = EventBus::noop();
-
-        let project = crate::test_helpers::create_test_project(&db).await;
-        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
-        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        let task_run_id = uuid::Uuid::now_v7().to_string();
-        let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
-        task_run_repo
-            .create(djinn_db::CreateTaskRunParams {
-                id: &task_run_id,
-                project_id: &project.id,
-                task_id: &task.id,
-                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
-                status: None,
-                workspace_path: None,
-                mirror_ref: None,
-            })
-            .await
-            .expect("create task_run");
-
-        let session_repo = SessionRepository::new(db.clone(), noop.clone());
-        let session = session_repo
-            .create(CreateSessionParams {
-                project_id: &project.id,
-                task_id: Some(&task.id),
-                model: "anthropic/claude-sonnet-4-20250514",
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: Some(&task_run_id),
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create session");
-
-        let msg_repo = SessionMessageRepository::new(db.clone(), noop.clone());
-        msg_repo
-            .insert_messages_batch(
-                &session.id,
-                &task.id,
-                &[
-                    Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::text("I'll help with that.")],
-                        metadata: None,
-                    },
-                    Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::text("Thanks!")],
-                        metadata: None,
-                    },
-                ],
-            )
-            .await
-            .expect("insert messages");
-
-        let credential_repo = CredentialRepository::new(db.clone(), noop.clone());
-        credential_repo
-            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-extraction", None)
-            .await
-            .expect("store credential");
-
-        let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let events_clone = captured_events.clone();
-        let capturing_bus = EventBus::new(move |event| {
-            events_clone.lock().unwrap().push(event);
-        });
-
-        let mut agent =
-            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-        agent.event_bus = capturing_bus;
-
-        super::run_post_session_extraction(task.id.clone(), task_run_id.clone(), agent).await;
-
-        let events: Vec<_> = captured_events.lock().unwrap().clone();
-        let credential_loading = events.iter().find(|e| {
-            e.entity_type == "lifecycle"
-                && e.action == "step"
-                && e.payload.get("step").and_then(|v| v.as_str()) == Some("credential_loading")
-        });
-        assert!(
-            credential_loading.is_some(),
-            "expected credential_loading lifecycle event from \
-             resolve_model_and_credential through the real \
-             ExtractionCallbacks adapter; events captured: {events:?}"
-        );
-        let detail = &credential_loading.unwrap().payload;
-        assert_eq!(
-            detail
-                .get("detail")
-                .and_then(|d| d.get("provider_id"))
-                .and_then(|v| v.as_str()),
-            Some("anthropic"),
-            "credential_loading event must reference the anthropic provider"
-        );
-
-        let taxonomy_json = session_repo
-            .get_event_taxonomy_json(&session.id)
-            .await
-            .expect("get taxonomy");
-        assert!(
-            taxonomy_json.is_some(),
-            "structural extraction must store event_taxonomy on the session"
-        );
+        let f = setup_extraction_fixtures(
+            "ANTHROPIC_API_KEY",
+            "sk-test-extraction",
+            None,
+            "post_session",
+        )
+        .await;
+        assert_credential_loading_event(&f, "anthropic", "the real ExtractionCallbacks adapter");
+        assert_taxonomy_stored(&f).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extraction_backfill_reaches_credential_resolution_through_real_adapter() {
-        use std::sync::Arc;
-
-        use djinn_core::events::EventBus;
-        use djinn_core::message::{ContentBlock, Message, Role};
-        use djinn_db::{CreateSessionParams, SessionMessageRepository, SessionRepository};
-
-        let db = Database::open_in_memory().expect("db");
-        db.ensure_initialized().await.expect("init db");
-        let noop = EventBus::noop();
-
-        let project = crate::test_helpers::create_test_project(&db).await;
-        let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
-        let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-        let task_run_id = uuid::Uuid::now_v7().to_string();
-        let task_run_repo = djinn_db::TaskRunRepository::new(db.clone());
-        task_run_repo
-            .create(djinn_db::CreateTaskRunParams {
-                id: &task_run_id,
-                project_id: &project.id,
-                task_id: &task.id,
-                trigger_type: djinn_core::models::TaskRunTrigger::NewTask.as_str(),
-                status: Some("completed"),
-                workspace_path: None,
-                mirror_ref: None,
-            })
-            .await
-            .expect("create completed task_run");
-
-        let session_repo = SessionRepository::new(db.clone(), noop.clone());
-        let session = session_repo
-            .create(CreateSessionParams {
-                project_id: &project.id,
-                task_id: Some(&task.id),
-                model: "anthropic/claude-sonnet-4-20250514",
-                agent_type: "worker",
-                metadata_json: None,
-                task_run_id: Some(&task_run_id),
-                pricing: None,
-                cost_basis: None,
-            })
-            .await
-            .expect("create session");
-
-        let msg_repo = SessionMessageRepository::new(db.clone(), noop.clone());
-        msg_repo
-            .insert_messages_batch(
-                &session.id,
-                &task.id,
-                &[
-                    Message {
-                        role: Role::Assistant,
-                        content: vec![ContentBlock::text("I'll help with that.")],
-                        metadata: None,
-                    },
-                    Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::text("Thanks!")],
-                        metadata: None,
-                    },
-                ],
-            )
-            .await
-            .expect("insert messages");
-
-        let credential_repo = CredentialRepository::new(db.clone(), noop.clone());
-        credential_repo
-            .set_with_owner("anthropic", "ANTHROPIC_API_KEY", "sk-test-backfill", None)
-            .await
-            .expect("store credential");
-
-        let captured_events: Arc<std::sync::Mutex<Vec<djinn_core::events::DjinnEventEnvelope>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        let events_clone = captured_events.clone();
-        let capturing_bus = EventBus::new(move |event| {
-            events_clone.lock().unwrap().push(event);
-        });
-
-        let mut agent =
-            crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
-        agent.event_bus = capturing_bus;
-
-        super::run_extraction_backfill(agent).await;
-
-        let events: Vec<_> = captured_events.lock().unwrap().clone();
-        let credential_loading = events.iter().find(|e| {
-            e.entity_type == "lifecycle"
-                && e.action == "step"
-                && e.payload.get("step").and_then(|v| v.as_str()) == Some("credential_loading")
-        });
-        assert!(
-            credential_loading.is_some(),
-            "expected credential_loading lifecycle event from \
-             resolve_model_and_credential through the real \
-             ExtractionCallbacks adapter via backfill; events captured: {events:?}"
+        let f = setup_extraction_fixtures(
+            "ANTHROPIC_API_KEY",
+            "sk-test-backfill",
+            Some("completed"),
+            "backfill",
+        )
+        .await;
+        assert_credential_loading_event(
+            &f,
+            "anthropic",
+            "the real ExtractionCallbacks adapter via backfill",
         );
-        let detail = &credential_loading.unwrap().payload;
-        assert_eq!(
-            detail
-                .get("detail")
-                .and_then(|d| d.get("provider_id"))
-                .and_then(|v| v.as_str()),
-            Some("anthropic"),
-            "credential_loading event must reference the anthropic provider"
-        );
-
-        let taxonomy_json = session_repo
-            .get_event_taxonomy_json(&session.id)
-            .await
-            .expect("get taxonomy");
-        assert!(
-            taxonomy_json.is_some(),
-            "structural extraction must store event_taxonomy on the session"
-        );
+        assert_taxonomy_stored(&f).await;
     }
 }
