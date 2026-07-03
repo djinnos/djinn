@@ -11,12 +11,25 @@ use djinn_control_plane::tools::epic_ops::{
 use djinn_control_plane::tools::proposal_readiness::evaluate_proposal_readiness;
 use djinn_core::models::{Proposal, ProposalDebateTrail, TransitionAction};
 use djinn_db::{ProposalRepository, TaskRepository, UserSettingsRepository};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use super::refinement::{
     AdversaryPassOutcome, AdversaryPassResult, JudgeVerdictResult, ObjectionRecord,
     RefinementLoopState, RefinementPhase, StopReason, build_revision_event_metadata,
     select_refinement_model,
 };
+
+fn phase_name(phase: RefinementPhase) -> &'static str {
+    match phase {
+        RefinementPhase::AdversaryAttack => "adversary_attack",
+        RefinementPhase::AdvocateRevision => "advocate_revision",
+        RefinementPhase::JudgeAdjudication => "judge_adjudication",
+        RefinementPhase::AwaitingHumanReview => "awaiting_human_review",
+        RefinementPhase::Complete => "complete",
+        RefinementPhase::AwaitingEvidence => "awaiting_evidence",
+    }
+}
 
 use super::actor::CoordinatorActor;
 use super::refinement_dispatch::RefinementSession;
@@ -317,8 +330,8 @@ impl CoordinatorActor {
                 false,
                 Some(
                     serde_json::json!({
-                        "from": from.as_str(),
-                        "to": to.as_str(),
+                        "from": phase_name(from),
+                        "to": phase_name(to),
                         "kind": "phase_transition",
                     })
                     .to_string(),
@@ -402,7 +415,7 @@ impl CoordinatorActor {
     ) -> Result<(), djinn_db::Error> {
         let event_bus = crate::events::event_bus_for(&self.events_tx);
         let task_repo = TaskRepository::new(self.db.clone(), event_bus);
-        task_repo
+        let _ = task_repo
             .transition(
                 task_id,
                 TransitionAction::ForceClose,
@@ -411,7 +424,8 @@ impl CoordinatorActor {
                 Some(reason),
                 None,
             )
-            .await
+            .await?;
+        Ok(())
     }
 
     async fn close_refinement_task_with_result(
@@ -545,34 +559,22 @@ impl CoordinatorActor {
             context
         };
 
-        let metadata = {
-            let mut m = serde_json::Map::new();
-            m.insert(
-                "refinement".to_string(),
-                serde_json::json!({
-                    "proposal_id": proposal_id,
-                    "agent_type": agent_type,
-                    "round": round,
-                    "against_revision_seq": against_revision_seq,
-                }),
-            );
-            if let Some(user_id) = attributed_user_id {
-                m.insert(
-                    "attributed_user_id".to_string(),
-                    serde_json::Value::String(user_id.to_string()),
-                );
-            }
-            serde_json::Value::Object(m)
-        };
+        // Metadata is intentionally not stored on the task; it was only used
+        // by the legacy task model and is no longer persisted. The refinement
+        // context above is fully represented in the description/body.
+        let _metadata = ();
 
         let task = task_repo
-            .create(djinn_db::CreateTaskParams {
-                title: &title,
-                body: &body,
-                status: Some("open"),
-                attributed_user_id,
-                metadata: Some(metadata.to_string()),
-            })
+            .create(
+                "epic-placeholder",
+                title.as_str(),
+                body.as_str(),
+                "",
+                "task",
+                3,
+                attributed_user_id.unwrap_or(""),
+                Some("open"),
+            )
             .await;
 
         match task {
@@ -606,11 +608,14 @@ impl CoordinatorActor {
         let ac_items: Vec<AcceptanceCriterionItem> =
             parse_acceptance_criteria_array(&proposal.acceptance_criteria);
 
-        Some(evaluate_proposal_readiness(
-            &proposal.body,
-            &ac_items,
-            target_count,
-        ))
+        Some(
+            evaluate_proposal_readiness(
+                proposal.body.as_str(),
+                &ac_items,
+                target_count,
+            )
+            .to_error_string(),
+        )
     }
 }
 
