@@ -437,10 +437,10 @@ check_files() {
                 *'tokio::process::Command::new("git")'*) matcher='tokio::process::Command::new("git")' ;;
                 *'Command::new("git")'*) matcher='Command::new("git")' ;;
                 *'::new("git")'*) matcher='Command::new("git")' ;;
-                *"reqwest::Client"*) matcher="reqwest::Client" ;;
                 *"reqwest::ClientBuilder"*) matcher="reqwest::ClientBuilder" ;;
                 *"reqwest::RequestBuilder"*) matcher="reqwest::RequestBuilder" ;;
-                *"use reqwest"*) matcher="use reqwest" ;;
+                *"reqwest::Client"*) matcher="reqwest::Client" ;;
+                *"reqwest::{"*) matcher="reqwest::{" ;;
                 *"kube::"*) matcher="kube::" ;;
                 *"use kube"*) matcher="use kube" ;;
                 *"k8s_openapi"*) matcher="k8s_openapi" ;;
