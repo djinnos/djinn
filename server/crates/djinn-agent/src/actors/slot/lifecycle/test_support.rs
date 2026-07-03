@@ -68,6 +68,7 @@ pub(crate) async fn create_project_epic_task(
     create_task(db, events, &epic.id, task_title, None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn assemble_for_role(
     db: Database,
     task: &Task,
