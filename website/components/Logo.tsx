@@ -19,7 +19,7 @@ export default function Logo() {
           priority
         />
       </div>
-      <span className="font-display text-2xl font-light tracking-tight text-white">Djinn<span className="text-brand-purple">.</span></span>
+      <span className="font-display text-2xl font-normal tracking-tight text-white">Djinn</span>
     </Link>
   );
 }
