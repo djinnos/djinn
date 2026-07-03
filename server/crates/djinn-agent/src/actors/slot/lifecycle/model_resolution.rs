@@ -1,17 +1,13 @@
 //! Model-ID parsing + provider credential lookup for the task lifecycle.
 //!
-//! This is a pure code-motion extraction from `run_task_lifecycle` (task #14
-//! preparatory work). The caller is responsible for reacting to
-//! [`ModelResolutionError`] — e.g. task-status transition to interrupted and
-//! releasing the slot — so that the extracted function has no knowledge of the
-//! surrounding task-run context.
+//! Pure extraction from `run_task_lifecycle` (task #14). The caller handles
+//! error-to-transition and slot release.
 
 use crate::actors::slot::helpers::{ProviderCredential, load_provider_credential, parse_model_id};
 use crate::context::AgentContext;
 use djinn_db::AgentRepository;
 
-/// Resolved catalog/provider identity + credential ready to drive an LLM
-/// provider for the upcoming session.
+/// Resolved catalog/provider identity + credential for an LLM session.
 pub(crate) struct ResolvedModelCredential {
     pub catalog_provider_id: String,
     pub model_name: String,
@@ -19,29 +15,12 @@ pub(crate) struct ResolvedModelCredential {
 }
 
 /// Failure from [`resolve_model_and_credential`].
-///
-/// Carries the human-readable reason string that the caller will thread into
-/// the task-status transition (preserving the original error-to-transition
-/// semantics of `run_task_lifecycle`).
 pub(crate) struct ModelResolutionError {
     pub reason: String,
 }
 
-/// Parse the requested `model_id`, resolve it against the provider catalog
-/// (allowing display-name / bare-suffix matches), then load the associated
-/// credential from the vault.
-///
-/// Mirrors the byte-for-byte behavior of the former inline block in
-/// `run_task_lifecycle`:
-///   - emits the `credential_loading` task-lifecycle step event after a
-///     successful model-ID parse, before the credential lookup,
-///   - returns a [`ModelResolutionError`] with the same reason strings the old
-///     block used for task-status transitions on failure (the displayed
-///     `anyhow::Error` text),
-///   - logs the same `tracing::warn!` lines on failure paths.
-///
-/// The caller is responsible for all task-status transitions and slot release
-/// on error — this function does not touch either.
+/// Parse `model_id`, resolve against provider catalog, load credential.
+/// Mirrors the former inline block in `run_task_lifecycle`.
 pub(crate) async fn resolve_model_and_credential(
     model_id: &str,
     task_id: &str,
@@ -95,21 +74,7 @@ pub(crate) async fn resolve_model_and_credential(
 }
 
 /// Resolve a per-role project preference into a concrete `provider/model` id.
-///
-/// Reads the default `agents` row for `(project_id, base_role)` (the same
-/// shape the coordinator's `resolve_role_model_preference` uses at dispatch
-/// time), normalizes the stored `model_preference` string against connected
-/// providers' catalogs, and returns the first `provider/model` match.
-///
-/// Returns `None` when:
-///   - no default role is configured for this `(project, base_role)`,
-///   - `model_preference` is unset / whitespace,
-///   - the preference string cannot be matched to any connected model,
-///   - any repository/catalog lookup errors (logged at `warn`).
-///
-/// Used by `supervisor_runner` to populate `TaskRunSpec::model_id_per_role`
-/// per-stage; the caller falls back to the dispatch-resolved default when
-/// this returns `None`.
+/// Returns `None` when no match or on error.
 pub(crate) async fn resolve_role_model_preference(
     project_id: &str,
     base_role: &str,
@@ -200,21 +165,7 @@ pub(crate) fn map_resume_selection_reason_to_rotation_cause(
 }
 
 /// Attempt model rotation for a resume dispatch.
-///
-/// When `metadata` indicates a prior session with a recorded `previous_model`
-/// that terminated for a rotation-worthy cause (no-progress checkpoint,
-/// auto-submit deadline, alternate checkpoint ref, or repeated verify loop),
-/// attempts to select a different model from the connected provider catalog.
-///
-/// Returns the rotated model ID, or `current_model_id` unchanged when:
-/// - no resume metadata is present,
-/// - no `previous_model` was recorded,
-/// - the selection reason does not map to a rotation-worthy termination cause,
-/// - no alternate model is available, or
-/// - credentials for the alternate are missing.
-///
-/// Emits a structured `model_rotation` lifecycle-step event via
-/// [`emit_rotation_event`] so observability sees every rotation attempt.
+/// Returns `current_model_id` unchanged when rotation is not applicable.
 pub(crate) async fn attempt_resume_model_rotation(
     task_id: &str,
     current_model_id: &str,
@@ -270,10 +221,6 @@ pub(crate) async fn attempt_resume_model_rotation(
 // ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
 
 /// Termination causes that should trigger model rotation.
-///
-/// These map to the coordinator-side lifecycle termination reasons from
-/// `j6u1` (no-progress, deadline) and the flaky/repeated-verify-loop
-/// patterns observed by the durable-progress detector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RotationTerminationCause {
     /// No durable progress for the configured threshold.
@@ -317,7 +264,7 @@ pub(crate) enum ModelRotationOutcome {
     NotApplicable,
 }
 
-/// Machine-readable reason model rotation fell back to the existing model.
+/// Reason model rotation fell back to the existing model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModelRotationFallbackReason {
     /// No other connected provider had any models.
@@ -329,8 +276,7 @@ pub(crate) enum ModelRotationFallbackReason {
 }
 
 impl ModelRotationOutcome {
-    /// The selected model id, regardless of whether rotation succeeded
-    /// or fell back. Returns `None` for `NotApplicable`.
+    /// The selected model id, or `None` for `NotApplicable`.
     pub(crate) fn selected_model(&self) -> Option<&str> {
         match self {
             Self::Rotated { selected_model, .. } => Some(selected_model),
@@ -340,18 +286,8 @@ impl ModelRotationOutcome {
     }
 }
 
-/// Attempt to select a different available model after a no-progress,
-/// deadline, flaky, or repeated-verify-loop termination.
-///
-/// Preserves provider credential resolution and catalog matching behavior:
-/// the function scans connected providers for any model whose `provider/model`
-/// id differs from `previous_model`, returns the first match, and leaves
-/// credential loading to the caller's normal [`resolve_model_and_credential`]
-/// path. If no alternate is available, falls back to `previous_model` and
-/// records a machine-readable [`ModelRotationFallbackReason`].
-///
-/// Emits a `model_rotation` task-lifecycle-step event with the rotation
-/// reason, previous model, selected model or fallback, and termination cause.
+/// Attempt to select a different available model after a rotation-worthy
+/// termination. Falls back to `previous_model` when no alternate is available.
 pub(crate) async fn resolve_model_with_rotation(
     task_id: &str,
     previous_model: Option<&str>,
@@ -482,9 +418,7 @@ pub(crate) async fn resolve_model_with_rotation(
     }
 }
 
-/// Emit a structured `model_rotation` task-lifecycle-step event with the
-/// rotation reason, previous model, selected model or fallback, and
-/// termination cause.
+/// Emit a `model_rotation` task-lifecycle-step event.
 async fn emit_rotation_event(
     task_id: &str,
     outcome: &ModelRotationOutcome,

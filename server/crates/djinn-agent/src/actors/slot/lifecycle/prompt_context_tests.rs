@@ -600,46 +600,28 @@ async fn worker_resume_note_included_for_auto_submit_source() {
     assert!(!note_text.contains("checkpoint"));
 }
 
-#[tokio::test]
-async fn worker_resume_note_absent_for_non_worker_roles() {
+#[test]
+fn worker_resume_note_absent_cases() {
     let metadata = resume_metadata_with_checkpoint();
-
-    // Lead role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("lead", Some(&metadata)).is_none());
-
-    // Reviewer role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("reviewer", Some(&metadata)).is_none());
-
-    // Planner role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("planner", Some(&metadata)).is_none());
-
-    // Architect role should NOT receive worker-resume instructions.
-    assert!(build_worker_resume_note("architect", Some(&metadata)).is_none());
-}
-
-#[tokio::test]
-async fn worker_resume_note_absent_when_not_considered() {
-    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+    for role_name in ["lead", "reviewer", "planner", "architect"] {
+        assert!(build_worker_resume_note(role_name, Some(&metadata)).is_none());
+    }
+    // Not considered
+    let not_considered = djinn_runtime::ResumeLifecycleMetadata {
         considered: false,
         ..resume_metadata_with_checkpoint()
     };
-    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
-}
-
-#[tokio::test]
-async fn worker_resume_note_absent_when_no_identifying_fields() {
-    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+    assert!(build_worker_resume_note("worker", Some(&not_considered)).is_none());
+    // No identifying fields
+    let no_fields = djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
         commit_sha: None,
         submit_or_review_id: None,
         prior_session_lineage: None,
         ..Default::default()
     };
-    assert!(build_worker_resume_note("worker", Some(&metadata)).is_none());
-}
-
-#[test]
-fn worker_resume_note_absent_when_metadata_is_none() {
+    assert!(build_worker_resume_note("worker", Some(&no_fields)).is_none());
+    // No metadata
     assert!(build_worker_resume_note("worker", None).is_none());
 }
 
@@ -651,9 +633,10 @@ async fn non_worker_role_prompt_has_no_resume_section() {
     let role = LeadRole;
     let metadata = resume_metadata_with_checkpoint();
 
-    // Even with metadata present, the lead role gets no resume note.
-    let note = build_worker_resume_note(role.config().name, Some(&metadata));
-    assert!(note.is_none());
+    assert!(build_worker_resume_note(role.config().name, Some(&metadata)).is_none());
+    for role_name in ["lead", "reviewer", "planner", "architect"] {
+        assert!(build_worker_resume_note(role_name, Some(&metadata)).is_none());
+    }
 
     let ctx = assemble_for_role_with_resume(db, &task, &role, None).await;
     assert!(ctx.worker_resume_note.is_none());
@@ -686,36 +669,6 @@ fn worker_resume_note_truncates_long_progress_summary() {
     // The truncated summary should end with … and be shorter than 200 chars.
     assert!(note.contains('…'));
     assert!(!note.contains(&"x".repeat(200)));
-}
-
-#[test]
-fn worker_resume_note_contains_all_required_fields_for_checkpoint() {
-    let metadata = resume_metadata_with_checkpoint();
-    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
-    assert_contains_all(
-        &note,
-        &[
-            "Resuming from prior session",
-            "session-prior-001",
-            "abc123def456",
-            "claude-opus-4.7",
-            "no-progress checkpoint",
-            "Implemented core feature",
-            "cargo test -p djinn-agent",
-        ],
-    );
-}
-
-#[test]
-fn worker_resume_note_contains_all_required_fields_for_auto_submit() {
-    let metadata = resume_metadata_with_auto_submit();
-    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
-    assert_contains_all(
-        &note,
-        &["session-prior-002", "review-7", "auto-submit accepted"],
-    );
-    // Should not mention checkpoint since this is an auto-submit source.
-    assert!(!note.contains("checkpoint"));
 }
 
 #[test]
