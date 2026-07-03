@@ -1,3 +1,4 @@
+// djinn:allow-oversize — park telemetry + quality-strike guard logic pushed file past the byte threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
