@@ -538,6 +538,7 @@ fn api_key_provider_config(
             format_family,
             &model.id,
         ),
+        tool_schema_compat: None,
     }
 }
 
