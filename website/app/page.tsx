@@ -341,7 +341,7 @@ export default function Home() {
                   ["tracing_built_in", "every agent session already streams to Langfuse; next, rolled up into answers a lead can act on."],
                 ].map(([k, v], i) => (
                   <div key={i} className="flex flex-col sm:flex-row sm:items-baseline gap-1 sm:gap-4">
-                    <span className="text-status-warn shrink-0 w-44">[ ] {k}</span>
+                    <span className="text-status-warn shrink-0 w-56 whitespace-nowrap">[ ] {k}</span>
                     <span className="text-text-secondary font-sans text-[15px]">{v}</span>
                   </div>
                 ))}
