@@ -201,18 +201,19 @@ async fn resolve_auto_submit_diff_fingerprint(
     metadata: &AutoSubmitReviewMetadataPayload,
     app_state: &SlotContext,
 ) -> Result<Option<String>, ()> {
-    let worktree_path = match resolve_task_worktree_path(task_id, &metadata.task_run_id, app_state).await {
-        Some(p) => p,
-        None => {
-            emit_fingerprint_unavailable_event(
-                task_id,
-                &metadata.task_run_id,
-                "workspace_unavailable",
-                app_state,
-            );
-            return Err(());
-        }
-    };
+    let worktree_path =
+        match resolve_task_worktree_path(task_id, &metadata.task_run_id, app_state).await {
+            Some(p) => p,
+            None => {
+                emit_fingerprint_unavailable_event(
+                    task_id,
+                    &metadata.task_run_id,
+                    "workspace_unavailable",
+                    app_state,
+                );
+                return Err(());
+            }
+        };
 
     match compute_submission_diff_fingerprint(&worktree_path).await {
         Ok(SubmissionDiffFingerprint::Diff(digest)) => {
@@ -1177,7 +1178,8 @@ mod tests {
             db.clone(),
             tokio_util::sync::CancellationToken::new(),
         );
-        let payload = Some(serde_json::json!({"anything": "here"}));        process_finalize_payload(&payload, "submit_unknown", "any-task-id", &ctx).await;
+        let payload = Some(serde_json::json!({"anything": "here"}));
+        process_finalize_payload(&payload, "submit_unknown", "any-task-id", &ctx).await;
     }
 
     // ─── auto-submit review metadata persistence ────────────────────────────

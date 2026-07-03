@@ -168,10 +168,12 @@ async fn make_task_worktree() -> PathBuf {
     run_git(&path, &["init"]).await;
     run_git(&path, &["config", "user.email", "test@example.com"]).await;
     run_git(&path, &["config", "user.name", "Test"]).await;
-    // First commit on main.
+    // First commit on main, then rename the default branch to main so the
+    // submission diff helper can resolve the base ref.
     std::fs::write(path.join("base.txt"), "base\n").unwrap();
     run_git(&path, &["add", "base.txt"]).await;
     run_git(&path, &["commit", "-m", "initial"]).await;
+    run_git(&path, &["branch", "-m", "main"]).await;
 
     // Create and check out a task branch.
     run_git(&path, &["checkout", "-b", "task/test"]).await;
