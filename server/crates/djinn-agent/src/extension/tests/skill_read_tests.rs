@@ -46,6 +46,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         None,
         Some("worker"),
         None,
+        None,
     )
     .await
     .expect("skill_read should succeed for a known skill");
@@ -76,6 +77,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         None,
         Some("worker"),
         None,
+        None,
     )
     .await
     .expect_err("skill_read should error for an unknown skill");
@@ -93,6 +95,7 @@ async fn skill_read_returns_content_for_known_skill_and_errors_for_unknown() {
         tmp.path(),
         None,
         Some("worker"),
+        None,
         None,
     )
     .await
@@ -135,6 +138,7 @@ async fn skill_read_rejects_tampered_skill_when_manifest_exists() {
         tmp.path(),
         None,
         Some("worker"),
+        None,
         None,
     )
     .await
@@ -183,6 +187,7 @@ async fn skill_read_serves_directory_skill_references_and_rejects_reference_tamp
         None,
         Some("worker"),
         None,
+        None,
     )
     .await
     .expect("skill_read should serve a verified directory skill");
@@ -211,6 +216,7 @@ async fn skill_read_serves_directory_skill_references_and_rejects_reference_tamp
         tmp.path(),
         None,
         Some("worker"),
+        None,
         None,
     )
     .await
@@ -296,6 +302,7 @@ async fn skill_read_serves_native_visual_spec_for_authoring_planner_session() {
         Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("skill_read should succeed for visual-spec in an authoring planner session");
@@ -364,6 +371,7 @@ async fn skill_read_rejects_visual_spec_in_non_authoring_planner_session() {
         Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect_err("skill_read should reject visual-spec in a non-authoring planner session");
@@ -419,6 +427,7 @@ async fn skill_read_serves_native_visual_spec_for_advocate_refinement_session() 
         Some(&task.id), // production passes the task UUID, not short_id
         Some("advocate"),
         None,
+        None,
     )
     .await
     .expect("skill_read should succeed for visual-spec in an advocate refinement session");
@@ -472,6 +481,7 @@ async fn skill_read_rejects_visual_spec_for_non_planner_role() {
         tmp.path(),
         Some(&task.id), // production passes the task UUID, not short_id
         Some("worker"),
+        None,
         None,
     )
     .await
@@ -533,6 +543,7 @@ async fn skill_read_native_body_not_from_worktree() {
         tmp.path(),
         Some(&task.id), // production passes the task UUID, not short_id
         Some("planner"),
+        None,
         None,
     )
     .await

@@ -320,6 +320,7 @@ async fn call_tool_dispatches_task_create_with_public_response_shape() {
         None,
         Some("planner"),
         None,
+        None,
     )
     .await
     .expect("task_create dispatch should succeed");
@@ -402,6 +403,7 @@ async fn call_tool_dispatches_task_update_with_public_response_shape() {
         Path::new(&project_path),
         Some(&task.id),
         Some("planner"),
+        None,
         None,
     )
     .await
@@ -491,6 +493,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
         Some(&task.id),
         Some("architect"),
         None,
+        None,
     )
     .await
     .expect("task_comment_add dispatch should succeed");
@@ -535,6 +538,7 @@ async fn call_tool_dispatches_comment_and_transition_flows() {
         Path::new(&project_path),
         Some(&task.id),
         Some("lead"),
+        None,
         None,
     )
     .await
@@ -588,6 +592,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         None,
         Some("architect"),
         None,
+        None,
     )
     .await
     .expect("agent_create dispatch should succeed");
@@ -633,6 +638,7 @@ async fn call_tool_dispatches_agent_ops_through_shared_agent_seam() {
         Path::new(&project_path),
         None,
         Some("architect"),
+        None,
         None,
     )
     .await

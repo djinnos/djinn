@@ -102,6 +102,9 @@ pub fn init_tool_schema_registry() {
         schemas.insert("advocate", extension::tool_schemas_advocate);
         schemas.insert("adversary", extension::tool_schemas_adversary);
         schemas.insert("judge", extension::tool_schemas_judge);
+        // Evidence-spike profile: read-only investigation tools for
+        // tasks created by the Judge demand-evidence path (epic 6tjy).
+        schemas.insert("evidence_spike", extension::tool_schemas_evidence_spike);
 
         djinn_roles::register_tool_schemas(schemas);
     });

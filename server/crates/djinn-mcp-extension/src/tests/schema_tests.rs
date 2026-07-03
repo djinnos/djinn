@@ -834,3 +834,340 @@ fn snapshot_judge_tool_names() {
 fn snapshot_judge_tool_schemas() {
     insta::assert_json_snapshot!("judge_tool_schemas", tool_schemas_judge());
 }
+
+// ── Evidence-spike profile tests ─────────────────────────────────────────
+
+/// Helper: collect tool names from a schema list.
+fn ev_schema_names(schemas: &[serde_json::Value]) -> BTreeSet<String> {
+    schemas
+        .iter()
+        .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+        .collect()
+}
+
+#[test]
+fn evidence_spike_has_read_only_investigation_tools() {
+    let schemas = tool_schemas_evidence_spike();
+    let names = ev_schema_names(&schemas);
+
+    // File/code intelligence (read-only from base, NO shell).
+    assert!(names.contains("read"), "evidence spike must have `read`");
+    assert!(
+        names.contains("code_search"),
+        "evidence spike must have `code_search`"
+    );
+    assert!(
+        names.contains("skill_read"),
+        "evidence spike must have `skill_read`"
+    );
+    assert!(names.contains("lsp"), "evidence spike must have `lsp`");
+    assert!(
+        names.contains("ci_job_log"),
+        "evidence spike must have `ci_job_log`"
+    );
+    assert!(
+        names.contains("github_search"),
+        "evidence spike must have `github_search`"
+    );
+    assert!(
+        names.contains("output_view"),
+        "evidence spike must have `output_view`"
+    );
+    assert!(
+        names.contains("output_grep"),
+        "evidence spike must have `output_grep`"
+    );
+
+    // Task/epic/memory read-only inspection (from shared_base + shared_lead).
+    assert!(
+        names.contains("task_show"),
+        "evidence spike must have `task_show`"
+    );
+    assert!(
+        names.contains("task_list"),
+        "evidence spike must have `task_list`"
+    );
+    assert!(
+        names.contains("task_activity_list"),
+        "evidence spike must have `task_activity_list`"
+    );
+    assert!(
+        names.contains("memory_read"),
+        "evidence spike must have `memory_read`"
+    );
+    assert!(
+        names.contains("memory_search"),
+        "evidence spike must have `memory_search`"
+    );
+    assert!(
+        names.contains("memory_list"),
+        "evidence spike must have `memory_list`"
+    );
+    assert!(
+        names.contains("task_blocked_list"),
+        "evidence spike must have `task_blocked_list`"
+    );
+    assert!(
+        names.contains("epic_show"),
+        "evidence spike must have `epic_show`"
+    );
+    assert!(
+        names.contains("epic_tasks"),
+        "evidence spike must have `epic_tasks`"
+    );
+
+    // Memory health/context (read-only).
+    assert!(
+        names.contains("memory_build_context"),
+        "evidence spike must have `memory_build_context`"
+    );
+    assert!(
+        names.contains("memory_health"),
+        "evidence spike must have `memory_health`"
+    );
+    assert!(
+        names.contains("memory_extracted_audit"),
+        "evidence spike must have `memory_extracted_audit`"
+    );
+    assert!(
+        names.contains("memory_broken_links"),
+        "evidence spike must have `memory_broken_links`"
+    );
+    assert!(
+        names.contains("memory_orphans"),
+        "evidence spike must have `memory_orphans`"
+    );
+
+    // Architect-only read tools.
+    assert!(
+        names.contains("code_graph"),
+        "evidence spike must have `code_graph`"
+    );
+    assert!(
+        names.contains("pr_review_context"),
+        "evidence spike must have `pr_review_context`"
+    );
+
+    // Proposal/debate read inspection.
+    assert!(
+        names.contains("proposal_show"),
+        "evidence spike must have `proposal_show`"
+    );
+    assert!(
+        names.contains("proposal_debate_list"),
+        "evidence spike must have `proposal_debate_list`"
+    );
+
+    // Finalize tool: evidence findings submission path.
+    assert!(
+        names.contains("submit_work"),
+        "evidence spike must have `submit_work` for findings handoff"
+    );
+}
+
+#[test]
+fn evidence_spike_excludes_mutation_and_destructive_tools() {
+    let schemas = tool_schemas_evidence_spike();
+    let names = ev_schema_names(&schemas);
+
+    // Shell is excluded (destructive).
+    assert!(
+        !names.contains("shell"),
+        "evidence spike must NOT have `shell`"
+    );
+
+    // File mutation tools are excluded.
+    assert!(
+        !names.contains("write"),
+        "evidence spike must NOT have `write`"
+    );
+    assert!(
+        !names.contains("edit"),
+        "evidence spike must NOT have `edit`"
+    );
+    assert!(
+        !names.contains("apply_patch"),
+        "evidence spike must NOT have `apply_patch`"
+    );
+
+    // Task mutation tools are excluded (except submit_work).
+    assert!(
+        !names.contains("task_create"),
+        "evidence spike must NOT have `task_create`"
+    );
+    assert!(
+        !names.contains("task_update"),
+        "evidence spike must NOT have `task_update`"
+    );
+    assert!(
+        !names.contains("task_transition"),
+        "evidence spike must NOT have `task_transition`"
+    );
+    assert!(
+        !names.contains("task_comment_add"),
+        "evidence spike must NOT have `task_comment_add`"
+    );
+
+    // Epic mutation tools are excluded.
+    assert!(
+        !names.contains("epic_create"),
+        "evidence spike must NOT have `epic_create`"
+    );
+    assert!(
+        !names.contains("epic_update"),
+        "evidence spike must NOT have `epic_update`"
+    );
+    assert!(
+        !names.contains("epic_close"),
+        "evidence spike must NOT have `epic_close`"
+    );
+
+    // Memory mutation tools are excluded.
+    assert!(
+        !names.contains("memory_write"),
+        "evidence spike must NOT have `memory_write`"
+    );
+    assert!(
+        !names.contains("memory_edit"),
+        "evidence spike must NOT have `memory_edit`"
+    );
+    assert!(
+        !names.contains("memory_move"),
+        "evidence spike must NOT have `memory_move`"
+    );
+
+    // Destructive admin tools are excluded.
+    assert!(
+        !names.contains("task_delete_branch"),
+        "evidence spike must NOT have `task_delete_branch`"
+    );
+    assert!(
+        !names.contains("task_archive_activity"),
+        "evidence spike must NOT have `task_archive_activity`"
+    );
+    assert!(
+        !names.contains("task_reset_counters"),
+        "evidence spike must NOT have `task_reset_counters`"
+    );
+    assert!(
+        !names.contains("task_kill_session"),
+        "evidence spike must NOT have `task_kill_session`"
+    );
+    assert!(
+        !names.contains("role_create"),
+        "evidence spike must NOT have `role_create`"
+    );
+
+    // Escalation tools are excluded.
+    assert!(
+        !names.contains("request_lead"),
+        "evidence spike must NOT have `request_lead`"
+    );
+
+    // Other finalize tools are excluded.
+    assert!(
+        !names.contains("submit_review"),
+        "evidence spike must NOT have `submit_review`"
+    );
+    assert!(
+        !names.contains("submit_decision"),
+        "evidence spike must NOT have `submit_decision`"
+    );
+    assert!(
+        !names.contains("submit_grooming"),
+        "evidence spike must NOT have `submit_grooming`"
+    );
+}
+
+#[test]
+fn evidence_spike_has_fewer_tools_than_architect() {
+    let ev_schemas = tool_schemas_evidence_spike();
+    let arch_schemas = tool_schemas_architect();
+    assert!(
+        ev_schemas.len() < arch_schemas.len(),
+        "evidence-spike profile ({}) must be strictly smaller than architect ({})",
+        ev_schemas.len(),
+        arch_schemas.len()
+    );
+}
+
+#[test]
+fn evidence_spike_preserves_normal_architect_surface() {
+    // Verify the normal architect surface is NOT affected by the evidence-spike
+    // profile.  The Architect does NOT have write/edit/apply_patch (it
+    // diagnoses and directs but does not write code), but it retains shell,
+    // mutation task/epic tools, memory mutation, and submit_work.
+    let arch_schemas = tool_schemas_architect();
+    let names = ev_schema_names(&arch_schemas);
+
+    assert!(names.contains("shell"), "architect must still have `shell`");
+    assert!(
+        names.contains("task_create"),
+        "architect must still have `task_create`"
+    );
+    assert!(
+        names.contains("task_transition"),
+        "architect must still have `task_transition`"
+    );
+    assert!(
+        names.contains("task_comment_add"),
+        "architect must still have `task_comment_add`"
+    );
+    assert!(
+        names.contains("epic_create"),
+        "architect must still have `epic_create`"
+    );
+    assert!(
+        names.contains("memory_write"),
+        "architect must still have `memory_write`"
+    );
+    assert!(
+        names.contains("submit_work"),
+        "architect must still have `submit_work`"
+    );
+}
+
+#[test]
+fn evidence_spike_preserves_normal_worker_surface() {
+    // Verify the normal worker surface is NOT affected.
+    let worker_schemas = tool_schemas_worker();
+    let names = ev_schema_names(&worker_schemas);
+
+    assert!(names.contains("shell"), "worker must still have `shell`");
+    assert!(names.contains("write"), "worker must still have `write`");
+    assert!(names.contains("edit"), "worker must still have `edit`");
+    assert!(
+        names.contains("apply_patch"),
+        "worker must still have `apply_patch`"
+    );
+    assert!(
+        names.contains("memory_write"),
+        "worker must still have `memory_write`"
+    );
+    assert!(
+        names.contains("submit_work"),
+        "worker must still have `submit_work`"
+    );
+}
+
+#[test]
+fn evidence_spike_all_schemas_are_read_only_except_finalize() {
+    let schemas = tool_schemas_evidence_spike();
+    for schema in &schemas {
+        let name = schema
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("<unknown>");
+        let is_read_only = schema
+            .get("readOnly")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let is_submit_work = name == "submit_work";
+        // Every tool must be read-only except submit_work (the finalize path).
+        assert!(
+            is_read_only || is_submit_work,
+            "evidence-spike tool `{name}` must be readOnly=true or be submit_work; \
+             got readOnly={is_read_only}"
+        );
+    }
+}
