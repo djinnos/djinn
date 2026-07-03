@@ -28,8 +28,6 @@ use crate::llm_extraction::{
 use crate::session_extraction::{SessionTaxonomy, extract_session_signals};
 use crate::test_helpers::{FailingProvider, FakeProvider, agent_context_from_db, create_test_db};
 
-// ─── Test helpers ─────────────────────────────────────────────────────────────
-
 /// Creates a temp directory (notes will be written there).
 fn make_tmpdir() -> TempDir {
     crate::test_helpers::test_tempdir("djinn-llm-extraction-")
@@ -49,7 +47,6 @@ impl CapturedLogs {
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
     type Writer = CapturedLogsWriter;
-
     fn make_writer(&'a self) -> Self::Writer {
         CapturedLogsWriter {
             inner: Arc::clone(&self.0),
@@ -69,7 +66,6 @@ impl std::io::Write for CapturedLogsWriter {
             .extend_from_slice(buf);
         Ok(buf.len())
     }
-
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
@@ -110,20 +106,17 @@ async fn make_fixture() -> TestFixture {
     let tmpdir = make_tmpdir();
     let db = create_test_db();
     let cancel = CancellationToken::new();
-
     let events = djinn_core::events::EventBus::noop();
     let project_repo = ProjectRepository::new(db.clone(), events.clone());
     let epic_repo = EpicRepository::new(db.clone(), events.clone());
     let task_repo = TaskRepository::new(db.clone(), events.clone());
     let session_repo = SessionRepository::new(db.clone(), events.clone());
-
     let uid = uuid::Uuid::now_v7().to_string();
     let name = format!("test-project-{uid}");
     let project = project_repo
         .create(&name, "test", &name)
         .await
         .expect("create project");
-
     let epic = epic_repo
         .create_for_project(
             &project.id,
@@ -142,7 +135,6 @@ async fn make_fixture() -> TestFixture {
         )
         .await
         .expect("create epic");
-
     let task = task_repo
         .create_in_project(
             &project.id,
@@ -158,7 +150,6 @@ async fn make_fixture() -> TestFixture {
         )
         .await
         .expect("create task");
-
     let session = session_repo
         .create(CreateSessionParams {
             project_id: &project.id,
@@ -172,7 +163,6 @@ async fn make_fixture() -> TestFixture {
         })
         .await
         .expect("create session");
-
     TestFixture {
         db,
         cancel,
@@ -239,8 +229,6 @@ fn novelty_failure_candidate_lookup(
     }]
 }
 
-// ─── AC2: Structural extraction ────────────────────────────────────────────────
-
 #[test]
 fn structural_extraction_produces_correct_taxonomy() {
     let messages = vec![
@@ -290,9 +278,7 @@ fn structural_extraction_produces_correct_taxonomy() {
             metadata: None,
         },
     ];
-
     let signals = extract_session_signals(&messages);
-
     assert_eq!(signals.taxonomy.notes_read, 2);
     assert_eq!(signals.taxonomy.errors, 1);
     assert_eq!(signals.taxonomy.files_changed, 1);
@@ -315,10 +301,8 @@ fn structural_extraction_produces_correct_taxonomy() {
 async fn structural_extraction_flushes_co_access_associations() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let events = djinn_core::events::EventBus::noop();
     let note_repo = NoteRepository::new(fixture.db.clone(), events.clone());
-
     let note_a = note_repo
         .create(
             &fixture.project.id,
@@ -339,7 +323,6 @@ async fn structural_extraction_flushes_co_access_associations() {
         )
         .await
         .expect("create note_b");
-
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -366,18 +349,15 @@ async fn structural_extraction_flushes_co_access_associations() {
             metadata: None,
         },
     ];
-
     let taxonomy = crate::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
         ctx,
     )
     .await;
-
     assert!(taxonomy.is_some());
     let taxonomy = taxonomy.expect("taxonomy present");
     assert_eq!(taxonomy.notes_read, 2);
-
     let associations = note_repo
         .get_associations_for_note(&note_a.id)
         .await
@@ -396,7 +376,6 @@ async fn structural_extraction_flushes_co_access_associations() {
 async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 3,
         errors: 2,
@@ -406,16 +385,13 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     let cases: Vec<_> = all_notes.iter().filter(|n| n.note_type == "case").collect();
     let patterns: Vec<_> = all_notes
         .iter()
@@ -425,19 +401,16 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
         .iter()
         .filter(|n| n.note_type == "pitfall")
         .collect();
-
     assert_eq!(cases.len(), 1);
     assert_eq!(patterns.len(), 1);
     assert_eq!(pitfalls.len(), 1);
     assert_eq!(cases[0].title, "Test Case Note");
     assert_eq!(patterns[0].title, "Test Pattern Note");
     assert_eq!(pitfalls[0].title, "Test Pitfall Note");
-
     for note in [cases[0], patterns[0], pitfalls[0]] {
         assert_eq!(note.storage, "db");
         assert!(note.file_path.is_empty());
     }
-
     assert!(
         !fixture
             .tmpdir
@@ -465,7 +438,6 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
 async fn llm_extracted_notes_have_confidence_0_5() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -475,21 +447,17 @@ async fn llm_extracted_notes_have_confidence_0_5() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert!(!all_notes.is_empty());
     for note in &all_notes {
         assert!((note.confidence - 0.5).abs() < 1e-9);
     }
-
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
@@ -512,7 +480,6 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     let fixture = make_fixture().await;
     let session_id = fixture.session_id.clone();
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy::default();
     let json = serde_json::json!({
         "cases": [{
@@ -524,15 +491,12 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert_eq!(notes.len(), 1);
     let note = &notes[0];
     assert!(note.content.contains(&session_id));
@@ -544,7 +508,6 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
 async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 5,
         errors: 3,
@@ -556,13 +519,11 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
     };
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert!(notes.is_empty());
 }
 
@@ -582,7 +543,6 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
         empty_provider,
     )
     .await;
-
     let empty_note_repo = NoteRepository::new(
         empty_fixture.db.clone(),
         djinn_core::events::EventBus::noop(),
@@ -608,7 +568,6 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
         serde_json::from_str(empty_taxonomy_json.as_deref().expect("taxonomy persisted"))
             .expect("deserialize taxonomy after empty success");
     assert_eq!(empty_taxonomy.extraction_quality.extracted, 0);
-
     // FAILED: the LLM call itself errored. Nothing is persisted — the failure
     // path returns before persisting the extraction taxonomy.
     let failed_fixture = make_fixture().await;
@@ -622,7 +581,6 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
         failed_provider,
     )
     .await;
-
     let failed_note_repo = NoteRepository::new(
         failed_fixture.db.clone(),
         djinn_core::events::EventBus::noop(),
@@ -656,7 +614,6 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
     // and record the dropped duplicate in `dedup_skipped`.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let dup_body = "## Situation\nA flaky extraction pipeline emitted the same case twice in one batch under a deterministic constraint.\n## Constraint\nThe durable note must be written once even when the model repeats it across the response.\n## Approach taken\nNormalize the title and note type and drop the second occurrence before any DB work happens.\n## Result\nOnly one durable case was created and the duplicate was counted as skipped.\n## Why it worked / failed\nThe normalized key collapsed the repeat without losing the reusable lesson.\n## Reusable lesson\nDeduplicate generated notes by a normalized title and type before creating them to avoid duplicate durable writes.\n## Related\n- intra-batch dedup\n- extraction quality gates";
     let json = serde_json::json!({
         "cases": [
@@ -668,7 +625,6 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(
         fixture.session_id.clone(),
         SessionTaxonomy::default(),
@@ -676,7 +632,6 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
         provider,
     )
     .await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let cases: Vec<_> = note_repo
         .list(&fixture.project.id, None)
@@ -690,7 +645,6 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
         1,
         "two notes with the same normalized title+type collapse to one"
     );
-
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
@@ -713,7 +667,6 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
 async fn llm_extraction_graceful_degradation_no_provider_configured() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 0,
@@ -733,11 +686,9 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         .with_level(true)
         .finish();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
-
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction(fixture.session_id.clone(), taxonomy, ctx).await;
     drop(guard);
-
     let captured = logs.take();
     assert!(
         captured.contains("llm_extraction: no LLM provider available; skipping extraction"),
@@ -751,13 +702,11 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         !captured.contains("dropping underspecified note at admission gate"),
         "missing-provider path must stay distinct from admission/quality-gate rejection; captured: {captured}"
     );
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert!(notes.is_empty());
 }
 
@@ -766,7 +715,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
-
     let existing = note_repo
         .create_db_note(
             &fixture.project.id,
@@ -795,7 +743,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         .expect("get existing before run")
         .expect("existing note before run")
         .confidence;
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -805,7 +752,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
@@ -831,9 +777,7 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
             djinn_provider::provider::StreamEvent::Done,
         ],
     ]));
-
     let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
-
     run_llm_extraction_with_provider_and_candidate_lookup(
         fixture.session_id.clone(),
         taxonomy,
@@ -842,21 +786,18 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
         semantic_duplicate_candidate_lookup,
     )
     .await;
-
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
     let dedup_notes: Vec<_> = notes.iter().filter(|n| n.note_type == "case").collect();
     assert_eq!(dedup_notes.len(), 1);
-
     let updated_existing = note_repo
         .get(&existing.id)
         .await
         .expect("get existing after run")
         .expect("existing note after run");
     assert!(updated_existing.confidence > starting_confidence);
-
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
@@ -873,7 +814,6 @@ async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_conf
 async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 1,
         errors: 0,
@@ -883,7 +823,6 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
@@ -906,7 +845,6 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
             djinn_provider::provider::StreamEvent::Done,
         ],
     ]));
-
     run_llm_extraction_with_provider_and_candidate_lookup(
         fixture.session_id.clone(),
         taxonomy,
@@ -915,13 +853,11 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         novelty_failure_candidate_lookup,
     )
     .await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "Fallback Novel Note");
 }
@@ -934,7 +870,6 @@ async fn llm_extraction_admission_gate_drops_pattern_with_no_required_sections()
     // it must not be persisted at confidence 0.5 and cleaned later.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 1,
         errors: 0,
@@ -944,13 +879,10 @@ async fn llm_extraction_admission_gate_drops_pattern_with_no_required_sections()
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = Arc::new(FakeProvider::text(
         r#"{"cases":[],"patterns":[{"title":"Underspecified Pattern Dropped","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
     ));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -960,7 +892,6 @@ async fn llm_extraction_admission_gate_drops_pattern_with_no_required_sections()
         notes.is_empty(),
         "admission gate must drop the underspecified pattern without writing any note (no working-spec fallback for malformed ADR-054 structure)"
     );
-
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
@@ -981,7 +912,6 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
     // been downgraded into a per-task working spec is now dropped entirely.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 1,
         errors: 1,
@@ -991,7 +921,6 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = Arc::new(FakeProvider::text(
         serde_json::json!({
             "cases": [],
@@ -1002,9 +931,7 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
             "pitfalls": []
         }).to_string(),
     ));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1014,7 +941,6 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
         notes.is_empty(),
         "admission gate must drop the pattern missing ADR-054 sections without writing a working spec"
     );
-
     let stored_json =
         SessionRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())
             .get_event_taxonomy_json(&fixture.session_id)
@@ -1033,7 +959,6 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
     let fixture = make_fixture().await;
     let ctx_structural = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
     let ctx_llm = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let messages = vec![
         Message {
             role: Role::Assistant,
@@ -1063,20 +988,17 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             metadata: None,
         },
     ];
-
     let taxonomy = crate::session_extraction::run_structural_extraction(
         fixture.session_id.clone(),
         messages,
         ctx_structural,
     )
     .await;
-
     assert!(taxonomy.is_some());
     let taxonomy = taxonomy.expect("taxonomy present");
     assert_eq!(taxonomy.files_changed, 1);
     assert_eq!(taxonomy.notes_written, 1);
     assert_eq!(taxonomy.tasks_transitioned, 1);
-
     fixture
         .db
         .ensure_initialized()
@@ -1087,35 +1009,28 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
             .get_event_taxonomy_json(&fixture.session_id)
             .await
             .expect("query session event_taxonomy");
-
     assert!(stored_json.is_some());
     let stored_taxonomy: SessionTaxonomy =
         serde_json::from_str(stored_json.as_deref().expect("stored taxonomy text"))
             .expect("deserialize stored taxonomy");
     assert_eq!(stored_taxonomy.files_changed, 1);
-
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx_llm, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert!(!all_notes.is_empty());
     let note_types: Vec<_> = all_notes.iter().map(|n| n.note_type.as_str()).collect();
     assert!(note_types.contains(&"case"));
     assert!(note_types.contains(&"pattern"));
     assert!(note_types.contains(&"pitfall"));
-
     for note in &all_notes {
         assert!((note.confidence - 0.5).abs() < 1e-9);
         assert!(note.content.contains(&fixture.session_id));
     }
 }
-
-// ─── AC7: applies_when anchor is persisted on durable extracted notes ─────────
 
 fn anchor_extraction_provider() -> Arc<FakeProvider> {
     let json = serde_json::json!({
@@ -1143,7 +1058,6 @@ fn anchor_extraction_provider() -> Arc<FakeProvider> {
 async fn llm_extraction_persists_applies_when_as_retrieval_anchor() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1153,25 +1067,20 @@ async fn llm_extraction_persists_applies_when_as_retrieval_anchor() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = anchor_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     let by_type: std::collections::HashMap<_, _> = all_notes
         .iter()
         .map(|n| (n.note_type.as_str(), n))
         .collect();
-
     let case = by_type.get("case").expect("case note written");
     let pattern = by_type.get("pattern").expect("pattern note written");
     let pitfall = by_type.get("pitfall").expect("pitfall note written");
-
     assert_eq!(
         case.retrieval_anchor.as_deref(),
         Some("When you need an objective situation sentence for a case note.")
@@ -1184,7 +1093,6 @@ async fn llm_extraction_persists_applies_when_as_retrieval_anchor() {
         pitfall.retrieval_anchor.as_deref(),
         Some("When a pitfall is buried inside a long body and not recalled.")
     );
-
     // The anchor is distinct from the body — the body still has all ADR-054
     // sections, and the anchor is a separate persisted field.
     for note in [case, pattern, pitfall] {
@@ -1201,18 +1109,15 @@ async fn llm_extraction_persists_note_without_anchor_when_model_omits_applies_wh
     // produces durable notes, just with a null anchor.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy::default();
     // Use the existing fake_extraction_provider (no anchor field on any note).
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
         .expect("list notes");
-
     assert_eq!(notes.len(), 3);
     for note in &notes {
         assert!(
@@ -1232,7 +1137,6 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     // concern) does not also drop the candidate and obscure the anchor test.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1254,7 +1158,6 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1267,7 +1170,6 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     );
 }
 
-// ─── ADR-054 admission gate: focused tests ────────────────────────────────────
 //
 // These tests cover the deterministic behavior of the extraction admission gate
 // introduced by [[u7h3]]. The gate runs in `process_extracted_note` BEFORE the
@@ -1375,7 +1277,6 @@ async fn admission_gate_passes_complete_case_note() {
     // preserved.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1385,7 +1286,6 @@ async fn admission_gate_passes_complete_case_note() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let case_content = complete_case_body();
     let json = serde_json::json!({
         "cases": [{
@@ -1400,7 +1300,6 @@ async fn admission_gate_passes_complete_case_note() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1429,7 +1328,6 @@ async fn admission_gate_passes_complete_case_note() {
         "durable body must contain the full ADR-054 section set"
     );
     assert!(created.content.contains("## Situation"));
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(stored.extracted, 1, "candidate counted as extracted");
     assert_eq!(
@@ -1446,7 +1344,6 @@ async fn admission_gate_drops_case_missing_required_section() {
     // admission_dropped == 1 on the run-metric row.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1456,7 +1353,6 @@ async fn admission_gate_drops_case_missing_required_section() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     // Build a case that is missing the `## Reusable lesson` section. We
     // remove the `## Reusable lesson` heading and its body line directly so
     // the test fixture is unambiguous about which section is missing.
@@ -1485,7 +1381,6 @@ async fn admission_gate_drops_case_missing_required_section() {
         body.contains("## Related"),
         "test fixture must keep the trailing Related section"
     );
-
     let json = serde_json::json!({
         "cases": [{
             "title": "Case Missing Reusable Lesson",
@@ -1497,7 +1392,6 @@ async fn admission_gate_drops_case_missing_required_section() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
@@ -1508,11 +1402,9 @@ async fn admission_gate_drops_case_missing_required_section() {
         .with_level(true)
         .finish();
     let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
-
     let guard = tracing::dispatcher::set_default(&dispatch);
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
     drop(guard);
-
     let captured = logs.take();
     assert!(
         captured.contains("llm_extraction: dropping underspecified note at admission gate"),
@@ -1522,7 +1414,6 @@ async fn admission_gate_drops_case_missing_required_section() {
         !captured.contains("llm_extraction: no LLM provider available; skipping extraction"),
         "provider-backed admission-gate rejection must not be misclassified as missing provider; captured: {captured}"
     );
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1532,7 +1423,6 @@ async fn admission_gate_drops_case_missing_required_section() {
         notes.is_empty(),
         "case missing ## Reusable lesson must be dropped at the gate (no create call)"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(stored.extracted, 1);
     assert_eq!(
@@ -1554,7 +1444,6 @@ async fn admission_gate_drops_short_body_note() {
     // the too-short-body signal does.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1564,14 +1453,12 @@ async fn admission_gate_drops_short_body_note() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     // All 7 case headings, with a body that is well under 220 chars.
     let short_body = "## Situation\nshort.\n## Constraint\nshort.\n## Approach taken\nshort.\n## Result\nshort.\n## Why it worked / failed\nshort.\n## Reusable lesson\nshort.\n## Related\n- short.";
     assert!(
         short_body.chars().count() < 220,
         "fixture must be short enough to trip the too-short-body signal"
     );
-
     let json = serde_json::json!({
         "cases": [{
             "title": "Short Body Case",
@@ -1582,9 +1469,7 @@ async fn admission_gate_drops_short_body_note() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1594,7 +1479,6 @@ async fn admission_gate_drops_short_body_note() {
         notes.is_empty(),
         "short-body case must be dropped at the gate (no create call)"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(stored.extracted, 1);
     assert_eq!(
@@ -1612,7 +1496,6 @@ async fn admission_gate_drops_low_paragraph_note() {
     // signal from the too-short-body signal.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1622,13 +1505,11 @@ async fn admission_gate_drops_low_paragraph_note() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let body = low_paragraph_pitfall_body();
     assert!(
         body.chars().count() >= 220,
         "fixture must clear the 220-char floor so only the paragraph signal fires"
     );
-
     let json = serde_json::json!({
         "cases": [],
         "patterns": [],
@@ -1639,9 +1520,7 @@ async fn admission_gate_drops_low_paragraph_note() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1651,7 +1530,6 @@ async fn admission_gate_drops_low_paragraph_note() {
         notes.is_empty(),
         "low-paragraph pitfall must be dropped at the gate (no create call)"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(stored.extracted, 1);
     assert_eq!(
@@ -1669,7 +1547,6 @@ async fn admission_gate_preserves_applies_when_and_scope_paths() {
     // retrieval_anchor or scope_paths the model returned.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1679,7 +1556,6 @@ async fn admission_gate_preserves_applies_when_and_scope_paths() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let json = serde_json::json!({
         "cases": [{
             "title": "Anchored Passing Case",
@@ -1692,9 +1568,7 @@ async fn admission_gate_preserves_applies_when_and_scope_paths() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1713,7 +1587,6 @@ async fn admission_gate_preserves_applies_when_and_scope_paths() {
         vec!["src/db/".to_string()],
         "scope_paths must reach the persisted note unchanged"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(
         stored.admission_dropped, 0,
@@ -1732,7 +1605,6 @@ async fn admission_gate_preserves_novelty_dedup() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
-
     let existing = note_repo
         .create_db_note(
             &fixture.project.id,
@@ -1753,7 +1625,6 @@ async fn admission_gate_preserves_novelty_dedup() {
         .expect("get existing before run")
         .expect("existing note before run")
         .confidence;
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -1763,7 +1634,6 @@ async fn admission_gate_preserves_novelty_dedup() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let provider = Arc::new(FakeProvider::script(vec![
         vec![
             djinn_provider::provider::StreamEvent::Delta(ContentBlock::Text {
@@ -1791,7 +1661,6 @@ async fn admission_gate_preserves_novelty_dedup() {
             djinn_provider::provider::StreamEvent::Done,
         ],
     ]));
-
     // Override the candidate lookup to surface the existing note as the only
     // semantic-duplicate candidate, so the novelty judge picks it.
     let _ = SEMANTIC_DUPLICATE_CANDIDATE_ID.set(existing.id.clone());
@@ -1814,7 +1683,6 @@ async fn admission_gate_preserves_novelty_dedup() {
                 score: 1.0,
             }]
         };
-
     run_llm_extraction_with_provider_and_candidate_lookup(
         fixture.session_id.clone(),
         taxonomy,
@@ -1823,7 +1691,6 @@ async fn admission_gate_preserves_novelty_dedup() {
         lookup,
     )
     .await;
-
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1835,7 +1702,6 @@ async fn admission_gate_preserves_novelty_dedup() {
         "dedup must NOT create a new case; only the existing note remains"
     );
     assert_eq!(case_notes[0].id, existing.id);
-
     let updated_existing = note_repo
         .get(&existing.id)
         .await
@@ -1845,7 +1711,6 @@ async fn admission_gate_preserves_novelty_dedup() {
         updated_existing.confidence > starting_confidence,
         "DUPLICATE_CONFIDENCE_SIGNAL must boost the existing note's confidence"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(
         stored.admission_dropped, 0,
@@ -1863,7 +1728,6 @@ async fn admission_gate_increments_metric_for_each_drop() {
     // counter of 2.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 4,
         errors: 2,
@@ -1873,7 +1737,6 @@ async fn admission_gate_increments_metric_for_each_drop() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     // Two of the three "complete" cases are intentionally not in this list —
     // the third is the short-body case whose `## Situation` body alone clears
     // the 220-char floor is too tricky to construct without also tripping the
@@ -1942,9 +1805,7 @@ async fn admission_gate_increments_metric_for_each_drop() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let notes = note_repo
         .list(&fixture.project.id, None)
@@ -1960,7 +1821,6 @@ async fn admission_gate_increments_metric_for_each_drop() {
         durable_count, 3,
         "exactly 3 candidates (case A, case B, pattern A) must be written; 2 are dropped"
     );
-
     let stored = extraction_quality_for(&fixture.db, &fixture.session_id).await;
     assert_eq!(
         stored.extracted, 5,
@@ -1990,7 +1850,6 @@ async fn admission_gate_does_not_affect_human_writes() {
     // happens in this test.
     let fixture = make_fixture().await;
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
-
     let created = note_repo
         .create_db_note_with_scope_and_retrieval_anchor(
             &fixture.project.id,
@@ -2003,7 +1862,6 @@ async fn admission_gate_does_not_affect_human_writes() {
         )
         .await
         .expect("human-authored note creates regardless of the gate");
-
     assert_eq!(created.title, "Human Authored Note");
     assert_eq!(
         created.retrieval_anchor.as_deref(),
@@ -2013,7 +1871,6 @@ async fn admission_gate_does_not_affect_human_writes() {
         created.parsed_scope_paths(),
         vec!["src/manual/".to_string()]
     );
-
     // No `run_llm_extraction_*` call happens in this test, so the
     // `event_taxonomy` for this session does not exist and there is no
     // `admission_dropped` counter to consult. The above note creation IS
@@ -2039,7 +1896,6 @@ async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() 
     // written from the extraction path and is surfaced via health.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -2049,9 +1905,7 @@ async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() 
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let body = case_body_missing_reusable_lesson();
-
     let json = serde_json::json!({
         "cases": [{
             "title": "Dropped In Health Case",
@@ -2062,9 +1916,7 @@ async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() 
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let health = note_repo
         .health(&fixture.project.id)
@@ -2084,7 +1936,6 @@ async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
     // Also assert health() reports 0.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-
     let taxonomy = SessionTaxonomy {
         files_changed: 2,
         errors: 1,
@@ -2094,7 +1945,6 @@ async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
         tasks_transitioned: 1,
         ..SessionTaxonomy::default()
     };
-
     let json = serde_json::json!({
         "cases": [{
             "title": "Complete No-Drop Case",
@@ -2106,9 +1956,7 @@ async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
     })
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
-
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-
     let consolidation_repo = NoteConsolidationRepository::new(fixture.db.clone());
     let metrics = consolidation_repo
         .list_run_metrics(&fixture.project.id, Some("extraction"), 10)
@@ -2122,7 +1970,6 @@ async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
         extraction_metric.admission_dropped_note_count, 0,
         "admission_dropped_note_count must be 0 when no candidates are dropped"
     );
-
     let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
     let health = note_repo
         .health(&fixture.project.id)

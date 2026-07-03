@@ -32,7 +32,6 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
     let project = create_test_project(&db).await;
     let epic_repo = EpicRepository::new(db.clone(), events.clone());
     let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
-
     let subject_epic = create_epic(
         &db,
         &events,
@@ -62,7 +61,6 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
         )
         .await
         .expect("wire epic blocker relationship");
-
     let sibling_epic = create_epic(
         &db,
         &events,
@@ -88,7 +86,6 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
             .await
             .expect("link epic to proposal");
     }
-
     let task = create_task(
         &db,
         &events,
@@ -98,7 +95,6 @@ async fn epic_context_includes_blocking_and_sibling_sections() {
     )
     .await;
     let epic_context = lead_epic_context(db, &task).await;
-
     assert_contains_all(
         &epic_context,
         &[
@@ -117,9 +113,7 @@ async fn epic_context_omits_sections_when_no_blockers_or_proposal() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Standalone epic", "Standalone task").await;
-
     let epic_context = lead_epic_context(db, &task).await;
-
     for section in ["### Blocking Epics", "### Proposal Sibling Epics"] {
         assert!(
             !epic_context.contains(section),
@@ -133,7 +127,6 @@ async fn missing_activity_yields_none_activity_text() {
     let db = Database::ephemeral().await.expect("create ephemeral db");
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "No-activity epic", "No-activity task").await;
-
     assert!(
         lead_prompt_context(db, &task).await.activity_text.is_none(),
         "task with no activity entries should yield None activity_text"
@@ -151,9 +144,7 @@ async fn conflict_context_formats_files_and_preserves_prompt_fields() {
         merge_target: "main".to_string(),
     };
     let role = LeadRole;
-
     let ctx = assemble_for_role(db, &task, &role, Some(&conflict), "", None, &[], &[]).await;
-
     assert_contains_all(
         ctx.conflict_files
             .as_deref()
@@ -179,7 +170,6 @@ async fn prompt_sections_append_in_canonical_order() {
         source("repo-a", "Repository A"),
         source("repo-b", "Repository B"),
     ];
-
     let ctx = assemble_for_role(
         db,
         &task,
@@ -191,7 +181,6 @@ async fn prompt_sections_append_in_canonical_order() {
         &sources,
     )
     .await;
-
     assert_contains_all(
         &ctx.system_prompt,
         &[
@@ -217,7 +206,6 @@ async fn prompt_sections_append_in_canonical_order() {
 #[test]
 fn format_conflict_files_cases() {
     assert!(format_conflict_files(None).is_none());
-
     let ctx = MergeConflictMetadata {
         conflicting_files: vec![
             "src/main.rs".to_string(),
@@ -237,7 +225,6 @@ fn format_conflict_files_cases() {
             "\n",
         ],
     );
-
     let empty = MergeConflictMetadata {
         conflicting_files: vec![],
         base_branch: "feature".to_string(),
@@ -250,7 +237,6 @@ fn format_conflict_files_cases() {
 fn format_activity_text_absence_and_comment_counts() {
     assert!(format_activity_text(&None, 3).is_none());
     assert!(format_activity_text(&Some(vec![]), 3).is_none());
-
     let entries = Some(vec![
         activity("1", "lead", "comment", r#"{"body":"Good work"}"#, 0),
         activity("2", "reviewer", "comment", r#"{"body":"Looks good"}"#, 1),
@@ -271,7 +257,6 @@ fn apply_prompt_sections_cases() {
         apply_prompt_sections("Base prompt.", "", None, &[], &[]),
         "Base prompt."
     );
-
     let result = apply_prompt_sections(
         "Base system prompt content.",
         "Custom extension text.",
@@ -279,7 +264,6 @@ fn apply_prompt_sections_cases() {
         &[skill("test-skill", "A test skill", "Skill body.", false)],
         &[source("sibling-repo", "Sibling")],
     );
-
     assert_contains_all(
         &result,
         &[
@@ -312,11 +296,9 @@ impl AgentRole for NoEpicRole {
     fn config(&self) -> &crate::roles::RoleConfig {
         &NO_EPIC_CONFIG
     }
-
     fn render_prompt(&self, task: &Task, ctx: &TaskContext) -> String {
         crate::prompts::render_prompt_for_role(self.config(), task, ctx)
     }
-
     fn needs_epic_context(&self) -> bool {
         false
     }
@@ -337,9 +319,7 @@ async fn epic_context_not_loaded_when_role_does_not_need_it() {
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Epic", "Task").await;
     let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
-
     assert!(load_epic_context(&task, false, &app_state).await.is_none());
-
     let role = NoEpicRole;
     let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
     assert!(ctx.epic_context.is_none());
@@ -352,11 +332,9 @@ async fn load_epic_context_returns_context_when_epic_exists() {
     let events = EventBus::noop();
     let task = create_project_epic_task(&db, &events, "Test Epic Title", "Test task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
-
     let result = load_epic_context(&task, true, &app_state)
         .await
         .expect("should return Some");
-
     assert_contains_all(
         &result,
         &[
@@ -375,7 +353,6 @@ async fn load_knowledge_context_returns_none_when_no_notes() {
     let task =
         create_project_epic_task(&db, &events, "Knowledge test epic", "Knowledge task").await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
-
     assert!(
         load_knowledge_context(&task, None, &app_state)
             .await
@@ -390,7 +367,6 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
     let project = create_test_project(&db).await;
     let epic_repo = EpicRepository::new(db.clone(), events.clone());
     let proposal_repo = ProposalRepository::new(db.clone(), events.clone());
-
     let subject_epic = create_epic(
         &db,
         &events,
@@ -425,7 +401,6 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
         )
         .await
         .expect("wire blocker");
-
     let sibling_epic = create_epic(
         &db,
         &events,
@@ -451,13 +426,11 @@ async fn load_epic_context_includes_blocker_and_sibling_sections_in_order() {
             .await
             .expect("link epic");
     }
-
     let task = create_task(&db, &events, &subject_epic.id, "Subject task", None).await;
     let app_state = agent_context_from_db(db, CancellationToken::new());
     let result = load_epic_context(&task, true, &app_state)
         .await
         .expect("should return Some");
-
     assert_contains_all(
         &result,
         &[
@@ -515,8 +488,6 @@ fn activity(
     }
 }
 
-// ── Worker resume note tests (y8pv / 48ru) ─────────────────────────────────
-
 fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
     djinn_runtime::ResumeLifecycleMetadata {
         considered: true,
@@ -560,7 +531,6 @@ async fn worker_resume_note_injected_for_worker_role() {
     let metadata = resume_metadata_with_checkpoint();
     let note = build_worker_resume_note(role.config().name, Some(&metadata));
     assert!(note.is_some(), "worker role should receive resume note");
-
     let ctx = assemble_for_role_with_resume(db, &task, &role, note.as_deref()).await;
     assert!(ctx.worker_resume_note.is_some());
     assert_contains_all(
@@ -590,7 +560,6 @@ async fn worker_resume_note_included_for_auto_submit_source() {
     let metadata = resume_metadata_with_auto_submit();
     let note = build_worker_resume_note(role.config().name, Some(&metadata));
     assert!(note.is_some());
-
     let note_text = note.unwrap();
     assert_contains_all(
         &note_text,
@@ -603,16 +572,12 @@ async fn worker_resume_note_included_for_auto_submit_source() {
 #[tokio::test]
 async fn worker_resume_note_absent_for_non_worker_roles() {
     let metadata = resume_metadata_with_checkpoint();
-
     // Lead role should NOT receive worker-resume instructions.
     assert!(build_worker_resume_note("lead", Some(&metadata)).is_none());
-
     // Reviewer role should NOT receive worker-resume instructions.
     assert!(build_worker_resume_note("reviewer", Some(&metadata)).is_none());
-
     // Planner role should NOT receive worker-resume instructions.
     assert!(build_worker_resume_note("planner", Some(&metadata)).is_none());
-
     // Architect role should NOT receive worker-resume instructions.
     assert!(build_worker_resume_note("architect", Some(&metadata)).is_none());
 }
@@ -650,11 +615,9 @@ async fn non_worker_role_prompt_has_no_resume_section() {
     let task = create_project_epic_task(&db, &events, "No-resume epic", "No-resume task").await;
     let role = LeadRole;
     let metadata = resume_metadata_with_checkpoint();
-
     // Even with metadata present, the lead role gets no resume note.
     let note = build_worker_resume_note(role.config().name, Some(&metadata));
     assert!(note.is_none());
-
     let ctx = assemble_for_role_with_resume(db, &task, &role, None).await;
     assert!(ctx.worker_resume_note.is_none());
     assert!(!ctx.system_prompt.contains("## Resume Context"));

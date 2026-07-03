@@ -20,7 +20,6 @@ pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usiz
         })
         .take(max)
         .collect();
-
     // Reverse back to chronological order
     high_signal
         .into_iter()
@@ -55,7 +54,6 @@ pub fn extract_worker_context(
     let Some(entries) = activity else {
         return (None, None);
     };
-
     // Last work_submitted entry — contains summary and remaining_concerns.
     let (worker_summary, worker_concerns) = entries
         .iter()
@@ -89,7 +87,6 @@ pub fn extract_worker_context(
             (summary, concerns)
         })
         .unwrap_or((None, None));
-
     (worker_summary, worker_concerns)
 }
 
@@ -116,22 +113,18 @@ pub async fn pr_review_feedback_context(task_id: &str, app_state: &SlotContext) 
         })
         .await
         .ok()?;
-
     let entry = entries.into_iter().next()?;
     let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
-
     let round = payload.get("round").and_then(|v| v.as_u64()).unwrap_or(1);
     let pr_url = payload.get("pr_url").and_then(|v| v.as_str()).unwrap_or("");
     let pull_number = payload
         .get("pull_number")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
-
     let mut lines = Vec::new();
     lines.push(format!(
         "**PR Review Feedback (Round {round})** — [{pr_url}]({pr_url})"
     ));
-
     // Top-level change-request reviews.
     if let Some(reviews) = payload
         .get("change_request_reviews")
@@ -152,7 +145,6 @@ pub async fn pr_review_feedback_context(task_id: &str, app_state: &SlotContext) 
             lines.push(format!("- @{reviewer} — {html_url}"));
         }
     }
-
     // Inline code comments.
     if let Some(comments) = payload.get("inline_comments").and_then(|v| v.as_array())
         && !comments.is_empty()
@@ -183,15 +175,11 @@ pub async fn pr_review_feedback_context(task_id: &str, app_state: &SlotContext) 
             lines.push(format!("- {location} (@{reviewer}): {truncated}"));
         }
     }
-
     if lines.len() <= 1 {
         return None;
     }
-
     Some(lines.join("\n"))
 }
-
-// ─── Utility functions ────────────────────────────────────────────────────────
 
 /// Truncate feedback text using 60/40 head+tail split.
 fn truncate_feedback(text: &str, max: usize) -> String {
@@ -255,7 +243,6 @@ pub fn runtime_env_diagnostics(
     let xdg_config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| "<unset>".to_string());
     let xdg_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| "<unset>".to_string());
     let path = std::env::var("PATH").unwrap_or_else(|_| "<unset>".to_string());
-
     let sessions_dir = PathBuf::from(&home).join(".djinn").join("sessions");
     let sessions_db = sessions_dir.join("sessions").join("sessions.db");
     format!(
@@ -275,8 +262,6 @@ pub fn runtime_env_diagnostics(
         path,
     )
 }
-
-// ─── Task / project helpers ───────────────────────────────────────────────────
 
 pub async fn load_task(task_id: &str, app_state: &SlotContext) -> anyhow::Result<Task> {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -387,14 +372,11 @@ pub const COMBINED_BRIEF_SECTION_FLOOR_CHARS: usize = 3000;
 pub fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
     let total = COMBINED_BRIEF_TOTAL_CHARS;
     let floor = COMBINED_BRIEF_SECTION_FLOOR_CHARS.min(total / 2);
-
     // Shared pool available above the two guaranteed floors.
     let shared = total.saturating_sub(2 * floor);
-
     // How much each section wants ABOVE its floor.
     let rev_extra_want = reviewer.len().saturating_sub(floor);
     let ci_extra_want = ci.len().saturating_sub(floor);
-
     let (rev_extra, ci_extra) = if rev_extra_want + ci_extra_want <= shared {
         // Both fit within the shared pool — give each exactly what it wants.
         (rev_extra_want, ci_extra_want)
@@ -415,7 +397,6 @@ pub fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
             (half, shared - half)
         }
     };
-
     (
         truncate_feedback(reviewer, floor + rev_extra),
         truncate_feedback(ci, floor + ci_extra),
@@ -432,8 +413,7 @@ pub fn budget_combined_sections(reviewer: &str, ci: &str) -> (String, String) {
 /// The combined-brief path applies its own fair per-section budget downstream
 /// (`budget_combined_sections`), so no pre-clipping happens here.
 ///
-/// Returns the comment body, or `None` when there's no in-cycle CI/verification
-/// comment.
+/// Returns the comment body, or `None` when there's no in-cycle CI/verification comment.
 pub fn raw_ci_feedback_in_cycle(
     activity: &[djinn_core::models::ActivityEntry],
     not_before: Option<&str>,
@@ -448,7 +428,6 @@ pub fn raw_ci_feedback_in_cycle(
             Some(floor) => e.created_at.as_str() >= floor,
             None => true,
         })?;
-
     let payload = serde_json::from_str::<serde_json::Value>(&entry.payload).ok()?;
     payload
         .get("body")
@@ -470,7 +449,6 @@ pub fn raw_ci_feedback_in_cycle(
 pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContext) -> String {
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
-
     // PR review feedback takes priority over generic activity log comments.
     if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
         // Find when the current reviewer-feedback cycle was logged so we only
@@ -480,7 +458,6 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
             .rev()
             .find(|e| e.event_type == PR_REVIEW_FEEDBACK_EVENT && e.actor_role == "system")
             .map(|e| e.created_at.clone());
-
         // When this same cycle also produced a CI failure, compose BOTH sources
         // into one directive. Otherwise keep today's reviewer-only behavior.
         if let Some(ci_raw) = raw_ci_feedback_in_cycle(&activity, review_cycle_floor.as_deref()) {
@@ -498,7 +475,6 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
                 Resolve (A) and (B) together, then push fixup commits to the same branch. Do not open a new PR."
             );
         }
-
         // Reviewer-only: the single section gets the full single-source budget.
         let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
         return format!(
@@ -507,9 +483,7 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
             Push fixup commits to the same branch. Do not open a new PR."
         );
     }
-
     let sections = recent_feedback(&activity, 3);
-
     if sections.is_empty() {
         "Start by understanding the task context and execute it fully before stopping.".to_string()
     } else {
@@ -519,5 +493,3 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
         )
     }
 }
-
-// ─── Provider helpers ─────────────────────────────────────────────────────────

@@ -8,14 +8,11 @@ use crate::test_helpers;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
 
-// ─── Test helpers ─────────────────────────────────────────────────────────
-
 fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-git-")
         .tempdir()
         .expect("create temp dir");
-
     let run_git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(args)
@@ -29,20 +26,16 @@ fn init_git_repo_with_dirty_file() -> tempfile::TempDir {
             String::from_utf8_lossy(&out.stderr)
         );
     };
-
     run_git(&["init"]);
     run_git(&["config", "--local", "user.email", "test@test.com"]);
     run_git(&["config", "--local", "user.name", "Test User"]);
     run_git(&["config", "--local", "commit.gpgsign", "false"]);
-
     std::fs::write(dir.path().join("README.md"), "hello\n").expect("write readme");
     run_git(&["add", "README.md"]);
     run_git(&["commit", "-m", "init"]);
     run_git(&["branch", "-m", "main"]);
-
     // Make a dirty tracked edit so the fingerprint computes a Diff.
     std::fs::write(dir.path().join("README.md"), "hello\ndirty\n").expect("write dirty");
-
     dir
 }
 
@@ -68,8 +61,6 @@ async fn create_run_with_workspace(
     id
 }
 
-// ── rejected submission fingerprint persistence ────────────────────────
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
     let db = test_helpers::create_test_db();
@@ -78,7 +69,6 @@ async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     let worktree = init_git_repo_with_dirty_file();
     let _run_id = create_run_with_workspace(
         &db,
@@ -87,16 +77,13 @@ async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
         Some(worktree.path().to_str().unwrap()),
     )
     .await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
         "acceptance_criteria": [],
         "feedback": "needs work"
     }));
-
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo
         .latest_for_task(&task.id)
@@ -119,7 +106,6 @@ async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     // Create a clean git repo with no dirty changes.
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-nodiff-")
@@ -147,7 +133,6 @@ async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
     run_git(&["commit", "-m", "init"]);
     run_git(&["branch", "-m", "main"]);
     // No dirty edits — NoDiff.
-
     let _run_id = create_run_with_workspace(
         &db,
         &project.id,
@@ -155,16 +140,13 @@ async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
         Some(dir.path().to_str().unwrap()),
     )
     .await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
         "acceptance_criteria": [],
         "feedback": "needs work but no diff"
     }));
-
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
@@ -181,19 +163,15 @@ async fn rejected_review_skips_persistence_when_no_worktree() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     // Task run with no workspace_path.
     let _run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
         "acceptance_criteria": [],
         "feedback": "no worktree available"
     }));
-
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
@@ -210,7 +188,6 @@ async fn accepted_review_does_not_record_rejected_fingerprint() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     let worktree = init_git_repo_with_dirty_file();
     let _run_id = create_run_with_workspace(
         &db,
@@ -219,16 +196,13 @@ async fn accepted_review_does_not_record_rejected_fingerprint() {
         Some(worktree.path().to_str().unwrap()),
     )
     .await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "approved",
         "acceptance_criteria": [],
         "feedback": null
     }));
-
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
     assert!(
@@ -248,7 +222,6 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     let worktree = init_git_repo_with_dirty_file();
     let run1_id = create_run_with_workspace(
         &db,
@@ -257,7 +230,6 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
         Some(worktree.path().to_str().unwrap()),
     )
     .await;
-
     // Record the rejection via handle_submit_review.
     let payload = Some(serde_json::json!({
         "task_id": task.id,
@@ -266,7 +238,6 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
         "feedback": "needs work"
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db.clone());
     let latest = integrity_repo
         .latest_for_task(&task.id)
@@ -275,7 +246,6 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
         .expect("rejection must be recorded");
     assert_eq!(latest.task_run_id.as_deref(), Some(run1_id.as_str()));
     assert_eq!(latest.no_progress_streak, 1);
-
     // Create a new task run (simulating redispatch).
     let _run2_id = create_run_with_workspace(
         &db,
@@ -284,7 +254,6 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
         Some(worktree.path().to_str().unwrap()),
     )
     .await;
-
     // The latest rejection should still be from run 1 (cross-run persistence).
     let latest_after_redispatch = integrity_repo
         .latest_for_task(&task.id)
@@ -312,9 +281,7 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     let run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
-
     // First rejection.
     record_rejected_integrity_entry(
         &task.id,
@@ -325,7 +292,6 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
         "sha256:first-reject",
     )
     .await;
-
     let integrity_repo = TaskRejectedSubmissionIntegrityRepository::new(db.clone());
     let latest = integrity_repo
         .latest_for_task(&task.id)
@@ -334,7 +300,6 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
         .expect("first rejection must be recorded");
     assert_eq!(latest.no_progress_streak, 1);
     assert_eq!(latest.diff_fingerprint, "sha256:first-reject");
-
     // Second rejection (streak should be 2).
     record_rejected_integrity_entry(
         &task.id,
@@ -345,7 +310,6 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
         "sha256:second-reject",
     )
     .await;
-
     let latest2 = integrity_repo
         .latest_for_task(&task.id)
         .await
@@ -355,7 +319,6 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
     assert_eq!(latest2.diff_fingerprint, "sha256:second-reject");
 }
 
-// ── End-to-end submission fingerprint persistence regression tests ────────
 //
 // These tests tie together accepted/auto-submit shared-fingerprint
 // persistence and rejected task-level fingerprint reload semantics.
@@ -368,15 +331,15 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
 ///
 /// Sets up a single temp git repo with dirty changes, then:
 /// 1. Accepts a submission via the model-called `submit_work` path with
-///    `auto_submit_review_metadata` — the finalize handler computes a
-///    fingerprint from the worktree and persists it in
-///    `auto_submit_reviews.diff_fingerprint`.
+/// `auto_submit_review_metadata` — the finalize handler computes a
+/// fingerprint from the worktree and persists it in
+/// `auto_submit_reviews.diff_fingerprint`.
 /// 2. Rejects a submission via the `submit_review` path with
-///    `verdict: "rejected"` — the handler computes a fingerprint from the
-///    **same** worktree and persists it in
-///    `task_rejected_submission_integrity.diff_fingerprint`.
+/// `verdict: "rejected"` — the handler computes a fingerprint from the
+/// **same** worktree and persists it in
+/// `task_rejected_submission_integrity.diff_fingerprint`.
 /// 3. Asserts both fingerprints are equal: the shared helper produces
-///    deterministic digests for identical worktree state.
+/// deterministic digests for identical worktree state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_helper() {
     let db = test_helpers::create_test_db();
@@ -384,17 +347,12 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
-
     // Create a single shared worktree with dirty changes.
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_str().unwrap().to_string();
-
-    // ── Path 1: accepted auto-submit ──────────────────────────────────
-
     let task_accepted = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let run_accepted =
         create_run_with_workspace(&db, &project.id, &task_accepted.id, Some(&worktree_path)).await;
-
     // Compute the expected fingerprint directly from the shared helper.
     let expected_fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
         .await
@@ -403,7 +361,6 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
         .fingerprint()
         .expect("dirty worktree must produce a Diff fingerprint")
         .to_string();
-
     // Submit through the model-called path with auto_submit_review_metadata.
     let accepted_payload = Some(serde_json::json!({
         "task_id": task_accepted.short_id,
@@ -423,7 +380,6 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
             "no_progress_streak": 0
         }
     }));
-
     let ok = process_finalize_payload_with_outcome(
         &accepted_payload,
         "submit_work",
@@ -432,7 +388,6 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
     )
     .await;
     assert!(ok, "accepted submit must succeed");
-
     let accepted_records =
         djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db.clone())
             .list_for_task_run(&run_accepted)
@@ -448,22 +403,16 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
         accepted_fingerprint, &expected_digest,
         "accepted fingerprint must match the shared helper digest"
     );
-
-    // ── Path 2: rejected review ───────────────────────────────────────
-
     let task_rejected = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let _run_rejected =
         create_run_with_workspace(&db, &project.id, &task_rejected.id, Some(&worktree_path)).await;
-
     let rejected_payload = Some(serde_json::json!({
         "task_id": task_rejected.id,
         "verdict": "rejected",
         "acceptance_criteria": [],
         "feedback": "needs work"
     }));
-
     process_finalize_payload(&rejected_payload, "submit_review", &task_rejected.id, &ctx).await;
-
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
     let rejected_latest = integrity_repo
@@ -471,15 +420,11 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
         .await
         .unwrap()
         .expect("rejected path must record a fingerprint");
-
     let rejected_fingerprint = &rejected_latest.diff_fingerprint;
     assert_eq!(
         rejected_fingerprint, &expected_digest,
         "rejected fingerprint must match the shared helper digest"
     );
-
-    // ── The two paths produce comparable digests ──────────────────────
-
     assert_eq!(
         accepted_fingerprint, rejected_fingerprint,
         "accepted and rejected paths must produce identical fingerprints \
@@ -502,9 +447,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
-    // ── Task run 1: reject ────────────────────────────────────────────
-
     let worktree_run1 = init_git_repo_with_dirty_file();
     let run1_id = create_run_with_workspace(
         &db,
@@ -513,7 +455,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
         Some(worktree_run1.path().to_str().unwrap()),
     )
     .await;
-
     // Compute the expected rejected fingerprint from the worktree.
     let rejected_fp = djinn_git::compute_submission_diff_fingerprint(worktree_run1.path())
         .await
@@ -522,7 +463,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
         .fingerprint()
         .expect("dirty worktree must produce Diff")
         .to_string();
-
     // Record the rejection.
     let payload = Some(serde_json::json!({
         "task_id": task.id,
@@ -531,7 +471,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
         "feedback": "not enough tests"
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(
             db.clone(),
@@ -544,9 +483,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
     assert_eq!(latest_run1.diff_fingerprint, rejected_digest);
     assert_eq!(latest_run1.task_run_id.as_deref(), Some(run1_id.as_str()));
     assert_eq!(latest_run1.no_progress_streak, 1);
-
-    // ── Task run 2: redispatch (new worktree, no changes yet) ────────
-
     let worktree_run2 = tempfile::Builder::new()
         .prefix("djinn-test-run2-")
         .tempdir()
@@ -583,7 +519,6 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
     run_git(worktree_run2.path(), &["commit", "-m", "init"]);
     run_git(worktree_run2.path(), &["branch", "-m", "main"]);
     // No dirty edits — clean worktree.
-
     let run2_id = create_run_with_workspace(
         &db,
         &project.id,
@@ -591,9 +526,7 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
         Some(worktree_run2.path().to_str().unwrap()),
     )
     .await;
-
     // ── Reload: the latest_for_task query must still see run 1's rejection.
-
     let latest_after_redispatch = integrity_repo
         .latest_for_task(&task.id)
         .await
@@ -642,10 +575,8 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     // Task run with NO workspace_path (historical case).
     let _run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
@@ -653,7 +584,6 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
         "feedback": "historical run, no workspace"
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     // The fingerprint must not be recorded.
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
@@ -662,7 +592,6 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
         latest.is_none(),
         "historical/no-worktree case must not produce a rejected fingerprint"
     );
-
     // A structured event must be emitted indicating the skip.
     let evts = events.lock().expect("events mutex");
     let unavailable_events: Vec<_> = evts
@@ -685,8 +614,7 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
     );
 }
 
-/// AC3: Historical/unavailable worktree behavior — workspace_path does not
-/// exist on disk.
+/// AC3: Historical/unavailable worktree behavior — workspace_path does not exist on disk.
 ///
 /// When the task run has a `workspace_path` but the directory has been
 /// deleted (e.g. after a cleanup or eviction), rejected-fingerprint
@@ -709,7 +637,6 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     // Task run with a workspace_path that does not exist on disk.
     let _run_id = create_run_with_workspace(
         &db,
@@ -718,7 +645,6 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
         Some("/nonexistent/path/to/workspace"),
     )
     .await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
@@ -726,7 +652,6 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
         "feedback": "workspace deleted after cleanup"
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     // The fingerprint must not be recorded.
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
@@ -735,7 +660,6 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
         latest.is_none(),
         "nonexistent worktree path must not produce a rejected fingerprint"
     );
-
     // A structured event must be emitted indicating the skip.
     let evts = events.lock().expect("events mutex");
     let unavailable_events: Vec<_> = evts
@@ -768,7 +692,6 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
     let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-
     // Create a clean git repo with no dirty changes.
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-nodiff-event-")
@@ -796,7 +719,6 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
     run_git(&["commit", "-m", "init"]);
     run_git(&["branch", "-m", "main"]);
     // No dirty edits — NoDiff.
-
     let _run_id = create_run_with_workspace(
         &db,
         &project.id,
@@ -804,7 +726,6 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
         Some(dir.path().to_str().unwrap()),
     )
     .await;
-
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
@@ -812,7 +733,6 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
         "feedback": "clean worktree, no diff"
     }));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
-
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
     let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
@@ -820,7 +740,6 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
         latest.is_none(),
         "NoDiff worktree must not produce a rejected fingerprint"
     );
-
     // The submission_fingerprint_unavailable event must be emitted with "no_diff".
     let evts = events.lock().expect("events mutex");
     let unavailable_events: Vec<_> = evts
@@ -858,7 +777,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
     use djinn_core::events::{DjinnEventEnvelope, EventBus};
     use djinn_core::models::{AutoSubmitTriggerReason, TaskRunTrigger, VerifyRunRecord};
     use djinn_db::repositories::task_run::CreateTaskRunParams;
-
     fn ctx_with_events(
         db: djinn_db::Database,
         events: Arc<Mutex<Vec<DjinnEventEnvelope>>>,
@@ -870,7 +788,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         });
         ctx
     }
-
     fn make_settlement(
         task_run_id: &str,
         eligible: bool,
@@ -923,15 +840,11 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             remaining_concerns: vec![],
         }
     }
-
-    // ── Accepted (eligible) settlement ────────────────────────────────
-
     let db = test_helpers::create_test_db();
     let events_a = Arc::new(Mutex::new(Vec::new()));
     let ctx_a = ctx_with_events(db.clone(), Arc::clone(&events_a));
     let project = test_helpers::create_test_project(&db).await;
     let epic = test_helpers::create_test_epic(&db, &project.id).await;
-
     let task_a = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let run_a = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
@@ -946,11 +859,9 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         })
         .await
         .expect("create run_a");
-
     let shared_fingerprint = "sha256:shared-fp-from-helper";
     let mut output_a = crate::output_parser::ParsedAgentOutput::empty();
     output_a.auto_submit = Some(make_settlement(&run_a, true, shared_fingerprint));
-
     let outcome_a =
         crate::lifecycle::teardown::settle_auto_submit_if_eligible(&task_a.id, &ctx_a, &output_a)
             .await;
@@ -958,7 +869,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         outcome_a,
         crate::lifecycle::teardown::AutoSubmitSettlementOutcome::Submitted
     );
-
     let review_records =
         djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db.clone())
             .list_for_task_run(&run_a)
@@ -966,9 +876,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             .unwrap();
     assert_eq!(review_records.len(), 1, "accepted must persist review");
     assert_eq!(review_records[0].diff_fingerprint, shared_fingerprint);
-
-    // ── Rejected (ineligible) settlement ──────────────────────────────
-
     let events_r = Arc::new(Mutex::new(Vec::new()));
     let ctx_r = ctx_with_events(db.clone(), Arc::clone(&events_r));
     let task_r = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
@@ -985,10 +892,8 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         })
         .await
         .expect("create run_r");
-
     let mut output_r = crate::output_parser::ParsedAgentOutput::empty();
     output_r.auto_submit = Some(make_settlement(&run_r, false, shared_fingerprint));
-
     let outcome_r =
         crate::lifecycle::teardown::settle_auto_submit_if_eligible(&task_r.id, &ctx_r, &output_r)
             .await;
@@ -996,7 +901,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         outcome_r,
         crate::lifecycle::teardown::AutoSubmitSettlementOutcome::Skipped
     );
-
     // Rejected path should NOT create an auto_submit_review (settlement skipped).
     let review_records_r =
         djinn_db::repositories::verify_run::AutoSubmitReviewRepository::new(db.clone())
@@ -1007,7 +911,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         review_records_r.is_empty(),
         "rejected settlement must not persist review"
     );
-
     // But must persist in task_rejected_submission_integrity.
     let integrity_repo =
         djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
@@ -1020,9 +923,6 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
         rejected_latest.diff_fingerprint, shared_fingerprint,
         "rejected settlement fingerprint must match the shared fingerprint"
     );
-
-    // ── Both store the same comparable fingerprint ────────────────────
-
     assert_eq!(
         review_records[0].diff_fingerprint, rejected_latest.diff_fingerprint,
         "accepted review and rejected integrity must store identical fingerprints \

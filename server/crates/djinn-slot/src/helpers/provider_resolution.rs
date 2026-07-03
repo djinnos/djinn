@@ -8,8 +8,6 @@
 
 use crate::host::SlotContext;
 
-// ─── Pure provider identification ────────────────────────────────────────────
-
 pub fn format_family_for_provider(
     provider_id: &str,
     model_id: &str,
@@ -90,8 +88,6 @@ pub fn default_base_url(provider_id: &str) -> String {
     }
 }
 
-// ─── Credential types ────────────────────────────────────────────────────────
-
 /// Resolved provider credentials — either an API key from the vault or an
 /// OAuth-derived `ProviderConfig` that already carries the right base URL,
 /// auth method, and model defaults.
@@ -112,8 +108,6 @@ impl ProviderCredential {
     }
 }
 
-// ─── Credential loading (delegated to host) ──────────────────────────────────
-
 pub async fn load_provider_credential(
     provider_id: &str,
     ctx: &SlotContext,
@@ -132,8 +126,6 @@ pub fn parse_model_id(model_id: &str) -> anyhow::Result<(String, String)> {
     };
     Ok((provider_id.to_owned(), model_name.to_owned()))
 }
-
-// ─── Telemetry ──────────────────────────────────────────────────────────────
 
 pub(crate) fn build_telemetry_meta(
     agent_type_str: &str,
@@ -156,8 +148,6 @@ pub(crate) fn build_telemetry_meta_with_attribution(
         user_id: user_id.map(str::to_owned),
     }
 }
-
-// ─── Provider construction ──────────────────────────────────────────────────
 
 /// Build an [`LlmProvider`] from a resolved model + credential.
 pub(crate) fn build_provider_from_resolved(

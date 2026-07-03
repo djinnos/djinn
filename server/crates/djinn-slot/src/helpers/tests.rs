@@ -39,7 +39,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<NeighborsResult, String> {
         Err("unused in test".into())
     }
-
     async fn ranked(
         &self,
         _: &ProjectCtx,
@@ -50,11 +49,9 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<RankedNode>, String> {
         Ok(self.ranked.clone())
     }
-
     async fn implementations(&self, _: &ProjectCtx, _: &str) -> Result<Vec<String>, String> {
         Err("unused in test".into())
     }
-
     async fn impact(
         &self,
         _: &ProjectCtx,
@@ -72,7 +69,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
         let entries = self.impacts.get(key).cloned().unwrap_or_default();
         Ok(ImpactResult::Detailed(entries))
     }
-
     async fn search(
         &self,
         _: &ProjectCtx,
@@ -82,7 +78,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<SearchHit>, String> {
         Err("unused in test".into())
     }
-
     async fn cycles(
         &self,
         _: &ProjectCtx,
@@ -91,7 +86,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<CycleGroup>, String> {
         Err("unused in test".into())
     }
-
     async fn orphans(
         &self,
         _: &ProjectCtx,
@@ -102,7 +96,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<OrphanEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn path(
         &self,
         _: &ProjectCtx,
@@ -113,7 +106,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Option<PathResult>, String> {
         Err("unused in test".into())
     }
-
     async fn edges(
         &self,
         _: &ProjectCtx,
@@ -124,11 +116,9 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<EdgeEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn describe(&self, _: &ProjectCtx, _: &str) -> Result<Option<SymbolDescription>, String> {
         Err("unused in test".into())
     }
-
     async fn context(
         &self,
         _: &ProjectCtx,
@@ -137,11 +127,9 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Option<djinn_control_plane::bridge::SymbolContext>, String> {
         Ok(self.contexts.get(key).cloned())
     }
-
     async fn status(&self, _: &ProjectCtx) -> Result<GraphStatus, String> {
         Err("unused in test".into())
     }
-
     async fn symbols_at(
         &self,
         _: &ProjectCtx,
@@ -151,7 +139,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<SymbolAtHit>, String> {
         Err("unused in test".into())
     }
-
     async fn diff_touches(
         &self,
         _: &ProjectCtx,
@@ -159,7 +146,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<DiffTouchesResult, String> {
         Err("unused in test".into())
     }
-
     async fn detect_changes(
         &self,
         _: &ProjectCtx,
@@ -186,7 +172,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
             by_file,
         })
     }
-
     async fn api_surface(
         &self,
         _: &ProjectCtx,
@@ -197,7 +182,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<ApiSurfaceEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn boundary_check(
         &self,
         _: &ProjectCtx,
@@ -206,7 +190,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<BoundaryViolation>, String> {
         Err("unused in test".into())
     }
-
     async fn hotspots(
         &self,
         _: &ProjectCtx,
@@ -216,7 +199,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<HotspotEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn complexity(
         &self,
         _: &ProjectCtx,
@@ -227,7 +209,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<djinn_control_plane::bridge::ComplexityResult, String> {
         Err("unused in test".into())
     }
-
     async fn refactor_candidates(
         &self,
         _: &ProjectCtx,
@@ -237,11 +218,9 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<djinn_control_plane::bridge::RefactorCandidate>, String> {
         Err("unused in test".into())
     }
-
     async fn metrics_at(&self, _: &ProjectCtx) -> Result<MetricsAtResult, String> {
         Err("unused in test".into())
     }
-
     async fn dead_symbols(
         &self,
         _: &ProjectCtx,
@@ -250,7 +229,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<DeadSymbolEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn deprecated_callers(
         &self,
         _: &ProjectCtx,
@@ -258,7 +236,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<DeprecatedHit>, String> {
         Err("unused in test".into())
     }
-
     async fn touches_hot_path(
         &self,
         _: &ProjectCtx,
@@ -269,7 +246,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<HotPathHit>, String> {
         Err("unused in test".into())
     }
-
     async fn coupling(
         &self,
         _: &ProjectCtx,
@@ -278,7 +254,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<djinn_control_plane::bridge::CouplingEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn churn(
         &self,
         _: &ProjectCtx,
@@ -287,7 +262,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<djinn_control_plane::bridge::ChurnEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn coupling_hotspots(
         &self,
         _: &ProjectCtx,
@@ -297,7 +271,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<djinn_control_plane::bridge::CoupledPairEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn coupling_hubs(
         &self,
         _: &ProjectCtx,
@@ -307,7 +280,6 @@ impl RepoGraphOps for FakeRepoGraphOps {
     ) -> Result<Vec<djinn_control_plane::bridge::CouplingHubEntry>, String> {
         Err("unused in test".into())
     }
-
     async fn resolve(
         &self,
         _: &ProjectCtx,
@@ -345,8 +317,6 @@ async fn setup_project() -> (
     let ctx = crate::test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
     (db, ctx, project, tmp)
 }
-
-// ── PR E2: auto-injected `code_graph context` ────────────────────────
 
 /// Mutex serializing tests that mutate `DJINN_AUTO_CODE_CONTEXT_ROLES`.
 /// Tests run in parallel by default and the env var is process-global.
@@ -462,7 +432,6 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
             },
         ],
     );
-
     // 5 callers across two categories — 5 total.
     let mut incoming: BTreeMap<EdgeCategory, Vec<RelatedSymbol>> = BTreeMap::new();
     incoming.insert(
@@ -481,7 +450,6 @@ fn make_symbol_context(name: &str, file_path: &str) -> SymbolContext {
             })
             .collect(),
     );
-
     SymbolContext {
         symbol: SymbolNode {
             uid: format!("symbol:{name}"),
@@ -509,19 +477,16 @@ fn auto_code_context_role_flag_parses_csv() {
     }
     assert!(!is_role_auto_code_context_enabled("worker"));
     assert!(!is_role_auto_code_context_enabled(""));
-
     unsafe {
         std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "");
     }
     assert!(!is_role_auto_code_context_enabled("worker"));
-
     unsafe {
         std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "worker, REVIEWER");
     }
     assert!(is_role_auto_code_context_enabled("worker"));
     assert!(is_role_auto_code_context_enabled("reviewer"));
     assert!(!is_role_auto_code_context_enabled("planner"));
-
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
@@ -533,12 +498,10 @@ async fn build_role_code_graph_context_returns_none_when_role_not_enabled() {
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
-
     let (_db, mut ctx, project, _tmp) = setup_project().await;
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
     let project_path = "/tmp/proj".to_string();
     let task = worker_task(&project.id);
-
     let scope_paths = vec!["server/src/new_area.rs".to_string()];
     let result =
         build_role_code_graph_context("worker", &task, &ctx, &project_path, &scope_paths).await;
@@ -552,13 +515,10 @@ async fn build_role_code_graph_context_emits_bullets_for_enabled_role() {
     unsafe {
         std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "worker,reviewer");
     }
-
     let (_db, mut ctx, project, _tmp) = setup_project().await;
-
     let bar_key = "symbol:rust pkg server/src/new_area.rs `Bar`#";
     let qux_key = "symbol:rust pkg server/src/new_area.rs `Qux`#";
     let unrelated_key = "symbol:rust pkg other/path.rs `Other`#";
-
     let mut contexts = HashMap::new();
     contexts.insert(
         bar_key.to_string(),
@@ -572,7 +532,6 @@ async fn build_role_code_graph_context_emits_bullets_for_enabled_role() {
         unrelated_key.to_string(),
         make_symbol_context("Other", "other/path.rs"),
     );
-
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
         ranked: vec![
             RankedNode {
@@ -612,15 +571,12 @@ async fn build_role_code_graph_context_emits_bullets_for_enabled_role() {
         contexts,
         ..FakeRepoGraphOps::default()
     }));
-
     let project_path = "/tmp/proj".to_string();
     let task = worker_task(&project.id);
     let scope_paths = vec!["server/src/new_area.rs".to_string()];
-
     let body = build_role_code_graph_context("worker", &task, &ctx, &project_path, &scope_paths)
         .await
         .expect("worker code-graph context should be present");
-
     // Bar bullet — top symbol in scope file.
     assert!(
         body.contains(
@@ -641,17 +597,14 @@ async fn build_role_code_graph_context_emits_bullets_for_enabled_role() {
     // Sub-bullets render the call / read targets.
     assert!(body.contains("calls: foo, bar, baz"));
     assert!(body.contains("reads: my_field, other_field"));
-
     // Same role enabled for reviewer too.
     let body_reviewer =
         build_role_code_graph_context("reviewer", &task, &ctx, &project_path, &scope_paths).await;
     assert!(body_reviewer.is_some());
-
     // Lead role is not in the allowlist → no auto-injection.
     let body_lead =
         build_role_code_graph_context("lead", &task, &ctx, &project_path, &scope_paths).await;
     assert!(body_lead.is_none());
-
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
@@ -666,15 +619,12 @@ async fn build_role_code_graph_context_skips_when_no_scope_paths() {
     let (_db, mut ctx, project, _tmp) = setup_project().await;
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
     let task = worker_task(&project.id);
-
     let result = build_role_code_graph_context("worker", &task, &ctx, "/tmp/proj", &[]).await;
     assert!(result.is_none());
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
 }
-
-// ── PR E3: diff-aware reviewer context ──────────────────────────────
 
 fn touched_symbol(
     uid: &str,
@@ -747,7 +697,6 @@ async fn build_reviewer_diff_context_returns_none_when_role_not_enabled() {
         ..FakeRepoGraphOps::default()
     }));
     let task = worker_task(&project.id);
-
     let result = build_reviewer_diff_context(
         "reviewer",
         &task,
@@ -769,7 +718,6 @@ async fn build_reviewer_diff_context_skips_without_shas() {
     let (_db, mut ctx, project, _tmp) = setup_project().await;
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
     let task = worker_task(&project.id);
-
     let result =
         build_reviewer_diff_context("reviewer", &task, &ctx, "/tmp/proj", None, None).await;
     assert!(result.is_none(), "no shas → no injection");
@@ -784,21 +732,17 @@ async fn build_reviewer_diff_context_emits_sorted_bullets() {
     unsafe {
         std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "reviewer");
     }
-
     let (_db, mut ctx, project, _tmp) = setup_project().await;
-
     // High-risk: 12 direct callers across 3 modules → HIGH bucket.
     let high_uid = "symbol:auth::middleware::verify_token";
     // Low-risk: 1 direct caller → LOW bucket.
     let low_uid = "symbol:utils::tiny_helper";
     // Critical: 25 direct callers → CRITICAL bucket.
     let critical_uid = "symbol:db::User::from_session";
-
     let mut impacts: HashMap<String, Vec<ImpactEntry>> = HashMap::new();
     impacts.insert(high_uid.to_string(), synth_impact(12, 0, 3));
     impacts.insert(low_uid.to_string(), synth_impact(1, 0, 1));
     impacts.insert(critical_uid.to_string(), synth_impact(25, 0, 4));
-
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps {
         detect_changes_touched: vec![
             touched_symbol(
@@ -823,7 +767,6 @@ async fn build_reviewer_diff_context_emits_sorted_bullets() {
         impacts,
         ..FakeRepoGraphOps::default()
     }));
-
     let task = worker_task(&project.id);
     let body = build_reviewer_diff_context(
         "reviewer",
@@ -835,13 +778,11 @@ async fn build_reviewer_diff_context_emits_sorted_bullets() {
     )
     .await
     .expect("reviewer diff context should be present");
-
     // Header is rendered.
     assert!(
         body.contains("## Changed symbols (HIGH risk first)"),
         "expected header, got: {body}"
     );
-
     // Each touched symbol's bullet is rendered with its risk + counts.
     assert!(
         body.contains("`db::User::from_session` (CRITICAL risk, 25 direct callers, 4 modules)"),
@@ -855,13 +796,11 @@ async fn build_reviewer_diff_context_emits_sorted_bullets() {
         body.contains("`utils::tiny_helper` (LOW risk, 1 direct callers, 1 modules)"),
         "expected low bullet, got: {body}"
     );
-
     // File paths are surfaced on the sub-bullet.
     assert!(
         body.contains("file: src/auth/middleware.rs"),
         "expected file sub-bullet, got: {body}"
     );
-
     // CRITICAL must come before HIGH must come before LOW.
     let crit_idx = body
         .find("`db::User::from_session`")
@@ -874,7 +813,6 @@ async fn build_reviewer_diff_context_emits_sorted_bullets() {
         .expect("low bullet present");
     assert!(crit_idx < high_idx, "CRITICAL should sort before HIGH");
     assert!(high_idx < low_idx, "HIGH should sort before LOW");
-
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
@@ -886,11 +824,9 @@ async fn build_reviewer_diff_context_returns_none_when_no_touched_symbols() {
     unsafe {
         std::env::set_var(AUTO_CODE_CONTEXT_ROLES_ENV, "reviewer");
     }
-
     let (_db, mut ctx, project, _tmp) = setup_project().await;
     ctx.repo_graph_ops = Some(Arc::new(FakeRepoGraphOps::default()));
     let task = worker_task(&project.id);
-
     let result = build_reviewer_diff_context(
         "reviewer",
         &task,
@@ -901,7 +837,6 @@ async fn build_reviewer_diff_context_returns_none_when_no_touched_symbols() {
     )
     .await;
     assert!(result.is_none(), "empty detect_changes → no injection");
-
     unsafe {
         std::env::remove_var(AUTO_CODE_CONTEXT_ROLES_ENV);
     }
