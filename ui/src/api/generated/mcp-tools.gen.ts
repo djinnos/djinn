@@ -4143,7 +4143,7 @@ export namespace MemoryRunEnrichmentOutputSchema {
   /**
    * Structured report returned by the enrichment pass.
    * 
-   * Mirrors `djinn_agent::actors::slot::memory_enrichment::EnrichmentReport`
+   * Mirrors `djinn_slot::memory_enrichment::EnrichmentReport`
    * one-for-one. The server-side bridge converts between the two at the
    * implementation boundary so the MCP wire shape stays stable.
    */
@@ -7445,11 +7445,23 @@ export namespace ProposalRefinementDemandRoundOutputSchema {
    */
   evidence_phase?: (EvidenceLifecyclePhase | null)
   /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * For `evidence_failed`, the failure reason (`spike_cancelled`,
    * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
    * `None` for other phases.
    */
   failure_reason?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
   /**
    * The feasibility question the spike must answer (from the structured
    * claim). `None` when `needs_evidence_claim` is a legacy plain string.
@@ -7638,11 +7650,23 @@ export namespace ProposalRefinementStartOutputSchema {
    */
   evidence_phase?: (EvidenceLifecyclePhase | null)
   /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * For `evidence_failed`, the failure reason (`spike_cancelled`,
    * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
    * `None` for other phases.
    */
   failure_reason?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
   /**
    * The feasibility question the spike must answer (from the structured
    * claim). `None` when `needs_evidence_claim` is a legacy plain string.
@@ -7788,11 +7812,23 @@ export namespace ProposalRefinementStatusOutputSchema {
    */
   evidence_phase?: (EvidenceLifecyclePhase | null)
   /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * For `evidence_failed`, the failure reason (`spike_cancelled`,
    * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
    * `None` for other phases.
    */
   failure_reason?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
   /**
    * The feasibility question the spike must answer (from the structured
    * claim). `None` when `needs_evidence_claim` is a legacy plain string.
@@ -8117,11 +8153,23 @@ export namespace ProposalShowOutputSchema {
    */
   evidence_phase?: (EvidenceLifecyclePhase | null)
   /**
+   * What the evidence spike should produce to resolve the claim.
+   * From the structured claim's `expected_findings`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  expected_findings?: string
+  /**
    * For `evidence_failed`, the failure reason (`spike_cancelled`,
    * `spike_errored`, `spike_force_closed`, `malformed_findings`, etc.).
    * `None` for other phases.
    */
   failure_reason?: string
+  /**
+   * Why in-session research was insufficient to resolve the claim.
+   * From the structured claim's `insufficient_in_session_research`.
+   * `None` when `needs_evidence_claim` is a legacy plain string.
+   */
+  insufficient_in_session_research?: string
   /**
    * The feasibility question the spike must answer (from the structured
    * claim). `None` when `needs_evidence_claim` is a legacy plain string.
