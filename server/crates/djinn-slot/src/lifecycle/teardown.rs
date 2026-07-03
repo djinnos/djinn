@@ -86,6 +86,24 @@ pub(crate) async fn settle_auto_submit_if_eligible(
     emit_auto_submit_decision_events(task_id, ctx, settlement);
 
     if !settlement.decision.eligible {
+        // Record the rejected submission fingerprint at the task level so the
+        // live submit-work guard can detect no-progress resubmissions across
+        // task runs. The settlement's diff_fingerprint was already computed by
+        // the auto-submit gate.
+        let fp = &settlement.review_event.diff_fingerprint;
+        if !fp.is_empty() {
+            let verdict_kind =
+                auto_submit_trigger_to_rejected_verdict(&settlement.decision.trigger_reason);
+            crate::finalize_handlers::record_rejected_integrity_entry(
+                task_id,
+                ctx,
+                verdict_kind.as_str(),
+                None,
+                Some(&settlement.task_run_id),
+                fp,
+            )
+            .await;
+        }
         emit_auto_submit_fallback_hook(task_id, ctx, "decision_skipped");
         return AutoSubmitSettlementOutcome::Skipped;
     }
@@ -157,6 +175,25 @@ fn emit_auto_submit_fallback_hook(task_id: &str, ctx: &SlotContext, reason: &'st
         project_id: None,
         from_sync: false,
     });
+}
+
+/// Map an auto-submit trigger reason to the corresponding rejected verdict
+/// kind for task-level integrity recording.
+fn auto_submit_trigger_to_rejected_verdict(
+    trigger: &djinn_core::models::AutoSubmitTriggerReason,
+) -> djinn_core::models::RejectedVerdictKind {
+    match trigger {
+        djinn_core::models::AutoSubmitTriggerReason::NoProgress => {
+            djinn_core::models::RejectedVerdictKind::NoProgress
+        }
+        djinn_core::models::AutoSubmitTriggerReason::Looping => {
+            djinn_core::models::RejectedVerdictKind::Looping
+        }
+        djinn_core::models::AutoSubmitTriggerReason::SoftDeadline => {
+            djinn_core::models::RejectedVerdictKind::SoftDeadline
+        }
+        _ => djinn_core::models::RejectedVerdictKind::Other,
+    }
 }
 
 pub(crate) async fn apply_transition_and_dispatch(
@@ -506,6 +543,63 @@ mod tests {
         assert_eq!(
             records[0].verify_timestamp.as_deref(),
             Some("2026-07-01T00:00:00.000Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn ineligible_settlement_records_rejected_fingerprint() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+        let mut output = ParsedAgentOutput::empty();
+        let mut s = settlement(&task_run_id, false);
+        // Ensure a non-empty fingerprint so the rejection path records it.
+        s.review_event.diff_fingerprint = "sha256:rejected-by-gate".to_string();
+        output.auto_submit = Some(s);
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
+
+        // The auto_submit_review record should NOT be created (settlement was skipped).
+        let review_records = AutoSubmitReviewRepository::new(db.clone())
+            .list_for_task_run(&task_run_id)
+            .await
+            .unwrap();
+        assert!(review_records.is_empty());
+
+        // But the task-level rejected integrity entry should be recorded.
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        let latest = integrity_repo
+            .latest_for_task(&task.id)
+            .await
+            .unwrap()
+            .expect("ineligible settlement must record rejected fingerprint");
+        assert_eq!(latest.diff_fingerprint, "sha256:rejected-by-gate");
+        assert_eq!(
+            latest.verdict_kind,
+            djinn_core::models::RejectedVerdictKind::Other.as_str()
+        );
+        assert_eq!(latest.no_progress_streak, 1);
+        assert_eq!(latest.task_run_id.as_deref(), Some(task_run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn ineligible_settlement_skips_fingerprint_when_empty() {
+        let (db, ctx, task, task_run_id, _events) = fixture().await;
+        let mut output = ParsedAgentOutput::empty();
+        let mut s = settlement(&task_run_id, false);
+        // Empty fingerprint — the skip path should NOT record anything.
+        s.review_event.diff_fingerprint = String::new();
+        output.auto_submit = Some(s);
+
+        let outcome = settle_auto_submit_if_eligible(&task.id, &ctx, &output).await;
+        assert_eq!(outcome, AutoSubmitSettlementOutcome::Skipped);
+
+        let integrity_repo =
+            djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository::new(db);
+        let latest = integrity_repo.latest_for_task(&task.id).await.unwrap();
+        assert!(
+            latest.is_none(),
+            "empty fingerprint must not produce a rejected integrity record"
         );
     }
 }
