@@ -514,6 +514,13 @@ pub(crate) async fn record_rejected_submission_fingerprint(
         .find(|r| r.workspace_path.is_some())
         .and_then(|r| Some((r.id.clone(), r.workspace_path.clone()?)))
     else {
+        let fallback_run_id = runs.first().map(|r| r.id.as_str()).unwrap_or("unknown");
+        emit_fingerprint_unavailable_event(
+            task_id,
+            fallback_run_id,
+            "workspace_unavailable",
+            app_state,
+        );
         tracing::info!(
             task_id = %task_id,
             verdict_kind = verdict_kind,
@@ -527,6 +534,7 @@ pub(crate) async fn record_rejected_submission_fingerprint(
     let fingerprint = match djinn_git::compute_submission_diff_fingerprint(&worktree).await {
         Ok(fp) => fp,
         Err(e) => {
+            emit_fingerprint_unavailable_event(task_id, &task_run_id, "compute_error", app_state);
             tracing::warn!(
                 task_id = %task_id,
                 task_run_id = %task_run_id,
@@ -540,6 +548,7 @@ pub(crate) async fn record_rejected_submission_fingerprint(
     };
 
     let Some(digest) = fingerprint.fingerprint().map(|s| s.to_string()) else {
+        emit_fingerprint_unavailable_event(task_id, &task_run_id, "no_diff", app_state);
         tracing::info!(
             task_id = %task_id,
             task_run_id = %task_run_id,
