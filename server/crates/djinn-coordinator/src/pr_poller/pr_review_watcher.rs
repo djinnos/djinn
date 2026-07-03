@@ -267,6 +267,12 @@ impl CoordinatorActor {
                     }
                 }
 
+                // Record the rejected submission fingerprint at the task
+                // level so the live submit-work guard can detect no-progress
+                // resubmissions across task runs after a PR reviewer requests
+                // changes.
+                self.record_pr_rejection_fingerprint(&task.id).await;
+
                 self.apply_pr_transition(
                     &task.id,
                     TransitionAction::PrChangesRequested,
