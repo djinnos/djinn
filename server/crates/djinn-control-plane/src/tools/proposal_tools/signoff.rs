@@ -547,3 +547,10 @@ impl DjinnMcpServer {
 mod signoff_tests {
     include!("signoff_tests.rs");
 }
+
+// Tribunal / P4 regression tests — extracted to `tribunal_tests.rs` to meet
+// the 1500-line file-size guard. The debate-trail gate logic lives in this
+// module (see `evaluate_composed_gate`), so tribunal tests are paired with
+// the signoff concern.
+#[cfg(test)]
+include!("tribunal_tests.rs");

@@ -331,13 +331,14 @@ fn emit_fingerprint_unavailable_event(
     reason: &str,
     ctx: &SlotContext,
 ) {
+    let reason_label = reason.to_string();
     ctx.event_bus.send(DjinnEventEnvelope {
         entity_type: "verify",
         action: "submission_fingerprint_unavailable",
         payload: serde_json::json!({
             "task_id": task_id,
             "task_run_id": task_run_id,
-            "reason": reason.to_string(),
+            "reason": reason_label,
         }),
         id: Some(task_id.to_string()),
         project_id: None,

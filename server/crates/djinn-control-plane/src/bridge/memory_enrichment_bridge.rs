@@ -5,7 +5,8 @@
 //!
 //! `djinn-agent` depends on `djinn-control-plane`, not the other way around.
 //! The control-plane MCP tool (`memory_run_enrichment`) needs to invoke
-//! `djinn_agent::actors::slot::memory_enrichment::run_memory_enrichment`, but
+//! `djinn_slot::memory_enrichment::run_memory_enrichment` (re-exported via the
+//! `djinn_agent::actors::slot` facade), but
 //! the dependency direction forbids a direct call.
 //!
 //! Following the same `Arc<dyn Trait>` pattern as `RepoGraphOps` and friends
@@ -17,7 +18,7 @@
 //!
 //! ## Wire types
 //!
-//! The wire types mirror `djinn_agent::actors::slot::memory_enrichment::*` so
+//! The wire types mirror `djinn_slot::memory_enrichment::*` so
 //! the MCP tool doesn't have to plumb agent types through its public
 //! surface. The server-side implementation translates between the two
 //! representations at the bridge boundary.
@@ -60,7 +61,7 @@ pub struct EnrichmentEdge {
 
 /// Structured report returned by the enrichment pass.
 ///
-/// Mirrors `djinn_agent::actors::slot::memory_enrichment::EnrichmentReport`
+/// Mirrors `djinn_slot::memory_enrichment::EnrichmentReport`
 /// one-for-one. The server-side bridge converts between the two at the
 /// implementation boundary so the MCP wire shape stays stable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -101,7 +102,8 @@ pub enum EnrichmentStatus {
 /// Bridge trait for the memory enrichment trigger.
 ///
 /// The implementation lives in `djinn-server`'s `mcp_bridge` and delegates to
-/// `djinn_agent::actors::slot::memory_enrichment::run_memory_enrichment_with_db`.
+/// `djinn_slot::memory_enrichment::run_memory_enrichment_with_db`
+/// (re-exported via the `djinn_agent::actors::slot` facade).
 ///
 /// # Contract
 ///

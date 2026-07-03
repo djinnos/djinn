@@ -207,7 +207,7 @@ impl CoordinatorActor {
     /// consumption, or `pool.dispatch()`. At-cap phases defer non-terminally
     /// so the state machine retries on the next tick. Failed paths clear the
     /// reservation so no slot leaks.
-    async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
+    pub(crate) async fn dispatch_next_refinement_phase(&mut self, proposal_id: &str) {
         let Some(state) = self.active_refinements.get(proposal_id).cloned() else {
             return;
         };
@@ -668,7 +668,7 @@ impl CoordinatorActor {
 
 #[cfg(test)]
 #[path = "refinement_cap_tests.rs"]
-mod refinement_cap_tests;
+pub(crate) mod refinement_cap_tests;
 
 #[cfg(test)]
 #[path = "refinement_dor_status_tests.rs"]
