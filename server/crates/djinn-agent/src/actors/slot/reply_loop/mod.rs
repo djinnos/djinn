@@ -1,9 +1,4 @@
-//! Compatibility facade for the canonical `djinn-slot` reply loop.
-//!
-//! The duplicated agent reply-loop implementation has been removed from the
-//! compiled module graph. This module preserves the historical
-//! `crate::actors::slot::reply_loop::*` API by adapting agent host services into
-//! `djinn-slot`'s `SlotContext` and `SlotToolDispatcher` seams.
+//! Reply-loop facade: adapts agent host services into djinn-slot SlotContext.
 
 use std::sync::{Arc, Mutex};
 

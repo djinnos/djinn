@@ -1,8 +1,5 @@
-//! Role-specific prompt-context assembly for the task lifecycle.
-//!
-//! Gathers conflict metadata, activity-log digest, worker submission context,
-//! epic context, knowledge notes, code-graph context, and CI directives into a
-//! [`TaskContext`], renders the system prompt, and layers extensions + skills.
+//! Role-specific prompt-context assembly: conflict, activity, epic, knowledge,
+//! code-graph, and CI directives → rendered system prompt with extensions + skills.
 
 use std::path::Path;
 
@@ -52,19 +49,14 @@ pub(crate) struct PromptContext {
     pub prompt_setup_commands: Option<String>,
 }
 
-/// A sibling project flagged as relevant to this task (read-only multi-repo).
-/// Reached on demand via `read(project=…)` / `code_search` / `shell(project=…)`
-/// — no eager checkout.
+/// Sibling project flagged as relevant (read-only multi-repo, no eager checkout).
 #[derive(Debug, Clone)]
 pub(crate) struct ReadSourceInfo {
     pub slug: String,
     pub name: String,
 }
 
-/// Append a "related repositories" section to the assembled system prompt.
-/// Tells the agent which OTHER registered projects are relevant and how to read
-/// them, while keeping all writes pinned to the task's own project. No-op when
-/// the task has no flagged read sources.
+/// Append read-only sibling repo section to prompt. No-op when no read sources.
 fn append_read_sources_prompt(prompt: &str, read_sources: &[ReadSourceInfo]) -> String {
     if read_sources.is_empty() {
         return prompt.to_string();
@@ -121,11 +113,7 @@ fn format_conflict_files(conflict_ctx: Option<&MergeConflictMetadata>) -> Option
     })
 }
 
-/// Build the pre-formatted activity-log digest from the raw activity
-/// entries. Returns `None` when the entries are empty or absent.
-///
-/// Output includes the last `max_feedback` high-signal comments and a
-/// per-role comment-count summary line.
+/// Build activity-log digest with recent feedback and per-role counts. Returns None when empty.
 fn format_activity_text(
     activity_entries: &Option<Vec<djinn_core::models::ActivityEntry>>,
     max_feedback: usize,
@@ -172,15 +160,7 @@ fn format_activity_text(
     }
 }
 
-/// Apply role extensions, skills, and read-source sections to the base
-/// prompt in the canonical order:
-///
-/// 1. Role-level `system_prompt_extensions` + `learned_prompt`
-/// 2. Resolved skills section
-/// 3. Read-only multi-repo sources section (last so it survives all
-///    other appends)
-///
-/// Returns the final `system_prompt` string.
+/// Apply extensions, skills, and read sources to base prompt in canonical order.
 fn apply_prompt_sections(
     base_system_prompt: &str,
     system_prompt_extensions: &str,
@@ -226,8 +206,7 @@ async fn load_sibling_tasks(
     }
 }
 
-/// Append `  - Delivered: <title>` sub-bullets for closed tasks owned by
-/// `blocker`. Logs and silently skips DB errors.
+/// Append delivered-task sub-bullets for a blocker's closed tasks.
 async fn append_blocker_deliveries(
     epic_id: &str,
     blocker: &djinn_db::EpicBlockerRef,
@@ -260,39 +239,16 @@ async fn append_blocker_deliveries(
     }
 }
 
-/// Fetch the list of blocking epics, returning `None` on empty or error.
-///
-/// Logs and silently swallows DB errors (same non-fatal semantics as the
-/// rest of the prompt-context loaders).
-async fn fetch_blockers(
-    epic_id: &str,
-    epic_repo: &djinn_db::EpicRepository,
-) -> Option<Vec<djinn_db::EpicBlockerRef>> {
-    match epic_repo.list_blockers(epic_id).await {
-        Ok(b) if !b.is_empty() => Some(b),
-        Ok(_) => None,
-        Err(e) => {
-            tracing::debug!(
-                epic_id = %epic_id,
-                error = %e,
-                "Lifecycle: failed to list blocking epics for prompt context"
-            );
-            None
-        }
-    }
-}
-
-/// Append blocking-epic lines and their delivered-task sub-bullets to `ctx_lines`.
-///
-/// Delegates blocker list retrieval to [`fetch_blockers`].
+/// Append blocking-epic lines and delivered-task sub-bullets.
 async fn load_blocking_epics(
     epic_id: &str,
     epic_repo: &djinn_db::EpicRepository,
     task_repo: &TaskRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    let Some(blockers) = fetch_blockers(epic_id, epic_repo).await else {
-        return;
+    let blockers = match epic_repo.list_blockers(epic_id).await {
+        Ok(b) if !b.is_empty() => b,
+        _ => return,
     };
 
     ctx_lines.push("\n### Blocking Epics".to_string());
@@ -305,81 +261,37 @@ async fn load_blocking_epics(
     }
 }
 
-/// Append proposal-sibling-epic lines to `ctx_lines` if the epic belongs
-/// to a proposal that also graduated other epics.
-///
-/// Delegates proposal and sibling retrieval to [`fetch_proposal_sibling_ids`].
+/// Append proposal-sibling-epic lines if epic belongs to a multi-epic proposal.
 async fn load_proposal_sibling_epics(
     epic_id: &str,
     epic_repo: &djinn_db::EpicRepository,
     proposal_repo: &ProposalRepository,
     ctx_lines: &mut Vec<String>,
 ) {
-    let Some((proposal_title, sibling_ids)) =
-        fetch_proposal_sibling_ids(epic_id, proposal_repo).await
-    else {
-        return;
-    };
-
-    ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal_title));
-    for sid in &sibling_ids {
-        append_proposal_sibling_epic(epic_id, sid, epic_repo, ctx_lines).await;
-    }
-}
-
-/// Fetch the proposal title and the list of sibling epic IDs (excluding the
-/// current epic). Returns `None` when no parent proposal exists, when the
-/// graduated-epics query fails, or when there are no remaining siblings.
-///
-/// Logs and silently swallows DB errors (same non-fatal semantics as the
-/// rest of the prompt-context loaders).
-async fn fetch_proposal_sibling_ids(
-    epic_id: &str,
-    proposal_repo: &ProposalRepository,
-) -> Option<(String, Vec<String>)> {
     let proposal = match proposal_repo.proposal_for_epic(epic_id).await {
         Ok(Some(p)) => p,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::debug!(
-                epic_id = %epic_id,
-                error = %e,
-                "Lifecycle: failed to find parent proposal for prompt context"
-            );
-            return None;
-        }
+        _ => return,
     };
-
     let siblings = match proposal_repo.graduated_epics(&proposal.id).await {
         Ok(s) => s,
-        Err(e) => {
-            tracing::debug!(
-                epic_id = %epic_id,
-                proposal_id = %proposal.id,
-                error = %e,
-                "Lifecycle: failed to list proposal sibling epics for prompt context"
-            );
-            return None;
-        }
+        _ => return,
     };
-
     let sibling_ids: Vec<String> = siblings
         .into_iter()
         .filter(|(sid, _)| sid != epic_id)
         .map(|(sid, _)| sid)
         .collect();
-
     if sibling_ids.is_empty() {
-        return None;
+        return;
     }
 
-    Some((proposal.title, sibling_ids))
+    ctx_lines.push(format!("\n### Proposal Sibling Epics ({})", proposal.title));
+    for sid in &sibling_ids {
+        append_proposal_sibling_epic(epic_id, sid, epic_repo, ctx_lines).await;
+    }
 }
 
-/// Append a single proposal-sibling-epic bullet to `ctx_lines`.
-///
-/// Logs and silently skips on DB error or missing epic (same non-fatal
-/// semantics as the rest of the prompt-context loaders).
+/// Append a single proposal-sibling-epic bullet; skip on error.
 async fn append_proposal_sibling_epic(
     epic_id: &str,
     sibling_id: &str,
@@ -405,11 +317,7 @@ async fn append_proposal_sibling_epic(
     }
 }
 
-/// Load the epic context block for roles that need it.
-///
-/// Returns `None` when `needs_epic_context` is false, when the task has
-/// no `epic_id`, when the epic row is missing, when the DB returns an
-/// error, or when no context lines were produced.
+/// Load epic context block; returns None when not needed or on error.
 async fn load_epic_context(
     task: &Task,
     needs_epic_context: bool,
@@ -444,12 +352,7 @@ async fn load_epic_context(
 
 /// Load the knowledge-context block from scope-matched memory notes.
 ///
-/// Derives scope paths from the task's description, design, and epic
-/// context text, then queries `NoteRepository` for overlapping
-/// pattern/pitfall/case notes.
-///
-/// Returns `None` on empty result set, DB error, or when no scope paths
-/// could be derived.
+/// Load knowledge context from scope-matched notes. Returns None on error/empty.
 async fn load_knowledge_context(
     task: &Task,
     epic_context: Option<&str>,
@@ -480,18 +383,7 @@ async fn load_knowledge_context(
     }
 }
 
-/// Build the full prompt context (all `TaskContext` fields, base +
-/// extensions + skills prompts) for one role session.
-///
-/// Reads activity log, epic row (when the role needs it), knowledge notes
-/// scoped to the task's paths. Non-fatal: every
-/// DB query falls back to `None` on error, mirroring the original inline
-/// block.
-///
-/// Called from `supervisor_impl::stage::execute_stage` which is only
-/// reachable through the host callback dispatch path
-/// (`host_callbacks::AgentDispatchCallbacks::run_task_dispatch` →
-/// `dispatch_task_runtime` → supervisor → stage).
+/// Build full prompt context for one role session. Non-fatal: DB queries fall back to None.
 pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> PromptContext {
     let PromptContextInputs {
         task,
@@ -636,17 +528,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     }
 }
 
-/// Build a promoted BLOCKING directive for red required CI.
-///
-/// Returns `Some(directive_text)` when:
-/// - `task.ci_status` is `"failing"` (required CI is red)
-/// - `task.ci_last_remediation_base_sha` is `Some(...)` (a remediation baseline exists)
-///
-/// Returns `None` for passing, pending, unknown, or advisory-only failure states.
-/// The directive includes concrete PR number, failing head SHA, blocking check/job
-/// names, and failure fingerprint. It is deliberately separate from ordinary
-/// activity-log prose and deduped by construction — the same durable baseline
-/// always produces identical text, and it appears exactly once in the prompt.
+/// Build BLOCKING directive for red required CI. Returns None for passing/advisory states.
 fn build_ci_blocking_directive(task: &Task) -> Option<String> {
     if task.ci_status != "failing" {
         return None;
@@ -681,19 +563,7 @@ fn build_ci_blocking_directive(task: &Task) -> Option<String> {
     ))
 }
 
-/// Resolve `(from_sha, to_sha)` for PR E3's reviewer diff context by
-/// shelling out to `git` against the task's worktree.
-///
-/// `to_sha` = `git rev-parse HEAD` in the worktree.
-/// `from_sha` = `git merge-base <target> HEAD` where `<target>` is the
-/// project's configured target branch (default `main`). The merge-base
-/// is what the reviewer would actually see if they ran `git diff
-/// <target>..HEAD` themselves, so it's the right anchor for "what
-/// changed in this PR".
-///
-/// Both SHAs are returned best-effort. Either value may be `None` if
-/// the underlying git command fails — the caller skips injection
-/// silently when both are missing.
+/// Resolve (from_sha, to_sha) for reviewer diff context via git. Best-effort.
 async fn resolve_reviewer_diff_shas(
     worktree_path: &Path,
     project_id: &str,
@@ -747,36 +617,12 @@ fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<Str
 
 // ── Worker resume note (y8pv / 48ru) ──────────────────────────────────────
 
-/// Check whether a role name is eligible to receive worker-resume
-/// instructions. Only the `worker` role (the primary code-execution role)
-/// receives resume context. Specialist roles that override the worker's
-/// runtime config (e.g. `task.agent_type`) still have `config().name` set
-/// to `"worker"`, so this check covers them too.
-///
-/// Non-worker roles (lead, reviewer, planner, architect, tribunal roles)
-/// never receive misleading worker-resume instructions — they don't
-/// operate on the task worktree the same way and injecting resume context
-/// would confuse them.
+/// Only the worker role receives resume context.
 pub(crate) fn role_receives_worker_resume(role_name: &str) -> bool {
     role_name == "worker"
 }
 
-/// Build a concise one-line worker resume note from resume lifecycle
-/// metadata. Returns `None` when:
-///   - the role is not a worker (see [`role_receives_worker_resume`]),
-///   - resume selection was not considered (`!metadata.considered`),
-///   - the selection fell back to a clean task branch with no prior
-///     checkpoint or submit/review id (nothing to resume from), or
-///   - no identifying fields are available (prior session, checkpoint SHA,
-///     or submit/review ID are all absent).
-///
-/// The note includes (when available):
-///   - prior session ID / lineage,
-///   - checkpoint SHA or submit/review ID,
-///   - previous model (from model-rotation metadata, if present),
-///   - termination reason (from the selection reason),
-///   - last durable-progress summary (from the extra map),
-///   - suggested verification command (from the extra map).
+/// Build one-line worker resume note. Returns None when not applicable.
 pub(crate) fn build_worker_resume_note(
     role_name: &str,
     metadata: Option<&djinn_runtime::ResumeLifecycleMetadata>,

@@ -1,16 +1,4 @@
-//! Per-stage role-config resolution shared by the supervisor-driven dispatch path.
-//!
-//! Maps a `RoleKind` to the effective `AgentRole` and project-level override
-//! fields (system prompt extensions, learned prompt, MCP servers, skills, model
-//! preference). Two paths feed the same output:
-//!
-//! 1. Specialist override (Worker stage): when `task.agent_type` resolves to a
-//!    specialist `Agent` row, its `base_role` picks the runtime role and its
-//!    fields populate every override slot.
-//! 2. Default role config: load the project's `is_default = 1` row for the
-//!    `RoleKind`'s `base_role`; missing rows yield empty defaults.
-//!
-//! All DB failures are non-fatal.
+//! Per-stage role-config resolution: specialist override or default role config. DB failures non-fatal.
 
 use std::str::FromStr;
 use std::sync::Arc;

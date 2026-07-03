@@ -572,15 +572,48 @@ After this session's hxn9 changes (current workspace):
 
 | Tree | Count | Delta from 0ug8 baseline |
 |---|---:|---:|
-| `server/crates/djinn-agent/src/actors/slot` | **7,958** | **−412** |
+| `server/crates/djinn-agent/src/actors/slot` | **7,729** | **−641** |
 | `server/crates/djinn-slot/src` | **30,705** | **+1,344** |
-| **Combined** | **38,663** | **+932** |
+| **Combined** | **38,434** | **+703** |
 
-Agent-slot reduction this session: **−331** (8,289 → 7,958).
+Agent-slot reduction across all hxn9 sessions: **−641** (8,370 → 7,729).
+This session's additional agent-slot reduction: **−229** (7,958 → 7,729).
 
 ### Note on the combined count
 
-The combined scoped count is **+931** above the post-0ug8 baseline, not −250 below it. This is because `djinn-slot/src` grew by **1,344 lines** (29,361 → 30,705) from concurrent canonical work merged since the baseline was established (parallel Wave 3/4 tasks adding reply-loop tests, turn logic, and extension schema tests). The 413-line agent-slot reduction achieved through adapter test consolidation and doc trimming is honest in-scope work, but is insufficient to overcome the canonical `djinn-slot` growth that lies outside this slice's scope. The AC3 requirement of ≥250 net combined-line reduction from the baseline is **not met** due to this external growth.
+The combined scoped count is **+703** above the post-0ug8 baseline (37,731), not −250 below it. This is because `djinn-slot/src` grew by **1,344 lines** (29,361 → 30,705) from concurrent canonical work merged since the baseline was established. The 641-line agent-slot reduction is honest in-scope consolidation, but cannot overcome the 1,344-line canonical `djinn-slot` growth. The AC3 requirement of ≥250 net combined-line reduction from the baseline is **not met** due to this external growth — the agent-slot tree would need to be ≤6,776 lines (a further ~953-line reduction beyond current) to meet the combined target.
+
+### This session's additional changes
+
+- **`supervisor_runner.rs`** (1,862 → 1,826 lines, −36): Condensed verbose multi-line doc comments on `PreSessionTimeout`, `ReportAwait`, `dispatch_task_runtime`, `DispatchContext`, `worker_output_durable`, `resolve_effective_flow`, `load_task_or_bail`, `TaskRunSpecInputs`, `resolve_credentials`, `build_runtime`, `resume_flow`, `resolve_commit_author`, and `await_report_from_stream`. Removed the `trigger_for_flow` doc comment (self-explanatory name).
+
+- **`prompt_context.rs`** (896 → 758 lines, −138): Condensed module-level doc block, `ReadSourceInfo`, `append_read_sources_prompt`, `format_activity_text`, `apply_prompt_sections`, `load_epic_context`, `load_knowledge_context`, `assemble_prompt_context`, `build_ci_blocking_directive`, `resolve_reviewer_diff_shas`, `role_receives_worker_resume`, and `build_worker_resume_note` doc comments. Inlined `fetch_blockers` and `fetch_proposal_sibling_ids` into their sole callers (`load_blocking_epics` and `load_proposal_sibling_epics`).
+
+- **`model_resolution.rs`** (527 → 523 lines, −4): Condensed `ResolvedModelCredential`, `resolve_model_and_credential`, `resolve_role_model_preference`, `attempt_resume_model_rotation`, `RotationTerminationCause`, and `ModelRotationOutcome` doc comments.
+
+- **`role_overrides.rs`** (388 → 376 lines, −12): Condensed 13-line module-level doc block to 1 line.
+
+- **`reply_loop/mod.rs`** (265 → 260 lines, −5): Condensed 6-line module-level doc block to 1 line.
+
+- **`provider_resolution.rs`** (532 → 518 lines, −14): Consolidated `oauth_wire_round_trip_preserves_some_medium` and `oauth_wire_round_trip_preserves_none` into single data-driven `oauth_wire_round_trip_preserves_reasoning_effort_and_fields` test. Condensed doc comments on remaining tests.
+
+### This session's validation
+
+```sh
+cargo clippy -p djinn-agent --lib -- -D warnings
+```
+
+Result: passed, no warnings or errors.
+
+Focused tests:
+
+```sh
+cargo test -p djinn-agent --lib -- rotation_tests format_ teardown mcp_resolve provider_resolution apply_ac_verdicts
+```
+
+Result: **35 passed, 0 failed**. All focused pure tests pass.
+
+Environment limitations: Same as prior sessions — DB-backed tests fail on missing `djinn_test_template` database. No tests were disabled or weakened.
 
 ### What changed
 

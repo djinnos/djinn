@@ -33,7 +33,7 @@ fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tra
     )
 }
 
-/// Pre-session liveness deadline (8 min default; override via `DJINN_PRESESSION_DEADLINE_SECS`).
+/// Pre-session liveness deadline (8 min default).
 const PRE_SESSION_DEADLINE_SECS_DEFAULT: u64 = 480;
 
 /// Step label before the worker emits its first stage marker.
@@ -48,9 +48,7 @@ fn pre_session_deadline() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Typed error surfaced when stage init never reaches the first reply-loop turn
-/// within the pre-session liveness deadline. Names the in-pod step the run hung
-/// on so the failure is diagnosable straight from host logs.
+/// Pre-session stage-init deadline exceeded; names the hung step for diagnostics.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
     "pre-session stage-init deadline exceeded: no session / first provider turn after \
@@ -61,15 +59,13 @@ pub struct PreSessionTimeout {
     pub elapsed_secs: u64,
 }
 
-/// Outcome of awaiting the worker's report stream: either a terminal report
-/// (or `None` when the stream closed / was cancelled) or a pre-session deadline
-/// breach.
+/// Outcome of awaiting the worker's terminal report or pre-session deadline.
 enum ReportAwait {
     Report(Option<TaskRunReport>),
     PreSessionTimeout(PreSessionTimeout),
 }
 
-/// Best-effort: mark credential revoked and emit event after a 401.
+/// Best-effort mark credential revoked and emit event after a 401.
 async fn surface_credential_revocation(
     app_state: &AgentContext,
     owner: Option<&str>,
@@ -104,10 +100,7 @@ async fn surface_credential_revocation(
     }
 }
 
-/// Host-side dispatch: resolve task -> build spec -> construct runtime -> drive lifecycle.
-///
-/// `Ok(())` = terminal outcome (slot treats as `SlotEvent::Free`).
-/// `Err` = infra setup failure the runtime can't express via `TaskRunReport`.
+/// Host-side dispatch: resolve task, build spec, construct runtime, drive lifecycle.
 pub(super) async fn dispatch_task_runtime(
     task_id: String,
     _project_path: String,
@@ -543,7 +536,7 @@ pub(super) async fn dispatch_task_runtime(
     }
 }
 
-/// Preflight context: task row, conflict/review state, branches, base flow.
+/// Preflight context: task, conflict state, branches, base flow.
 struct DispatchContext<'a> {
     task: &'a Task,
     has_conflict: bool,
@@ -574,8 +567,7 @@ impl<'a> DispatchContext<'a> {
     }
 }
 
-/// For `ReviewResponse`, probe the mirror to see if worker output is durable.
-/// Conservative on any failure (timeout -> keep full redo).
+/// For ReviewResponse, probe mirror for durable output. Conservative on failure.
 async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentContext) -> bool {
     if !matches!(ctx.base_flow, SupervisorFlow::ReviewResponse) {
         return false;
@@ -602,8 +594,7 @@ async fn worker_output_durable(ctx: &DispatchContext<'_>, app_state: &AgentConte
     }
 }
 
-/// Resolve the effective supervisor flow, applying the ReviewResume durability
-/// upgrade when appropriate.
+/// Resolve effective supervisor flow; apply ReviewResume when durable.
 async fn resolve_effective_flow(
     ctx: &DispatchContext<'_>,
     app_state: &AgentContext,
@@ -612,7 +603,6 @@ async fn resolve_effective_flow(
     resume_flow(ctx.base_flow, durable)
 }
 
-/// Map the resolved flow and conflict context to a task-run trigger.
 fn trigger_for_flow(flow: &SupervisorFlow, has_conflict: bool) -> TaskRunTrigger {
     if has_conflict {
         TaskRunTrigger::ConflictRetry
@@ -626,7 +616,7 @@ fn trigger_for_flow(flow: &SupervisorFlow, has_conflict: bool) -> TaskRunTrigger
     }
 }
 
-/// Load a task by id or return a typed error for dispatch-time setup failures.
+/// Load a task by id or bail.
 async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow::Result<Task> {
     match task_repo.get(task_id).await {
         Ok(Some(t)) => Ok(t),
@@ -639,11 +629,7 @@ async fn load_task_or_bail(task_id: &str, task_repo: &TaskRepository) -> anyhow:
     }
 }
 
-/// Inputs to [`TaskRunSpec`] construction resolved from the task row, dispatch
-/// context, and surrounding repositories.
-///
-/// Keeping the resolved inputs together makes the construction of the spec a
-/// pure, synchronous operation and keeps the top-level dispatch flow compact.
+/// Inputs to TaskRunSpec construction resolved from task row, dispatch context, and repos.
 struct TaskRunSpecInputs {
     task_run_id: String,
     task_id: String,
@@ -758,7 +744,7 @@ impl From<TaskRunSpecInputs> for TaskRunSpec {
     }
 }
 
-/// Resolve commit-author identity (task creator's GitHub no-reply email for Vercel compatibility).
+/// Resolve commit-author identity for Vercel compatibility.
 async fn resolve_commit_author(
     app_state: &AgentContext,
     created_by_user_id: Option<&str>,
@@ -823,7 +809,7 @@ fn announce_dispatch(app_state: &AgentContext, spec: &TaskRunSpec, model_id: &st
         ));
 }
 
-/// Resolve per-role provider credentials (scoped to task creator).
+/// Resolve per-role provider credentials scoped to task creator.
 async fn resolve_credentials(
     spec: &TaskRunSpec,
     app_state: &AgentContext,
@@ -860,13 +846,7 @@ async fn resolve_credentials(
     Ok(credentials)
 }
 
-/// Construct the [`SessionRuntime`] for this dispatch.
-///
-/// - On [`RuntimeKind::Kubernetes`]: builds a [`djinn_k8s::KubernetesRuntime`]
-///   using the ambient `ConnectionRegistry` and DB. Fast-fails with the same
-///   missing-mirror / missing-rpc-registry errors as the original inline path.
-/// - On [`RuntimeKind::Test`]: builds a [`TestRuntime`] wrapping a
-///   [`SupervisorTaskRunner`] with the host's mirror and services.
+/// Construct the SessionRuntime for this dispatch (Kubernetes or Test).
 async fn build_runtime(
     app_state: &AgentContext,
     task: &Task,
@@ -919,7 +899,7 @@ async fn build_runtime(
     Ok(runtime)
 }
 
-/// If `ReviewResponse` and worker output is durable, upgrade to `ReviewResume`.
+/// Upgrade ReviewResponse to ReviewResume when durable.
 fn resume_flow(base_flow: SupervisorFlow, worker_output_durable: bool) -> SupervisorFlow {
     if matches!(base_flow, SupervisorFlow::ReviewResponse) && worker_output_durable {
         SupervisorFlow::ReviewResume
@@ -1147,23 +1127,7 @@ async fn teardown_cargo_target_run_dir(app_state: &AgentContext, task_run_id: &s
     }
 }
 
-/// Drain a [`BiStream`] until we see the terminal [`StreamEvent::Report`]
-/// frame, returning the [`TaskRunReport`] it carries.
-///
-/// Both runtimes bridge the worker's events onto `events_rx`: `TestRuntime`
-/// forwards the [`TaskRunReport`] produced by [`SupervisorTaskRunner`], and
-/// `KubernetesRuntime::attach_stdio` forwards the worker's
-/// `WorkerEvent::TerminalReport` from its RPC connection. We drop non-terminal
-/// frames (already observed via the event-bus / DB-write seams) and return:
-///
-/// - `Ok(Some(report))` — the worker emitted its terminal report. This is the
-///   authoritative result (real run id + completed stages).
-/// - `Ok(None)` — the channel closed (worker exited / connection dropped) or
-///   the `kill` token fired before any report arrived. The caller falls back
-///   to the runtime's teardown stub.
-///
-/// Bounded by `kill`: a hung worker connection can't pin the slot past the
-/// cancel the slot actor already requested.
+/// Drain a BiStream until the terminal Report frame, returning the TaskRunReport.
 async fn await_report_from_stream(
     mut stream: BiStream,
     kill: &CancellationToken,

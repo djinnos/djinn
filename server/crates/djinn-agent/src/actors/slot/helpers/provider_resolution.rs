@@ -402,41 +402,35 @@ mod tests {
         }
     }
 
-    /// `Some(ReasoningEffort::Medium)` survives the `OAuthConfigWire`
-    /// host→Secret→worker round-trip exactly.
+    /// OAuth wire round-trip preserves reasoning_effort and core fields for both Some and None.
     #[test]
-    fn oauth_wire_round_trip_preserves_some_medium() {
-        let original = sample_oauth_config(Some(ReasoningEffort::Medium));
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-
-        assert_eq!(
-            reconstructed.reasoning_effort,
-            Some(ReasoningEffort::Medium)
-        );
-        assert_eq!(reconstructed.base_url, original.base_url);
-        assert_eq!(reconstructed.model_id, original.model_id);
-        assert_eq!(reconstructed.context_window, original.context_window);
-        assert_eq!(
-            reconstructed.session_affinity_key,
-            original.session_affinity_key
-        );
-        assert_eq!(reconstructed.provider_headers, original.provider_headers);
-        assert!(reconstructed.telemetry.is_none());
-    }
-
-    /// A host-resolved `None` (e.g. Codex/OpenAI Responses) round-trips cleanly.
-    #[test]
-    fn oauth_wire_round_trip_preserves_none() {
-        let original = sample_oauth_config(None);
-        let wire = OAuthConfigWire::from_provider_config(&original);
-        let json = serde_json::to_string(&wire).expect("serialize");
-        let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
-        let reconstructed = decoded.to_provider_config();
-
-        assert_eq!(reconstructed.reasoning_effort, None);
+    fn oauth_wire_round_trip_preserves_reasoning_effort_and_fields() {
+        for (reasoning, label) in [
+            (Some(ReasoningEffort::Medium), "Some(Medium)"),
+            (None, "None"),
+        ] {
+            let original = sample_oauth_config(reasoning);
+            let wire = OAuthConfigWire::from_provider_config(&original);
+            let json = serde_json::to_string(&wire).expect("serialize");
+            let decoded: OAuthConfigWire = serde_json::from_str(&json).expect("deserialize");
+            let reconstructed = decoded.to_provider_config();
+            assert_eq!(reconstructed.reasoning_effort, reasoning, "{label}");
+            assert_eq!(reconstructed.base_url, original.base_url, "{label}");
+            assert_eq!(reconstructed.model_id, original.model_id, "{label}");
+            assert_eq!(
+                reconstructed.context_window, original.context_window,
+                "{label}"
+            );
+            assert_eq!(
+                reconstructed.session_affinity_key, original.session_affinity_key,
+                "{label}"
+            );
+            assert_eq!(
+                reconstructed.provider_headers, original.provider_headers,
+                "{label}"
+            );
+            assert!(reconstructed.telemetry.is_none(), "{label}");
+        }
     }
 
     /// A legacy OAuth JSON blob without `reasoning_effort` deserializes to `None`.

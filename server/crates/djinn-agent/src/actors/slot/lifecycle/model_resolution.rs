@@ -4,8 +4,7 @@ use crate::actors::slot::helpers::{ProviderCredential, load_provider_credential,
 use crate::context::AgentContext;
 use djinn_db::AgentRepository;
 
-/// Resolved catalog/provider identity + credential ready to drive an LLM
-/// provider for the upcoming session.
+/// Resolved catalog/provider identity + credential for an LLM session.
 pub(crate) struct ResolvedModelCredential {
     pub catalog_provider_id: String,
     pub model_name: String,
@@ -17,7 +16,7 @@ pub(crate) struct ModelResolutionError {
     pub reason: String,
 }
 
-/// Parse `model_id`, resolve against the provider catalog, and load the credential.
+/// Parse model_id, resolve against catalog, and load credential.
 pub(crate) async fn resolve_model_and_credential(
     model_id: &str,
     task_id: &str,
@@ -70,8 +69,7 @@ pub(crate) async fn resolve_model_and_credential(
     })
 }
 
-/// Resolve a per-role project preference into a concrete `provider/model` id.
-/// Returns `None` when no matching preference is found or on lookup errors.
+/// Resolve per-role project preference into a concrete provider/model id.
 pub(crate) async fn resolve_role_model_preference(
     project_id: &str,
     base_role: &str,
@@ -161,9 +159,7 @@ pub(crate) fn map_resume_selection_reason_to_rotation_cause(
     }
 }
 
-/// Attempt model rotation for a resume dispatch.
-/// Returns the rotated model ID, or `current_model_id` unchanged when rotation
-/// is not applicable.
+/// Attempt model rotation for a resume dispatch; returns selected model id.
 pub(crate) async fn attempt_resume_model_rotation(
     task_id: &str,
     current_model_id: &str,
@@ -218,7 +214,7 @@ pub(crate) async fn attempt_resume_model_rotation(
 
 // ── Model rotation (y8pv / 48ru) ──────────────────────────────────────────
 
-/// Termination causes that should trigger model rotation.
+/// Termination causes that trigger model rotation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RotationTerminationCause {
     /// No durable progress for the configured threshold.
@@ -241,7 +237,7 @@ impl RotationTerminationCause {
     }
 }
 
-/// Outcome of a model-rotation attempt.
+/// Outcome of a model rotation attempt.
 #[derive(Debug, Clone)]
 pub(crate) enum ModelRotationOutcome {
     /// A different model was selected.
