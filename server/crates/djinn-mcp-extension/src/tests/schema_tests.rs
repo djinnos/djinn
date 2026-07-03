@@ -133,6 +133,7 @@ fn tool_names_for_role(role: &str) -> BTreeSet<String> {
         "advocate" => tool_schemas_advocate(),
         "adversary" => tool_schemas_adversary(),
         "judge" => tool_schemas_judge(),
+"evidence_spike" => tool_schemas_evidence_spike(),
         _ => panic!("unknown role: {role}"),
     };
     schemas
@@ -652,6 +653,7 @@ fn all_role_tool_schemas_have_pinned_safety_annotations() {
         ("advocate", tool_schemas_advocate()),
         ("adversary", tool_schemas_adversary()),
         ("judge", tool_schemas_judge()),
+        ("evidence_spike", tool_schemas_evidence_spike()),
     ] {
         for schema in schemas {
             let name = schema
@@ -684,6 +686,7 @@ fn role_tool_schemas_pin_destructive_and_open_world_sets() {
         tool_schemas_advocate(),
         tool_schemas_adversary(),
         tool_schemas_judge(),
+        tool_schemas_evidence_spike(),
     ] {
         for schema in schemas {
             let name = schema
@@ -833,4 +836,148 @@ fn snapshot_judge_tool_names() {
 #[test]
 fn snapshot_judge_tool_schemas() {
     insta::assert_json_snapshot!("judge_tool_schemas", tool_schemas_judge());
+}
+
+// ── evidence-spike read-only schema tests ────────────────────────────────
+
+#[test]
+fn evidence_spike_schema_includes_read_only_investigation_tools() {
+    let names = schema_names(tool_schemas_evidence_spike());
+    let expected = [
+        "read",
+        "code_search",
+        "code_graph",
+        "github_search",
+        "output_view",
+        "output_grep",
+        "lsp",
+        "skill_read",
+        "ci_job_log",
+    ];
+    for tool in expected {
+        assert!(
+            names.iter().any(|n| n == tool),
+            "evidence_spike schema should include {tool}"
+        );
+    }
+}
+
+#[test]
+fn evidence_spike_schema_includes_read_only_inspection_tools() {
+    let names = schema_names(tool_schemas_evidence_spike());
+    let expected = [
+        "task_show",
+        "task_list",
+        "task_activity_list",
+        "epic_show",
+        "epic_tasks",
+        "proposal_show",
+        "proposal_debate_list",
+        "memory_read",
+        "memory_search",
+        "memory_list",
+        "memory_build_context",
+        "memory_health",
+        "memory_orphans",
+        "memory_broken_links",
+        "memory_extracted_audit",
+    ];
+    for tool in expected {
+        assert!(
+            names.iter().any(|n| n == tool),
+            "evidence_spike schema should include {tool}"
+        );
+    }
+}
+
+#[test]
+fn evidence_spike_schema_includes_submit_work_terminal() {
+    let names = schema_names(tool_schemas_evidence_spike());
+    assert!(
+        names.iter().any(|n| n == "submit_work"),
+        "evidence_spike schema should include submit_work as the terminal finalize tool"
+    );
+}
+
+#[test]
+fn evidence_spike_schema_excludes_mutation_and_destructive_tools() {
+    let names = schema_names(tool_schemas_evidence_spike());
+    let blocked = [
+        "shell",
+        "write",
+        "edit",
+        "apply_patch",
+        "task_update",
+        "task_comment_add",
+        "task_transition",
+        "task_create",
+        "epic_create",
+        "epic_update",
+        "epic_close",
+        "memory_write",
+        "memory_edit",
+        "memory_move",
+        "proposal_update",
+        "proposal_debate_append",
+        "proposal_debate_resolve",
+        "proposal_refinement_demand_evidence",
+        "proposal_ac_set",
+        "proposal_ac_amend",
+        "proposal_complete",
+        "proposal_block_patch",
+        "proposal_reconcile_obsolete_epic",
+        "task_delete_branch",
+        "task_archive_activity",
+        "task_reset_counters",
+        "task_kill_session",
+        "agent_create",
+        "agent_amend_prompt",
+        "request_lead",
+        "request_planner",
+    ];
+    for tool in blocked {
+        assert!(
+            !names.iter().any(|n| n == tool),
+            "evidence_spike schema must NOT include {tool}"
+        );
+    }
+}
+
+#[test]
+fn evidence_spike_schema_all_tools_are_read_only_except_submit_work() {
+    for schema in tool_schemas_evidence_spike() {
+        let name = schema
+            .get("name")
+            .and_then(|n| n.as_str())
+            .expect("tool schema has a name");
+        if name == "submit_work" {
+            assert_eq!(
+                safety_tuple(&schema),
+                (false, false, false, false),
+                "submit_work must be classified as mutation"
+            );
+            continue;
+        }
+        let (read_only, destructive, _idempotent, _open_world) = safety_tuple(&schema);
+        assert!(
+            read_only,
+            "{name} must be read-only in evidence_spike schema"
+        );
+        assert!(
+            !destructive,
+            "{name} must not be destructive in evidence_spike schema"
+        );
+    }
+}
+
+#[test]
+fn snapshot_evidence_spike_tool_names() {
+    let schemas = tool_schemas_evidence_spike();
+    let names = tool_names(&schemas);
+    insta::assert_json_snapshot!("evidence_spike_tool_names", names);
+}
+
+#[test]
+fn snapshot_evidence_spike_tool_schemas() {
+    insta::assert_json_snapshot!("evidence_spike_tool_schemas", tool_schemas_evidence_spike());
 }

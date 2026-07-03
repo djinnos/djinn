@@ -43,6 +43,7 @@ pub mod helpers;
 pub mod shared_schemas;
 pub mod tool_defs;
 pub mod tool_defs_code_graph;
+pub mod tool_schemas_evidence_spike;
 pub mod truncate;
 pub mod types;
 
