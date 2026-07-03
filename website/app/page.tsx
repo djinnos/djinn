@@ -201,13 +201,12 @@ export default function Home() {
               <div className="space-y-14">
                 {PIPELINE.map((stage) => (
                   <div key={stage.n} className="relative sm:pl-20">
-                    <div className="rail-node hidden sm:flex absolute left-0 top-0 w-10 h-10 rounded-lg items-center justify-center text-xs text-text-secondary">
+                    <div className="rail-node hidden sm:flex absolute left-0 top-0 w-10 h-10 rounded-lg items-center justify-center text-xs text-brand-purple">
                       {stage.n}
                     </div>
 
                     <div className="flex flex-wrap items-baseline gap-x-4 gap-y-2 mb-3">
                       <h3 className="font-display text-2xl md:text-3xl font-semibold">
-                        <span className="font-mono text-base md:text-lg text-text-muted font-normal mr-3 select-none" aria-hidden>###</span>
                         {stage.name}
                       </h3>
                       <StatusChip label={stage.status.label} tone={stage.status.tone} />

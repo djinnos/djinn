@@ -186,8 +186,8 @@ code.tick {
   background: linear-gradient(
     to bottom,
     transparent,
-    var(--color-border) 8%,
-    var(--color-border) 92%,
+    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 8%,
+    color-mix(in srgb, var(--color-brand-purple) 28%, var(--color-border)) 92%,
     transparent
   );
   width: 1px;
