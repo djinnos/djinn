@@ -242,40 +242,38 @@ impl CoordinatorActor {
             }
         }
 
-        // Check for evidence lifecycle events.  Only query when a spike
-        // has been linked (current or past) to avoid scanning the full
-        // revision history for proposals that never entered the evidence
-        // pipeline.
-        if proposal.linked_spike_task_id.is_some() || proposal.needs_evidence_claim.is_some() {
-            let event_bus = crate::events::event_bus_for(&self.events_tx);
-            let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
+        // Check for evidence lifecycle events even after the link/claim has
+        // been cleared: a successful in-process receipt clears the durable
+        // evidence block before the next Advocate dispatch, but the latest
+        // `refinement_evidence_received` event must still derive EvidenceReady.
+        let event_bus = crate::events::event_bus_for(&self.events_tx);
+        let proposal_repo = djinn_db::ProposalRepository::new(self.db.clone(), event_bus);
 
-            match proposal_repo.revisions(&proposal.id).await {
-                Ok(revisions) => {
-                    // Walk revisions in reverse to find the latest evidence
-                    // lifecycle event.
-                    for rev in revisions.iter().rev() {
-                        match rev.event_kind.as_str() {
-                            "refinement_evidence_received" => {
-                                has_evidence_received_event = true;
-                                break;
-                            }
-                            "refinement_evidence_failed" => {
-                                has_evidence_failed_event = true;
-                                break;
-                            }
-                            _ => {}
+        match proposal_repo.revisions(&proposal.id).await {
+            Ok(revisions) => {
+                // Walk revisions in reverse to find the latest evidence
+                // lifecycle event.
+                for rev in revisions.iter().rev() {
+                    match rev.event_kind.as_str() {
+                        "refinement_evidence_received" => {
+                            has_evidence_received_event = true;
+                            break;
                         }
+                        "refinement_evidence_failed" => {
+                            has_evidence_failed_event = true;
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        proposal_id = %proposal.id,
-                        error = %e,
-                        "Failed to read revisions for evidence lifecycle; \
-                         assuming no evidence events"
-                    );
-                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    proposal_id = %proposal.id,
+                    error = %e,
+                    "Failed to read revisions for evidence lifecycle; \
+                     assuming no evidence events"
+                );
             }
         }
 
