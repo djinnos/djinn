@@ -538,7 +538,7 @@ fn api_key_provider_config(
             format_family,
             &model.id,
         ),
-        tool_schema_compat: None,
+        tool_schema_compat: builtin::tool_schema_compat_for(provider_id, &model.id),
     }
 }
 
@@ -590,6 +590,7 @@ mod tests {
     use crate::provider::error::ProviderError;
     use crate::provider::{
         AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort, ToolChoice,
+        ToolSchemaCompat,
     };
     use djinn_core::models::Pricing;
     use djinn_db::UserRepository;
@@ -791,6 +792,66 @@ mod tests {
             FormatFamily::OpenAIResponses
         );
         assert_eq!(responses_config.reasoning_effort, None);
+    }
+
+    #[test]
+    fn api_key_provider_config_sets_tool_schema_compat() {
+        let kimi = test_model("kimi-for-coding", "k2p7", true);
+        let minimax = test_model("minimax-coding-plan", "MiniMax-M3", true);
+        let google = test_model("google", "gemini-2.5-pro", true);
+        let openai = test_model("openai", "gpt-4.1-mini", true);
+        let anthropic = test_model("anthropic", "claude-3-5-haiku", false);
+
+        assert_eq!(
+            api_key_provider_config(
+                "kimi-for-coding",
+                &kimi,
+                builtin::find_builtin_provider("kimi-for-coding").expect("kimi builtin"),
+                "kimi-secret".to_string(),
+            )
+            .tool_schema_compat,
+            Some(ToolSchemaCompat::Moonshot)
+        );
+        assert_eq!(
+            api_key_provider_config(
+                "minimax-coding-plan",
+                &minimax,
+                builtin::find_builtin_provider("minimax-coding-plan").expect("minimax builtin"),
+                "minimax-secret".to_string(),
+            )
+            .tool_schema_compat,
+            Some(ToolSchemaCompat::Moonshot)
+        );
+        assert_eq!(
+            api_key_provider_config(
+                "google",
+                &google,
+                builtin::find_builtin_provider("google").expect("google builtin"),
+                "google-secret".to_string(),
+            )
+            .tool_schema_compat,
+            Some(ToolSchemaCompat::Gemini)
+        );
+        assert_eq!(
+            api_key_provider_config(
+                "openai",
+                &openai,
+                builtin::find_builtin_provider("openai").expect("openai builtin"),
+                "openai-secret".to_string(),
+            )
+            .tool_schema_compat,
+            None
+        );
+        assert_eq!(
+            api_key_provider_config(
+                "anthropic",
+                &anthropic,
+                builtin::find_builtin_provider("anthropic").expect("anthropic builtin"),
+                "anthropic-secret".to_string(),
+            )
+            .tool_schema_compat,
+            None
+        );
     }
 
     enum ProviderBehavior {
