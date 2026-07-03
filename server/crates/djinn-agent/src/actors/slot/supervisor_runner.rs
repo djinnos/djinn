@@ -158,92 +158,22 @@ pub(super) async fn dispatch_task_runtime(
     let runtime_kind = runtime_kind();
 
     // ── Drive prepare → (await report) → teardown ─────────────────────────
-    let handle = runtime
-        .prepare(&spec, &credentials)
-        .await
-        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
-
-    let cancel_runtime = runtime.clone();
-    let cancel_handle = handle.clone();
-    let cancel_task_id = task.id.clone();
-    let cancel_model_id = model_id.clone();
-    let cancel_task = tokio::spawn({
-        let kill = kill.clone();
-        async move {
-            kill.cancelled().await;
-            let span = tracing::info_span!(
-                "djinn.slot.kill",
-                task_id = %cancel_task_id,
-                model_id = %cancel_model_id,
-            );
-            async {
-                let _ = cancel_runtime.cancel(&cancel_handle).await;
-            }
-            .instrument(span)
-            .await;
-        }
-    });
-
-    let bistream_result = runtime.attach_stdio(&handle).await;
-    let handshake_timed_out = matches!(
-        &bistream_result,
-        Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
-    );
-    let mut infra_death: Option<String> = None;
-    let mut presession_timeout: Option<PreSessionTimeout> = None;
-    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
-        Ok(bistream) => {
-            let await_outcome = tokio::select! {
-                biased;
-                res = await_report_from_stream(
-                    bistream,
-                    &kill,
-                    app_state.db.clone(),
-                    &spec.task_run_id,
-                    &spec.task_id,
-                    pre_session_deadline(),
-                ) => res,
-                reason = runtime.watch_infra_death(&handle) => {
-                    tracing::warn!(
-                        task_id = %task.short_id,
-                        %reason,
-                        runtime = ?runtime_kind,
-                        "supervisor dispatch: worker infra died before terminal report \
-                         (OOM / eviction / Job failure); finalizing run as interrupted"
-                    );
-                    infra_death = Some(reason);
-                    Ok(ReportAwait::Report(None))
-                }
-            };
-            match await_outcome {
-                Ok(ReportAwait::Report(report)) => Ok(report),
-                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
-                    presession_timeout = Some(timeout);
-                    Ok(None)
-                }
-                Err(e) => Err(e),
-            }
-        }
-        Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
-    };
-
-    cancel_task.abort();
-    let _ = cancel_task.await;
-
-    let teardown = runtime.teardown(handle).await;
-
-    let reap_status = if presession_timeout.is_some() {
-        TaskRunStatus::Failed
-    } else {
-        teardown
-            .as_ref()
-            .ok()
-            .map(report_to_terminal_status)
-            .unwrap_or(TaskRunStatus::Interrupted)
-    };
-    reap_orphan_task_run(&app_state, &task.id, reap_status).await;
-
-    teardown_cargo_target_run_dir(&app_state, &spec.task_run_id).await;
+    let RuntimeExecutionOutcome {
+        report_result,
+        teardown,
+        handshake_timed_out,
+        infra_death,
+        presession_timeout,
+    } = execute_runtime_report_phase(
+        runtime.clone(),
+        &spec,
+        &credentials,
+        &task,
+        &model_id,
+        &app_state,
+        &kill,
+    )
+    .await?;
 
     if handshake_timed_out {
         app_state
@@ -540,6 +470,178 @@ pub(super) async fn dispatch_task_runtime(
             );
             Err(anyhow::anyhow!("runtime.teardown failed: {e}"))
         }
+    }
+}
+
+/// Everything `dispatch_task_runtime` needs back from the runtime
+/// execution/report phase to run its persistence and finalization logic.
+struct RuntimeExecutionOutcome {
+    report_result: anyhow::Result<Option<TaskRunReport>>,
+    teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
+    handshake_timed_out: bool,
+    infra_death: Option<String>,
+    presession_timeout: Option<PreSessionTimeout>,
+}
+
+/// Outcome of attaching stdio and waiting for the worker's terminal report.
+struct TerminalReportAwaitOutcome {
+    report_result: anyhow::Result<Option<TaskRunReport>>,
+    handshake_timed_out: bool,
+    infra_death: Option<String>,
+    presession_timeout: Option<PreSessionTimeout>,
+}
+
+/// Drive the provider runtime execution phase: prepare, cancellation watcher,
+/// stdio attach, terminal-report await (with infra-death and pre-session
+/// timeout watching), teardown, orphan reaping, and cargo-target cleanup.
+async fn execute_runtime_report_phase(
+    runtime: Arc<dyn SessionRuntime>,
+    spec: &TaskRunSpec,
+    credentials: &ResolvedCredentials,
+    task: &Task,
+    model_id: &str,
+    app_state: &AgentContext,
+    kill: &CancellationToken,
+) -> anyhow::Result<RuntimeExecutionOutcome> {
+    let handle = runtime
+        .prepare(spec, credentials)
+        .await
+        .map_err(|e| anyhow::anyhow!("runtime.prepare failed: {e}"))?;
+
+    let cancel_task = spawn_runtime_cancel_watcher(
+        runtime.clone(),
+        handle.clone(),
+        kill.clone(),
+        task.id.clone(),
+        model_id.to_string(),
+    );
+
+    let await_outcome =
+        attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
+            .await;
+
+    abort_runtime_cancel_watcher(cancel_task).await;
+
+    let teardown = runtime.teardown(handle).await;
+
+    let reap_status = select_orphan_reap_status(&await_outcome.presession_timeout, &teardown);
+    reap_orphan_task_run(app_state, &task.id, reap_status).await;
+
+    teardown_cargo_target_run_dir(app_state, &spec.task_run_id).await;
+
+    Ok(RuntimeExecutionOutcome {
+        report_result: await_outcome.report_result,
+        teardown,
+        handshake_timed_out: await_outcome.handshake_timed_out,
+        infra_death: await_outcome.infra_death,
+        presession_timeout: await_outcome.presession_timeout,
+    })
+}
+
+/// Watch the kill token and cancel the runtime run when it fires.
+fn spawn_runtime_cancel_watcher(
+    runtime: Arc<dyn SessionRuntime>,
+    handle: djinn_runtime::RunHandle,
+    kill: CancellationToken,
+    task_id: String,
+    model_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        kill.cancelled().await;
+        let span = tracing::info_span!(
+            "djinn.slot.kill",
+            task_id = %task_id,
+            model_id = %model_id,
+        );
+        async {
+            let _ = runtime.cancel(&handle).await;
+        }
+        .instrument(span)
+        .await;
+    })
+}
+
+/// Abort the cancellation watcher once the run has reached its terminal state.
+async fn abort_runtime_cancel_watcher(cancel_task: tokio::task::JoinHandle<()>) {
+    cancel_task.abort();
+    let _ = cancel_task.await;
+}
+
+/// Attach stdio and wait for the authoritative terminal report, racing the
+/// runtime's infra-death watcher and tracking pre-session timeouts.
+async fn attach_and_await_terminal_report(
+    runtime: Arc<dyn SessionRuntime>,
+    handle: &djinn_runtime::RunHandle,
+    app_state: &AgentContext,
+    spec: &TaskRunSpec,
+    task: &Task,
+    kill: &CancellationToken,
+) -> TerminalReportAwaitOutcome {
+    let bistream_result = runtime.attach_stdio(handle).await;
+    let handshake_timed_out = matches!(
+        &bistream_result,
+        Err(djinn_runtime::RuntimeError::HandshakeTimeout(_))
+    );
+    let mut infra_death: Option<String> = None;
+    let mut presession_timeout: Option<PreSessionTimeout> = None;
+    let report_result: anyhow::Result<Option<TaskRunReport>> = match bistream_result {
+        Ok(bistream) => {
+            let await_outcome = tokio::select! {
+                biased;
+                res = await_report_from_stream(
+                    bistream,
+                    kill,
+                    app_state.db.clone(),
+                    &spec.task_run_id,
+                    &spec.task_id,
+                    pre_session_deadline(),
+                ) => res,
+                reason = runtime.watch_infra_death(handle) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        %reason,
+                        runtime = ?runtime_kind(),
+                        "supervisor dispatch: worker infra died before terminal report \
+                         (OOM / eviction / Job failure); finalizing run as interrupted"
+                    );
+                    infra_death = Some(reason);
+                    Ok(ReportAwait::Report(None))
+                }
+            };
+            match await_outcome {
+                Ok(ReportAwait::Report(report)) => Ok(report),
+                Ok(ReportAwait::PreSessionTimeout(timeout)) => {
+                    presession_timeout = Some(timeout);
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(anyhow::anyhow!("runtime.attach_stdio failed: {e}")),
+    };
+    TerminalReportAwaitOutcome {
+        report_result,
+        handshake_timed_out,
+        infra_death,
+        presession_timeout,
+    }
+}
+
+/// Pick the status used when reaping an orphaned `task_runs` row after the
+/// runtime phase: pre-session timeouts fail fast; otherwise mirror the
+/// teardown report's terminal status, defaulting to interrupted.
+fn select_orphan_reap_status(
+    presession_timeout: &Option<PreSessionTimeout>,
+    teardown: &Result<TaskRunReport, djinn_runtime::RuntimeError>,
+) -> TaskRunStatus {
+    if presession_timeout.is_some() {
+        TaskRunStatus::Failed
+    } else {
+        teardown
+            .as_ref()
+            .ok()
+            .map(report_to_terminal_status)
+            .unwrap_or(TaskRunStatus::Interrupted)
     }
 }
 
