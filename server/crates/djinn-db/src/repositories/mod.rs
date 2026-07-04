@@ -25,6 +25,7 @@ pub mod session_compaction_boundary;
 pub mod session_message;
 pub mod settings;
 pub mod task;
+pub mod task_arbitration;
 pub mod task_run;
 pub mod test_support;
 pub mod usage_analytics;
