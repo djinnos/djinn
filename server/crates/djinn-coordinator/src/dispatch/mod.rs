@@ -1,4 +1,5 @@
 mod admission;
+pub(crate) mod liveness;
 mod outcome;
 pub(crate) mod post_intervention_lane;
 /// Pure resume-source selector and candidate builder. Wired into the dispatch
