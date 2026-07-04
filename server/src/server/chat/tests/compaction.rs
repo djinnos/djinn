@@ -16,7 +16,6 @@
 use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_core::events::EventBus;
 use djinn_core::message::{ContentBlock, Message, Role};
-use djinn_core::models::SessionMessage;
 use djinn_db::repositories::session_compaction_boundary::{
     BeginCompactionParams, CompleteCompactionParams, SessionCompactionBoundaryRepository,
 };
@@ -33,28 +32,29 @@ async fn seed_chat_session(db: &djinn_db::Database, session_id: &str) {
     djinn_db::test_support::seed_chat_session_row(db, session_id).await;
 }
 
-/// Insert messages into session_messages and return their DB-assigned ids.
+/// Insert messages into session_messages one at a time via the repository layer
+/// and return their DB-assigned ids.
 async fn insert_and_collect_ids(
     db: &Database,
     session_id: &str,
     messages: &[Message],
 ) -> Vec<String> {
     let repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
-    repo.insert_messages_batch(session_id, "", messages)
-        .await
-        .unwrap();
-    let rows: Vec<SessionMessage> = sqlx::query_as!(
-        SessionMessage,
-        r#"SELECT id, session_id, role, content_json::text AS "content_json!", token_count, created_at
-             FROM session_messages
-             WHERE session_id = $1
-             ORDER BY created_at ASC, id ASC"#,
-        session_id,
-    )
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
-    rows.into_iter().map(|r| r.id).collect()
+    let mut ids = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let role = match msg.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        let content_json = serde_json::to_string(&msg.content).unwrap_or_else(|_| "[]".to_string());
+        let inserted = repo
+            .insert_message(session_id, "", role, &content_json, None)
+            .await
+            .unwrap();
+        ids.push(inserted.id);
+    }
+    ids
 }
 
 /// Helper to build the compacted marker pair (user summary + assistant
