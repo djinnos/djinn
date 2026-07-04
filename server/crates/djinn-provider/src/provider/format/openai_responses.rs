@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
+use crate::provider::FormatFamily;
 use crate::provider::client::ApiClient;
 use crate::provider::error::ProviderError;
+use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -79,12 +81,15 @@ impl OpenAIResponsesProvider {
                         .or_else(|| tool.get("input_schema"))
                         .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
                         .cloned()
-                        .map(super::openai::ensure_object_properties);
+                        .map(|schema| {
+                            project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI)
+                        });
                     json!({
                         "type": "function",
                         "name": name,
                         "description": description,
                         "parameters": parameters,
+                        "strict": false,
                     })
                 })
                 .collect();
@@ -984,6 +989,7 @@ mod tests {
         assert_eq!(tools_arr[0]["name"], "bash");
         assert_eq!(tools_arr[0]["description"], "Run a shell command");
         assert!(tools_arr[0]["parameters"]["properties"]["cmd"].is_object());
+        assert_eq!(tools_arr[0]["strict"], false);
     }
 
     #[test]
@@ -1008,6 +1014,111 @@ mod tests {
         assert_eq!(tools_arr[0]["type"], "function");
         assert_eq!(tools_arr[0]["name"], "bash");
         assert_eq!(tools_arr[0]["description"], "Run a shell command");
+        assert_eq!(tools_arr[0]["strict"], false);
+    }
+
+    #[test]
+    fn test_build_request_with_tools_moonshot_compat_projects_schema() {
+        let mut provider = test_provider();
+        provider.config.tool_schema_compat = Some(crate::provider::ToolSchemaCompat::Moonshot);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+
+        // Schema uses Draft-2020-12 prefixItems that Moonshot rejects.
+        let tools = vec![json!({
+            "name": "tuple_tool",
+            "description": "Takes a tuple",
+            "inputSchema": {
+                "type": "array",
+                "prefixItems": [{ "type": "string" }, { "type": "integer" }]
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let tools_arr = req["tools"].as_array().unwrap();
+        assert_eq!(tools_arr[0]["name"], "tuple_tool");
+        assert_eq!(tools_arr[0]["strict"], false);
+        // Moonshot projection collapses prefixItems into items array.
+        let params = &tools_arr[0]["parameters"];
+        assert!(params.get("prefixItems").is_none());
+        let items = params["items"].as_array().expect("items should be array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "string");
+        assert_eq!(items[1]["type"], "integer");
+    }
+
+    #[test]
+    fn test_build_request_native_no_quirk_emits_strict_false_per_tool() {
+        // Captures the wire-shape OpenAI Responses emits for a native
+        // (`tool_schema_compat: None`) provider config, by observing the
+        // **actual generated JSON body** (`build_request` is exactly the
+        // JSON OpenAI Responses receives). The companion integration test
+        // in `tests/provider_client_requests.rs::openai_responses_native_*`
+        // does the full request round-trip; this in-crate test pins the
+        // `build_request` shape independently so a seam regression surfaces
+        // here even when the integration test harness is unavailable.
+        //
+        // The Responses path is the documented exception to the no-quirk
+        // identity rule: every emitted function tool spec MUST carry
+        // `"strict": false` because the RMCP-emitted input schemas do not
+        // satisfy OpenAI's strict-schema requirements. Native=no-quirk
+        // everywhere else — only `strict` is intentionally non-native.
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+        let tools = vec![
+            json!({
+                "name": "bash",
+                "description": "Run a shell command",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"]
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}}
+                    }
+                }
+            }),
+        ];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Auto));
+        let tools_arr = req["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 2);
+
+        for tool in tools_arr {
+            assert_eq!(tool["type"], "function");
+            // Responses hoists `name`/`description`/`parameters` to the top
+            // level; the chat-completions `function` wrapper is gone.
+            assert!(tool["name"].is_string());
+            assert!(tool["description"].is_string());
+            assert!(tool["function"].is_null());
+            assert!(tool["parameters"].is_object());
+            // The intended non-native-shape exception: every function tool
+            // spec carries `strict: false` regardless of compat.
+            assert_eq!(tool["strict"], false);
+        }
+
+        // Byte-determinism: the whole body must serialize to identical
+        // strings across repeated builds. A drift here would also break the
+        // implicit OpenAI Responses cache and rate-limit contract on the
+        // and would mean a non-deterministic value (timestamp, hash order,
+        // id) leaked into the native path that mpen AC3 says must stay
+        // stable. This guards the same invariant as the Anthropic /
+        // OpenAI-ChatCompletions / Google native tests do for their seams.
+        let body_a = serde_json::to_string(&req).expect("serialize body once");
+        let body_b = serde_json::to_string(&req).expect("serialize body twice");
+        assert_eq!(
+            body_a, body_b,
+            "OpenAI Responses native no-quirk request must be byte-deterministic across builds"
+        );
     }
 
     #[test]

@@ -185,7 +185,10 @@ pub(crate) fn build_provider_from_resolved(
                     provider_headers,
                     capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
                     reasoning_effort: None,
-                    tool_schema_compat: None,
+                    tool_schema_compat: djinn_provider::catalog::builtin::tool_schema_compat_for(
+                        &resolved.catalog_provider_id,
+                        &resolved.model_name,
+                    ),
                 },
             ))
         }
@@ -216,4 +219,124 @@ pub(crate) fn resolved_needs_base_url(
         resolved.provider_credential,
         Some(ProviderCredential::ApiKey(..))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to build a `ResolvedModelCredential` with an API-key credential
+    /// for the given provider/model.
+    fn mock_resolved(
+        provider_id: &str,
+        model_name: &str,
+    ) -> crate::lifecycle::model_resolution::ResolvedModelCredential {
+        crate::lifecycle::model_resolution::ResolvedModelCredential {
+            catalog_provider_id: provider_id.to_string(),
+            model_name: model_name.to_string(),
+            provider_credential: Some(ProviderCredential::ApiKey(
+                "TEST_KEY".to_string(),
+                "sk-test".to_string(),
+            )),
+        }
+    }
+
+    #[test]
+    fn kimi_quirked_model_receives_moonshot_compat() {
+        let resolved = mock_resolved("kimi-for-coding", "k2p7");
+        let provider = build_provider_from_resolved(
+            resolved,
+            128_000,
+            None,
+            None,
+            "https://api.example.com".to_string(),
+        )
+        .expect("provider should be created");
+
+        let config = provider
+            .config_snapshot()
+            .expect("concrete provider exposes config");
+        assert_eq!(
+            config.tool_schema_compat,
+            Some(djinn_provider::provider::ToolSchemaCompat::Moonshot),
+        );
+    }
+
+    #[test]
+    fn minimax_quirked_model_receives_moonshot_compat() {
+        let resolved = mock_resolved("minimax-coding-plan", "MiniMax-M3");
+        let provider = build_provider_from_resolved(
+            resolved,
+            64_000,
+            None,
+            None,
+            "https://api.example.com".to_string(),
+        )
+        .expect("provider should be created");
+
+        let config = provider
+            .config_snapshot()
+            .expect("concrete provider exposes config");
+        assert_eq!(
+            config.tool_schema_compat,
+            Some(djinn_provider::provider::ToolSchemaCompat::Moonshot),
+        );
+    }
+
+    #[test]
+    fn google_quirked_model_receives_gemini_compat() {
+        let resolved = mock_resolved("google", "gemini-2.5-pro");
+        let provider = build_provider_from_resolved(
+            resolved,
+            1_000_000,
+            None,
+            None,
+            "https://generativelanguage.googleapis.com".to_string(),
+        )
+        .expect("provider should be created");
+
+        let config = provider
+            .config_snapshot()
+            .expect("concrete provider exposes config");
+        assert_eq!(
+            config.tool_schema_compat,
+            Some(djinn_provider::provider::ToolSchemaCompat::Gemini),
+        );
+    }
+
+    #[test]
+    fn openai_native_model_receives_none_compat() {
+        let resolved = mock_resolved("openai", "gpt-4.1-mini");
+        let provider = build_provider_from_resolved(
+            resolved,
+            128_000,
+            None,
+            None,
+            "https://api.openai.com".to_string(),
+        )
+        .expect("provider should be created");
+
+        let config = provider
+            .config_snapshot()
+            .expect("concrete provider exposes config");
+        assert_eq!(config.tool_schema_compat, None);
+    }
+
+    #[test]
+    fn anthropic_native_model_receives_none_compat() {
+        let resolved = mock_resolved("anthropic", "claude-3-5-haiku");
+        let provider = build_provider_from_resolved(
+            resolved,
+            200_000,
+            None,
+            None,
+            "https://api.anthropic.com".to_string(),
+        )
+        .expect("provider should be created");
+
+        let config = provider
+            .config_snapshot()
+            .expect("concrete provider exposes config");
+        assert_eq!(config.tool_schema_compat, None);
+    }
 }

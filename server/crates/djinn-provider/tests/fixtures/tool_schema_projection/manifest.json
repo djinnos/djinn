@@ -1,0 +1,31 @@
+{
+  "$comment": "Manifest for the tool-schema projection corpus. The follow-up invariant test (task azmt) loads fixtures by walking this manifest's entries. Each entry maps a fixture file (relative to this directory) to a corpus group and an optional list of projection shapes it exercises.",
+  "version": 1,
+  "groups": {
+    "builtin": {
+      "$comment": "Snapshots of real built-in tool schemas: role-based (worker/planner/lead/reviewer/architect from djinn-agent insta snapshots) plus the full DjinnMcpServer::all_tool_schemas() corpus (generated from djinn-control-plane). See README.md.",
+      "files": [
+        "builtin/worker.json",
+        "builtin/planner.json",
+        "builtin/lead.json",
+        "builtin/reviewer.json",
+        "builtin/architect.json",
+        "builtin/djinn_mcp_server.json"
+      ]
+    },
+    "regression": {
+      "$comment": "Named regression schemas for known-bad JSON Schema shapes from proposal mpen.",
+      "files": [
+        "regression/01_empty_items_object.json",
+        "regression/02_items_object_no_properties.json",
+        "regression/03_allof_if_then_conditionals.json",
+        "regression/04_schemars_untagged_enum_anyof.json",
+        "regression/05_ref_siblings.json",
+        "regression/06_tuple_prefix_items.json",
+        "regression/07_unevaluated_items.json",
+        "regression/08_gemini_forbidden_keywords.json",
+        "regression/09_combined_real_world.json"
+      ]
+    }
+  }
+}

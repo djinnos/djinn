@@ -55,12 +55,13 @@ fn apply_ac_verdicts_handles_empty_existing_gracefully() {
 
 #[tokio::test]
 async fn budget_park_logs_extractor_compatible_work_submitted() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     handle_budget_park(
         "completed A; B remains",
         "budget-triggered wind-down summary captured",
@@ -85,12 +86,13 @@ async fn budget_park_logs_extractor_compatible_work_submitted() {
 
 #[tokio::test]
 async fn budget_park_empty_summary_skips_activity() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     handle_budget_park("   ", "ignored", &task.id, &ctx).await;
     let repo = TaskRepository::new(db.clone(), ctx.event_bus.clone());
     let entries = repo.list_activity(&task.id).await.unwrap();
@@ -99,12 +101,13 @@ async fn budget_park_empty_summary_skips_activity() {
 
 #[tokio::test]
 async fn submit_work_logs_activity_with_summary_and_files() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
         "task_id": task.short_id,
         "commit_title": "feat: implement the feature",
@@ -128,12 +131,13 @@ async fn submit_work_logs_activity_with_summary_and_files() {
 
 #[tokio::test]
 async fn budget_park_submit_work_activity_surfaces_unchanged() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
         "task_id": task.short_id,
         "commit_title": "park budget summary",
@@ -158,12 +162,13 @@ async fn budget_park_submit_work_activity_surfaces_unchanged() {
 
 #[tokio::test]
 async fn submit_work_malformed_payload_does_not_crash() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db: _,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // Missing required "summary" field.
     let payload = Some(serde_json::json!({"task_id": task.id}));
     // Should not panic.
@@ -172,12 +177,13 @@ async fn submit_work_malformed_payload_does_not_crash() {
 
 #[tokio::test]
 async fn submit_review_atomically_sets_ac_from_criteria_array() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // Seed AC with met=false.
     TaskRepository::new(db.clone(), ctx.event_bus.clone())
         .set_acceptance_criteria(
@@ -206,12 +212,13 @@ async fn submit_review_atomically_sets_ac_from_criteria_array() {
 
 #[tokio::test]
 async fn submit_review_logs_verdict_activity() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "verdict": "rejected",
@@ -230,12 +237,13 @@ async fn submit_review_logs_verdict_activity() {
 
 #[tokio::test]
 async fn submit_review_malformed_payload_does_not_crash() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db: _,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // "verdict" is required but missing.
     let payload = Some(serde_json::json!({"task_id": task.id}));
     process_finalize_payload(&payload, "submit_review", &task.id, &ctx).await;
@@ -243,12 +251,13 @@ async fn submit_review_malformed_payload_does_not_crash() {
 
 #[tokio::test]
 async fn submit_decision_logs_decision_activity() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
         "task_id": task.id,
         "decision": "reopen",
@@ -272,12 +281,13 @@ async fn submit_decision_logs_decision_activity() {
 
 #[tokio::test]
 async fn submit_decision_malformed_payload_does_not_crash() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db: _,
+        ctx,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // "decision" is required but missing.
     let payload = Some(serde_json::json!({"task_id": task.id}));
     process_finalize_payload(&payload, "submit_decision", &task.id, &ctx).await;
@@ -285,13 +295,13 @@ async fn submit_decision_malformed_payload_does_not_crash() {
 
 #[tokio::test]
 async fn submit_grooming_logs_per_task_activity_entries() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task1 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
-    let task2 = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task1 = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task2 = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let payload = Some(serde_json::json!({
         "tasks_reviewed": [
             {"task_id": task1.id, "action": "promoted", "changes": "bumped priority to 1"},
@@ -321,14 +331,14 @@ async fn submit_grooming_logs_per_task_activity_entries() {
 /// of re-planning every stale-sweep (epic `mygq`, 2026-07-01).
 #[tokio::test]
 async fn submit_grooming_blocked_on_records_epic_blocker_durably() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let parked = test_helpers::create_test_epic(&db, &project.id).await;
-    let blocker = test_helpers::create_test_epic(&db, &project.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let parked = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let blocker = crate::test_helpers::create_test_epic(&db, &project.id).await;
     // The planning session runs on a real planning task under the parked epic.
-    let planning_task = test_helpers::create_test_task(&db, &project.id, &parked.id).await;
+    let planning_task = crate::test_helpers::create_test_task(&db, &project.id, &parked.id).await;
     let epic_repo = djinn_db::EpicRepository::new(db.clone(), ctx.event_bus.clone());
     assert!(
         !epic_repo.has_unresolved_blockers(&parked.id).await.unwrap(),
@@ -370,12 +380,12 @@ async fn submit_grooming_blocked_on_records_epic_blocker_durably() {
 /// be skipped without crashing and without recording a bogus edge.
 #[tokio::test]
 async fn submit_grooming_blocked_on_unresolvable_ref_is_skipped() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let parked = test_helpers::create_test_epic(&db, &project.id).await;
-    let planning_task = test_helpers::create_test_task(&db, &project.id, &parked.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let parked = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let planning_task = crate::test_helpers::create_test_task(&db, &project.id, &parked.id).await;
     let payload = Some(serde_json::json!({
         "tasks_reviewed": [],
         "blocked_on": ["does-not-exist"],
@@ -390,7 +400,7 @@ async fn submit_grooming_blocked_on_unresolvable_ref_is_skipped() {
 
 #[tokio::test]
 async fn submit_grooming_malformed_payload_does_not_crash() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
     // Missing "tasks_reviewed" entirely.
@@ -400,7 +410,7 @@ async fn submit_grooming_malformed_payload_does_not_crash() {
 
 #[tokio::test]
 async fn none_payload_is_a_noop() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
     process_finalize_payload(&None, "submit_work", "any-task-id", &ctx).await;
@@ -408,7 +418,7 @@ async fn none_payload_is_a_noop() {
 
 #[tokio::test]
 async fn unknown_finalize_tool_is_a_noop() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
     let payload = Some(serde_json::json!({"anything": "here"}));
@@ -417,12 +427,13 @@ async fn unknown_finalize_tool_is_a_noop() {
 
 #[tokio::test]
 async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // Create a task_run so the metadata can reference it.
     let run_id = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
@@ -486,12 +497,13 @@ async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
 
 #[tokio::test]
 async fn auto_submit_payload_records_model_called_false() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let run_id = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
         .create(djinn_db::repositories::task_run::CreateTaskRunParams {

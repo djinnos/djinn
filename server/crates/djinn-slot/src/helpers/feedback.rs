@@ -4,19 +4,24 @@ use djinn_orchestration_types::slot::{MERGE_CONFLICT_PREFIX, MergeConflictMetada
 
 /// Return the most recent N high-signal comments (lead, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
+/// Includes structured rejected `review_submitted` payloads even when there is no
+/// matching `comment`-typed twin.
 /// Each entry is formatted as "**Label:** body".
 pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usize) -> Vec<String> {
     let high_signal: Vec<&djinn_core::models::ActivityEntry> = activity
         .iter()
         .rev()
         .filter(|e| {
-            e.event_type == "comment"
+            (e.event_type == "comment"
                 && (e.actor_role == "lead"
                     || e.actor_role == "pm"
                     || e.actor_role == "architect"
                     || e.actor_role == "reviewer"
                     || e.actor_role == "task_reviewer"
-                    || e.actor_role == "verification")
+                    || e.actor_role == "verification"))
+                || (e.event_type == "review_submitted"
+                    && e.actor_role == "reviewer"
+                    && is_rejected_review(e))
         })
         .take(max)
         .collect();
@@ -25,6 +30,14 @@ pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usiz
         .into_iter()
         .rev()
         .filter_map(|e| {
+            if e.event_type == "review_submitted" {
+                let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
+                let body = payload.get("feedback").and_then(|v| v.as_str())?;
+                if body.is_empty() {
+                    return None;
+                }
+                return Some(format!("**Reviewer rejection:**\n{body}"));
+            }
             let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
             let body = payload.get("body").and_then(|v| v.as_str())?;
             let label = match e.actor_role.as_str() {
@@ -42,6 +55,15 @@ pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usiz
             Some(format!("**{label}:**\n{trimmed}"))
         })
         .collect()
+}
+
+/// Return true when the activity entry is a structured rejected review submission.
+/// The `review_submitted` event is logged by `submit_review` with a `verdict` field.
+fn is_rejected_review(entry: &djinn_core::models::ActivityEntry) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload) else {
+        return false;
+    };
+    payload.get("verdict").and_then(|v| v.as_str()) == Some("rejected")
 }
 
 /// Extract worker submission summary/concerns from the activity log so the
@@ -184,6 +206,56 @@ pub async fn pr_review_feedback_context(task_id: &str, app_state: &SlotContext) 
 /// Truncate feedback text using 60/40 head+tail split.
 fn truncate_feedback(text: &str, max: usize) -> String {
     crate::truncate::smart_truncate(text, max)
+}
+
+/// Per-reason character cap inside a single ledger bullet.
+const LEDGER_REASON_MAX_CHARS: usize = 120;
+
+/// Character budget for the entire formatted reopen-ledger section.
+pub const LEDGER_BUDGET_CHARS: usize = 2000;
+
+/// Format up to six recent reopen ledger entries as a compact, worker-facing
+/// section. Entries are presented in chronological order (oldest first / newest
+/// last) with ascending round numbers so the worker can see progression.
+///
+/// Each line is formatted as:
+///   `Round N — reopen_class (from: from_status): truncated_reason`
+///
+/// The entire output is bounded by [`LEDGER_BUDGET_CHARS`] via
+/// [`truncate_feedback`].
+pub fn format_reopen_ledger(entries: &[ReopenLedgerEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    // DB returns newest-first; reverse so oldest → newest for worker context.
+    let mut lines: Vec<String> = Vec::with_capacity(entries.len() + 1);
+    lines.push("**Reopen history (newest last):**".to_string());
+    for (i, entry) in entries.iter().rev().enumerate() {
+        let round = i + 1;
+        let class = &entry.reopen_class;
+        let from = if entry.from_status.is_empty() {
+            "—"
+        } else {
+            entry.from_status.as_str()
+        };
+        let reason_snippet = match &entry.reason {
+            Some(r) if !r.is_empty() => {
+                let trimmed = r.trim();
+                let snippet: String = trimmed.chars().take(LEDGER_REASON_MAX_CHARS).collect();
+                if trimmed.chars().count() > LEDGER_REASON_MAX_CHARS {
+                    format!("{snippet}…")
+                } else {
+                    snippet
+                }
+            }
+            _ => "—".to_string(),
+        };
+        lines.push(format!(
+            "Round {round} — {class} (from: {from}): {reason_snippet}"
+        ));
+    }
+    let raw = lines.join("\n");
+    Some(truncate_feedback(&raw, LEDGER_BUDGET_CHARS))
 }
 
 #[cfg(test)]
@@ -450,7 +522,7 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
     let repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
     let activity = repo.list_activity(task_id).await.ok().unwrap_or_default();
     // PR review feedback takes priority over generic activity log comments.
-    if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
+    let mut msg = if let Some(pr_feedback) = pr_review_feedback_context(task_id, app_state).await {
         // Find when the current reviewer-feedback cycle was logged so we only
         // pull CI feedback from the same cycle (not a stale earlier-head comment).
         let review_cycle_floor = activity
@@ -464,7 +536,7 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
             // Fairly budget the two sections so neither a huge reviewer blob nor
             // a huge CI log can starve the other (E5). Unused budget is lent.
             let (reviewer_section, ci_section) = budget_combined_sections(&pr_feedback, &ci_raw);
-            return format!(
+            format!(
                 "This PR has TWO blocking problems. Address ALL of the following in one pass before responding:\n\n\
                 **(A) A human reviewer requested changes.** Address every reviewer comment below:\n\n\
                 {reviewer_section}\n\n\
@@ -473,23 +545,37 @@ pub async fn initial_user_message_for_task(task_id: &str, app_state: &SlotContex
                 {ci_section}\n\n\
                 ---\n\n\
                 Resolve (A) and (B) together, then push fixup commits to the same branch. Do not open a new PR."
-            );
+            )
+        } else {
+            // Reviewer-only: the single section gets the full single-source budget.
+            let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
+            format!(
+                "A human reviewer has requested changes on the PR. Address every reviewer comment below:\n\n\
+                {reviewer_section}\n\n\
+                Push fixup commits to the same branch. Do not open a new PR."
+            )
         }
-        // Reviewer-only: the single section gets the full single-source budget.
-        let reviewer_section = truncate_feedback(&pr_feedback, MAX_COMBINED_SECTION_CHARS);
-        return format!(
-            "A human reviewer has requested changes on the PR. Address every reviewer comment below:\n\n\
-            {reviewer_section}\n\n\
-            Push fixup commits to the same branch. Do not open a new PR."
-        );
-    }
-    let sections = recent_feedback(&activity, 3);
-    if sections.is_empty() {
-        "Start by understanding the task context and execute it fully before stopping.".to_string()
     } else {
-        format!(
-            "The activity log contains important feedback from prior sessions. Read it carefully and act on it:\n\n{}\n\nAddress this feedback, make the necessary changes, then stop.",
-            sections.join("\n\n---\n\n")
-        )
+        let sections = recent_feedback(&activity, 3);
+        if sections.is_empty() {
+            "Start by understanding the task context and execute it fully before stopping."
+                .to_string()
+        } else {
+            format!(
+                "The activity log contains important feedback from prior sessions. Read it carefully and act on it:\n\n{}\n\nAddress this feedback, make the necessary changes, then stop.",
+                sections.join("\n\n---\n\n")
+            )
+        }
+    };
+
+    // Append compact reopen failure ledger when available. Query failures are
+    // tolerated — the dispatch proceeds without the ledger section.
+    if let Ok(ledger) = repo.recent_reopen_ledger(task_id, 6).await
+        && let Some(section) = format_reopen_ledger(&ledger)
+    {
+        msg.push_str("\n\n---\n\n");
+        msg.push_str(&section);
     }
+
+    msg
 }

@@ -99,6 +99,9 @@ pub(crate) struct PromptContextInputs<'a> {
     pub read_sources: &'a [ReadSourceInfo],
     /// Worker resume note (y8pv/48ru). `None` for non-worker roles.
     pub worker_resume_note: Option<&'a str>,
+    /// Per-server MCP instructions from connected servers, in deterministic
+    /// server-name order. Failed or no-instruction servers are omitted.
+    pub mcp_server_instructions: &'a std::collections::BTreeMap<String, String>,
 }
 
 /// Format conflicting files as a `- <path>` markdown list.
@@ -154,18 +157,46 @@ fn format_activity_text(
     }
 }
 
-/// Apply extensions, skills, and read sources to base prompt in canonical order.
+/// Format MCP server instructions as a deterministic `mcp_instructions` prompt
+/// section. Returns `None` when the map is empty (no server provided instructions).
+///
+/// Each server gets its own subsection, sorted by server name. The section is
+/// only included when at least one connected server returned non-empty
+/// instructions.
+fn format_mcp_instructions(
+    mcp_server_instructions: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if mcp_server_instructions.is_empty() {
+        return None;
+    }
+    let mut sections = Vec::new();
+    for (server_name, instruction) in mcp_server_instructions {
+        sections.push(format!("### {server_name}\n{instruction}"));
+    }
+    Some(format!(
+        "## MCP Server Instructions\n{}",
+        sections.join("\n\n")
+    ))
+}
+
+/// Apply extensions, skills, read sources, and MCP instructions to base prompt
+/// in canonical order.
 fn apply_prompt_sections(
     base_system_prompt: &str,
     system_prompt_extensions: &str,
     learned_prompt: Option<&str>,
     resolved_skills: &[ResolvedSkill],
     read_sources: &[ReadSourceInfo],
+    mcp_server_instructions: &std::collections::BTreeMap<String, String>,
 ) -> String {
     let with_extensions =
         apply_role_extensions(base_system_prompt, system_prompt_extensions, learned_prompt);
     let with_skills = apply_skills(&with_extensions, resolved_skills);
-    append_read_sources_prompt(&with_skills, read_sources)
+    let with_read_sources = append_read_sources_prompt(&with_skills, read_sources);
+    match format_mcp_instructions(mcp_server_instructions) {
+        Some(section) => format!("{with_read_sources}\n\n{section}"),
+        None => with_read_sources,
+    }
 }
 
 /// Append sibling task summary lines to `ctx_lines` for the given epic.
@@ -383,6 +414,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         app_state,
         read_sources,
         worker_resume_note,
+        mcp_server_instructions,
     } = inputs;
     let conflict_files = format_conflict_files(conflict_ctx);
     let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
@@ -460,6 +492,7 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         learned_prompt,
         resolved_skills,
         read_sources,
+        mcp_server_instructions,
     );
     PromptContext {
         conflict_files,

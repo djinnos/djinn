@@ -801,6 +801,83 @@ mod tests {
         );
     }
 
+    // ── DjinnMcpServer corpus snapshot for tool-schema projection tests ──
+    //
+    // The `djinn-provider` crate cannot depend on `djinn-control-plane`
+    // (cycle), so the `DjinnMcpServer::all_tool_schemas()` corpus is
+    // committed as a JSON fixture under
+    //   djinn-provider/tests/fixtures/tool_schema_projection/builtin/djinn_mcp_server.json
+    //
+    // This test either **asserts** the committed fixture matches the live
+    // output (normal `cargo test`), or **writes** the fixture when the
+    // environment variable `UPDATE_DJINN_MCP_SERVER_FIXTURE=1` is set.
+    //
+    // Regeneration:
+    //   UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \
+    //     server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture
+
+    /// Canonical fixture path relative to `CARGO_MANIFEST_DIR`.
+    const DJINN_MCP_SERVER_FIXTURE_REL: &str =
+        "../djinn-provider/tests/fixtures/tool_schema_projection/builtin/djinn_mcp_server.json";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn djinn_mcp_server_corpus_fixture_is_current() {
+        let db = Database::open_in_memory().unwrap();
+        let state = test_mcp_state(db);
+        let server = DjinnMcpServer::new(state);
+
+        let schemas = server.all_tool_schemas();
+        assert!(
+            !schemas.is_empty(),
+            "DjinnMcpServer::all_tool_schemas() returned empty — check rmcp tool router wiring"
+        );
+
+        // Sort by tool name for deterministic ordering.
+        let mut sorted = schemas;
+        sorted.sort_by(|a, b| {
+            let name_a = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let name_b = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            name_a.cmp(name_b)
+        });
+
+        let pretty =
+            serde_json::to_string_pretty(&sorted).expect("all_tool_schemas must serialize to JSON");
+
+        let fixture_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(DJINN_MCP_SERVER_FIXTURE_REL);
+
+        if std::env::var("UPDATE_DJINN_MCP_SERVER_FIXTURE").as_deref() == Ok("1") {
+            // Write mode: overwrite the committed fixture.
+            if let Some(parent) = fixture_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|e| panic!("create fixture dir {}: {e}", parent.display()));
+            }
+            std::fs::write(&fixture_path, &pretty)
+                .unwrap_or_else(|e| panic!("write fixture {}: {e}", fixture_path.display()));
+            eprintln!(
+                "Wrote DjinnMcpServer corpus fixture ({} tools) to {}",
+                sorted.len(),
+                fixture_path.display()
+            );
+        } else {
+            // Assert mode: the committed fixture must match.
+            let committed = std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| {
+                panic!(
+                    "read committed fixture {}: {e}\n\
+                     Run with UPDATE_DJINN_MCP_SERVER_FIXTURE=1 to generate it.",
+                    fixture_path.display()
+                )
+            });
+            assert_eq!(
+                pretty, committed,
+                "DjinnMcpServer::all_tool_schemas() has drifted from the committed fixture.\n\
+                 If this is intentional, regenerate with:\n\
+                 UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \n\
+                   server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture"
+            );
+        }
+    }
+
     // ── Dispatch-pause contract: strict-argument decoding + read-only status ─
     //
     // The dispatch-pause epic ships three MCP tools whose parameter structs

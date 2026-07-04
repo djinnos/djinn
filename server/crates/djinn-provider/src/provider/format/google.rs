@@ -6,7 +6,10 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
+use crate::provider::format::tool_projection::project;
+use crate::provider::{
+    FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
+};
 
 pub struct GoogleProvider {
     config: ProviderConfig,
@@ -49,7 +52,36 @@ impl GoogleProvider {
         }
 
         if !tools.is_empty() {
-            body["tools"] = json!([{"functionDeclarations": tools}]);
+            let declarations: Vec<Value> = tools
+                .iter()
+                .map(|tool| {
+                    let name = tool
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    let description = tool
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    let input_schema = tool
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| json!({"type": "object"}));
+                    let projected = project(
+                        input_schema,
+                        self.config.tool_schema_compat,
+                        FormatFamily::Google,
+                    );
+                    json!({
+                        "name": name,
+                        "description": description,
+                        "parameters": projected,
+                    })
+                })
+                .collect();
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
 
             match tool_choice.unwrap_or(ToolChoice::Auto) {
                 ToolChoice::Auto => {}
@@ -263,7 +295,9 @@ impl LlmProvider for GoogleProvider {
 mod tests {
     use super::*;
     use crate::message::{Conversation, Message};
-    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+    use crate::provider::{
+        AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ToolSchemaCompat,
+    };
     use axum::{Router, routing::post};
     use futures::TryStreamExt;
     use std::sync::{Arc, Mutex};
@@ -427,11 +461,79 @@ mod tests {
         let tools = vec![json!({
             "name": "shell",
             "description": "Run shell",
-            "parameters": {"type": "object"}
+            "inputSchema": {"type": "object"}
         })];
 
         let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
         assert_eq!(req["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
+    }
+
+    #[test]
+    fn test_build_request_native_no_quirk_emits_function_declarations_envelope() {
+        // Captures the wire-shape Google emits for a native/no-quirk
+        // `tool_schema_compat: None` provider config, by observing the
+        // **actual generated JSON body** (the `build_request` return value
+        // is exactly the JSON Google receives). The companion integration
+        // test in `tests/provider_client_requests.rs::google_native_no_quirk_*`
+        // does the full request round-trip; this in-crate test pins the
+        // `build_request` shape independently so a seam regression surfaces
+        // here even when the integration test harness is unavailable.
+        //
+        // We deliberately do not go through the wiremock HTTP layer or the
+        // standalone `tool_projection::project` direct call — this test
+        // proves the **seam** (build_request, end-to-end) stays native-shaped
+        // on `tool_schema_compat: None`, exactly the property mpen AC3
+        // requires.
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run a shell command",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"]
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Auto));
+        let tools_arr = req["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 1);
+        // Gemini wire format expects exactly one `functionDeclarations` group.
+        assert_eq!(
+            tools_arr[0]
+                .as_object()
+                .map(|o| o.keys().collect::<Vec<_>>())
+                .unwrap_or_default(),
+            vec!["functionDeclarations"]
+        );
+
+        let decl = &tools_arr[0]["functionDeclarations"][0];
+        assert_eq!(decl["name"], "shell");
+        assert_eq!(decl["description"], "Run a shell command");
+        // RMCP `inputSchema` becomes Gemini wire `parameters`.
+        assert!(decl.get("inputSchema").is_none());
+        assert_eq!(decl["parameters"]["type"], "object");
+        assert_eq!(decl["parameters"]["properties"]["cmd"]["type"], "string");
+        assert_eq!(decl["parameters"]["required"][0], "cmd");
+
+        // Native path must NOT emit `strict` (Responses-only concern) and
+        // must NOT emit `toolConfig` for the `Auto` choice.
+        assert!(decl.get("strict").is_none());
+        assert!(req.get("toolConfig").is_none());
+
+        // The whole request body must serialize to byte-identical strings on
+        // repeated builds — no non-deterministic value (timestamp, request
+        // id, hash-order leak, …) may sneak into the functionDecls envelope
+        // for the native path. A drift here would also break the Gemini
+        // implicit dedup / cost-control contract.
+        let body_a = serde_json::to_string(&req).expect("serialize body once");
+        let body_b = serde_json::to_string(&req).expect("serialize body twice");
+        assert_eq!(
+            body_a, body_b,
+            "Google native no-quirk request body must be byte-deterministic across builds"
+        );
     }
 
     #[test]
@@ -442,6 +544,20 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
         assert!(req.get("toolConfig").is_none());
+    }
+
+    #[test]
+    fn test_build_request_tool_choice_none_still_emits_tool_config() {
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "noop",
+            "description": "Noop",
+            "inputSchema": {"type": "object"}
+        })];
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::None));
+        assert_eq!(req["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
     }
 
     // ─── B5: reasoning-effort -> thinkingConfig ─────────────────────────────
@@ -462,6 +578,61 @@ mod tests {
     #[test]
     fn test_reasoning_effort_high_sets_thinking_budget() {
         use crate::provider::ReasoningEffort;
+        // Native/no-quirk: schema is forwarded as-is through `inputSchema`.
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"]
+            },
+            "readOnly": false,
+            "destructive": true,
+            "idempotent": true,
+            "openWorld": true
+        })];
+        let req = provider.build_request(&conv, &tools, None);
+        let decl = &req["tools"][0]["functionDeclarations"][0];
+        assert_eq!(decl["name"], "shell");
+        assert_eq!(decl["description"], "Run shell");
+        assert_eq!(decl["parameters"]["type"], "object");
+        assert_eq!(decl["parameters"]["properties"]["cmd"]["type"], "string");
+        assert!(decl.get("inputSchema").is_none());
+        assert!(decl.get("readOnly").is_none());
+        assert!(decl.get("destructive").is_none());
+        assert!(decl.get("idempotent").is_none());
+        assert!(decl.get("openWorld").is_none());
+
+        // Gemini quirk: apply keyword whitelist and required filtering.
+        let mut gemini_config = test_google_config();
+        gemini_config.tool_schema_compat = Some(ToolSchemaCompat::Gemini);
+        let gemini_provider = GoogleProvider::new(gemini_config);
+        let gemini_tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd", "missing"],
+                "unevaluatedProperties": false
+            }
+        })];
+        let gemini_req = gemini_provider.build_request(&conv, &gemini_tools, None);
+        let gemini_decl = &gemini_req["tools"][0]["functionDeclarations"][0];
+        assert!(gemini_decl.get("inputSchema").is_none());
+        let required = gemini_decl["parameters"]["required"].as_array().unwrap();
+        assert_eq!(required, &["cmd"]);
+        assert!(
+            gemini_decl["parameters"]
+                .get("unevaluatedProperties")
+                .is_none()
+        );
+
+        // Reasoning effort high sets the thinking budget.
         let mut config = test_google_config();
         config.reasoning_effort = Some(ReasoningEffort::High);
         let provider = GoogleProvider::new(config);

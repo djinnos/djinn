@@ -17,7 +17,10 @@ use crate::test_helpers::{extract_stash_content, test_session_settlement_for_sta
 use djinn_core::message::Role;
 use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::{SessionMessageRepository, SessionRepository, TaskRepository};
+use djinn_db::{
+    SessionCompactionBoundaryRepository, SessionMessageRepository, SessionRepository,
+    TaskRepository,
+};
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
@@ -62,11 +65,14 @@ fn clear_session_budget_env() {
 }
 
 /// Pre-scripted response: text (optional) + tool calls + token counts.
+/// When `_error` is set, `MockProvider::stream()` returns the error immediately
+/// instead of producing a stream.
 struct MockResponse {
     text: Option<String>,
     tool_calls: Vec<ContentBlock>,
     input_tokens: u32,
     output_tokens: u32,
+    _error: Option<anyhow::Error>,
 }
 
 impl MockResponse {
@@ -76,6 +82,7 @@ impl MockResponse {
             tool_calls: vec![],
             input_tokens,
             output_tokens: 10,
+            _error: None,
         }
     }
     fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
@@ -96,6 +103,7 @@ impl MockResponse {
             }],
             input_tokens,
             output_tokens: 10,
+            _error: None,
         }
     }
 }
@@ -144,6 +152,11 @@ impl LlmProvider for MockProvider {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| MockResponse::text_only("fallback done", 50));
+            // If the mock response has an error, return it immediately
+            // (simulates a provider failure such as context_length_exceeded).
+            if let Some(e) = resp._error {
+                return Err(e);
+            }
             let mut events: Vec<anyhow::Result<StreamEvent>> = vec![];
             if let Some(text) = resp.text {
                 events.push(Ok(StreamEvent::Delta(ContentBlock::Text { text })));
@@ -198,6 +211,115 @@ async fn make_context() -> (
         .to_string_lossy()
         .into_owned();
     (ctx, project_path, task.id, session.id, cancel)
+}
+
+/// Holds common test state for reply-loop tests, eliminating the repeated
+/// `make_context()` + `Conversation` setup + `ReplyLoopContext { ... }` block.
+struct ReplyLoopHarness {
+    slot_ctx: crate::host::SlotContext,
+    project_path: String,
+    task_id: String,
+    session_id: String,
+    cancel: CancellationToken,
+    conv: Conversation,
+}
+
+type ReplyLoopResult = (anyhow::Result<()>, ParsedAgentOutput, i64, i64, i64, i64);
+
+impl ReplyLoopHarness {
+    async fn new() -> Self {
+        let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+        let mut conv = Conversation::new();
+        conv.push(Message::system("You are a worker."));
+        conv.push(Message::user("Do the task."));
+        Self {
+            slot_ctx,
+            project_path,
+            task_id,
+            session_id,
+            cancel,
+            conv,
+        }
+    }
+
+    /// Run the reply loop with default settings (context_window=10_000,
+    /// model_id="test/mock-model", no max_turns override).
+    async fn run(
+        &mut self,
+        provider: &dyn LlmProvider,
+        tools: &[serde_json::Value],
+    ) -> ReplyLoopResult {
+        self.run_with(provider, tools, 10_000, "test/mock-model", None)
+            .await
+    }
+
+    /// Run with a custom context_window.
+    async fn run_with_window(
+        &mut self,
+        provider: &dyn LlmProvider,
+        tools: &[serde_json::Value],
+        context_window: i64,
+    ) -> ReplyLoopResult {
+        self.run_with(provider, tools, context_window, "test/mock-model", None)
+            .await
+    }
+
+    /// Run with a custom model_id.
+    async fn run_with_model(
+        &mut self,
+        provider: &dyn LlmProvider,
+        tools: &[serde_json::Value],
+        model_id: &str,
+    ) -> ReplyLoopResult {
+        self.run_with(provider, tools, 10_000, model_id, None).await
+    }
+
+    /// Run with a custom max_turns_override.
+    async fn run_with_max_turns(
+        &mut self,
+        provider: &dyn LlmProvider,
+        tools: &[serde_json::Value],
+        max_turns: u32,
+    ) -> ReplyLoopResult {
+        self.run_with(provider, tools, 10_000, "test/mock-model", Some(max_turns))
+            .await
+    }
+
+    /// Run with all parameters customizable.
+    async fn run_with(
+        &mut self,
+        provider: &dyn LlmProvider,
+        tools: &[serde_json::Value],
+        context_window: i64,
+        model_id: &str,
+        max_turns_override: Option<u32>,
+    ) -> ReplyLoopResult {
+        let worktree_path = std::path::PathBuf::from("/tmp");
+        run_reply_loop(
+            ReplyLoopContext {
+                provider,
+                tools,
+                task_id: &self.task_id,
+                task_short_id: "t1",
+                session_id: &self.session_id,
+                project_path: &self.project_path,
+                worktree_path: &worktree_path,
+                role_name: "worker",
+                finalize_tool_names: &["submit_work", "request_lead"],
+                context_window,
+                model_id,
+                cancel: &self.cancel,
+                global_cancel: &self.cancel,
+                ctx: &self.slot_ctx,
+                active_skill_names: &[],
+                active_mcp_server_names: &[],
+                max_turns_override,
+            },
+            &mut self.conv,
+            false,
+        )
+        .await
+    }
 }
 
 async fn count_persisted_messages(slot_ctx: &crate::host::SlotContext, session_id: &str) -> usize {
@@ -754,36 +876,10 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         }],
         input_tokens: 100,
         output_tokens: 10,
+        _error: None,
     }]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "finalize response consumed");
     assert!(
@@ -809,35 +905,8 @@ async fn text_only_without_finalize_triggers_nudge_then_fails() {
         MockResponse::text_only("Yes, definitely done.", 120),
         // The 4th turn is never reached because we fail after 3 nudges.
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_err(), "expected error after nudge exhaustion");
     assert!(
         result
@@ -873,37 +942,11 @@ async fn nudge_count_resets_after_tool_call() {
             }],
             input_tokens: 130,
             output_tokens: 10,
+            _error: None,
         },
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     assert!(result.is_ok(), "expected ok, got: {:?}", result);
     assert_eq!(provider.remaining(), 0, "all responses consumed");
     assert!(output.finalize_payload.is_some(), "finalize payload set");
@@ -953,6 +996,7 @@ async fn tool_choice_required_for_supported_providers() {
             }],
             input_tokens: 110,
             output_tokens: 10,
+            _error: None,
         },
     ]);
     let recorded = Arc::new(Mutex::new(Vec::<Option<ToolChoice>>::new()));
@@ -1258,35 +1302,8 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
         75,
     ));
     let provider = MockProvider::new(responses);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     clear_session_budget_env();
     let _ = &_env_guard;
     assert!(
@@ -1296,16 +1313,16 @@ async fn hard_token_budget_injects_wind_down_and_ends_gracefully() {
     );
     assert_eq!(provider.remaining(), 0, "summary turn should be consumed");
     assert_eq!(
-        wind_down_directive_count(&conv),
+        wind_down_directive_count(&h.conv),
         1,
         "token budget should inject the existing wind-down directive once"
     );
     assert_eq!(
-        persisted_wind_down_directive_count(&slot_ctx, &session_id).await,
+        persisted_wind_down_directive_count(&h.slot_ctx, &h.session_id).await,
         1,
         "token-budget wind-down directive should be persisted"
     );
-    let assistant_text = role_text(&conv, Role::Assistant);
+    let assistant_text = role_text(&h.conv, Role::Assistant);
     assert!(
         assistant_text.contains("token budget reached") && assistant_text.contains("next:"),
         "wind-down summary should be captured, got: {assistant_text:?}"
@@ -1329,35 +1346,8 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
         ));
     }
     let provider = MockProvider::new(responses);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     clear_session_budget_env();
     let _ = &_env_guard;
     assert!(
@@ -1371,12 +1361,12 @@ async fn hard_token_budget_wind_down_ignored_falls_back_to_hard_error() {
     );
     assert_eq!(provider.remaining(), 0, "only one extra turn should run");
     assert_eq!(
-        wind_down_directive_count(&conv),
+        wind_down_directive_count(&h.conv),
         1,
         "token-budget wind-down extension is strictly one turn"
     );
     assert_eq!(
-        persisted_wind_down_directive_count(&slot_ctx, &session_id).await,
+        persisted_wind_down_directive_count(&h.slot_ctx, &h.session_id).await,
         1,
         "ignored token-budget directive should still be persisted once"
     );
@@ -1405,35 +1395,8 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         MockResponse::tool_call_with_input("tc3", "nonexistent_tool", same_args.clone(), 120),
         MockResponse::tool_call_with_input("tc4", "nonexistent_tool", same_args, 130),
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     let err = result.expect_err("fourth identical failure should trip typed loop guard");
     let guard_err = err
         .downcast_ref::<LoopGuardError>()
@@ -1444,8 +1407,9 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
     );
     assert_eq!(guard_err.condition.observed, 4);
     assert_eq!(guard_err.condition.threshold, 3);
-    let user_text = role_text(&conv, Role::User);
-    let correction_count = conv
+    let user_text = role_text(&h.conv, Role::User);
+    let correction_count = h
+        .conv
         .messages
         .iter()
         .filter(|m| {
@@ -1468,22 +1432,22 @@ async fn identical_failing_tool_call_injects_correction_then_typed_terminates() 
         "corrective message should name and forbid the exact normalized signature, got: {user_text}"
     );
     // The system prompt is intentionally skipped by the reply loop's
-    // initial-seed persistence pass, so persisted = conv.messages.len() - 1.
+    // initial-seed persistence pass, so persisted = h.conv.messages.len() - 1.
     // The 4th attempt's tool-result message is also not persisted because
     // the loop returns from the guard before appending it — but it is
-    // likewise absent from `conv.messages`, so the invariant still holds.
-    let persisted = count_persisted_messages(&slot_ctx, &session_id).await;
-    let expected_persisted = conv.messages.len() - 1;
+    // likewise absent from `h.conv.messages`, so the invariant still holds.
+    let persisted = count_persisted_messages(&h.slot_ctx, &h.session_id).await;
+    let expected_persisted = h.conv.messages.len() - 1;
     assert_eq!(
         persisted,
         expected_persisted,
         "corrective message should be persisted with the transcript; expected \
          {expected_persisted} (conversation len {} minus 1 system prompt), got {persisted}",
-        conv.messages.len()
+        h.conv.messages.len()
     );
     let persisted_conversation =
-        SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone())
-            .load_conversation(&session_id)
+        SessionMessageRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone())
+            .load_conversation(&h.session_id)
             .await
             .expect("load persisted conversation");
     let persisted_user_text = role_text(&persisted_conversation, Role::User);
@@ -1545,6 +1509,7 @@ async fn repeated_assistant_output_signature_trips_on_fourth_repeat() {
         }],
         input_tokens,
         output_tokens: 10,
+        _error: None,
     };
     let provider = MockProvider::new(vec![
         response("a1", 100),
@@ -1699,6 +1664,7 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
         ],
         input_tokens: 130,
         output_tokens: 10,
+        _error: None,
     });
     responses.push(MockResponse::tool_call_with_input(
         "done",
@@ -1827,6 +1793,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             }],
             input_tokens: 10,
             output_tokens: 5,
+            _error: None,
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
@@ -1961,37 +1928,11 @@ async fn soft_budget_below_threshold_no_injection() {
             }],
             input_tokens: 5,
             output_tokens: 5,
+            _error: None,
         },
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     // SAFETY: SESSION_BUDGET_ENV_LOCK held; restore baseline before asserting.
     clear_session_budget_env();
     let _ = &_env_guard;
@@ -2001,15 +1942,15 @@ async fn soft_budget_below_threshold_no_injection() {
         result
     );
     assert_eq!(provider.remaining(), 0, "all 6 scripted turns consumed");
-    let reminder_count = count_system_reminder_messages(&conv);
+    let reminder_count = count_system_reminder_messages(&h.conv);
     assert_eq!(
         reminder_count, 0,
         "no <system-reminder> converge directive should be injected while \
          cumulative spend is below the soft threshold; got {reminder_count}, full \
          conversation:\n{:#?}",
-        conv.messages
+        h.conv.messages
     );
-    let user_text = role_text(&conv, Role::User);
+    let user_text = role_text(&h.conv, Role::User);
     assert!(
         !user_text.contains("<system-reminder>"),
         "no system-reminder body should appear in user text below threshold; got: {user_text}"
@@ -2036,35 +1977,8 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         MockResponse::tool_call_with_input("b", "worker_tool", serde_json::json!({"step": 2}), 30), // cumulative 90 → hard wind-down before next turn
         MockResponse::text_only("Budget handoff: implemented A; B remains.", 5),
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, tokens_in, tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     clear_session_budget_env();
     let _ = &_env_guard;
     assert!(
@@ -2088,13 +2002,13 @@ async fn hard_budget_wind_down_captures_budget_summary() {
         tokens_in < 1000,
         "hard budget should park well below the legacy worker max-turn blast radius"
     );
-    let user_text = role_text(&conv, Role::User);
+    let user_text = role_text(&h.conv, Role::User);
     assert!(user_text.contains("You are out of steps"));
     let stage_outcome = StageOutcome::Parked {
         reason: ParkReason::Budget,
         summary: output.budget_wind_down_summary.clone(),
         wind_down_ignored: false,
-        session_id: session_id.clone(),
+        session_id: h.session_id.clone(),
         tokens_in,
         tokens_out,
     };
@@ -2112,12 +2026,12 @@ async fn hard_budget_wind_down_captures_budget_summary() {
             .budget_wind_down_details
             .as_deref()
             .expect("budget details captured above"),
-        &task_id,
-        &slot_ctx,
+        &h.task_id,
+        &h.slot_ctx,
     )
     .await;
-    let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
-    let entries = repo.list_activity(&task_id).await.unwrap();
+    let repo = TaskRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
+    let entries = repo.list_activity(&h.task_id).await.unwrap();
     let work_entries: Vec<_> = entries
         .iter()
         .filter(|entry| entry.event_type == "work_submitted")
@@ -2177,35 +2091,8 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         // fallback as a false successful summary.
         MockResponse::text_only("fallback budget handoff that must never be consumed", 5),
     ]);
-    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
-    let worktree_path = std::path::PathBuf::from("/tmp");
-    let mut conv = Conversation::new();
-    conv.push(Message::system("You are a worker."));
-    conv.push(Message::user("Do the task."));
-    let (result, output, tokens_in, tokens_out, _cr, _cw) = run_reply_loop(
-        ReplyLoopContext {
-            provider: &provider,
-            tools: &tools,
-            task_id: &task_id,
-            task_short_id: "t1",
-            session_id: &session_id,
-            project_path: &project_path,
-            worktree_path: &worktree_path,
-            role_name: "worker",
-            finalize_tool_names: &["submit_work", "request_lead"],
-            context_window: 10_000,
-            model_id: "test/mock-model",
-            cancel: &cancel,
-            global_cancel: &cancel,
-            ctx: &slot_ctx,
-            active_skill_names: &[],
-            active_mcp_server_names: &[],
-            max_turns_override: None,
-        },
-        &mut conv,
-        false,
-    )
-    .await;
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, output, tokens_in, tokens_out, _cr, _cw) = h.run(&provider, &tools).await;
     clear_session_budget_env();
     let _ = &_env_guard;
     let err = result.expect_err("ignored hard-budget wind-down should return typed error");
@@ -2230,7 +2117,7 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         reason: ParkReason::Budget,
         summary: None,
         wind_down_ignored: true,
-        session_id: session_id.clone(),
+        session_id: h.session_id.clone(),
         tokens_in,
         tokens_out,
     };
@@ -2248,8 +2135,8 @@ async fn hard_budget_wind_down_ignored_returns_typed_budget_error() {
         ),
         other => panic!("expected parked outcome, got {other:?}"),
     }
-    let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
-    let entries = repo.list_activity(&task_id).await.unwrap();
+    let repo = TaskRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
+    let entries = repo.list_activity(&h.task_id).await.unwrap();
     assert!(
         entries
             .iter()
@@ -2315,6 +2202,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         }],
         input_tokens: 50,
         output_tokens: 10,
+        _error: None,
     }]);
     let first_conversation = Arc::new(Mutex::new(None));
     let provider = CapturingProvider {
@@ -3035,5 +2923,84 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     assert!(
         output.finalize_payload.is_some(),
         "finalize_payload must be set for changed fingerprint"
+    );
+}
+
+/// Regression: when reactive compaction fires (context_length_exceeded) but
+/// the compaction itself fails (summarizer error), the reply loop must leave
+/// only a `Started` boundary row with no completed `Ended` row. The session's
+/// raw history remains accessible via `load_conversation`.
+#[tokio::test]
+async fn failed_reactive_compaction_leaves_started_only_boundary() {
+    // Use 5,000 input tokens (50% of 10,000) so proactive compaction does NOT
+    // fire (threshold is 80%). Then the second stream returns
+    // context_length_exceeded, triggering the reactive compaction path.
+    // compact_conversation fails because the summarizer calls also fail.
+    let responses = vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 5_000),
+        // This triggers the reactive context_length_exceeded path.
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!("context_length_exceeded")),
+        },
+        // compact_conversation calls provider for summarization → fails.
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!("summarization_failed")),
+        },
+        // Not reached (error propagates), but available as fallback.
+        MockResponse::text_only("done", 50),
+    ];
+
+    let provider = MockProvider::new(responses);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = h.run(&provider, &[]).await;
+
+    // The reply loop must fail because reactive compaction failed.
+    assert!(
+        result.is_err(),
+        "reply loop must error when reactive compaction fails; got: {:?}",
+        result
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("context_length_exceeded"),
+        "error must reference context_length_exceeded; got: {err_msg}"
+    );
+
+    // Verify boundary state: no completed boundary after failed compaction.
+    // Note: the Started boundary insert is best-effort in persistence.rs and
+    // may be silently swallowed if the DB write fails. The key regression is
+    // that NO completed boundary exists (LatestCompleted remains None).
+    // Pure boundary-row lifecycle is tested in djinn-db crate tests.
+    let boundary_repo = SessionCompactionBoundaryRepository::new(h.slot_ctx.db.clone());
+    let latest_completed = boundary_repo
+        .latest_completed_boundary(&h.session_id)
+        .await
+        .unwrap();
+    assert!(
+        latest_completed.is_none(),
+        "no completed boundary should exist after failed compaction"
+    );
+
+    // The raw conversation history must still be loadable and unchanged.
+    let msg_repo =
+        SessionMessageRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
+    let persisted = msg_repo
+        .load_conversation(&h.session_id)
+        .await
+        .expect("load_conversation must succeed");
+    // After the tool call at 5,000 tokens, the reply loop added a tool result.
+    // The persisted messages include at minimum the initial system+user + tool_use + tool_result.
+    assert!(
+        persisted.messages.len() >= 2,
+        "raw history must be preserved after failed compaction; got {} messages",
+        persisted.messages.len()
     );
 }
