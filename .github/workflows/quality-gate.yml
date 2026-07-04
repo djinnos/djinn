@@ -46,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       server: ${{ steps.filter.outputs.server }}
+      sandbox: ${{ steps.filter.outputs.sandbox }}
       ui: ${{ steps.filter.outputs.ui }}
     steps:
       - uses: actions/checkout@v4
@@ -74,6 +75,21 @@ jobs:
               - 'server/crates/**/migrations_postgres/**'
               - 'server/crates/**/*.rs'
               - 'server/src/**/*.rs'
+              - '.github/workflows/quality-gate.yml'
+            # aarch64 cross-check trigger. The ONLY arch-conditional code
+            # (cfg(target_arch) seccomp/landlock syscall constants) lives in
+            # djinn-sandbox, so the ~400s cold cross-compile only needs to run
+            # when that crate — or anything that reshapes its aarch64 build
+            # (dep graph via Cargo.lock / workspace-hack, cargo/toolchain
+            # config) — changes. Every other server change skips it. This
+            # keeps the single most expensive job off the ~99% of PRs and
+            # merge-queue runs that never touch the sandbox.
+            sandbox:
+              - 'server/crates/djinn-sandbox/**'
+              - 'server/crates/workspace-hack/**'
+              - 'server/Cargo.lock'
+              - 'server/.cargo/**'
+              - 'server/rust-toolchain.toml'
               - '.github/workflows/quality-gate.yml'
             ui:
               - 'ui/**'
@@ -279,7 +295,12 @@ jobs:
   server-aarch64-check:
     name: Server aarch64 Check
     needs: changes
-    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    # Gated on the `sandbox` filter, NOT `server`: the arch-conditional code
+    # this job protects is confined to djinn-sandbox, so a full cold aarch64
+    # cross-compile is only warranted when the sandbox crate (or the inputs
+    # that reshape its aarch64 build) change. Skipped → Quality Gate treats it
+    # as success, so unrelated PRs no longer pay the ~400s cold build.
+    if: needs.changes.outputs.sandbox == 'true' && github.event_name != 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -454,14 +475,20 @@ jobs:
   # ║                                                                  ║
   # ║  DB-backed, full-compile + run. Skipped on PRs to save action    ║
   # ║  runs — they execute once when a PR enters the merge queue       ║
-  # ║  (and on manual workflow_dispatch).  needs: server-clippy gates  ║
-  # ║  these behind a green lint so we don't burn a Postgres + full    ║
-  # ║  test build when clippy would have failed anyway.                ║
+  # ║  (and on manual workflow_dispatch), now in PARALLEL with clippy  ║
+  # ║  rather than gated behind it (see the per-job note below).        ║
   # ╚══════════════════════════════════════════════════════════════════╝
 
   server-test:
     name: Server Test
-    needs: [changes, server-clippy]
+    # Runs in PARALLEL with clippy (no longer `needs: server-clippy`). The old
+    # gate was a pure cost optimization — skip the 4 Postgres shards if clippy
+    # would fail anyway — but it serialized ~112s of warm clippy in front of
+    # every merge-queue run. Merge-queue code is already PR-reviewed and clippy
+    # rarely fails on the rebase, so the far more common case is paying that
+    # 112s for nothing. A red clippy still fails the Quality Gate; the only
+    # cost of parallelizing is occasionally burning shards on a doomed run.
+    needs: changes
     if: needs.changes.outputs.server == 'true' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     strategy:
@@ -568,7 +595,12 @@ jobs:
 
   server-sqlx-cache:
     name: Server sqlx Cache
-    needs: [changes, server-clippy]
+    # Runs in PARALLEL with clippy (no longer `needs: server-clippy`). Both
+    # compile the workspace off the same `server-quality` warm cache, so
+    # serializing them doubled the wall-clock of the server path on every PR
+    # (clippy ~261s THEN sqlx ~135s) for no correctness benefit — this is a
+    # self-contained freshness check, not a downstream consumer of clippy.
+    needs: changes
     if: needs.changes.outputs.server == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     defaults:
