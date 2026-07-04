@@ -861,11 +861,27 @@ pub fn compute_transition(
         }
 
         TransitionAction::Escalate => {
+            // Widen to every non-terminal status the second-strike park rung
+            // may observe, so the coordinator can route into
+            // `NeedsLeadIntervention` (arbiter entry) from the same source
+            // set that `ParkForRemediation` accepts.  Terminal statuses
+            // (Closed) and the Lead intervention pair are intentionally
+            // excluded: the arbiter entry point must not re-enter an
+            // already-active Lead intervention or bypass close.
             if !matches!(
                 from,
-                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview,
+                TaskStatus::Open
+                    | TaskStatus::InProgress
+                    | TaskStatus::NeedsTaskReview
+                    | TaskStatus::InTaskReview
+                    | TaskStatus::Approved
+                    | TaskStatus::PrDraft
+                    | TaskStatus::PrReview,
             ) {
-                return bad("escalate is only valid from open, in_progress, or in_task_review");
+                return bad(
+                    "escalate is only valid from open, in_progress, needs_task_review, \
+                     in_task_review, approved, pr_draft, or pr_review",
+                );
             }
             TransitionApply {
                 to_status: Some(TaskStatus::NeedsLeadIntervention),
@@ -1180,7 +1196,13 @@ mod tests {
             }
             (
                 TransitionAction::Escalate,
-                TaskStatus::Open | TaskStatus::InProgress | TaskStatus::InTaskReview,
+                TaskStatus::Open
+                | TaskStatus::InProgress
+                | TaskStatus::NeedsTaskReview
+                | TaskStatus::InTaskReview
+                | TaskStatus::Approved
+                | TaskStatus::PrDraft
+                | TaskStatus::PrReview,
             ) => Some(TaskStatus::NeedsLeadIntervention),
             (TransitionAction::LeadInterventionStart, TaskStatus::NeedsLeadIntervention) => {
                 Some(TaskStatus::InLeadIntervention)
@@ -1829,5 +1851,174 @@ mod tests {
         )
         .unwrap();
         assert!(park.reopen_class.is_none());
+    }
+
+    // ── Arbiter-entry park-rung regressions (7f8u) ────────────────────────────
+    //
+    // The second-strike park rung in `route_planner_intervention` may observe
+    // any non-terminal status.  When the coordinator chooses arbiter dispatch
+    // instead of an immediate human-review hold, it will use
+    // `TransitionAction::Escalate` to enter `NeedsLeadIntervention` (the Lead
+    // arbiter entry point).  These tests lock that contract.
+
+    /// Every non-terminal status the park rung can observe must be accepted by
+    /// `Escalate` and must land at `NeedsLeadIntervention`.
+    #[test]
+    fn escalate_accepts_all_park_rung_source_statuses() {
+        // These are the exact statuses `ParkForRemediation` accepts — the same
+        // set `route_planner_intervention` may observe at the park rung.
+        let park_rung_sources = [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::NeedsTaskReview,
+            TaskStatus::InTaskReview,
+            TaskStatus::Approved,
+            TaskStatus::PrDraft,
+            TaskStatus::PrReview,
+        ];
+        for from in &park_rung_sources {
+            let result = compute_transition(&TransitionAction::Escalate, from, None)
+                .unwrap_or_else(|e| panic!("Escalate from {from:?} must succeed: {e}"));
+            assert_eq!(
+                result.to_status,
+                Some(TaskStatus::NeedsLeadIntervention),
+                "Escalate from {from:?} must land at NeedsLeadIntervention"
+            );
+            // Escalate resets continuation (matches existing behaviour).
+            assert!(
+                result.reset_continuation,
+                "Escalate from {from:?} must reset continuation"
+            );
+        }
+    }
+
+    /// Terminal and already-in-Lead statuses must reject Escalate with a clear
+    /// error, preserving the guard against re-entering an active intervention.
+    #[test]
+    fn escalate_rejects_terminal_and_lead_statuses() {
+        let invalid_sources = [
+            TaskStatus::Closed,
+            TaskStatus::NeedsLeadIntervention,
+            TaskStatus::InLeadIntervention,
+        ];
+        for from in &invalid_sources {
+            let result = compute_transition(&TransitionAction::Escalate, from, None);
+            assert!(
+                result.is_err(),
+                "Escalate from {from:?} must be rejected (terminal or already in Lead)"
+            );
+            let err_msg = result
+                .err()
+                .expect("Escalate from invalid source must return Err")
+                .to_string();
+            assert!(
+                err_msg.contains("escalate"),
+                "Error message should mention 'escalate': got {err_msg}"
+            );
+        }
+    }
+
+    /// Verify the error message enumerates the full set of valid sources so
+    /// callers get a useful diagnostic.
+    #[test]
+    fn escalate_error_message_lists_all_valid_sources() {
+        let err = compute_transition(&TransitionAction::Escalate, &TaskStatus::Closed, None)
+            .err()
+            .expect("Escalate from Closed must return Err")
+            .to_string();
+        // Spot-check that every newly-added source appears in the message.
+        assert!(
+            err.contains("needs_task_review"),
+            "message should list needs_task_review"
+        );
+        assert!(err.contains("approved"), "message should list approved");
+        assert!(err.contains("pr_draft"), "message should list pr_draft");
+        assert!(err.contains("pr_review"), "message should list pr_review");
+    }
+
+    /// Existing Lead intervention transitions continue to behave as before.
+    /// (Regression guard: widening Escalate must not break start/release/
+    /// complete/approve/conflict.)
+    #[test]
+    fn lead_intervention_transitions_unchanged() {
+        // lead_intervention_start: needs_lead_intervention → in_lead_intervention
+        let start = compute_transition(
+            &TransitionAction::LeadInterventionStart,
+            &TaskStatus::NeedsLeadIntervention,
+            None,
+        )
+        .expect("lead_intervention_start from needs_lead_intervention is valid");
+        assert_eq!(start.to_status, Some(TaskStatus::InLeadIntervention));
+
+        // lead_intervention_release: in_lead_intervention → needs_lead_intervention
+        let release = compute_transition(
+            &TransitionAction::LeadInterventionRelease,
+            &TaskStatus::InLeadIntervention,
+            None,
+        )
+        .expect("lead_intervention_release from in_lead_intervention is valid");
+        assert_eq!(release.to_status, Some(TaskStatus::NeedsLeadIntervention));
+
+        // lead_intervention_complete: in_lead_intervention → open (+ records intervention)
+        let complete = compute_transition(
+            &TransitionAction::LeadInterventionComplete,
+            &TaskStatus::InLeadIntervention,
+            None,
+        )
+        .expect("lead_intervention_complete from in_lead_intervention is valid");
+        assert_eq!(complete.to_status, Some(TaskStatus::Open));
+        assert!(complete.reset_continuation);
+        assert!(complete.record_intervention);
+
+        // lead_approve: in_lead_intervention → approved
+        let approve = compute_transition(
+            &TransitionAction::LeadApprove,
+            &TaskStatus::InLeadIntervention,
+            None,
+        )
+        .expect("lead_approve from in_lead_intervention is valid");
+        assert_eq!(approve.to_status, Some(TaskStatus::Approved));
+
+        // lead_approve_conflict: in_lead_intervention → open (+ merge conflict metadata)
+        let conflict = compute_transition(
+            &TransitionAction::LeadApproveConflict,
+            &TaskStatus::InLeadIntervention,
+            None,
+        )
+        .expect("lead_approve_conflict from in_lead_intervention is valid");
+        assert_eq!(conflict.to_status, Some(TaskStatus::Open));
+        assert!(conflict.reset_continuation);
+        assert!(conflict.set_merge_conflict_metadata);
+        assert_eq!(conflict.reopen_class, Some(ReopenClass::MergeConflict));
+
+        // All Lead actions must reject from non-matching statuses.
+        for from in &[
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Closed,
+            TaskStatus::PrReview,
+        ] {
+            assert!(
+                compute_transition(&TransitionAction::LeadInterventionStart, from, None).is_err(),
+                "lead_intervention_start must be invalid from {from:?}"
+            );
+            assert!(
+                compute_transition(&TransitionAction::LeadInterventionRelease, from, None).is_err(),
+                "lead_intervention_release must be invalid from {from:?}"
+            );
+            assert!(
+                compute_transition(&TransitionAction::LeadInterventionComplete, from, None)
+                    .is_err(),
+                "lead_intervention_complete must be invalid from {from:?}"
+            );
+            assert!(
+                compute_transition(&TransitionAction::LeadApprove, from, None).is_err(),
+                "lead_approve must be invalid from {from:?}"
+            );
+            assert!(
+                compute_transition(&TransitionAction::LeadApproveConflict, from, None).is_err(),
+                "lead_approve_conflict must be invalid from {from:?}"
+            );
+        }
     }
 }

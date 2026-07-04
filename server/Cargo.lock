@@ -1221,7 +1221,6 @@ dependencies = [
  "djinn-telemetry",
  "djinn-workspace",
  "futures",
- "git2",
  "hex",
  "insta",
  "libc",

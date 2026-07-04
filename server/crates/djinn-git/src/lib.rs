@@ -567,3 +567,128 @@ pub async fn rev_list_count(repo_root: &Path, range: &str) -> Result<u64, GitErr
         .parse::<u64>()
         .map_err(|e| GitError::Other(anyhow::anyhow!("rev-list count not a u64: {e}")))
 }
+
+// ─── Synchronous git2 helpers ─────────────────────────────────────────────
+//
+// These wrap libgit2 operations that callers (djinn-coordinator, djinn-stack)
+// need synchronously.  They live in the djinn-git owner crate so non-owner
+// crates never depend on `git2` directly.
+
+/// One blob entry from a HEAD tree walk: relative path + size in bytes.
+#[derive(Debug, Clone)]
+pub struct HeadBlobEntry {
+    pub path: String,
+    pub size: u64,
+}
+
+/// Enumerate every blob in the current HEAD tree, returning its relative path
+/// and size.  Works on both bare mirrors and working-tree repos.
+///
+/// Returns `Ok(vec![])` when HEAD is unresolvable (e.g. fresh repo with no
+/// commits) — callers typically fall back to a filesystem walk in that case.
+pub fn head_blob_list(root: &Path) -> Result<Vec<HeadBlobEntry>, GitError> {
+    let repo = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))?;
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let tree = head.peel_to_tree()?;
+
+    let mut out = Vec::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        let name = match entry.name() {
+            Some(n) => n,
+            None => return git2::TreeWalkResult::Ok,
+        };
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            let full = if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}{name}")
+            };
+            let size = repo
+                .find_blob(entry.id())
+                .ok()
+                .map(|b| b.size() as u64)
+                .unwrap_or(0);
+            out.push(HeadBlobEntry { path: full, size });
+        }
+        git2::TreeWalkResult::Ok
+    })?;
+    Ok(out)
+}
+
+/// Read the blob content for every path in `wanted` that exists in the HEAD
+/// tree.  Returns a map of `path → UTF-8 body`.  Paths not found in the tree
+/// are silently omitted.  Works on both bare mirrors and working-tree repos.
+pub fn head_blob_bodies(
+    root: &Path,
+    wanted: &std::collections::BTreeSet<&str>,
+) -> Result<std::collections::HashMap<String, String>, GitError> {
+    let repo = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))?;
+    let tree = repo.head()?.peel_to_tree()?;
+    let mut out = std::collections::HashMap::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() != Some(git2::ObjectType::Blob) {
+            return git2::TreeWalkResult::Ok;
+        }
+        let name = match entry.name() {
+            Some(n) => n,
+            None => return git2::TreeWalkResult::Ok,
+        };
+        let full = if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}{name}")
+        };
+        if !wanted.contains(full.as_str()) {
+            return git2::TreeWalkResult::Ok;
+        }
+        if let Ok(blob) = repo.find_blob(entry.id())
+            && let Ok(body) = std::str::from_utf8(blob.content())
+        {
+            out.insert(full, body.to_string());
+        }
+        git2::TreeWalkResult::Ok
+    })?;
+    Ok(out)
+}
+
+/// Returns `true` when the git repository at `path` has any uncommitted
+/// changes (staged, modified, untracked, renamed, or deleted files).
+///
+/// Conservatively returns `false` if the path is not a valid git repo or
+/// if the status probe fails, matching the existing coordinator behaviour
+/// that treats errors as "not dirty" so we never promote a task to the PR
+/// flow on a bogus signal.
+pub fn worktree_is_dirty(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let repo = match git2::Repository::open(path) {
+        Ok(repo) => repo,
+        Err(_) => return false,
+    };
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .include_ignored(false)
+        .recurse_untracked_dirs(true);
+    match repo.statuses(Some(&mut opts)) {
+        Ok(statuses) => statuses.iter().any(|entry| {
+            let s = entry.status();
+            s.intersects(
+                git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE
+                    | git2::Status::WT_NEW
+                    | git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_TYPECHANGE
+                    | git2::Status::WT_RENAMED,
+            )
+        }),
+        Err(_) => false,
+    }
+}
