@@ -84,49 +84,7 @@ impl CoordinatorActor {
     /// the in-DB signals (taxonomy, comments) are still consulted as a
     /// fallback.
     pub(crate) fn worktree_has_uncommitted_changes(worktree_path: &std::path::Path) -> bool {
-        if !worktree_path.exists() {
-            return false;
-        }
-        let repo = match git2::Repository::open(worktree_path) {
-            Ok(repo) => repo,
-            Err(e) => {
-                tracing::debug!(
-                    path = %worktree_path.display(),
-                    error = %e,
-                    "worktree_has_uncommitted_changes: not a git repo"
-                );
-                return false;
-            }
-        };
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true)
-            .include_ignored(false)
-            .recurse_untracked_dirs(true);
-        match repo.statuses(Some(&mut opts)) {
-            Ok(statuses) => statuses.iter().any(|entry| {
-                let s = entry.status();
-                s.intersects(
-                    git2::Status::INDEX_NEW
-                        | git2::Status::INDEX_MODIFIED
-                        | git2::Status::INDEX_DELETED
-                        | git2::Status::INDEX_RENAMED
-                        | git2::Status::INDEX_TYPECHANGE
-                        | git2::Status::WT_NEW
-                        | git2::Status::WT_MODIFIED
-                        | git2::Status::WT_DELETED
-                        | git2::Status::WT_TYPECHANGE
-                        | git2::Status::WT_RENAMED,
-                )
-            }),
-            Err(e) => {
-                tracing::debug!(
-                    path = %worktree_path.display(),
-                    error = %e,
-                    "worktree_has_uncommitted_changes: status() failed"
-                );
-                false
-            }
-        }
+        djinn_git::worktree_is_dirty(worktree_path)
     }
 
     pub(crate) async fn simple_lifecycle_task_has_durable_artifacts(&self, task_id: &str) -> bool {

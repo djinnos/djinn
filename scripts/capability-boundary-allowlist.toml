@@ -105,14 +105,6 @@ capability = "git"
 
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-coordinator/src/dispatch/retry.rs"
-	matcher = "git2::"
-	owner = "team/coordinator"
-	rationale = "Still-pending owner-crate migration: worktree dirty-state probe in coordinator dispatch. Must be routed through djinn-git once djinn-git exposes a synchronous worktree-status helper."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-coordinator/src/preapproval_gate.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"
@@ -149,14 +141,6 @@ capability = "git"
 	matcher = "Command::new(\"git\")"
 	owner = "team/slot"
 	rationale = "Test-local helper for creating temporary git repos in reply-loop tests. Not used by production slot logic."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-stack/src/detect.rs"
-	matcher = "git2::"
-	owner = "team/stack"
-	rationale = "Still-pending owner-crate migration: stack detection uses libgit2 directly for repository inspection. Must be routed through djinn-git once djinn-git exposes the equivalent synchronous helpers."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]

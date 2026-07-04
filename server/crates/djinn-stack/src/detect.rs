@@ -88,40 +88,18 @@ fn enumerate(root: &Path) -> Result<Vec<FileEntry>> {
     }
 }
 
-/// `git ls-tree -r HEAD` via git2. Works on both bare mirrors and
+/// `git ls-tree -r HEAD` via djinn-git. Works on both bare mirrors and
 /// working-tree repos. Returns `Ok(vec![])` when HEAD is unresolvable
 /// (fresh clone with no commits); caller falls back to filesystem.
 fn enumerate_git(root: &Path) -> Result<Vec<FileEntry>> {
-    let repo = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))?;
-    let head = match repo.head() {
-        Ok(h) => h,
-        Err(_) => return Ok(Vec::new()),
-    };
-    let tree = head.peel_to_tree()?;
-
-    let mut out = Vec::new();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        let name = match entry.name() {
-            Some(n) => n,
-            None => return git2::TreeWalkResult::Ok,
-        };
-        if entry.kind() == Some(git2::ObjectType::Blob) {
-            let full = if dir.is_empty() {
-                name.to_string()
-            } else {
-                format!("{dir}{name}")
-            };
-            // Blob size lookup — cheap, already in the pack/loose object header.
-            let size = repo
-                .find_blob(entry.id())
-                .ok()
-                .map(|b| b.size() as u64)
-                .unwrap_or(0);
-            out.push(FileEntry { path: full, size });
-        }
-        git2::TreeWalkResult::Ok
-    })?;
-    Ok(out)
+    let blobs = djinn_git::head_blob_list(root)?;
+    Ok(blobs
+        .into_iter()
+        .map(|e| FileEntry {
+            path: e.path,
+            size: e.size,
+        })
+        .collect())
 }
 
 fn enumerate_fs(root: &Path) -> Result<Vec<FileEntry>> {
@@ -192,33 +170,14 @@ fn read_manifest_bodies_git(
     root: &Path,
     wanted: &BTreeSet<&str>,
 ) -> Result<HashMap<String, String>> {
-    let repo = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))?;
-    let tree = repo.head()?.peel_to_tree()?;
-    let mut out = HashMap::new();
-    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-        if entry.kind() != Some(git2::ObjectType::Blob) {
-            return git2::TreeWalkResult::Ok;
-        }
-        let name = match entry.name() {
-            Some(n) => n,
-            None => return git2::TreeWalkResult::Ok,
-        };
-        let full = if dir.is_empty() {
-            name.to_string()
-        } else {
-            format!("{dir}{name}")
-        };
-        if !is_interesting_manifest(&full, wanted) {
-            return git2::TreeWalkResult::Ok;
-        }
-        if let Ok(blob) = repo.find_blob(entry.id())
-            && let Ok(body) = std::str::from_utf8(blob.content())
-        {
-            out.insert(full, body.to_string());
-        }
-        git2::TreeWalkResult::Ok
-    })?;
-    Ok(out)
+    // Build the full path filter: manifest filenames + nextest config paths,
+    // matching the behaviour of the previous inline `is_interesting_manifest`
+    // guard that walked the tree with git2 directly.
+    let mut full_wanted: BTreeSet<&str> = wanted.iter().copied().collect();
+    for p in NEXTEST_CONFIG_PATHS {
+        full_wanted.insert(p);
+    }
+    Ok(djinn_git::head_blob_bodies(root, &full_wanted)?)
 }
 
 fn is_interesting_manifest(path: &str, wanted: &BTreeSet<&str>) -> bool {
@@ -773,32 +732,8 @@ fn read_paths(root: &Path, paths: &[String]) -> HashMap<String, String> {
     let wanted: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
     let mut out = HashMap::new();
 
-    if let Ok(repo) = git2::Repository::open(root).or_else(|_| git2::Repository::open_bare(root))
-        && let Ok(head) = repo.head()
-        && let Ok(tree) = head.peel_to_tree()
-    {
-        let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-            if entry.kind() != Some(git2::ObjectType::Blob) {
-                return git2::TreeWalkResult::Ok;
-            }
-            let Some(name) = entry.name() else {
-                return git2::TreeWalkResult::Ok;
-            };
-            let full = if dir.is_empty() {
-                name.to_string()
-            } else {
-                format!("{dir}{name}")
-            };
-            if !wanted.contains(full.as_str()) {
-                return git2::TreeWalkResult::Ok;
-            }
-            if let Ok(blob) = repo.find_blob(entry.id())
-                && let Ok(body) = std::str::from_utf8(blob.content())
-            {
-                out.insert(full, body.to_string());
-            }
-            git2::TreeWalkResult::Ok
-        });
+    if let Ok(git_bodies) = djinn_git::head_blob_bodies(root, &wanted) {
+        out = git_bodies;
     }
 
     for path in paths {

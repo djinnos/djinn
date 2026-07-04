@@ -1221,7 +1221,6 @@ dependencies = [
  "djinn-telemetry",
  "djinn-workspace",
  "futures",
- "git2",
  "hex",
  "insta",
  "libc",
@@ -1701,7 +1700,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "git2",
+ "djinn-git",
  "regex",
  "schemars 1.2.1",
  "serde",
