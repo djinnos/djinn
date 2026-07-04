@@ -19,6 +19,7 @@ djinn-db = { path = "../djinn-db" }
 djinn-graph = { path = "../djinn-graph" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-runtime = { path = "../djinn-runtime" }
+djinn-slot = { path = "../djinn-slot" }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }
 djinn-telemetry = { path = "../djinn-telemetry" }

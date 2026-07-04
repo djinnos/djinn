@@ -101,7 +101,7 @@ pub use supervisor_runner::run_supervisor_dispatch;
 // Re-export the public surface so callers can use
 // `djinn_slot::reply_loop::{ReplyLoopContext, run_reply_loop}`.
 
-pub use reply_loop::{ReplyLoopContext, run_reply_loop};
+pub use reply_loop::{CompactionCriticalSection, ReplyLoopContext, run_reply_loop};
 
 #[derive(Debug, Clone)]
 pub enum SlotEvent {
