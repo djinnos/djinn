@@ -447,6 +447,110 @@ fn combined_budget_lends_unused_room_when_both_large() {
 }
 
 #[test]
+fn recent_feedback_includes_structured_rejected_review_without_comment_twin() {
+    let activity = vec![djinn_core::models::ActivityEntry {
+        id: "evt-1".to_string(),
+        task_id: Some("t".to_string()),
+        actor_id: "agent-supervisor".to_string(),
+        actor_role: "reviewer".to_string(),
+        event_type: "review_submitted".to_string(),
+        payload: serde_json::json!({
+            "verdict": "rejected",
+            "feedback": "missing edge case handling"
+        })
+        .to_string(),
+        created_at: "2026-06-01T11:00:00Z".to_string(),
+    }];
+    let feedback = recent_feedback(&activity, 10);
+    assert_eq!(feedback.len(), 1);
+    assert!(feedback[0].contains("Reviewer rejection"));
+    assert!(feedback[0].contains("missing edge case handling"));
+}
+
+#[test]
+fn recent_feedback_structured_rejection_chronological_order_with_comments() {
+    let activity = vec![
+        activity_entry(
+            "reviewer",
+            "comment",
+            "earlier review comment",
+            "2026-06-01T10:00:00Z",
+        ),
+        djinn_core::models::ActivityEntry {
+            id: "evt-2".to_string(),
+            task_id: Some("t".to_string()),
+            actor_id: "agent-supervisor".to_string(),
+            actor_role: "reviewer".to_string(),
+            event_type: "review_submitted".to_string(),
+            payload: serde_json::json!({
+                "verdict": "rejected",
+                "feedback": "structured rejection: fix the naming"
+            })
+            .to_string(),
+            created_at: "2026-06-01T11:00:00Z".to_string(),
+        },
+        activity_entry(
+            "verification",
+            "comment",
+            "CI failure",
+            "2026-06-01T12:00:00Z",
+        ),
+    ];
+    let feedback = recent_feedback(&activity, 10);
+    assert_eq!(feedback.len(), 3);
+    assert!(feedback[0].contains("Reviewer feedback"));
+    assert!(feedback[0].contains("earlier review comment"));
+    assert!(feedback[1].contains("Reviewer rejection"));
+    assert!(feedback[1].contains("structured rejection: fix the naming"));
+    assert!(feedback[2].contains("Verification failure"));
+    assert!(feedback[2].contains("CI failure"));
+}
+
+#[test]
+fn recent_feedback_approved_review_is_not_included() {
+    let activity = vec![djinn_core::models::ActivityEntry {
+        id: "evt-1".to_string(),
+        task_id: Some("t".to_string()),
+        actor_id: "agent-supervisor".to_string(),
+        actor_role: "reviewer".to_string(),
+        event_type: "review_submitted".to_string(),
+        payload: serde_json::json!({
+            "verdict": "approved",
+            "feedback": "looks good"
+        })
+        .to_string(),
+        created_at: "2026-06-01T11:00:00Z".to_string(),
+    }];
+    assert!(recent_feedback(&activity, 10).is_empty());
+}
+
+#[test]
+fn recent_feedback_limit_drops_oldest_keeps_freshest_rejection() {
+    let activity = vec![
+        activity_entry("pm", "comment", "pm note 1", "2026-06-01T09:00:00Z"),
+        activity_entry("pm", "comment", "pm note 2", "2026-06-01T10:00:00Z"),
+        djinn_core::models::ActivityEntry {
+            id: "evt-3".to_string(),
+            task_id: Some("t".to_string()),
+            actor_id: "agent-supervisor".to_string(),
+            actor_role: "reviewer".to_string(),
+            event_type: "review_submitted".to_string(),
+            payload: serde_json::json!({
+                "verdict": "rejected",
+                "feedback": "freshest rejection"
+            })
+            .to_string(),
+            created_at: "2026-06-01T11:00:00Z".to_string(),
+        },
+    ];
+    let feedback = recent_feedback(&activity, 2);
+    assert_eq!(feedback.len(), 2);
+    assert!(feedback[0].contains("pm note 2"));
+    assert!(feedback[1].contains("Reviewer rejection"));
+    assert!(feedback[1].contains("freshest rejection"));
+}
+
+#[test]
 fn combined_budget_single_section_gets_more_than_floor() {
     // When only one section has content, it should be allowed well past the
     // per-section floor (it borrows the empty peer's whole share).
