@@ -12,6 +12,7 @@ djinn-provider = { path = "../djinn-provider" }
 anyhow = "1"
 futures = "0.3"
 serde_json = "1"
+sha2 = "0.10"
 tracing = "0.1"
 workspace-hack.workspace = true
 

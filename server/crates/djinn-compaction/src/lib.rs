@@ -22,6 +22,42 @@ pub use prompts::CompactionContext;
 pub use prompts::{COMPACTION_SUMMARY_END_MARKER, strip_compaction_markers};
 pub use prompts::{extract_prior_summary, previous_summary_block};
 
+/// Maximum length for a message identity that fits the boundary table's
+/// `VARCHAR(36)` id columns (`first_message_id`, `last_compacted_message_id`,
+/// `first_retained_message_id` — see migration 92).
+const MESSAGE_IDENTITY_MAX_LEN: usize = 36;
+
+/// Stable per-message identity that fits the boundary table's `VARCHAR(36)` id
+/// columns (`first_message_id`, `last_compacted_message_id`,
+/// `first_retained_message_id` — see migration 92). Prefers the
+/// provider-assigned message id when present and short enough; otherwise falls
+/// back to a content hash truncated to 36 characters. 34 hex chars (136 bits)
+/// is far beyond any collision risk across the messages of one conversation.
+///
+/// This is the shared implementation used by both the chat-path and worker-path
+/// compaction boundary persistence.
+pub fn bounded_message_identity(msg: &djinn_provider::message::Message) -> String {
+    use sha2::{Digest, Sha256};
+
+    if let Some(serde_json::Value::Object(provider_data)) =
+        msg.metadata.as_ref().and_then(|m| m.provider_data.as_ref())
+        && let Some(serde_json::Value::String(id)) = provider_data.get("id")
+        && id.len() <= MESSAGE_IDENTITY_MAX_LEN
+    {
+        return id.clone();
+    }
+    let digest = {
+        use std::fmt::Write;
+        let raw = Sha256::digest(serde_json::to_vec(msg).unwrap_or_default());
+        let mut out = String::with_capacity(raw.len() * 2);
+        for b in raw {
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    };
+    format!("h:{}", &digest[..MESSAGE_IDENTITY_MAX_LEN - 2])
+}
+
 /// Whether `err` is a failure that reactive compaction can recover from — a
 /// context-window overflow or an orphaned tool-call/result reference. Both are
 /// resolved by summarising the conversation and retrying, so any conversation
@@ -58,5 +94,56 @@ mod tests {
         assert!(!is_compaction_recoverable_error(&anyhow::anyhow!(
             "connection reset by peer"
         )));
+    }
+
+    #[test]
+    fn bounded_message_identity_fallback_never_exceeds_36_chars() {
+        // A message with no provider_data — triggers the hash fallback.
+        let msg = djinn_provider::message::Message::user("hello world");
+        let identity = bounded_message_identity(&msg);
+        assert!(
+            identity.len() <= 36,
+            "identity too long: {identity} ({} chars)",
+            identity.len()
+        );
+        assert!(identity.starts_with("h:"), "unexpected prefix: {identity}");
+        assert_eq!(identity.len(), 36);
+    }
+
+    #[test]
+    fn bounded_message_identity_preserves_short_provider_id() {
+        use serde_json::json;
+
+        let mut msg = djinn_provider::message::Message::user("test");
+        let id = "msg_abc123";
+        msg.metadata = Some(djinn_provider::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({"id": id})),
+        });
+        let identity = bounded_message_identity(&msg);
+        assert_eq!(identity, id);
+    }
+
+    #[test]
+    fn bounded_message_identity_truncates_long_provider_id() {
+        use serde_json::json;
+
+        let mut msg = djinn_provider::message::Message::user("test");
+        let long_id = "x".repeat(50); // 50 chars > 36
+        msg.metadata = Some(djinn_provider::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({"id": long_id})),
+        });
+        let identity = bounded_message_identity(&msg);
+        assert!(
+            identity.len() <= 36,
+            "identity too long: {identity} ({} chars)",
+            identity.len()
+        );
+        assert!(identity.starts_with("h:"), "unexpected prefix: {identity}");
     }
 }

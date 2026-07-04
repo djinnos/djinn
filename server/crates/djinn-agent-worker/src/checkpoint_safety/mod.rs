@@ -40,7 +40,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::process::Command;
 use tracing::{debug, warn};
 
 /// Maximum file size (in bytes) that is eligible for checkpoint staging without
@@ -787,28 +786,22 @@ fn parse_porcelain_line(line: &str) -> Option<(String, String)> {
 
 /// Run a git command in the worktree and return its stdout.
 ///
-/// Uses `tokio::process::Command` with the same `safe.directory` env injection
-/// as `djinn_git::run_git_command`, so it works in the mixed-UID K8s Pod
-/// environment.
+/// Delegates to [`djinn_git::run_git_command_in`] which applies
+/// `safe.directory=*` and lowers process priority, matching the
+/// requirements for the mixed-UID K8s Pod environment.
 async fn run_git(worktree: &Path, args: &[&str]) -> Result<String, CheckpointSafetyError> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(worktree).args(args);
-    // safe.directory injection — see djinn_git::run_git_command docs.
-    cmd.env("GIT_CONFIG_COUNT", "1");
-    cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
-    cmd.env("GIT_CONFIG_VALUE_0", "*");
-    let output = cmd.output().await.map_err(|e| CheckpointSafetyError::Git {
-        command: args.join(" "),
-        stderr: format!("spawn failed: {e}"),
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(CheckpointSafetyError::Git {
-            command: args.join(" "),
-            stderr,
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let command_display = args.join(" ");
+    let out = djinn_git::run_git_command_in(worktree, owned)
+        .await
+        .map_err(|e| CheckpointSafetyError::Git {
+            command: command_display.clone(),
+            stderr: match &e {
+                djinn_git::GitError::CommandFailed { stderr, .. } => stderr.clone(),
+                other => format!("{other}"),
+            },
+        })?;
+    Ok(out.stdout)
 }
 
 /// Freeze and inspect a worker worktree, classifying every dirty/untracked/
