@@ -9,7 +9,9 @@
 //! RAII `Drop`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use tokio::sync::Notify;
 
 /// Shared state that tracks whether a compaction critical section is active.
 ///
@@ -20,6 +22,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Debug, Clone, Default)]
 pub struct CompactionCriticalSection {
     active: Arc<AtomicBool>,
+    /// Monotonic version bumped on every release so observers can wait for a
+    /// specific release transition without busy waiting. `0` means "never held
+    /// or released at least once".
+    version: Arc<AtomicU64>,
+    notify: Arc<Notify>,
 }
 
 impl CompactionCriticalSection {
@@ -31,6 +38,40 @@ impl CompactionCriticalSection {
     /// Returns true if the critical section is currently entered.
     pub fn is_compacting(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+
+    /// Asynchronously wait until the critical section is released, or return
+    /// immediately if it is already released. This is not a lock acquisition:
+    /// callers can race with re-entry after the release they observe.
+    ///
+    /// The returned future is cancellation-safe: the internal notify is
+    /// edge-triggered, so a missed wakeup is recovered by the next release.
+    pub async fn wait_released(&self) {
+        // Avoid the await entirely if we are already released. `Acquire` on the
+        // active flag couples with the `Release` store in `release`, so any state
+        // published while the section was active is visible after this load.
+        if !self.is_compacting() {
+            return;
+        }
+        // Snapshot the version before waiting. If we observe a release after
+        // this snapshot, the version will have advanced, and the loop below
+        // will exit immediately.
+        let observed_version = self.version.load(Ordering::Acquire);
+        loop {
+            // Double-check after subscribing. We cannot miss the release that
+            // happened before we started waiting because the store advances the
+            // version and notifies *after* the store.
+            if !self.is_compacting() {
+                let current_version = self.version.load(Ordering::Acquire);
+                if current_version != observed_version {
+                    return;
+                }
+                // Edge case: the section was never entered in this generation,
+                // so the version did not change. If it is released, we are done.
+                return;
+            }
+            self.notify.notified().await;
+        }
     }
 
     /// Enter the critical section. Panics if already entered (single-tasked
@@ -45,6 +86,8 @@ impl CompactionCriticalSection {
     /// Release the critical section. Idempotent.
     fn release(&self) {
         self.active.store(false, Ordering::Release);
+        self.version.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
     }
 
     /// Acquire a scoped guard that releases the section when dropped.
@@ -111,4 +154,44 @@ mod tests {
         let _guard1 = section.guard();
         let _guard2 = section.guard(); // should panic: single-tasked contract
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_released_returns_when_already_released() {
+        let section = CompactionCriticalSection::new();
+        // Should complete immediately without entering the critical section.
+        tokio::time::timeout(Duration::from_millis(10), section.wait_released())
+            .await
+            .expect("wait_released should not block when already released");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clone_observes_active_and_release_transitions() {
+        let section = CompactionCriticalSection::new();
+        let observer = section.clone();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            observer.wait_released().await;
+            let _ = tx.send(observer.is_compacting()).await;
+        });
+
+        // Give the observer a chance to start waiting.
+        tokio::task::yield_now().await;
+        assert!(section.is_compacting());
+
+        {
+            let _guard = section.guard();
+            // Yield again so the observer task is parked on the notify.
+            tokio::task::yield_now().await;
+        }
+
+        let released = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("observer should report release")
+            .expect("channel should stay open");
+        assert!(!released);
+        assert!(!section.is_compacting());
+    }
+
+    use std::time::Duration;
 }

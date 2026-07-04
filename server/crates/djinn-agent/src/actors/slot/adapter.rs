@@ -31,6 +31,7 @@ pub(crate) fn build_slot_context(
         clock: Arc::new(SystemClock::new()),
         callbacks,
         tool_dispatcher,
+        compaction_cs: agent.compaction_cs.clone(),
     }
 }
 

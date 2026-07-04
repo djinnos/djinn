@@ -247,6 +247,13 @@ pub struct SlotContext {
     /// Tool dispatch handle for the reply loop.  Routes stash, MCP, and
     /// extension tool calls through the host's infrastructure.
     pub tool_dispatcher: Option<Arc<dyn SlotToolDispatcher>>,
+    /// Shared compaction critical section for the active slot lifecycle/run.
+    ///
+    /// The slot actor creates one per active lifecycle and passes it into the
+    /// reply loop; it keeps a clone on `ActiveLifecycle` so command routing can
+    /// observe/wait on compaction without busy waiting. This is internal to the
+    /// slot lifecycle and is not serialized across the wire.
+    pub compaction_cs: CompactionCriticalSection,
 }
 
 impl SlotContext {

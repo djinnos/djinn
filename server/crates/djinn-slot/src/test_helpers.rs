@@ -404,6 +404,7 @@ pub fn agent_context_from_db_with_dispatcher(
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(NoopCallbacks),
         tool_dispatcher,
+        compaction_cs: CompactionCriticalSection::new(),
     }
 }
 
