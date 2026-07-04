@@ -8,8 +8,11 @@ use crate::server::AppState;
 mod handler;
 mod project_resolver;
 mod prompt;
-#[cfg(test)]
 mod compaction_boundary;
+
+pub(super) use compaction_boundary::{
+    complete_chat_compaction_boundary, record_chat_compaction_started,
+};
 pub(super) mod sessions;
 
 use djinn_provider::message::Message;

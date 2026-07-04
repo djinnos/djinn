@@ -1,8 +1,17 @@
+use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_db::{
-    BeginCompactionParams, CompactionPhase, CompleteCompactionParams,
-    SessionCompactionBoundaryRepository,
+    BeginCompactionParams, CompleteCompactionParams, SessionCompactionBoundaryRepository,
 };
 use djinn_provider::message::{Conversation, Message, Role};
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
 
 /// Marker metadata written with chat compaction boundaries so that the shared
 /// `SessionMessageRepository::load_conversation` projection can recognise the
@@ -10,7 +19,7 @@ use djinn_provider::message::{Conversation, Message, Role};
 fn compaction_marker_metadata() -> serde_json::Value {
     serde_json::json!({
         "marker_kind": "compaction_summary",
-        "end_marker": djinn_agent::compaction::COMPACTION_SUMMARY_END_MARKER,
+        "end_marker": COMPACTION_SUMMARY_END_MARKER,
     })
 }
 
@@ -49,7 +58,7 @@ fn gather_chat_boundary_identity(
             first_retained_message_id = Some(message_identity(msg));
             break;
         }
-        if msg.role == Role::User && msg.text_content().contains(djinn_agent::compaction::COMPACTION_SUMMARY_END_MARKER) {
+        if msg.role == Role::User && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER) {
             found_summary = true;
         }
     }
@@ -61,7 +70,7 @@ fn gather_chat_boundary_identity(
                 hasher.update(&bytes);
             }
         }
-        Some(format!("sha256:{}", hex::encode(hasher.finalize())))
+        Some(format!("sha256:{}", hex_encode(&hasher.finalize())))
     };
 
     (
@@ -82,7 +91,7 @@ fn message_identity(msg: &Message) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "hash:{}",
-        hex::encode(Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()))
+        hex_encode(&Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()))
     )
 }
 
@@ -102,7 +111,7 @@ fn accepted_summary_text(conversation: &Conversation) -> Option<String> {
         {
             let summary = conversation.messages[i - 1]
                 .text_content()
-                .split(djinn_agent::compaction::COMPACTION_SUMMARY_END_MARKER)
+                .split(COMPACTION_SUMMARY_END_MARKER)
                 .next()
                 .unwrap_or("")
                 .to_string();
@@ -202,11 +211,33 @@ pub(crate) async fn complete_chat_compaction_boundary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_db::test_support::seed_session_row;
+    use djinn_core::events::EventBus;
+    use djinn_db::test_support::{seed_project, seed_session_row, UsageTestSessionSeed};
     use djinn_provider::message::Message;
 
     fn test_db() -> djinn_db::Database {
-        djinn_db::Database::new_sqlite_in_memory().unwrap()
+        djinn_db::Database::open_in_memory().unwrap()
+    }
+
+    async fn seed_chat_session(db: &djinn_db::Database, session_id: &str) {
+        seed_project(db, "project-test", "test project").await;
+        seed_session_row(
+            db,
+            UsageTestSessionSeed {
+                project_id: "project-test",
+                model_id: "test-model",
+                agent_type: "chat",
+                started_at: "2025-01-01T00:00:00Z",
+                tokens_in: 0,
+                tokens_out: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                cost_basis: "",
+                task_id: None,
+            },
+        )
+        .await;
     }
 
     fn compacted_conversation() -> Conversation {
@@ -214,7 +245,7 @@ mod tests {
         conv.push(Message::system("be helpful"));
         conv.push(Message::user(format!(
             "compact summary{}",
-            djinn_agent::compaction::COMPACTION_SUMMARY_END_MARKER
+            COMPACTION_SUMMARY_END_MARKER
         )));
         conv.push(Message::assistant(
             "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task.",
@@ -259,7 +290,7 @@ mod tests {
     async fn record_and_complete_chat_compaction_boundary() {
         let db = test_db();
         let session_id = uuid::Uuid::now_v7().to_string();
-        seed_session_row(&db, &session_id).await;
+        seed_chat_session(&db, &session_id).await;
         let repo = SessionCompactionBoundaryRepository::new(db.clone());
 
         let before = unaccepted_conversation();
@@ -281,7 +312,7 @@ mod tests {
         assert_eq!(marker_metadata["marker_kind"], "compaction_summary");
         assert_eq!(
             marker_metadata["end_marker"].as_str().unwrap(),
-            djinn_agent::compaction::COMPACTION_SUMMARY_END_MARKER
+            COMPACTION_SUMMARY_END_MARKER
         );
     }
 
@@ -289,7 +320,7 @@ mod tests {
     async fn failed_chat_compaction_leaves_started_only() {
         let db = test_db();
         let session_id = uuid::Uuid::now_v7().to_string();
-        seed_session_row(&db, &session_id).await;
+        seed_chat_session(&db, &session_id).await;
         let repo = SessionCompactionBoundaryRepository::new(db.clone());
 
         let before = unaccepted_conversation();
@@ -309,8 +340,9 @@ mod tests {
     async fn normal_chat_messages_do_not_create_boundaries() {
         let db = test_db();
         let session_id = uuid::Uuid::now_v7().to_string();
-        seed_session_row(&db, &session_id).await;
-        let message_repo = djinn_db::SessionMessageRepository::new(db.clone());
+        seed_chat_session(&db, &session_id).await;
+        let events = EventBus::noop();
+        let message_repo = djinn_db::SessionMessageRepository::new(db.clone(), events);
         let boundary_repo = SessionCompactionBoundaryRepository::new(db.clone());
 
         let msg = djinn_provider::message::Message::user("hello");

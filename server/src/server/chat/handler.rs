@@ -27,7 +27,7 @@ use futures::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    accepted_summary_text, complete_chat_compaction_boundary, record_chat_compaction_started,
+    complete_chat_compaction_boundary, record_chat_compaction_started,
     ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
     ErrorPayload, PROPOSAL_ADDRESS_SYSTEM_PROMPT, ProjectResolver, ProjectResolverError,
     SessionTitlePayload, ToolCallPayload, ToolResultPayload, apply_chat_skills,
@@ -42,10 +42,10 @@ use djinn_agent::chat_tools::ChatResolvedProject;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{
-    BeginCompactionParams, CompleteCompactionParams, ProposalRepository,
-    SessionCompactionBoundaryRepository, SessionMessageRepository, SessionRepository,
+    ProposalRepository, SessionCompactionBoundaryRepository, SessionMessageRepository,
+    SessionRepository,
 };
-use djinn_provider::message::{ContentBlock, Conversation, Message, MessageMeta, Role};
+use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
 const MAX_TOOL_ITERATIONS: usize = 20;
@@ -94,7 +94,7 @@ async fn maybe_compact_proactively(
         context_window,
     ) {
         let boundary_repo =
-            SessionCompactionBoundaryRepository::new(state.db().clone(), state.event_bus());
+            SessionCompactionBoundaryRepository::new(state.db().clone());
         let boundary_id =
             record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
         let compacted = djinn_agent::compaction::compact_conversation(
@@ -108,7 +108,9 @@ async fn maybe_compact_proactively(
         .await;
         if compacted {
             complete_chat_compaction_boundary(
-                &boundary_repo, boundary_id.as_deref(), conversation).await;
+                &boundary_repo, boundary_id.as_deref(), conversation,
+            )
+            .await;
         }
     }
 }
@@ -155,7 +157,7 @@ async fn init_provider_stream(
                     "chat: recoverable stream-init failure; compacting and retrying"
                 );
                 let boundary_repo =
-                    SessionCompactionBoundaryRepository::new(state.db().clone(), state.event_bus());
+                    SessionCompactionBoundaryRepository::new(state.db().clone());
                 let boundary_id =
                     record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
                 let compacted = djinn_agent::compaction::compact_conversation(
@@ -169,7 +171,9 @@ async fn init_provider_stream(
                 .await;
                 if compacted {
                     complete_chat_compaction_boundary(
-                        &boundary_repo, boundary_id.as_deref(), conversation).await;
+                        &boundary_repo, boundary_id.as_deref(), conversation,
+                    )
+                    .await;
                 }
                 if compacted {
                     return Err(StreamInitOutcome::CompactedAndContinue);
