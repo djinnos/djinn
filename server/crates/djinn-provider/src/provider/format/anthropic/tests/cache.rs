@@ -460,3 +460,270 @@ fn test_tool_without_schema_gets_default_input_schema() {
     let req = provider.build_request(&conv, &tools, None);
     assert_eq!(req["tools"][0]["input_schema"], json!({"type": "object"}));
 }
+
+// ─── 41g8 Wave 1: tool_schema_compat projection seam (Anthropic) ────────────
+
+/// Native Anthropic / no-quirk config (`tool_schema_compat = None`) must
+/// retain representative existing `input_schema` shape byte-for-byte: the
+/// shared projection core is identity when `compat` is `None`, so a complex
+/// RMCP-style schema (with `$ref`, `prefixItems`, `unevaluatedItems`, etc.)
+/// passes through unchanged. This guards against a regression where an
+/// `Some(...)` slipped through the seam and stripped native-Anthropic fields.
+#[test]
+fn test_tool_schema_compat_none_preserves_native_anthropic_input_schema() {
+    use crate::provider::FormatFamily;
+    use crate::provider::format::tool_projection;
+
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message::user("hello"));
+
+    // A schema that includes every keyword the shared Moonshot rewrite would
+    // strip — so any accidental Moonshot application would be obvious.
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "point": {
+                "$ref": "#/$defs/point",
+                "description": "should be preserved verbatim for native Anthropic",
+                "prefixItems": [{"type": "number"}, {"type": "number"}],
+                "unevaluatedItems": false
+            }
+        },
+        "$defs": {
+            "point": {"type": "object"}
+        }
+    });
+    let tools = vec![json!({
+        "name": "annotate",
+        "description": "Annotate something",
+        "input_schema": schema.clone()
+    })];
+
+    // Sanity: tool_projection identity path on a schema that contains those
+    // keywords keeps them intact. This is the contract the Anthropic seam
+    // must honour when `tool_schema_compat` is `None`.
+    assert_eq!(
+        tool_projection::project(schema.clone(), None, FormatFamily::Anthropic),
+        schema,
+        "shared projection must be identity when compat is None"
+    );
+
+    let req = provider.build_request(&conv, &tools, None);
+    let serialized_schema = &req["tools"][0]["input_schema"];
+
+    // Every Moonshot-stripped keyword survives on the wire for native Anthropic.
+    assert_eq!(serialized_schema["$defs"]["point"]["type"], "object");
+    assert!(
+        serialized_schema["properties"]["point"]
+            .get("$ref")
+            .is_some()
+    );
+    assert!(
+        serialized_schema["properties"]["point"]
+            .get("prefixItems")
+            .is_some()
+    );
+    assert!(
+        serialized_schema["properties"]["point"]
+            .get("unevaluatedItems")
+            .is_some()
+    );
+}
+
+/// Moonshot-compatible config (`tool_schema_compat = Moonshot`) on an
+/// Anthropic-format provider (Kimi / Moonshot / MiniMax coding plan) must run
+/// the converted `input_schema` through the shared projection core: `$ref`
+/// sibling keywords are stripped, `prefixItems` collapses into `items`, and
+/// `unevaluatedItems` is removed. Cache-control marker behavior on the tool
+/// array remains intact — the projection is applied before cache_control is
+/// inserted on the last tool, so marker placement is unaffected.
+#[test]
+fn test_tool_schema_compat_moonshot_projects_anthropic_input_schema() {
+    use crate::provider::ToolSchemaCompat;
+
+    let mut config = test_anthropic_config();
+    config.tool_schema_compat = Some(ToolSchemaCompat::Moonshot);
+    let provider = AnthropicProvider::new(config);
+
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message::system_with_metadata(
+        "base prompt",
+        crate::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        },
+    ));
+    conv.messages[0].content.push(ContentBlock::Text {
+        text: "project context".to_string(),
+    });
+    conv.messages[0].content.push(ContentBlock::Text {
+        text: "dynamic tail".to_string(),
+    });
+    conv.push(crate::message::Message::user("hello"));
+
+    // RMCP-shaped tool: schema arrives via `inputSchema`, includes every
+    // Moonshot-rewritten keyword, and is paired with a plain tool that needs
+    // no rewriting — to confirm both go through the projection step.
+    //
+    // Two distinct sub-trees exercise the rewrites:
+    //   * a `$ref` with non-informational sibling keywords → siblings stripped.
+    //   * an array schema with `prefixItems` + `unevaluatedItems` →
+    //     prefixItems collapsed into items, unevaluatedItems dropped.
+    let tools = vec![
+        json!({
+            "name": "complex",
+            "description": "Tool with full Moonshot rewrite coverage",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref_field": {
+                        "$ref": "#/$defs/complex",
+                        "minLength": 0,
+                        "pattern": ".*",
+                        "description": "informational sibling kept by Moonshot"
+                    },
+                    "coord": {
+                        "type": "array",
+                        "prefixItems": [{"type": "number"}, {"type": "number"}],
+                        "unevaluatedItems": false
+                    }
+                },
+                "$defs": {
+                    "complex": {"type": "object"}
+                }
+            }
+        }),
+        json!({
+            "name": "plain",
+            "description": "Tool with no Moonshot rewrite needed",
+            "input_schema": {"type": "object", "properties": {"x": {"type": "string"}}}
+        }),
+    ];
+
+    let req = provider.build_request(&conv, &tools, None);
+    let req_tools = req["tools"].as_array().expect("tools array");
+    assert_eq!(req_tools.len(), 2);
+
+    // First tool: RMCP `inputSchema` was converted to Anthropic `input_schema`
+    // AND the schema body was projected through the Moonshot rewrites.
+    let complex = &req_tools[0];
+    assert_eq!(complex["name"], "complex");
+    assert!(
+        complex.get("inputSchema").is_none(),
+        "RMCP camelCase key must not leak onto the wire"
+    );
+    let projected = &complex["input_schema"];
+    let ref_field = &projected["properties"]["ref_field"];
+    let coord = &projected["properties"]["coord"];
+
+    // $ref kept; non-informational sibling keywords stripped by Moonshot.
+    assert!(ref_field.get("$ref").is_some());
+    assert!(
+        ref_field.get("minLength").is_none(),
+        "Moonshot projection must strip non-informational $ref sibling keywords"
+    );
+    assert!(
+        ref_field.get("pattern").is_none(),
+        "Moonshot projection must strip non-informational $ref sibling keywords"
+    );
+    // Description is on the Moonshot keep-list, so it survives.
+    assert_eq!(
+        ref_field["description"],
+        "informational sibling kept by Moonshot"
+    );
+
+    // prefixItems collapsed into items, unevaluatedItems dropped.
+    assert!(
+        coord.get("prefixItems").is_none(),
+        "Moonshot projection must collapse prefixItems into items"
+    );
+    assert!(
+        coord.get("unevaluatedItems").is_none(),
+        "Moonshot projection must drop unevaluatedItems"
+    );
+    assert!(
+        coord["items"].is_array(),
+        "collapsed items array must be present"
+    );
+    let items = coord["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["type"], "number");
+    assert_eq!(items[1]["type"], "number");
+
+    // Second tool: identity for keywords Moonshot does not touch.
+    let plain = &req_tools[1];
+    assert_eq!(plain["input_schema"]["type"], "object");
+    assert_eq!(plain["input_schema"]["properties"]["x"]["type"], "string");
+
+    // Cache-control marker behavior remains intact: the last tool definition
+    // (and only the last) carries the `ephemeral` marker, system prefix blocks
+    // still receive cache_control, and the trailing message breakpoint is
+    // still emitted. Projection must not perturb any of this.
+    assert!(
+        req_tools[0].get("cache_control").is_none(),
+        "the non-last tool must not carry a cache_control marker"
+    );
+    assert_eq!(
+        req_tools[1]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "the last tool definition still owns the cacheable-prefix marker"
+    );
+
+    let system = req["system"].as_array().expect("system array");
+    assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(system[1]["cache_control"], json!({"type": "ephemeral"}));
+    assert!(system[2].get("cache_control").is_none());
+
+    let messages = req["messages"].as_array().expect("messages");
+    let last_block = messages.last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last_block["cache_control"], json!({"type": "ephemeral"}));
+}
+
+/// Default `tool_schema_compat = None` paths still produce the existing
+/// `cache_control` marker placement after the seam change — a regression
+/// guard so adding `compat` to the serializer cannot silently move the
+/// tool-`cache_control` marker off the last definition.
+#[test]
+fn test_tool_schema_compat_none_cache_control_marker_unchanged() {
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message::system_with_metadata(
+        "base prompt",
+        crate::message::MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(json!({
+                ANTHROPIC_CACHE_BREAKPOINT_KEY: CacheBreakpoint {
+                    kind: Some("stable_prefix".to_string()),
+                }
+            })),
+        },
+    ));
+    conv.messages[0].content.push(ContentBlock::Text {
+        text: "project context".to_string(),
+    });
+    conv.push(crate::message::Message::user("hello"));
+
+    let tools = vec![
+        json!({"name": "first", "description": "first", "input_schema": {"type": "object"}}),
+        json!({"name": "second", "description": "second", "input_schema": {"type": "object"}}),
+    ];
+
+    let req = provider.build_request(&conv, &tools, None);
+    let req_tools = req["tools"].as_array().expect("tools array");
+    assert!(req_tools[0].get("cache_control").is_none());
+    assert_eq!(req_tools[1]["cache_control"], json!({"type": "ephemeral"}));
+}
