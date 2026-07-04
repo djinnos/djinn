@@ -17,7 +17,10 @@ use std::pin::Pin;
 use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool as RmcpTool};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ReadResourceRequestParams, Resource as RmcpResource,
+    ResourceContents, Tool as RmcpTool,
+};
 use rmcp::service::{Peer, RoleClient};
 use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -358,6 +361,9 @@ struct RoutingState {
     /// Schema fingerprints for each registered tool (namespaced_name → hash).
     /// Used for rename detection during `tools/list_changed` refreshes.
     tool_fingerprints: HashMap<String, u64>,
+    /// Server names that advertised the resources capability at connect time.
+    /// Only these servers may be targeted by `list_resources` / `read_resource`.
+    resource_servers: HashSet<String>,
 }
 
 impl RoutingState {
@@ -473,6 +479,9 @@ pub struct McpToolRegistry {
     /// Mirrors the `RoutingState` value so consumers can read it without
     /// acquiring the lock.
     server_instructions: BTreeMap<String, String>,
+    /// Server names that advertised the resources capability. Mirrors the
+    /// `RoutingState` value so consumers can read it without acquiring the lock.
+    resource_servers: Vec<String>,
     #[cfg(test)]
     test_dispatch: Option<Arc<TestDispatchFn>>,
 }
@@ -578,6 +587,158 @@ impl McpToolRegistry {
     /// instructions are omitted.
     pub fn server_instructions(&self) -> &BTreeMap<String, String> {
         &self.server_instructions
+    }
+
+    /// Returns `true` if at least one connected server advertised the
+    /// `resources` capability during discovery.
+    pub fn has_resource_servers(&self) -> bool {
+        !self.resource_servers.is_empty()
+    }
+
+    /// Returns the sorted names of connected servers that advertised the
+    /// `resources` capability.  Deterministic order for stable gating logic.
+    pub fn resource_server_names(&self) -> &[String] {
+        &self.resource_servers
+    }
+
+    /// List resources from one or all resource-capable MCP servers.
+    ///
+    /// When `server` is `None`, resources from every resource-capable server
+    /// are collected.  Failures for individual servers are logged and skipped;
+    /// a deterministic `Err` is returned only when *every* requested server
+    /// failed (or no server matched).
+    ///
+    /// Uses the same per-server request timeout policy as `call_tool`.
+    /// Does not hold registry locks across network awaits.
+    pub async fn list_resources(
+        &self,
+        server: Option<&str>,
+    ) -> Result<Vec<(String, RmcpResource)>, String> {
+        // Snapshot the relevant routing state under the read lock.
+        let snapshot: Vec<(String, Arc<Peer<RoleClient>>, u64)> = {
+            let routing = self.routing.read().unwrap();
+            let target_servers: Vec<&str> = match server {
+                Some(name) => {
+                    if !routing.resource_servers.contains(name) {
+                        return Err(format!(
+                            "MCP server `{name}` is not resource-capable or not connected"
+                        ));
+                    }
+                    vec![name]
+                }
+                None => routing
+                    .resource_servers
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
+            };
+            if target_servers.is_empty() {
+                return Ok(Vec::new());
+            }
+            target_servers
+                .into_iter()
+                .filter_map(|name| {
+                    let peer = routing.peers.get(name)?;
+                    let timeout_ms = routing
+                        .request_timeouts
+                        .get(name)
+                        .copied()
+                        .unwrap_or(McpServerConfig::default_request_timeout_ms());
+                    Some((name.to_string(), peer.clone(), timeout_ms))
+                })
+                .collect()
+        };
+        // Lock released — safe to await.
+
+        if snapshot.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_resources: Vec<(String, RmcpResource)> = Vec::new();
+        let mut had_success = false;
+
+        for (server_name, peer, timeout_ms) in &snapshot {
+            let timeout_duration = Duration::from_millis(*timeout_ms);
+            match tokio::time::timeout(timeout_duration, peer.list_resources(None)).await {
+                Ok(Ok(result)) => {
+                    for resource in result.resources {
+                        all_resources.push((server_name.clone(), resource));
+                    }
+                    had_success = true;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "MCP resources/list failed for server; skipping"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        timeout_ms = *timeout_ms,
+                        "MCP resources/list timed out for server; skipping"
+                    );
+                }
+            }
+        }
+
+        if had_success || !all_resources.is_empty() {
+            Ok(all_resources)
+        } else {
+            Err("All resource-capable MCP servers failed to list resources".to_string())
+        }
+    }
+
+    /// Read a single resource from a specific MCP server by URI.
+    ///
+    /// Returns `Err` for missing server, timeout, or rmcp failure.
+    /// Uses the same per-server request timeout policy as `call_tool`.
+    /// Does not hold registry locks across network awaits.
+    pub async fn read_resource(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<Vec<ResourceContents>, String> {
+        // Snapshot the routing state under the read lock.
+        let (peer, timeout_ms) = {
+            let routing = self.routing.read().unwrap();
+
+            if !routing.resource_servers.contains(server) {
+                return Err(format!(
+                    "MCP server `{server}` is not resource-capable or not connected"
+                ));
+            }
+
+            let timeout_ms = routing
+                .request_timeouts
+                .get(server)
+                .copied()
+                .unwrap_or(McpServerConfig::default_request_timeout_ms());
+
+            let peer = routing
+                .peers
+                .get(server)
+                .cloned()
+                .ok_or_else(|| format!("MCP server `{server}` peer not found"))?;
+
+            (peer, timeout_ms)
+        };
+        // Lock released — safe to await.
+
+        let timeout_duration = Duration::from_millis(timeout_ms);
+        let params = ReadResourceRequestParams::new(uri);
+
+        match tokio::time::timeout(timeout_duration, peer.read_resource(params)).await {
+            Ok(Ok(result)) => Ok(result.contents),
+            Ok(Err(e)) => Err(format!(
+                "MCP resources/read for `{uri}` on server `{server}` failed: {e}"
+            )),
+            Err(_elapsed) => Err(format!(
+                "MCP resources/read for `{uri}` on server `{server}` timed out \
+                 after {timeout_ms}ms"
+            )),
+        }
     }
 
     /// Dispatch a tool call to the MCP server that owns the given tool name.
@@ -779,6 +940,7 @@ pub async fn connect_and_discover(
         server_instructions: BTreeMap::new(),
         unavailable: HashSet::new(),
         tool_fingerprints: HashMap::new(),
+        resource_servers: HashSet::new(),
     }));
 
     let mut tool_to_server: HashMap<String, String> = HashMap::new();
@@ -788,6 +950,7 @@ pub async fn connect_and_discover(
     let mut request_timeouts: HashMap<String, u64> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
     let mut server_instructions: BTreeMap<String, String> = BTreeMap::new();
+    let mut resource_servers_set: HashSet<String> = HashSet::new();
 
     for (name, config) in servers {
         let resolved = match resolve_server_config(name, config, app_state).await {
@@ -905,6 +1068,10 @@ pub async fn connect_and_discover(
                     server_instructions.insert(name.clone(), trimmed.to_string());
                 }
             }
+            // Track servers that advertise the resources capability.
+            if info.capabilities.resources.is_some() {
+                resource_servers_set.insert(name.clone());
+            }
         }
 
         // Discover tools from this server.
@@ -974,12 +1141,18 @@ pub async fn connect_and_discover(
         r.request_timeouts = request_timeouts;
         r.tool_fingerprints = tool_fingerprints;
         r.server_instructions = server_instructions.clone();
+        r.resource_servers = resource_servers_set.clone();
     }
+
+    // Sort resource server names for deterministic order.
+    let mut resource_server_names: Vec<String> = resource_servers_set.into_iter().collect();
+    resource_server_names.sort();
 
     Some(McpToolRegistry {
         routing,
         tool_schemas,
         server_instructions,
+        resource_servers: resource_server_names,
         #[cfg(test)]
         test_dispatch: None,
     })
