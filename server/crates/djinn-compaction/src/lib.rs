@@ -20,6 +20,7 @@ mod truncate;
 pub use policy::{compact_conversation, needs_compaction};
 pub use prompts::CompactionContext;
 pub use prompts::{COMPACTION_SUMMARY_END_MARKER, strip_compaction_markers};
+pub use prompts::{extract_prior_summary, previous_summary_block};
 
 /// Maximum length for a message identity that fits the boundary table's
 /// `VARCHAR(36)` id columns (`first_message_id`, `last_compacted_message_id`,
