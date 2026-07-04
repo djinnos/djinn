@@ -1878,6 +1878,7 @@ fn build_worker_agent_context(
         // are configured" error from helpers::resolve_project_id_for_agent_tools.
         default_project_id: Some(project_id),
         reconciliation_sweep: ReconciliationSweepConfig::default(),
+        compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
 

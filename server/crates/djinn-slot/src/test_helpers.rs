@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::{SlotContext, SlotToolDispatcher};
+use crate::reply_loop::CompactionCriticalSection;
 
 /// Minimal `SlotToolDispatcher` for tests that exercise the reply loop.
 /// Stash tools (`output_view`/`output_grep`) return stub text; extension

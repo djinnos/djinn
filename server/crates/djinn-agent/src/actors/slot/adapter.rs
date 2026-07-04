@@ -184,7 +184,7 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         task_id: String,
         project_path: String,
         model_id: String,
-        _ctx: djinn_slot::host::SlotContext,
+        ctx: djinn_slot::host::SlotContext,
         kill: tokio_util::sync::CancellationToken,
         pause: tokio_util::sync::CancellationToken,
         resume_lifecycle_metadata: Option<serde_json::Value>,
@@ -192,7 +192,14 @@ impl djinn_slot::host::SlotHostCallbacks for AgentHostCallbacks {
         if !self.dispatch_mode {
             return Box::pin(async { Ok(()) });
         }
-        let agent = self.agent.clone();
+        // Propagate the slot actor's per-run CompactionCriticalSection into the
+        // AgentContext so the reply-loop adapter (which builds SlotContext from
+        // AgentContext) shares the same handle the actor retains on
+        // ActiveLifecycle.  Without this, the agent-side reply loop would use a
+        // stale/default CompactionCriticalSection from the AgentContext that was
+        // constructed at server startup, breaking the shared-handle invariant.
+        let mut agent = self.agent.clone();
+        agent.compaction_cs = ctx.compaction_cs.clone();
         Box::pin(async move {
             super::supervisor_runner::dispatch_task_runtime(
                 task_id,
