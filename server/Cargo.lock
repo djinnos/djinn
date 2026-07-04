@@ -1587,6 +1587,7 @@ dependencies = [
  "clap",
  "dirs 6.0.0",
  "djinn-agent",
+ "djinn-compaction",
  "djinn-control-plane",
  "djinn-core",
  "djinn-db",
