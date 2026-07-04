@@ -1,5 +1,6 @@
 mod admission;
 mod outcome;
+pub(crate) mod post_intervention_lane;
 /// Pure resume-source selector and candidate builder. Wired into the dispatch
 /// path for re-dispatch after controlled terminations; returns `None` when
 /// resume selection is disabled so default/off dispatch behavior is unchanged.
@@ -7,7 +8,6 @@ mod outcome;
 // task (twsk). The dispatcher uses the helpers directly to attach selection
 // metadata to the session lifecycle path.
 pub mod resume_source;
-mod post_intervention_lane;
 mod retry;
 pub(crate) mod session_recovery;
 mod task_dispatch;

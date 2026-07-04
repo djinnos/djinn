@@ -1,7 +1,6 @@
 // djinn:allow-oversize — legacy dispatch module over size-guard threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
-use super::post_intervention_lane;
 #[cfg(test)]
 use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
 #[cfg(test)]
@@ -9,6 +8,7 @@ use super::admission::{
     clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
 };
 use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
@@ -1577,15 +1577,11 @@ impl CoordinatorActor {
             // routed to the plan lane when the default-on feature flag is set,
             // while keeping the `worker` role and `ModelLane::for_role` mapping
             // unchanged.
-            let effective_lane = if role == "worker" && task.intervention_count >= 1 {
-                if post_intervention_lane::use_plan_lane_for_post_intervention_workers() {
-                    Some(djinn_core::models::ModelLane::Plan)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            let effective_lane = post_intervention_lane::effective_dispatch_lane(
+                role,
+                task.intervention_count,
+                post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
+            );
             let user_model_ids = self
                 .resolve_user_model_priority_with_lane(creator.as_deref(), role, effective_lane)
                 .await;

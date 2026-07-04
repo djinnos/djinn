@@ -191,12 +191,10 @@ impl CoordinatorActor {
                 return Vec::new();
             };
             let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
-            let lane = effective_lane.unwrap_or_else(|| djinn_core::models::ModelLane::for_role(base_role));
+            let lane = effective_lane
+                .unwrap_or_else(|| djinn_core::models::ModelLane::for_role(base_role));
             let models = match us_repo.get(uid).await {
-                Ok(Some(s)) => s
-                    .lanes
-                    .map(|l| l.lane(lane).to_vec())
-                    .unwrap_or_default(),
+                Ok(Some(s)) => s.lanes.map(|l| l.lane(lane).to_vec()).unwrap_or_default(),
                 _ => return Vec::new(),
             };
             if models.is_empty() {
@@ -232,12 +230,18 @@ impl CoordinatorActor {
     /// (plan / implement / review), filtered to providers they still have
     /// connected. `base_role` selects the lane: planner/architect/chat → plan,
     /// worker → implement, reviewer → review, lead/unknown → plan.
+    ///
+    /// Only consumed by the `#[cfg(not(test))]` dispatch-model fallback in
+    /// `resolve_dispatch_models_for_role`; the `#[cfg(test)]` harness stubs that
+    /// fallback out, so this wrapper is (correctly) unused in test builds.
+    #[cfg_attr(test, allow(dead_code))]
     pub(crate) async fn resolve_user_model_priority(
         &self,
         created_by_user_id: Option<&str>,
         base_role: &str,
     ) -> Vec<String> {
-        self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None).await
+        self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None)
+            .await
     }
 
     /// Resolve a `provider/model` list for a DB role's `model_preference`.
