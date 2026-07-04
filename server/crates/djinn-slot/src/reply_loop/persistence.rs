@@ -214,3 +214,90 @@ pub(super) fn serialize_llm_input(
         "tools": tools,
     })
 }
+
+/// Idempotently persist any observed assistant/tool rows from the current
+/// in-flight turn that were not finalized through the normal reply-loop
+/// completion path.
+///
+/// This is called when a turn is interrupted, cancelled, or ends early (e.g.
+/// stream cancellation, deploy drain, stall-kill) so that partially-observed
+/// assistant content and completed streaming tool results survive session
+/// release and are visible on resume/timeline.
+///
+/// The `turn_flushed` flag on [`StreamTurnState`] guards against duplicate
+/// persistence: once set, repeated calls within the same turn are no-ops.
+/// This makes the helper safe to call from multiple teardown paths.
+///
+/// Best-effort: persistence failures are logged and never propagated.
+pub(super) async fn flush_in_flight_turn(
+    repo: &SessionMessageRepository,
+    session_id: &str,
+    task_id: &str,
+    now_timestamp: i64,
+    stream_state: &mut super::streaming::StreamTurnState,
+) {
+    use djinn_provider::message::{ContentBlock, Message, MessageMeta, Role};
+
+    if stream_state.turn_flushed {
+        return;
+    }
+
+    // Build and persist the assistant message from accumulated turn content
+    // (thinking, text, tool_use blocks) if any content was observed.
+    let mut assistant_content: Vec<ContentBlock> = Vec::new();
+    assistant_content.extend(stream_state.turn_provider_state.clone());
+    if !stream_state.turn_thinking.is_empty() {
+        assistant_content.push(ContentBlock::Thinking {
+            thinking: stream_state.turn_thinking.clone(),
+        });
+    }
+    if !stream_state.turn_text.is_empty() {
+        assistant_content.push(ContentBlock::Text {
+            text: stream_state.turn_text.clone(),
+        });
+    }
+    for tc in &stream_state.turn_tool_calls {
+        assistant_content.push(tc.clone());
+    }
+    if !assistant_content.is_empty() {
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: assistant_content,
+            metadata: Some(MessageMeta {
+                input_tokens: Some(stream_state.turn_tokens_in),
+                output_tokens: Some(stream_state.turn_tokens_out),
+                timestamp: Some(now_timestamp),
+                provider_data: None,
+            }),
+        };
+        persist_session_message(repo, session_id, task_id, &assistant_msg).await;
+    }
+
+    // Persist any completed streaming tool results.  `streaming_results`
+    // contains `(content_block_index, result_block)` for tool calls that
+    // were dispatched early and whose futures completed before the stream
+    // was interrupted.  We wrap them as a single User/ToolResult message,
+    // matching the normal turn finalize pattern.
+    if !stream_state.streaming_results.is_empty() {
+        let tool_result_content: Vec<ContentBlock> = stream_state
+            .streaming_results
+            .iter()
+            .map(|(_, result_block)| match result_block {
+                ContentBlock::ToolResult { .. } => result_block.clone(),
+                other => ContentBlock::ToolResult {
+                    tool_use_id: String::new(),
+                    content: vec![other.clone()],
+                    is_error: false,
+                },
+            })
+            .collect();
+        let result_msg = Message {
+            role: Role::User,
+            content: tool_result_content,
+            metadata: None,
+        };
+        persist_session_message(repo, session_id, task_id, &result_msg).await;
+    }
+
+    stream_state.turn_flushed = true;
+}

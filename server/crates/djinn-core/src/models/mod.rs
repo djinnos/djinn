@@ -11,6 +11,7 @@ pub mod session;
 pub mod session_message;
 pub mod settings;
 pub mod task;
+pub mod task_attempt;
 pub mod task_run;
 pub mod user_settings;
 pub mod verify_run;
@@ -34,6 +35,11 @@ pub use task::{
     ActivityEntry, CiStatus, IssueType, PRIORITY_CRITICAL, ReopenClass, ReopenLedgerEntry, Task,
     TaskPrCiSnapshot, TaskPrCiSnapshotInput, TaskStatus, TransitionAction, TransitionApply,
     compute_transition, compute_transition_for_issue_type,
+};
+pub use task_attempt::{
+    GuardDecision, GuardReason, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
+    TaskAttemptPromptSummary, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
+    TASK_ATTEMPT_SUMMARY_MAX_LEN,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use user_settings::{ModelLane, ModelLanes, UserSettings};
