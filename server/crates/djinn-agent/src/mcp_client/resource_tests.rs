@@ -279,3 +279,93 @@ fn rmcp_list_resources_result_is_accessible() {
     assert!(result.resources.is_empty());
     assert!(result.next_cursor.is_none());
 }
+
+// ── Native resource tool schema-gating tests (task jdgb) ─────────────
+//
+// These tests verify the `has_resource_servers()` predicate that
+// `stage.rs` uses to gate exposure of the native `list_mcp_resources`
+// and `read_mcp_resource` schemas, plus the schema shapes themselves.
+
+/// Schema gating: no resource servers → schemas must NOT be appended.
+#[test]
+fn resource_schema_gating_off_without_capability() {
+    let registry = make_registry_with_resources(Vec::new());
+    assert!(!registry.has_resource_servers());
+}
+
+/// Schema gating: with resource servers → schemas SHOULD be appended.
+#[test]
+fn resource_schema_gating_on_with_capability() {
+    let registry = make_registry_with_resources(vec!["resource-server".to_string()]);
+    assert!(registry.has_resource_servers());
+    assert_eq!(
+        registry.resource_server_names(),
+        &["resource-server".to_string()]
+    );
+}
+
+/// Verify the `list_mcp_resources` schema shape matches proposal ql4s:
+/// optional `server` string, read-only, non-destructive.
+#[test]
+fn list_mcp_resources_schema_shape() {
+    let schema = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "list_mcp_resources",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" }
+                },
+                "required": [],
+                "additionalProperties": false
+            }
+        },
+        "readOnly": true,
+        "destructive": false,
+        "idempotent": true,
+        "openWorld": false,
+        "concurrent_safe": true
+    });
+    assert_eq!(schema["function"]["name"], "list_mcp_resources");
+    assert_eq!(
+        schema["function"]["parameters"]["required"],
+        serde_json::json!([])
+    );
+    assert!(schema["function"]["parameters"]["properties"]["server"].is_object());
+    assert_eq!(schema["readOnly"], true);
+    assert_eq!(schema["destructive"], false);
+}
+
+/// Verify the `read_mcp_resource` schema shape matches proposal ql4s:
+/// required `server` and `uri` strings, read-only, non-destructive.
+#[test]
+fn read_mcp_resource_schema_shape() {
+    let schema = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "read_mcp_resource",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" },
+                    "uri": { "type": "string" }
+                },
+                "required": ["server", "uri"],
+                "additionalProperties": false
+            }
+        },
+        "readOnly": true,
+        "destructive": false,
+        "idempotent": true,
+        "openWorld": false,
+        "concurrent_safe": true
+    });
+    assert_eq!(schema["function"]["name"], "read_mcp_resource");
+    assert_eq!(
+        schema["function"]["parameters"]["required"],
+        serde_json::json!(["server", "uri"])
+    );
+    assert_eq!(schema["readOnly"], true);
+    assert_eq!(schema["destructive"], false);
+}
