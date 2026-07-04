@@ -18,13 +18,51 @@ use djinn_db::{
     CommitFileChange, CommitFileChangeRepository, CouplingPairEvent, Database,
     derive_pair_events_into,
 };
-use djinn_git::CommandOutput;
 use thiserror::Error;
 
 const GIT_LOG_TIMEOUT: Duration = Duration::from_secs(120);
 const BATCH_SIZE: usize = 500;
 const PAIR_BATCH_SIZE: usize = 500;
 const COMMIT_SENTINEL: &str = "__COMMIT__";
+
+/// A small, owned git-shell wrapper returned by the owner crate so callers can
+/// inspect the exit code, stdout, and stderr without re-allocating.
+#[allow(dead_code)]
+struct GitOutput {
+    stdout: String,
+    stderr: String,
+    code: i32,
+}
+
+impl From<djinn_git::CommandOutput> for GitOutput {
+    fn from(out: djinn_git::CommandOutput) -> Self {
+        Self {
+            stdout: out.stdout,
+            stderr: out.stderr,
+            code: out.code,
+        }
+    }
+}
+
+/// A single git shell-out command pattern, factored so callers can run a small
+/// git pipeline in the owner crate without importing `tokio::process::Command`.
+async fn git_command_in(
+    cwd: &Path,
+    args: Vec<String>,
+) -> Result<GitOutput, IngestError> {
+    match tokio::time::timeout(GIT_LOG_TIMEOUT, djinn_git::run_git_command_in(cwd, args)).await {
+        Ok(Ok(out)) => Ok(out.into()),
+        Ok(Err(djinn_git::GitError::CommandFailed { code, stderr, .. })) => {
+            Err(IngestError::GitFailed {
+                status: code.to_string(),
+                stderr,
+            })
+        }
+        Ok(Err(djinn_git::GitError::Io(io_err))) => Err(IngestError::Spawn(io_err)),
+        Ok(Err(other)) => Err(IngestError::Parse(format!("git command: {other}"))),
+        Err(_elapsed) => Err(IngestError::Timeout(GIT_LOG_TIMEOUT)),
+    }
+}
 
 /// Observability rollup returned by [`ingest_new_commits`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -235,36 +273,24 @@ pub async fn ingest_new_commits(
 }
 
 async fn git_head(project_root: &Path) -> Result<String, IngestError> {
-    match tokio::time::timeout(GIT_LOG_TIMEOUT, djinn_git::head_commit_sha(project_root)).await {
-        Ok(Ok(sha)) => Ok(sha),
-        Ok(Err(djinn_git::GitError::CommandFailed { code, stderr, .. })) => {
-            Err(IngestError::GitFailed {
-                status: code.to_string(),
-                stderr,
-            })
-        }
-        Ok(Err(djinn_git::GitError::Io(io_err))) => Err(IngestError::Spawn(io_err)),
-        Ok(Err(other)) => Err(IngestError::Parse(format!("git rev-parse: {other}"))),
-        Err(_elapsed) => Err(IngestError::Timeout(GIT_LOG_TIMEOUT)),
-    }
+    let out = git_command_in(project_root, vec!["rev-parse".into(), "HEAD".into()]).await?;
+    Ok(out.stdout.trim().to_owned())
 }
 
 async fn cursor_is_reachable(project_root: &Path, sha: &str) -> bool {
-    let owned: Vec<String> = vec![
-        "merge-base".into(),
-        "--is-ancestor".into(),
-        sha.to_string(),
-        "HEAD".into(),
-    ];
-    let Ok(Ok(out)) = tokio::time::timeout(
-        GIT_LOG_TIMEOUT,
-        djinn_git::run_git_command_in(project_root, owned),
+    matches!(
+        git_command_in(
+            project_root,
+            vec![
+                "merge-base".into(),
+                "--is-ancestor".into(),
+                sha.to_string(),
+                "HEAD".into(),
+            ],
+        )
+        .await,
+        Ok(out) if out.code == 0
     )
-    .await
-    else {
-        return false;
-    };
-    out.code == 0
 }
 
 /// Targeted fetch for the saved cursor SHA so a shallow warm-Pod clone can
@@ -307,14 +333,15 @@ async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
     // missing remote errors with "fatal: 'origin' does not appear to be
     // a git repository" — not catastrophic, but we want this helper to
     // be a clean best-effort.
-    let probe: Vec<String> = vec!["config".into(), "--get".into(), "remote.origin.url".into()];
+    let probe = git_command_in(
+        project_root,
+        vec!["config".into(), "--get".into(), "remote.origin.url".into()],
+    )
+    .await;
     let has_origin = tokio::fs::metadata(project_root.join(".git/config"))
         .await
         .is_ok()
-        && {
-            let probe_out = djinn_git::run_git_command_in(project_root, probe).await;
-            matches!(probe_out, Ok(o) if o.code == 0)
-        };
+        && matches!(probe, Ok(out) if out.code == 0);
     if !has_origin {
         return false;
     }
@@ -323,29 +350,16 @@ async fn try_fetch_cursor(project_root: &Path, cursor: &str) -> bool {
     // shallow boundary back to the root; `git fetch origin <ref>` only
     // fetches <ref> and leaves parents unreachable. See the doc comment on
     // this fn for the full reasoning.
-    let owned: Vec<String> = vec!["fetch".into(), "--unshallow".into()];
-    let fetch = tokio::time::timeout(
-        GIT_LOG_TIMEOUT,
-        djinn_git::run_git_command_in(project_root, owned),
-    )
-    .await;
+    let fetch = git_command_in(project_root, vec!["fetch".into(), "--unshallow".into()]).await;
 
     let out = match fetch {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
+        Ok(out) => out,
+        Err(e) => {
             tracing::warn!(
                 project_root = %project_root.display(),
                 cursor = %cursor,
                 error = %e,
                 "coupling_index: `git fetch --unshallow` failed to spawn; falling back to full re-walk"
-            );
-            return false;
-        }
-        Err(_) => {
-            tracing::warn!(
-                project_root = %project_root.display(),
-                cursor = %cursor,
-                "coupling_index: `git fetch --unshallow` timed out; falling back to full re-walk"
             );
             return false;
         }
@@ -414,34 +428,27 @@ async fn run_git_log(project_root: &Path, range: &str) -> Result<(String, bool),
             project_root = %project_root.display(),
             "coupling_index: shallow clone detected; attempting `git fetch --unshallow` before walk"
         );
-        let owned: Vec<String> = vec!["fetch".into(), "--unshallow".into()];
-        let fetch = tokio::time::timeout(
-            GIT_LOG_TIMEOUT,
-            djinn_git::run_git_command_in(project_root, owned),
+        let fetch = git_command_in(
+            project_root,
+            vec!["fetch".into(), "--unshallow".into()],
         )
         .await;
         match fetch {
-            Ok(Ok(out)) if out.code == 0 => {
+            Ok(GitOutput { code: 0, .. }) => {
                 unshallowed = true;
             }
-            Ok(Ok(out)) => {
+            Ok(out) => {
                 tracing::warn!(
                     project_root = %project_root.display(),
                     stderr = %out.stderr.trim(),
                     "coupling_index: `git fetch --unshallow` non-zero; ingesting visible history only"
                 );
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 tracing::warn!(
                     project_root = %project_root.display(),
                     error = %e,
                     "coupling_index: `git fetch --unshallow` failed to spawn; ingesting visible history only"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    "coupling_index: `git fetch --unshallow` timed out; ingesting visible history only"
                 );
             }
         }
