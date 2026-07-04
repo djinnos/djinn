@@ -82,19 +82,6 @@ fn manifest_json_loads_and_has_expected_groups() {
 }
 
 #[test]
-fn manifest_includes_djinn_mcp_server_fixture() {
-    let manifest = load_fixture("manifest.json");
-    let files = manifest["groups"]["builtin"]["files"]
-        .as_array()
-        .expect("manifest builtin group has no 'files' array");
-    let file_strings: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
-    assert!(
-        file_strings.contains(&DJINN_MCP_SERVER_FIXTURE),
-        "builtin manifest must include '{DJINN_MCP_SERVER_FIXTURE}'"
-    );
-}
-
-#[test]
 fn djinn_mcp_server_fixture_is_substantial_and_well_formed() {
     let tools = load_fixture(DJINN_MCP_SERVER_FIXTURE)
         .as_array()

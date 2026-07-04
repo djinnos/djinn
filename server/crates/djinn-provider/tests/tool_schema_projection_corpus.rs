@@ -215,9 +215,9 @@ fn djinn_mcp_server_fixture_is_present_and_substantial() {
             seen.insert(name),
             "duplicate tool name '{name}' in {DJINN_MCP_SERVER_FIXTURE}"
         );
-        let schema = tool
-            .get("inputSchema")
-            .unwrap_or_else(|| panic!("tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} missing 'inputSchema'"));
+        let schema = tool.get("inputSchema").unwrap_or_else(|| {
+            panic!("tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} missing 'inputSchema'")
+        });
         assert!(
             schema.is_object(),
             "tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} has a non-object 'inputSchema'"
