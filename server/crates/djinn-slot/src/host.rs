@@ -27,6 +27,7 @@ use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::helpers::ProviderCredential;
+use crate::reply_loop::compaction_guard::CompactionCriticalSection;
 
 /// Identifies the knowledge-write target for a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +261,13 @@ pub struct SlotContext {
     /// Tool dispatch handle for the reply loop.  Routes stash, MCP, and
     /// extension tool calls through the host's infrastructure.
     pub tool_dispatcher: Option<Arc<dyn SlotToolDispatcher>>,
+    /// Shared compaction critical section for the active slot lifecycle/run.
+    ///
+    /// The slot actor creates one per active lifecycle and passes it into the
+    /// reply loop; it keeps a clone on `ActiveLifecycle` so command routing can
+    /// observe/wait on compaction without busy waiting. This is internal to the
+    /// slot lifecycle and is not serialized across the wire.
+    pub compaction_cs: CompactionCriticalSection,
 }
 
 impl SlotContext {

@@ -456,6 +456,7 @@ impl RealPoolKillHarness {
             rpc_registry: None,
             default_project_id: None,
             reconciliation_sweep: ReconciliationSweepConfig::default(),
+            compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         };
 
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();

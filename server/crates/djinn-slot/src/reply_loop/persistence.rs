@@ -1,4 +1,4 @@
-use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
+use djinn_compaction::{COMPACTION_SUMMARY_END_MARKER, bounded_message_identity};
 use djinn_db::{
     BeginCompactionParams, CompleteCompactionParams, SessionCompactionBoundaryRepository,
     SessionMessageRepository,
@@ -136,8 +136,8 @@ pub(super) async fn complete_compaction_boundary(
 /// message id before the compaction point. For the retained tail we use the
 /// first message id of the preserved tail after compaction, plus a stable hash
 /// of the entire compacted conversation. Message ids are taken from
-/// `MessageMeta::provider_data["id"]` if available; otherwise the stable SHA-256
-/// of the message JSON is used as a synthetic identity.
+/// `MessageMeta::provider_data["id"]` if available; otherwise a stable SHA-256
+/// of the message JSON is used as a synthetic identity bounded to 36 chars.
 fn gather_boundary_identity(
     conversation: &Conversation,
 ) -> (
@@ -152,8 +152,8 @@ fn gather_boundary_identity(
         .messages
         .iter()
         .find(|m| m.role != Role::System)
-        .map(message_identity);
-    let last_compacted_message_id = conversation.messages.last().map(message_identity);
+        .map(bounded_message_identity);
+    let last_compacted_message_id = conversation.messages.last().map(bounded_message_identity);
 
     // The retained tail is the first non-summary, non-system, non-continuation
     // message after compaction. We detect the summary by looking for a user
@@ -169,7 +169,7 @@ fn gather_boundary_identity(
                 .text_content()
                 .starts_with("Part of your context was compacted.")
         {
-            first_retained_message_id = Some(message_identity(msg));
+            first_retained_message_id = Some(bounded_message_identity(msg));
             break;
         }
         if msg.role == Role::User && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER) {
@@ -192,20 +192,6 @@ fn gather_boundary_identity(
         last_compacted_message_id,
         first_retained_message_id,
         retained_tail_hash,
-    )
-}
-
-fn message_identity(msg: &Message) -> String {
-    if let Some(serde_json::Value::Object(provider_data)) =
-        msg.metadata.as_ref().and_then(|m| m.provider_data.as_ref())
-        && let Some(serde_json::Value::String(id)) = provider_data.get("id")
-    {
-        return id.clone();
-    }
-    use sha2::{Digest, Sha256};
-    format!(
-        "hash:{}",
-        hex::encode(Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()))
     )
 }
 
