@@ -171,6 +171,14 @@ impl TaskRepository {
     /// Reopen-like transitions are identified heuristically from the
     /// activity payload: `to_status = 'open'` from one of the
     /// review/PR/closed source states.
+    ///
+    /// uv3p Part C: reopen events whose `activity_log.created_at` predates the
+    /// task's `human_review_resolved_at` marker are excluded. When a human
+    /// closes a human-review hold the strike ledger it just adjudicated must
+    /// read as consumed — only strikes accrued AFTER the release count, so the
+    /// park evaluator cannot re-park on the stale pre-release counters (ygj0).
+    /// The subquery is NULL for tasks that were never held, in which case every
+    /// reopen counts (`created_at > NULL` is NULL → the OR keeps the row).
     pub async fn quality_reopen_count(&self, task_id: &str) -> Result<i64> {
         self.db.ensure_initialized().await?;
         // NOTE: dynamic SQL with JSONB operators — compile-time check not possible.
@@ -181,12 +189,60 @@ impl TaskRepository {
                AND archived = FALSE
                AND (payload ->> 'to_status') = 'open'
                AND (payload ->> 'from_status') IN ('in_task_review', 'pr_draft', 'pr_review', 'closed', 'approved')
-               AND COALESCE(payload ->> 'reopen_class', 'other') IN ('review_rejected', 'merge_queue_failed', 'other')"#,
+               AND COALESCE(payload ->> 'reopen_class', 'other') IN ('review_rejected', 'merge_queue_failed', 'other')
+               AND (
+                   (SELECT t.human_review_resolved_at FROM tasks t WHERE t.id = $1) IS NULL
+                   OR created_at > (SELECT t.human_review_resolved_at FROM tasks t WHERE t.id = $1)
+               )"#,
         )
         .bind(task_id)
         .fetch_one(self.db.pool())
         .await?;
         Ok(count)
+    }
+
+    /// uv3p Part C: read the consumed-hold marker for a task.
+    ///
+    /// `Some(ts)` is the UTC instant the most recent human-review hold on this
+    /// task was resolved (see [`Self::mark_human_review_resolved`]); `None` when
+    /// the task has never been held. The park guard uses it as the floor for
+    /// "post-release" evidence so it never re-parks on strikes a human already
+    /// adjudicated.
+    pub async fn human_review_resolved_at(&self, task_id: &str) -> Result<Option<String>> {
+        self.db.ensure_initialized().await?;
+        let ts = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT human_review_resolved_at FROM tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(self.db.pool())
+        .await?
+        .flatten();
+        Ok(ts)
+    }
+
+    /// uv3p Part C: stamp the consumed-hold marker on every source task that
+    /// `hold_task_id` was blocking.
+    ///
+    /// Called when a `human-review-hold` remediation task closes. Records the
+    /// resolution instant so `quality_reopen_count` (and the park guard's
+    /// evidence floor) discount every strike accrued before the human released
+    /// the source — the ygj0 duplicate-hold fix. Returns the number of source
+    /// tasks stamped. Idempotent by construction: re-closing writes a later
+    /// timestamp, never a duplicate hold.
+    pub async fn mark_human_review_resolved(&self, hold_task_id: &str) -> Result<u64> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(
+            r#"UPDATE tasks SET
+                    human_review_resolved_at =
+                        to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    updated_at =
+                        to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                 WHERE id IN (SELECT task_id FROM blockers WHERE blocking_task_id = $1)"#,
+        )
+        .bind(hold_task_id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Return the most recent reopen ledger entries for a task.

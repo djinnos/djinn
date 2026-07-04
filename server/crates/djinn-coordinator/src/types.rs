@@ -263,6 +263,28 @@ pub(super) const TASK_OUTCOME_FAILED_CLOSE: &str = "failed_closed";
 /// The marker payload also stores the `quality_strikes` count for audit.
 pub(super) const PLANNER_INTERVENTION_MARKER: &str = "planner_intervention";
 
+/// uv3p Part B: activity marker recording that the human-park rung declined to
+/// park and redispatched instead (no post-intervention remediation was ever
+/// attempted, or a brand-new CI fingerprint deserved one shot). Payload carries
+/// the decision (`kind`), the fingerprint when relevant, and the non-attempt
+/// model count — an audit trail proving the fleet actually tried before a human
+/// is ever paged.
+pub(super) const PARK_REDISPATCH_MARKER: &str = "park_attempted_remediation_redispatch";
+
+/// uv3p Part B: number of CONSECUTIVE post-intervention sessions that terminated
+/// pre-submission (across DIFFERENT models) after which the human-park rung
+/// stops rotating and finally parks. Below this bound the coordinator redispatches
+/// with forced model rotation instead of parking; at/above it the task parks
+/// with a reason that names the terminated sessions/models rather than the
+/// templated "same acceptance criteria kept failing" text.
+///
+/// Rationale for `2`: the first non-attempt termination (loop-guard trip, infra
+/// death, handshake failure) is evidence about that one session/model, not about
+/// the task — a single rotation to a different model is cheap and frequently
+/// succeeds (kibj would have). Two distinct models both terminating pre-submission
+/// is a genuine signal the remediation itself is stuck, so park for a human.
+pub(super) const NON_ATTEMPT_PARK_THRESHOLD: usize = 2;
+
 /// Number of consecutive worker re-attempts (internal review rejections /
 /// reopens) after which the coordinator stops re-dispatching the worker and
 /// instead routes the task to a Planner intervention pass that DECIDES how to
