@@ -5,6 +5,7 @@ pub mod embeddings;
 pub mod error_classify;
 pub mod github_api;
 pub mod github_app;
+pub mod github_server;
 pub mod http_util;
 pub mod message;
 pub mod oauth;
