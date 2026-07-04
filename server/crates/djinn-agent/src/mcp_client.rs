@@ -4,8 +4,8 @@
 //! definitions via `tools/list`, and provides dispatch for tool calls routed
 //! to those servers during the reply loop.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, RwLock};
 
 #[cfg(test)]
 use std::future::Future;
@@ -68,12 +68,7 @@ fn is_mcp_name_safe_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-fn truncate_mcp_namespaced_name(
-    prefix: &str,
-    separator: &str,
-    server: &str,
-    tool: &str,
-) -> String {
+fn truncate_mcp_namespaced_name(prefix: &str, separator: &str, server: &str, tool: &str) -> String {
     let budget = MCP_NAMESPACED_NAME_MAX_LEN.saturating_sub(prefix.len() + separator.len());
     // Allocate at least one character for each segment so neither is erased.
     let server_len = server.len().min(budget.saturating_sub(1));
@@ -126,6 +121,24 @@ fn annotate_external_tool_schema_safety(value: &mut serde_json::Value) {
     );
 }
 
+/// Interior-mutable routing state for [`McpToolRegistry`].
+///
+/// Wrapped in `Arc<RwLock<_>>` so the registry is `Clone`-safe and supports
+/// notification-driven refresh without requiring `&mut self`.
+struct RoutingState {
+    /// namespaced_tool_name → server_name
+    tool_to_server: HashMap<String, String>,
+    /// namespaced_tool_name → original tool name (as the MCP server knows it)
+    namespaced_to_original: HashMap<String, String>,
+    /// server_name → live peer handle
+    peers: HashMap<String, Arc<Peer<RoleClient>>>,
+    /// Tools that were advertised at session start but have since been removed
+    /// by a `tools/list_changed` refresh. These remain in the routing maps
+    /// (so `has_tool` returns `true`) but `call_tool` returns a deterministic
+    /// error instead of dispatching.
+    unavailable: HashSet<String>,
+}
+
 /// Registry of MCP tool names → server connections built at session start.
 ///
 /// Holds live `Peer<RoleClient>` handles and the tool-name→server-name mapping
@@ -133,15 +146,15 @@ fn annotate_external_tool_schema_safety(value: &mut serde_json::Value) {
 ///
 /// Tools are registered under namespaced names (`mcp__{server}__{tool}`) to
 /// prevent collisions and make provenance visible in traces.
+///
+/// Routing state is interior-mutable via `Arc<RwLock<_>>` to support
+/// notification-driven refreshes (`tools/list_changed`). The advertised
+/// schema vector (`tool_schemas`) is session-fixed and never changes.
 #[derive(Clone)]
 pub struct McpToolRegistry {
-    /// namespaced_tool_name → server_name
-    tool_to_server: HashMap<String, String>,
-    /// namespaced_tool_name → original tool name (as the MCP server knows it)
-    namespaced_to_original: HashMap<String, String>,
-    /// server_name → live peer handle
-    peers: HashMap<String, Arc<Peer<RoleClient>>>,
+    routing: Arc<RwLock<RoutingState>>,
     /// All discovered tool schemas ready to append to the session tool list.
+    /// Session-fixed: once set at construction, never mutated.
     tool_schemas: Vec<serde_json::Value>,
     #[cfg(test)]
     test_dispatch: Option<Arc<TestDispatchFn>>,
@@ -207,18 +220,40 @@ enum PlaceholderLookup {
 
 impl McpToolRegistry {
     /// Returns true if this registry has a tool with the given name.
+    ///
+    /// Returns `true` even for tools that have been marked unavailable by a
+    /// server refresh — the name is still known, but `call_tool` will return
+    /// a deterministic error.
     pub fn has_tool(&self, name: &str) -> bool {
-        self.tool_to_server.contains_key(name)
+        self.routing
+            .read()
+            .unwrap()
+            .tool_to_server
+            .contains_key(name)
     }
 
     /// Returns the MCP server name that provides the given tool, if any.
-    pub fn server_for_tool(&self, name: &str) -> Option<&str> {
-        self.tool_to_server.get(name).map(|s| s.as_str())
+    pub fn server_for_tool(&self, name: &str) -> Option<String> {
+        self.routing
+            .read()
+            .unwrap()
+            .tool_to_server
+            .get(name)
+            .cloned()
     }
 
     /// Returns the discovered tool schemas (provider-compatible JSON).
+    ///
+    /// This list is session-fixed: it reflects the tools discovered at session
+    /// start and is never updated by `tools/list_changed` refreshes.
     pub fn tool_schemas(&self) -> &[serde_json::Value] {
         &self.tool_schemas
+    }
+
+    /// Returns true if the given tool has been marked unavailable by a server
+    /// refresh (i.e., the server no longer advertises it).
+    pub fn is_unavailable(&self, name: &str) -> bool {
+        self.routing.read().unwrap().unavailable.contains(name)
     }
 
     /// Dispatch a tool call to the MCP server that owns the given tool name.
@@ -226,7 +261,9 @@ impl McpToolRegistry {
     /// `tool_name` should be the namespaced name (e.g. `mcp__Tavilly__web_search`).
     /// The original tool name is resolved internally for the server call.
     ///
-    /// Returns `Ok(json)` on success or `Err(message)` on failure.
+    /// Returns `Ok(json)` on success or `Err(message)` on failure. If the tool
+    /// has been marked unavailable by a server refresh, returns a deterministic
+    /// error without attempting to dispatch.
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -237,25 +274,44 @@ impl McpToolRegistry {
             return dispatch(tool_name, arguments).await;
         }
 
-        let server_name = self
-            .tool_to_server
-            .get(tool_name)
-            .ok_or_else(|| format!("MCP tool `{tool_name}` not found in registry"))?;
+        // Snapshot the routing state under the read lock, then release before
+        // the async peer.call_tool() so we never hold a std::sync::RwLock
+        // across an await point.
+        let (server_name, original_name, peer) = {
+            let routing = self.routing.read().unwrap();
 
-        let original_name = self
-            .namespaced_to_original
-            .get(tool_name)
-            .map(|s| s.as_str())
-            .unwrap_or(tool_name);
+            if routing.unavailable.contains(tool_name) {
+                return Err(format!(
+                    "MCP tool `{tool_name}` is no longer available: \
+                     removed by server refresh"
+                ));
+            }
 
-        let peer = self
-            .peers
-            .get(server_name.as_str())
-            .ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?;
+            let server_name = routing
+                .tool_to_server
+                .get(tool_name)
+                .ok_or_else(|| format!("MCP tool `{tool_name}` not found in registry"))?
+                .clone();
+
+            let original_name = routing
+                .namespaced_to_original
+                .get(tool_name)
+                .cloned()
+                .unwrap_or_else(|| tool_name.to_string());
+
+            let peer = routing
+                .peers
+                .get(server_name.as_str())
+                .ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?
+                .clone();
+
+            (server_name, original_name, peer)
+        };
+        // Lock released — safe to await.
 
         // CallToolRequestParams is #[non_exhaustive] in rmcp 1.x; build via
         // new() + field assignment (meta/task default to None).
-        let mut params = CallToolRequestParams::new(original_name.to_string());
+        let mut params = CallToolRequestParams::new(original_name);
         params.arguments = arguments.map(|m| m.into_iter().collect());
 
         let result = peer.call_tool(params).await.map_err(|e| {
@@ -263,6 +319,54 @@ impl McpToolRegistry {
         })?;
 
         call_tool_result_to_json(result)
+    }
+
+    /// Apply a `tools/list_changed` refresh for a single server.
+    ///
+    /// `current_tool_names` contains the original (non-namespaced) tool names
+    /// that the server currently advertises. Any previously registered tool
+    /// for this server whose original name is NOT in `current_tool_names` is
+    /// marked unavailable. Unchanged tools remain dispatchable.
+    ///
+    /// Newly discovered tools are NOT added to `tool_schemas` (session-fixed).
+    /// Returns the list of namespaced tool names that were marked unavailable.
+    pub fn apply_tools_refresh(
+        &self,
+        server_name: &str,
+        current_tool_names: &[String],
+    ) -> Vec<String> {
+        let current_set: HashSet<&str> = current_tool_names.iter().map(|s| s.as_str()).collect();
+        let mut routing = self.routing.write().unwrap();
+        let mut newly_unavailable = Vec::new();
+
+        // Collect namespaced names that belong to this server and whose
+        // original name is no longer advertised.
+        let to_mark: Vec<String> = routing
+            .tool_to_server
+            .iter()
+            .filter_map(|(namespaced, srv)| {
+                if srv != server_name {
+                    return None;
+                }
+                let original = routing
+                    .namespaced_to_original
+                    .get(namespaced)
+                    .map(|s| s.as_str())
+                    .unwrap_or(namespaced.as_str());
+                if !current_set.contains(original) && !routing.unavailable.contains(namespaced) {
+                    Some(namespaced.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for name in to_mark {
+            routing.unavailable.insert(name.clone());
+            newly_unavailable.push(name);
+        }
+
+        newly_unavailable
     }
 }
 
@@ -455,9 +559,12 @@ pub async fn connect_and_discover(
     }
 
     Some(McpToolRegistry {
-        tool_to_server,
-        namespaced_to_original,
-        peers,
+        routing: Arc::new(RwLock::new(RoutingState {
+            tool_to_server,
+            namespaced_to_original,
+            peers,
+            unavailable: HashSet::new(),
+        })),
         tool_schemas,
         #[cfg(test)]
         test_dispatch: None,
@@ -674,10 +781,7 @@ mod tests {
     }
 
     fn assert_regex_match(name: &str) {
-        let re = regex::Regex::new(&format!(
-            "^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$"
-        ))
-        .expect("valid regex");
+        let re = regex::Regex::new("^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$").expect("valid regex");
         assert!(
             re.is_match(name),
             "name `{name}` does not match the expected pattern"
@@ -711,12 +815,23 @@ mod tests {
         assert_eq!(err, "something went wrong");
     }
 
+    /// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps.
+    fn make_routing(
+        tool_to_server: HashMap<String, String>,
+        namespaced_to_original: HashMap<String, String>,
+    ) -> Arc<RwLock<RoutingState>> {
+        Arc::new(RwLock::new(RoutingState {
+            tool_to_server,
+            namespaced_to_original,
+            peers: HashMap::new(),
+            unavailable: HashSet::new(),
+        }))
+    }
+
     #[test]
     fn empty_registry_has_no_tools() {
         let registry = McpToolRegistry {
-            tool_to_server: HashMap::new(),
-            namespaced_to_original: HashMap::new(),
-            peers: HashMap::new(),
+            routing: make_routing(HashMap::new(), HashMap::new()),
             tool_schemas: Vec::new(),
             test_dispatch: None,
         };
@@ -733,9 +848,7 @@ mod tests {
         namespaced_to_original.insert(namespaced.clone(), "web_search".to_string());
 
         let registry = McpToolRegistry {
-            tool_to_server,
-            namespaced_to_original,
-            peers: HashMap::new(),
+            routing: make_routing(tool_to_server, namespaced_to_original),
             tool_schemas: vec![serde_json::json!({"name": namespaced})],
             test_dispatch: None,
         };
@@ -749,9 +862,10 @@ mod tests {
     fn registry_schemas_default_to_concurrent_unsafe() {
         let namespaced = mcp_namespaced_name("search-server", "web_search");
         let registry = McpToolRegistry {
-            tool_to_server: HashMap::from([(namespaced.clone(), "search-server".to_string())]),
-            namespaced_to_original: HashMap::from([(namespaced.clone(), "web_search".to_string())]),
-            peers: HashMap::new(),
+            routing: make_routing(
+                HashMap::from([(namespaced.clone(), "search-server".to_string())]),
+                HashMap::from([(namespaced.clone(), "web_search".to_string())]),
+            ),
             tool_schemas: vec![serde_json::json!({
                 "name": namespaced,
                 "description": "search",
@@ -834,9 +948,7 @@ mod tests {
         let received = std::sync::Arc::new(std::sync::Mutex::new(None));
         let received_clone = received.clone();
         let registry = McpToolRegistry {
-            tool_to_server,
-            namespaced_to_original,
-            peers: HashMap::new(),
+            routing: make_routing(tool_to_server, namespaced_to_original),
             tool_schemas: Vec::new(),
             test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
                 let received = received_clone.clone();
@@ -855,9 +967,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {
         let registry = McpToolRegistry {
-            tool_to_server: HashMap::new(),
-            namespaced_to_original: HashMap::new(),
-            peers: HashMap::new(),
+            routing: make_routing(HashMap::new(), HashMap::new()),
             tool_schemas: Vec::new(),
             test_dispatch: None,
         };
@@ -885,9 +995,7 @@ mod tests {
             let tool_to_server: HashMap<String, String> = mappings.into_iter().collect();
             let namespaced_to_original = HashMap::new(); // test dispatch handles names directly
             Self {
-                tool_to_server,
-                namespaced_to_original,
-                peers: HashMap::new(),
+                routing: make_routing(tool_to_server, namespaced_to_original),
                 tool_schemas,
                 test_dispatch: Some(Arc::new(move |tool_name, arguments| {
                     let result = dispatch(tool_name, arguments);
@@ -1133,5 +1241,129 @@ mod tests {
 
         let result = connect_and_discover("test", "worker", &servers, &app_state).await;
         assert!(result.is_none());
+    }
+
+    // ── Refresh / mutability tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn removed_advertised_tool_returns_deterministic_error() {
+        let namespaced = mcp_namespaced_name("my-server", "web_search");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(namespaced.clone(), "web_search".to_string());
+
+        let registry = McpToolRegistry {
+            routing: make_routing(tool_to_server, namespaced_to_original),
+            tool_schemas: vec![serde_json::json!({"name": namespaced})],
+            test_dispatch: None,
+        };
+
+        // Tool is available initially.
+        assert!(registry.has_tool(&namespaced));
+        assert!(!registry.is_unavailable(&namespaced));
+
+        // Simulate server refresh that no longer advertises web_search.
+        let removed = registry.apply_tools_refresh("my-server", &[]);
+        assert_eq!(removed, vec![namespaced.clone()]);
+        assert!(registry.is_unavailable(&namespaced));
+        // has_tool still returns true — the name is known.
+        assert!(registry.has_tool(&namespaced));
+
+        // call_tool returns a deterministic error.
+        let result = registry.call_tool(&namespaced, None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no longer available"),
+            "expected deterministic unavailable error, got: {err}"
+        );
+        assert!(
+            err.contains("removed by server refresh"),
+            "error should mention server refresh, got: {err}"
+        );
+    }
+
+    #[test]
+    fn refresh_does_not_add_newly_discovered_tools_to_schemas() {
+        let namespaced = mcp_namespaced_name("my-server", "existing_tool");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(namespaced.clone(), "existing_tool".to_string());
+
+        let registry = McpToolRegistry {
+            routing: make_routing(tool_to_server, namespaced_to_original),
+            tool_schemas: vec![serde_json::json!({"name": namespaced})],
+            test_dispatch: None,
+        };
+
+        let schemas_before = registry.tool_schemas().len();
+
+        // Apply refresh — the server now advertises a brand new tool as well.
+        registry.apply_tools_refresh(
+            "my-server",
+            &["existing_tool".to_string(), "new_tool".to_string()],
+        );
+
+        // tool_schemas is session-fixed: still the same length.
+        assert_eq!(
+            registry.tool_schemas().len(),
+            schemas_before,
+            "tool_schemas must not grow after a refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_advertised_tool_remains_dispatchable_after_refresh() {
+        let namespaced = mcp_namespaced_name("my-server", "stable_tool");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(namespaced.clone(), "stable_tool".to_string());
+
+        // Use test_dispatch to verify the tool is still callable.
+        let registry = McpToolRegistry {
+            routing: make_routing(tool_to_server, namespaced_to_original),
+            tool_schemas: vec![serde_json::json!({"name": namespaced})],
+            test_dispatch: Some(Arc::new(|_, _| {
+                Box::pin(async { Ok(serde_json::json!({"ok": true})) })
+            })),
+        };
+
+        // Refresh: stable_tool is still advertised.
+        let removed = registry.apply_tools_refresh("my-server", &["stable_tool".to_string()]);
+        assert!(removed.is_empty(), "no tools should be removed");
+        assert!(!registry.is_unavailable(&namespaced));
+
+        // Tool is still dispatchable.
+        let result = registry.call_tool(&namespaced, None).await;
+        assert!(result.is_ok(), "unchanged tool should still dispatch");
+    }
+
+    #[tokio::test]
+    async fn routing_state_is_clone_safe() {
+        let namespaced = mcp_namespaced_name("my-server", "shared_tool");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+        let mut namespaced_to_original = HashMap::new();
+        namespaced_to_original.insert(namespaced.clone(), "shared_tool".to_string());
+
+        let registry = McpToolRegistry {
+            routing: make_routing(tool_to_server, namespaced_to_original),
+            tool_schemas: vec![serde_json::json!({"name": namespaced})],
+            test_dispatch: None,
+        };
+
+        // Clone shares the same routing state.
+        let clone = registry.clone();
+        assert!(clone.has_tool(&namespaced));
+
+        // Mutating via the original is visible to the clone.
+        registry.apply_tools_refresh("my-server", &[]);
+        assert!(
+            clone.is_unavailable(&namespaced),
+            "clone must see unavailability set on original"
+        );
     }
 }
