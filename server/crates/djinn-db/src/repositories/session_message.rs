@@ -1,5 +1,4 @@
 use djinn_core::events::{DjinnEventEnvelope, EventBus};
-use djinn_core::events::{DjinnEventEnvelope, EventBus};
 use djinn_core::message::{Conversation, Message, Role};
 use djinn_core::models::SessionMessage;
 
@@ -22,6 +21,7 @@ pub struct SessionMessageRepository {
 /// to splice the compacted head onto the retained raw tail.
 #[derive(Debug, Clone)]
 struct ProjectedCompaction {
+    #[allow(dead_code)]
     boundary_id: String,
     summary_text: String,
     marker_metadata: Option<serde_json::Value>,
@@ -49,7 +49,10 @@ impl SessionMessageRepository {
         &self,
         session_id: &str,
     ) -> Result<Option<ProjectedCompaction>> {
-        let boundary = self.boundary_repo().latest_completed_boundary(session_id).await?;
+        let boundary = self
+            .boundary_repo()
+            .latest_completed_boundary(session_id)
+            .await?;
         let Some(boundary) = boundary else {
             return Ok(None);
         };
@@ -80,15 +83,19 @@ impl SessionMessageRepository {
     /// downstream callers (SSE, provider serialization) can inspect marker
     /// properties if needed, while normal messages are left untouched.
     fn summary_message(summary_text: &str, marker_metadata: &Option<serde_json::Value>) -> Message {
-        let metadata = marker_metadata.as_ref().map(|value| djinn_core::message::MessageMeta {
-            input_tokens: None,
-            output_tokens: None,
-            timestamp: None,
-            provider_data: Some(value.clone()),
-        });
+        let metadata = marker_metadata
+            .as_ref()
+            .map(|value| djinn_core::message::MessageMeta {
+                input_tokens: None,
+                output_tokens: None,
+                timestamp: None,
+                provider_data: Some(value.clone()),
+            });
         Message {
             role: Role::System,
-            content: vec![djinn_core::message::ContentBlock::text(summary_text.to_owned())],
+            content: vec![djinn_core::message::ContentBlock::text(
+                summary_text.to_owned(),
+            )],
             metadata,
         }
     }
@@ -342,10 +349,7 @@ impl SessionMessageRepository {
             )
             .await?;
 
-        let summary = Self::summary_message(
-            &projected.summary_text,
-            &projected.marker_metadata,
-        );
+        let summary = Self::summary_message(&projected.summary_text, &projected.marker_metadata);
 
         // If the tail is the full raw conversation (because the retained-tail
         // identity did not match or was missing), we still prepend the compacted
@@ -647,6 +651,61 @@ mod tests {
 
     // ── Compaction projection tests ───────────────────────────────────────
 
+    /// Verifies that `load_conversation` returns raw history unchanged when no
+    /// boundary records exist for the session. This is the compatibility
+    /// contract: sessions that never used compaction projection must continue
+    /// to behave exactly as they did before boundaries were introduced.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_conversation_returns_raw_history_without_boundaries() {
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
+
+        let msg_repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
+        // Confirm no boundary records exist.
+        let boundary_repo = SessionCompactionBoundaryRepository::new(db);
+        let boundary = boundary_repo
+            .latest_completed_boundary(&session_id)
+            .await
+            .unwrap();
+        assert!(
+            boundary.is_none(),
+            "fresh session must have no boundary rows"
+        );
+
+        let messages = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("What is Rust?"),
+            Message::assistant("Rust is a systems programming language."),
+        ];
+        msg_repo
+            .insert_messages_batch(&session_id, &task_id, &messages)
+            .await
+            .unwrap();
+
+        let conv = msg_repo.load_conversation(&session_id).await.unwrap();
+        // Must return exactly the raw messages in insertion order, unmodified.
+        assert_eq!(conv.messages.len(), 3);
+        assert_eq!(conv.messages[0].role, Role::System);
+        assert_eq!(
+            conv.messages[0].text_content(),
+            "You are a helpful assistant."
+        );
+        assert_eq!(conv.messages[1].role, Role::User);
+        assert_eq!(conv.messages[1].text_content(), "What is Rust?");
+        assert_eq!(conv.messages[2].role, Role::Assistant);
+        assert_eq!(
+            conv.messages[2].text_content(),
+            "Rust is a systems programming language."
+        );
+        // No metadata should have been injected by projection.
+        for msg in &conv.messages {
+            assert!(
+                msg.metadata.is_none(),
+                "no metadata expected for raw history"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn load_conversation_ignores_started_only_boundaries() {
         let db = test_db();
@@ -655,7 +714,11 @@ mod tests {
         let msg_repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
         let boundary_repo = SessionCompactionBoundaryRepository::new(db);
 
-        let messages = vec![Message::system("sys"), Message::user("u1"), Message::assistant("a1")];
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("u1"),
+            Message::assistant("a1"),
+        ];
         msg_repo
             .insert_messages_batch(&session_id, &task_id, &messages)
             .await
@@ -756,16 +819,18 @@ mod tests {
             conv.messages[0].text_content(),
             "Compacted summary of earlier turns."
         );
-        assert!(conv.messages[0]
-            .metadata
-            .as_ref()
-            .unwrap()
-            .provider_data
-            .as_ref()
-            .unwrap()["marker_kind"]
-            .as_str()
-            .unwrap()
-            .contains("compaction_boundary"));
+        assert!(
+            conv.messages[0]
+                .metadata
+                .as_ref()
+                .unwrap()
+                .provider_data
+                .as_ref()
+                .unwrap()["marker_kind"]
+                .as_str()
+                .unwrap()
+                .contains("compaction_boundary")
+        );
         assert_eq!(conv.messages[1].role, Role::User);
         assert_eq!(conv.messages[1].text_content(), "new user");
     }
