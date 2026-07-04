@@ -148,7 +148,6 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
     fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String> {
         self.mcp_registry
             .and_then(|registry| registry.server_for_tool(tool_name))
-            .map(str::to_owned)
     }
     fn clear_stash(&self) {
         self.output_stash
