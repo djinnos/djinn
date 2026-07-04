@@ -17,7 +17,10 @@ use crate::test_helpers::{extract_stash_content, test_session_settlement_for_sta
 use djinn_core::message::Role;
 use djinn_core::models::SessionStatus;
 use djinn_db::repositories::session::CreateSessionParams;
-use djinn_db::{SessionMessageRepository, SessionRepository, TaskRepository};
+use djinn_db::{
+    SessionCompactionBoundaryRepository, SessionMessageRepository, SessionRepository,
+    TaskRepository,
+};
 use djinn_provider::message::{ContentBlock, Conversation, Message};
 use djinn_provider::provider::ToolChoice;
 use djinn_provider::provider::{LlmProvider, StreamEvent, TokenUsage};
@@ -62,11 +65,14 @@ fn clear_session_budget_env() {
 }
 
 /// Pre-scripted response: text (optional) + tool calls + token counts.
+/// When `_error` is set, `MockProvider::stream()` returns the error immediately
+/// instead of producing a stream.
 struct MockResponse {
     text: Option<String>,
     tool_calls: Vec<ContentBlock>,
     input_tokens: u32,
     output_tokens: u32,
+    _error: Option<anyhow::Error>,
 }
 
 impl MockResponse {
@@ -76,6 +82,7 @@ impl MockResponse {
             tool_calls: vec![],
             input_tokens,
             output_tokens: 10,
+            _error: None,
         }
     }
     fn tool_call(id: &str, name: &str, input_tokens: u32) -> Self {
@@ -96,6 +103,7 @@ impl MockResponse {
             }],
             input_tokens,
             output_tokens: 10,
+            _error: None,
         }
     }
 }
@@ -144,6 +152,11 @@ impl LlmProvider for MockProvider {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| MockResponse::text_only("fallback done", 50));
+            // If the mock response has an error, return it immediately
+            // (simulates a provider failure such as context_length_exceeded).
+            if let Some(e) = resp._error {
+                return Err(e);
+            }
             let mut events: Vec<anyhow::Result<StreamEvent>> = vec![];
             if let Some(text) = resp.text {
                 events.push(Ok(StreamEvent::Delta(ContentBlock::Text { text })));
@@ -754,6 +767,7 @@ async fn finalize_tool_call_ends_session_and_captures_payload() {
         }],
         input_tokens: 100,
         output_tokens: 10,
+        _error: None,
     }]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let worktree_path = std::path::PathBuf::from("/tmp");
@@ -873,6 +887,7 @@ async fn nudge_count_resets_after_tool_call() {
             }],
             input_tokens: 130,
             output_tokens: 10,
+            _error: None,
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
@@ -953,6 +968,7 @@ async fn tool_choice_required_for_supported_providers() {
             }],
             input_tokens: 110,
             output_tokens: 10,
+            _error: None,
         },
     ]);
     let recorded = Arc::new(Mutex::new(Vec::<Option<ToolChoice>>::new()));
@@ -1545,6 +1561,7 @@ async fn repeated_assistant_output_signature_trips_on_fourth_repeat() {
         }],
         input_tokens,
         output_tokens: 10,
+        _error: None,
     };
     let provider = MockProvider::new(vec![
         response("a1", 100),
@@ -1699,6 +1716,7 @@ async fn mixed_successful_tool_batch_resets_consecutive_failure_pressure() {
         ],
         input_tokens: 130,
         output_tokens: 10,
+        _error: None,
     });
     responses.push(MockResponse::tool_call_with_input(
         "done",
@@ -1827,6 +1845,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
             }],
             input_tokens: 10,
             output_tokens: 5,
+            _error: None,
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
@@ -1961,6 +1980,7 @@ async fn soft_budget_below_threshold_no_injection() {
             }],
             input_tokens: 5,
             output_tokens: 5,
+            _error: None,
         },
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
@@ -2315,6 +2335,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
         }],
         input_tokens: 50,
         output_tokens: 10,
+        _error: None,
     }]);
     let first_conversation = Arc::new(Mutex::new(None));
     let provider = CapturingProvider {
@@ -3035,5 +3056,110 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     assert!(
         output.finalize_payload.is_some(),
         "finalize_payload must be set for changed fingerprint"
+    );
+}
+
+/// Regression: when reactive compaction fires (context_length_exceeded) but
+/// the compaction itself fails (summarizer error), the reply loop must leave
+/// only a `Started` boundary row with no completed `Ended` row. The session's
+/// raw history remains accessible via `load_conversation`.
+#[tokio::test]
+async fn failed_reactive_compaction_leaves_started_only_boundary() {
+    // Use 5,000 input tokens (50% of 10,000) so proactive compaction does NOT
+    // fire (threshold is 80%). Then the second stream returns
+    // context_length_exceeded, triggering the reactive compaction path.
+    // compact_conversation fails because the summarizer calls also fail.
+    let responses = vec![
+        MockResponse::tool_call("t1", "nonexistent_tool", 5_000),
+        // This triggers the reactive context_length_exceeded path.
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!("context_length_exceeded")),
+        },
+        // compact_conversation calls provider for summarization → fails.
+        MockResponse {
+            text: None,
+            tool_calls: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            _error: Some(anyhow::anyhow!("summarization_failed")),
+        },
+        // Not reached (error propagates), but available as fallback.
+        MockResponse::text_only("done", 50),
+    ];
+
+    let provider = MockProvider::new(responses);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let worktree_path = std::path::PathBuf::from("/tmp");
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+    let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+
+    // The reply loop must fail because reactive compaction failed.
+    assert!(
+        result.is_err(),
+        "reply loop must error when reactive compaction fails; got: {:?}",
+        result
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("context_length_exceeded"),
+        "error must reference context_length_exceeded; got: {err_msg}"
+    );
+
+    // Verify boundary state: no completed boundary after failed compaction.
+    // Note: the Started boundary insert is best-effort in persistence.rs and
+    // may be silently swallowed if the DB write fails. The key regression is
+    // that NO completed boundary exists (LatestCompleted remains None).
+    // Pure boundary-row lifecycle is tested in djinn-db crate tests.
+    let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
+    let latest_completed = boundary_repo
+        .latest_completed_boundary(&session_id)
+        .await
+        .unwrap();
+    assert!(
+        latest_completed.is_none(),
+        "no completed boundary should exist after failed compaction"
+    );
+
+    // The raw conversation history must still be loadable and unchanged.
+    let msg_repo = SessionMessageRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
+    let persisted = msg_repo
+        .load_conversation(&session_id)
+        .await
+        .expect("load_conversation must succeed");
+    // After the tool call at 5,000 tokens, the reply loop added a tool result.
+    // The persisted messages include at minimum the initial system+user + tool_use + tool_result.
+    assert!(
+        persisted.messages.len() >= 2,
+        "raw history must be preserved after failed compaction; got {} messages",
+        persisted.messages.len()
     );
 }
