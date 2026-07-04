@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
+use crate::provider::format::tool_projection::project;
+use crate::provider::FormatFamily;
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::error::ProviderError;
@@ -79,12 +81,13 @@ impl OpenAIResponsesProvider {
                         .or_else(|| tool.get("input_schema"))
                         .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
                         .cloned()
-                        .map(super::openai::ensure_object_properties);
+                        .map(|schema| project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI));
                     json!({
                         "type": "function",
                         "name": name,
                         "description": description,
                         "parameters": parameters,
+                        "strict": false,
                     })
                 })
                 .collect();
@@ -984,6 +987,7 @@ mod tests {
         assert_eq!(tools_arr[0]["name"], "bash");
         assert_eq!(tools_arr[0]["description"], "Run a shell command");
         assert!(tools_arr[0]["parameters"]["properties"]["cmd"].is_object());
+        assert_eq!(tools_arr[0]["strict"], false);
     }
 
     #[test]
@@ -1008,6 +1012,37 @@ mod tests {
         assert_eq!(tools_arr[0]["type"], "function");
         assert_eq!(tools_arr[0]["name"], "bash");
         assert_eq!(tools_arr[0]["description"], "Run a shell command");
+        assert_eq!(tools_arr[0]["strict"], false);
+    }
+
+    #[test]
+    fn test_build_request_with_tools_moonshot_compat_projects_schema() {
+        let mut provider = test_provider();
+        provider.config.tool_schema_compat = Some(crate::provider::ToolSchemaCompat::Moonshot);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+
+        // Schema uses Draft-2020-12 prefixItems that Moonshot rejects.
+        let tools = vec![json!({
+            "name": "tuple_tool",
+            "description": "Takes a tuple",
+            "inputSchema": {
+                "type": "array",
+                "prefixItems": [{ "type": "string" }, { "type": "integer" }]
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let tools_arr = req["tools"].as_array().unwrap();
+        assert_eq!(tools_arr[0]["name"], "tuple_tool");
+        assert_eq!(tools_arr[0]["strict"], false);
+        // Moonshot projection collapses prefixItems into items array.
+        let params = &tools_arr[0]["parameters"];
+        assert!(params.get("prefixItems").is_none());
+        let items = params["items"].as_array().expect("items should be array");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "string");
+        assert_eq!(items[1]["type"], "integer");
     }
 
     #[test]
