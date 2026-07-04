@@ -63,30 +63,33 @@ pub async fn try_merge_no_commit_no_ff(
     cwd: &Path,
     merge_ref: &str,
 ) -> Result<bool, String> {
-    use std::process::Stdio;
-
-    let mut cmd = tokio::process::Command::new("git");
-    djinn_git::apply_safe_directory_env(&mut cmd);
-    cmd.arg("-C")
-        .arg(cwd)
-        .args(["merge", "--no-commit", "--no-ff", merge_ref])
-        .env("GIT_AUTHOR_NAME", "djinn-bot")
-        .env("GIT_AUTHOR_EMAIL", "bot@djinn.local")
-        .env("GIT_COMMITTER_NAME", "djinn-bot")
-        .env("GIT_COMMITTER_EMAIL", "bot@djinn.local")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = timeout(GIT_CMD_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| "git merge timed out".to_string())?;
-    if output.status.success() {
+    let output = timeout(
+        GIT_CMD_TIMEOUT,
+        djinn_git::run_git_command_in_with_env(
+            cwd,
+            vec![
+                "merge".to_string(),
+                "--no-commit".to_string(),
+                "--no-ff".to_string(),
+                merge_ref.to_string(),
+            ],
+            vec![
+                ("GIT_AUTHOR_NAME".to_string(), "djinn-bot".to_string()),
+                ("GIT_AUTHOR_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                ("GIT_COMMITTER_NAME".to_string(), "djinn-bot".to_string()),
+                ("GIT_COMMITTER_EMAIL".to_string(), "bot@djinn.local".to_string()),
+            ],
+        ),
+    )
+    .await
+    .map_err(|_| "git merge timed out".to_string())?
+    .map_err(|e| format!("git merge failed: {e}"))?;
+    if output.is_success() {
         return Ok(true);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.code() == Some(1) {
+    let stderr = output.stderr.trim().to_string();
+    if output.exit_code() == Some(1) {
         Ok(false)
     } else {
         Err(format!("git merge --no-commit --no-ff {merge_ref}: {stderr}"))
@@ -134,40 +137,38 @@ pub async fn commit_tree_merge(
     tree_sha: &str,
     merge_target_sha: &str,
 ) -> Result<String, String> {
-    use std::process::Stdio;
-
-    let mut cmd = tokio::process::Command::new("git");
-    djinn_git::apply_safe_directory_env(&mut cmd);
-    cmd.arg("-C")
-        .arg(cwd)
-        .args([
-            "commit-tree",
-            tree_sha,
-            "-p",
-            "HEAD",
-            "-p",
-            merge_target_sha,
-            "-m",
-            "Merge resolution (enforced by supervisor)",
-        ])
-        .env("GIT_AUTHOR_NAME", "djinn-bot")
-        .env("GIT_AUTHOR_EMAIL", "bot@djinn.local")
-        .env("GIT_COMMITTER_NAME", "djinn-bot")
-        .env("GIT_COMMITTER_EMAIL", "bot@djinn.local")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = timeout(GIT_CMD_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| "git commit-tree timed out".to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let output = timeout(
+        GIT_CMD_TIMEOUT,
+        djinn_git::run_git_command_in_with_env(
+            cwd,
+            vec![
+                "commit-tree".to_string(),
+                tree_sha.to_string(),
+                "-p".to_string(),
+                "HEAD".to_string(),
+                "-p".to_string(),
+                merge_target_sha.to_string(),
+                "-m".to_string(),
+                "Merge resolution (enforced by supervisor)".to_string(),
+            ],
+            vec![
+                ("GIT_AUTHOR_NAME".to_string(), "djinn-bot".to_string()),
+                ("GIT_AUTHOR_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                ("GIT_COMMITTER_NAME".to_string(), "djinn-bot".to_string()),
+                ("GIT_COMMITTER_EMAIL".to_string(), "bot@djinn.local".to_string()),
+            ],
+        ),
+    )
+    .await
+    .map_err(|_| "git commit-tree timed out".to_string())?
+    .map_err(|e| format!("git commit-tree failed: {e}"))?;
+    if !output.is_success() {
+        let stderr = output.stderr.trim().to_string();
         return Err(format!(
             "git commit-tree {tree_sha} -p HEAD -p {merge_target_sha}: {stderr}"
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout.trim().to_string())
 }
 
 /// `git reset --hard <commit>` in `cwd`. Used to move the current branch to the

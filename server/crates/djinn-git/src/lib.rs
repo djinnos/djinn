@@ -203,6 +203,19 @@ pub struct CommandOutput {
     pub code: i32,
 }
 
+impl CommandOutput {
+    /// True when the recorded exit code represents a successful exit (code 0).
+    pub fn is_success(&self) -> bool {
+        self.code == 0
+    }
+
+    /// Returns the recorded exit code as an `Option<i32>`, mirroring
+    /// `std::process::ExitStatus::code()`.
+    pub fn exit_code(&self) -> Option<i32> {
+        Some(self.code)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MergeResult {
     pub commit_sha: String,
