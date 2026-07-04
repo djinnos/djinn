@@ -38,10 +38,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use djinn_agent::actors::slot::helpers::{
-    OAuthConfigWire, auth_method_for_provider, capabilities_for_provider, default_base_url,
-    format_family_for_provider, parse_model_id,
-};
+// `OAuthConfigWire` is a host-specific wire type (worker Secret serialization) that
+// stays in `djinn-agent`; the pure provider-identification helpers are consumed from
+// their canonical home in `djinn-slot`.
+use djinn_agent::actors::slot::helpers::OAuthConfigWire;
 use djinn_agent::context::AgentContext;
 use djinn_agent::supervisor::worker_execute_stage;
 use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
@@ -51,6 +51,10 @@ use djinn_provider::provider::{
     default_reasoning_effort_for_model,
 };
 use djinn_runtime::{ResolvedCredentials, RoleKind, SerializableCredential};
+use djinn_slot::helpers::{
+    auth_method_for_provider, capabilities_for_provider, default_base_url,
+    format_family_for_provider, parse_model_id,
+};
 use djinn_stack::environment::EnvironmentConfig;
 use djinn_supervisor::services::{
     SerializableCreateSessionParams, SerializableCreateTaskRunParams, SerializableDjinnEvent,

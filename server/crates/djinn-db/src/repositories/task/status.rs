@@ -185,6 +185,20 @@ impl TaskRepository {
         // Blocker resolution: when a task reaches post-merge/closed states, notify any tasks
         // it was blocking that are now fully unblocked, so coordinators can dispatch them.
         if task.status == "closed" {
+            // uv3p Part C: closing a human-review hold stamps a consumed-hold
+            // marker on the source task(s) it was holding BEFORE they are
+            // revived, so the park evaluator that runs on the very next
+            // dispatch tick discounts the pre-release strike ledger and cannot
+            // spawn a duplicate hold on unchanged counters (ygj0).
+            if task.labels.contains("human-review-hold")
+                && let Err(e) = self.mark_human_review_resolved(&task.id).await
+            {
+                tracing::warn!(
+                    hold_task_id = %task.id,
+                    error = %e,
+                    "failed to stamp human_review_resolved_at on held source(s)"
+                );
+            }
             self.emit_unblocked_tasks(&task.id).await?;
         }
 

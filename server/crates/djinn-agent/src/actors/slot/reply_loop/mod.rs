@@ -199,6 +199,10 @@ pub(crate) async fn run_reply_loop(
         mcp_registry,
         allowed_for_dispatch,
     )));
+    // Shared compaction critical section for this reply-loop session; the slot
+    // reply loop enters it around every context rotation and releases it on
+    // every exit path.
+    let compaction_cs = djinn_slot::reply_loop::CompactionCriticalSection::new();
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
@@ -219,6 +223,7 @@ pub(crate) async fn run_reply_loop(
                 active_skill_names,
                 active_mcp_server_names,
                 max_turns_override,
+                compaction_cs: &compaction_cs,
             },
             conversation,
             is_resumed_session,
