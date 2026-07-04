@@ -112,13 +112,14 @@ fn make_routing(
     tool_to_server: HashMap<String, String>,
     namespaced_to_original: HashMap<String, String>,
 ) -> Arc<RwLock<RoutingState>> {
-    Arc::new(RwLock::new(RoutingState {
-        tool_to_server,
-        namespaced_to_original,
-        peers: HashMap::new(),
-        request_timeouts: HashMap::new(),
-        unavailable: HashSet::new(),
-    }))
+            Arc::new(RwLock::new(RoutingState {
+                tool_to_server,
+                namespaced_to_original,
+                peers: HashMap::new(),
+                request_timeouts: HashMap::new(),
+                unavailable: HashSet::new(),
+                server_instructions: BTreeMap::new(),
+            }))
 }
 
 #[test]
@@ -290,6 +291,7 @@ impl McpToolRegistry {
         Self {
             routing: make_routing(tool_to_server, namespaced_to_original),
             tool_schemas,
+            server_instructions: BTreeMap::new(),
             test_dispatch: Some(Arc::new(move |tool_name, arguments| {
                 let result = dispatch(tool_name, arguments);
                 Box::pin(async move { result })
