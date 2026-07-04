@@ -277,15 +277,6 @@ cleanup_issue = "epic/fztz"
 # djinn-k8s/ so the guard runs cleanly today.  They will be cleaned up as crates
 # migrate to djinn-k8s (tracked by epic fztz).
 
-# djinn-agent
-[[entries]]
-capability = "k8s"
-path = "server/crates/djinn-agent/src/runtime_bridge.rs"
-matcher = "kube::"
-owner = "team/agent"
-rationale = "Pre-existing kube::Client usage for token review validation; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
-
 # djinn-image-controller
 [[entries]]
 capability = "k8s"
@@ -349,5 +340,5 @@ capability = "k8s"
 path = "server/src/server/state/mod.rs"
 matcher = "kube::"
 owner = "team/server"
-rationale = "Pre-existing kube::Client construction for image controller, graph warmer, and RPC token review wiring; to be migrated to djinn-k8s."
+rationale = "Pre-existing kube::Client construction for image controller and graph warmer runtime wiring; the RPC token review path has moved behind djinn-k8s."
 cleanup_issue = "epic/fztz"

@@ -21,7 +21,7 @@ use djinn_db::{
 };
 use djinn_git::{GitActorHandle, GitError};
 use djinn_image_controller::{ImageBuildWatcher, ImageController, ImageControllerConfig};
-use djinn_k8s::{K8sGraphWarmer, KubernetesConfig};
+use djinn_k8s::{K8sGraphWarmer, KubernetesConfig, TokenReviewer};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_provider::embeddings::{EmbeddingService, default_embedding_cache_dir};
 use djinn_provider::github_app::AppConfig as GitHubAppConfig;
@@ -1350,17 +1350,20 @@ impl AppState {
             self.cancel().clone(),
         );
 
-        // Validator: prefer the real TokenReview path; fall back to
-        // AllowAllValidator if no kubeconfig is available (dev / CI).
+        // Validator: prefer the real TokenReview path via djinn-k8s owner-crate
+        // wrapper; fall back to AllowAllValidator if no kubeconfig is available
+        // (dev / CI).  This listener deliberately no longer constructs a raw
+        // kube::Client here — the client is now owned and configured inside
+        // djinn_k8s::token_review::TokenReviewer.
         //
         // Threads the process-wide `ConnectionRegistry` into the accept
         // loop so per-task-run `PendingConnection` slots reserved by
         // `KubernetesRuntime::prepare` pick up the worker's inbound
         // `FramePayload::Event` frames once the handshake lands.
         let registry = self.inner.rpc_registry.clone();
-        let handle_result = match kube::Client::try_default().await {
-            Ok(client) => {
-                let validator = Arc::new(K8sTokenReviewValidator::new(client, "djinn"));
+        let handle_result = match TokenReviewer::try_default("djinn").await {
+            Ok(reviewer) => {
+                let validator = Arc::new(K8sTokenReviewValidator::new(reviewer));
                 tracing::info!(
                     addr = %rpc_addr,
                     "rpc_server: binding TCP listener with K8sTokenReviewValidator"
@@ -1371,7 +1374,7 @@ impl AppState {
                 tracing::warn!(
                     addr = %rpc_addr,
                     error = %e,
-                    "rpc_server: kube::Client::try_default failed; \
+                    "rpc_server: TokenReviewer::try_default failed; \
                      falling back to AllowAllValidator (dev mode)"
                 );
                 serve_on_tcp(

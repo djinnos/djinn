@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                id, session_id, phase, schema_version,\n                first_message_id, last_compacted_message_id,\n                first_retained_message_id, retained_tail_hash,\n                summary_text,\n                marker_metadata,\n                created_at, completed_at\n             FROM session_compaction_boundaries\n             WHERE session_id = $1 AND phase = 'ended'\n             ORDER BY completed_at DESC, id DESC\n             LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "session_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "phase",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "schema_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "first_message_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_compacted_message_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "first_retained_message_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "retained_tail_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "summary_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "marker_metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 11,
+        "name": "completed_at",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "2318c1d8b72d1044e9ba02c63dc870e7a818df98e5898c433624ea78f98a9845"
+}
