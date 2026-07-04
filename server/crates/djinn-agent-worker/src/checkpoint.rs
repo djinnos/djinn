@@ -32,6 +32,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::checkpoint_safety::{self, CheckpointSafetyConfig};
 
+/// Convert a `djinn_git::GitError` to the string error type used by this
+/// module's local helpers.
+fn git_err_to_string(e: djinn_git::GitError) -> String {
+    e.to_string()
+}
+
 // ─── Constants ─────────────────────────────────────────────────────────────
 
 /// Maximum number of push attempts (including the initial try).
@@ -859,45 +865,36 @@ async fn try_rebase(worktree: &Path, branch: &str) -> bool {
 // ─── Git helpers ───────────────────────────────────────────────────────────
 
 /// Run a git command in the worktree and return stdout on success.
+///
+/// Delegates to [`djinn_git::run_git_command_in`] which applies
+/// `safe.directory=*` and lowers process priority.
 async fn git_cmd(worktree: &Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(worktree)
-        .args(args)
-        .output()
+    let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let out = djinn_git::run_git_command_in(worktree, owned)
         .await
-        .map_err(|e| format!("git {} spawn error: {e}", args.join(" ")))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("git {}: {}", args.join(" "), stderr.trim()))
-    }
+        .map_err(git_err_to_string)?;
+    Ok(out.stdout)
 }
 
 /// Run a git command with extra environment variables.
+///
+/// Delegates to [`djinn_git::run_git_command_in_with_env`] which applies
+/// `safe.directory=*` and lowers process priority alongside the caller's
+/// extra env vars.
 async fn git_cmd_with_env(
     worktree: &Path,
     args: &[&str],
     env: &[(&str, &str)],
 ) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C").arg(worktree).args(args);
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let output = cmd
-        .output()
+    let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let owned_env: Vec<(String, String)> = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let out = djinn_git::run_git_command_in_with_env(worktree, owned_args, owned_env)
         .await
-        .map_err(|e| format!("git {} spawn error: {e}", args.join(" ")))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("git {}: {}", args.join(" "), stderr.trim()))
-    }
+        .map_err(git_err_to_string)?;
+    Ok(out.stdout)
 }
 
 /// Resolve a ref to a SHA via `git rev-parse`.
@@ -1124,71 +1121,47 @@ mod tests {
 
     // ── Integration-style tests with real git repos ─────────────────────
 
+    /// Helper: run a git command via `djinn_git` (applies safe.directory and
+    /// lower priority — matches production behavior). Returns stdout.
+    async fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        djinn_git::run_git_command_in(dir, owned)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+            .stdout
+    }
+
     /// Helper: create a bare git repo as "origin" and a working clone.
     async fn setup_test_repos() -> (tempfile::TempDir, tempfile::TempDir) {
         let origin = tempfile::tempdir().unwrap();
         let clone = tempfile::tempdir().unwrap();
 
         // Init bare origin.
-        tokio::process::Command::new("git")
-            .arg("init")
-            .arg("--bare")
-            .arg(origin.path())
-            .output()
-            .await
-            .unwrap();
+        git(origin.path(), &["init", "--bare"]).await;
 
         // Clone it.
-        tokio::process::Command::new("git")
-            .arg("clone")
-            .arg(origin.path())
-            .arg(clone.path())
-            .output()
-            .await
-            .unwrap();
+        git(
+            clone.path(),
+            &["clone", origin.path().to_str().unwrap(), "."],
+        )
+        .await;
 
         // Configure identity in clone.
         for (k, v) in [("user.name", "test"), ("user.email", "test@test.local")] {
-            tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(clone.path())
-                .args(["config", k, v])
-                .output()
-                .await
-                .unwrap();
+            git(clone.path(), &["config", k, v]).await;
         }
 
         // Create an initial commit so HEAD exists.
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(clone.path())
-            .args(["checkout", "-b", "task/test-branch"])
-            .output()
-            .await
-            .unwrap();
+        git(clone.path(), &["checkout", "-b", "task/test-branch"]).await;
 
         std::fs::write(clone.path().join("README.md"), "init\n").unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(clone.path())
-            .args(["add", "README.md"])
-            .output()
-            .await
-            .unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(clone.path())
-            .args(["commit", "-m", "init"])
-            .output()
-            .await
-            .unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(clone.path())
-            .args(["push", "origin", "task/test-branch:task/test-branch"])
-            .output()
-            .await
-            .unwrap();
+        git(clone.path(), &["add", "README.md"]).await;
+        git(clone.path(), &["commit", "-m", "init"]).await;
+        git(
+            clone.path(),
+            &["push", "origin", "task/test-branch:task/test-branch"],
+        )
+        .await;
 
         (origin, clone)
     }
@@ -1250,14 +1223,7 @@ mod tests {
         assert_eq!(result.outcome, PreservationOutcome::Checkpointed);
 
         // Verify the commit message format in the repo.
-        let log = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(clone.path())
-            .args(["log", "-1", "--format=%s"])
-            .output()
-            .await
-            .unwrap();
-        let msg = String::from_utf8_lossy(&log.stdout);
+        let msg = git(clone.path(), &["log", "-1", "--format=%s"]).await;
         assert!(
             msg.starts_with("wip: checkpoint session test-session turn 1 reason soft-deadline"),
             "unexpected commit message: {msg}"
@@ -1325,55 +1291,27 @@ mod tests {
 
         // Create a divergent commit on the remote.
         let diverger = tempfile::tempdir().unwrap();
-        tokio::process::Command::new("git")
-            .arg("clone")
-            .arg(origin.path())
-            .arg(diverger.path())
-            .output()
-            .await
-            .unwrap();
+        git(
+            diverger.path(),
+            &["clone", origin.path().to_str().unwrap(), "."],
+        )
+        .await;
 
         // Configure identity.
         for (k, v) in [("user.name", "other"), ("user.email", "other@test.local")] {
-            tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(diverger.path())
-                .args(["config", k, v])
-                .output()
-                .await
-                .unwrap();
+            git(diverger.path(), &["config", k, v]).await;
         }
 
         // Create a commit on the same branch in the diverger.
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(diverger.path())
-            .args(["checkout", "task/test-branch"])
-            .output()
-            .await
-            .unwrap();
+        git(diverger.path(), &["checkout", "task/test-branch"]).await;
         std::fs::write(diverger.path().join("diverge.txt"), "remote work\n").unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(diverger.path())
-            .args(["add", "diverge.txt"])
-            .output()
-            .await
-            .unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(diverger.path())
-            .args(["commit", "-m", "diverge"])
-            .output()
-            .await
-            .unwrap();
-        tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(diverger.path())
-            .args(["push", "origin", "task/test-branch:task/test-branch"])
-            .output()
-            .await
-            .unwrap();
+        git(diverger.path(), &["add", "diverge.txt"]).await;
+        git(diverger.path(), &["commit", "-m", "diverge"]).await;
+        git(
+            diverger.path(),
+            &["push", "origin", "task/test-branch:task/test-branch"],
+        )
+        .await;
 
         // Now our clone is behind — create local work.
         std::fs::write(clone.path().join("local.txt"), "local work\n").unwrap();

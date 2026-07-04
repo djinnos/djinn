@@ -493,6 +493,52 @@ pub async fn run_git_command_with_timeout_in(
     run_git_command_with_timeout(cwd.to_path_buf(), args, timeout).await
 }
 
+/// Like [`run_git_command_in`] but accepts additional environment variables
+/// that are merged into the child process environment (alongside the standard
+/// `safe.directory=*` injection and priority lowering).
+///
+/// Useful for callers that need per-invocation overrides such as custom
+/// `GIT_AUTHOR_NAME` / `GIT_COMMITTER_NAME` for commit operations.
+pub async fn run_git_command_in_with_env(
+    cwd: &Path,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+) -> Result<CommandOutput, GitError> {
+    use std::process::Stdio;
+    let mut cmd = tokio::process::Command::new("git");
+    apply_safe_directory_env(&mut cmd);
+    for (k, v) in &extra_env {
+        cmd.env(k, v);
+    }
+    cmd.args(&args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    lower_process_priority(&mut cmd);
+    let output = cmd.output().await?;
+
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            code,
+            command: args.join(" "),
+            cwd: cwd.display().to_string(),
+            stdout,
+            stderr,
+        });
+    }
+
+    Ok(CommandOutput {
+        stdout,
+        stderr,
+        code,
+    })
+}
+
 /// `git rev-parse HEAD` against `repo_root`. Returns the trimmed SHA on
 /// stdout. Used by callers that want the HEAD commit SHA without having to
 /// manually parse `CommandOutput`.
