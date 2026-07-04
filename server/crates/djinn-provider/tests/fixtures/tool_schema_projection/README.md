@@ -20,7 +20,8 @@ tool_schema_projection/
 │   ├── planner.json      # tool_schemas_planner()
 │   ├── lead.json         # tool_schemas_lead()
 │   ├── reviewer.json     # tool_schemas_reviewer()
-│   └── architect.json    # tool_schemas_architect()
+│   ├── architect.json    # tool_schemas_architect()
+│   └── djinn_mcp_server.json  # DjinnMcpServer::all_tool_schemas()
 ├── regression/       # Named regression schemas for known-bad shapes
 │   ├── 01_empty_items_object.json
 │   ├── 02_items_object_no_properties.json
@@ -57,15 +58,16 @@ out-of-band command that runs **outside** `djinn-provider`.
 
 The `builtin/*.json` files are **snapshots** of the role-based tool
 schema helpers exported by `djinn-mcp-extension` (registered via
-`djinn-agent`):
+`djinn-agent`), plus the full `DjinnMcpServer` corpus:
 
-| Fixture         | Source function                          |
-|-----------------|------------------------------------------|
-| `worker.json`   | `djinn_agent::extension::tool_schemas_worker()`   |
-| `planner.json`  | `djinn_agent::extension::tool_schemas_planner()`  |
-| `lead.json`     | `djinn_agent::extension::tool_schemas_lead()`     |
-| `reviewer.json` | `djinn_agent::extension::tool_schemas_reviewer()` |
-| `architect.json`| `djinn_agent::extension::tool_schemas_architect()`|
+| Fixture                    | Source function                                       |
+|----------------------------|-------------------------------------------------------|
+| `worker.json`              | `djinn_agent::extension::tool_schemas_worker()`       |
+| `planner.json`             | `djinn_agent::extension::tool_schemas_planner()`      |
+| `lead.json`                | `djinn_agent::extension::tool_schemas_lead()`         |
+| `reviewer.json`            | `djinn_agent::extension::tool_schemas_reviewer()`     |
+| `architect.json`           | `djinn_agent::extension::tool_schemas_architect()`    |
+| `djinn_mcp_server.json`    | `DjinnMcpServer::all_tool_schemas()` (sorted by name)|
 
 These are the same values captured by the insta snapshots at
 `server/crates/djinn-agent/src/extension/tests/snapshots/`
@@ -73,16 +75,22 @@ These are the same values captured by the insta snapshots at
 
 ### DjinnMcpServer corpus
 
-The `DjinnMcpServer::all_tool_schemas()` tool set (147 tools as of the
-last count) is runtime-constructed in `djinn-control-plane` and cannot be
-imported here without a cycle. The role-based snapshots above cover the
-worker/planner/lead/reviewer/architect tool surfaces that are actually
-projected at provider serialization seams.
+The `DjinnMcpServer::all_tool_schemas()` tool set is included as
+`builtin/djinn_mcp_server.json`. Because `DjinnMcpServer` is
+runtime-constructed in `djinn-control-plane`, the snapshot is generated
+by a focused test in that crate:
 
-To add a `DjinnMcpServer` snapshot in the future, run the refresh command
-(see below) from a crate that *can* depend on `djinn-control-plane`
-(e.g. the `djinn` server binary's test suite) and commit the output as
-`builtin/djinn_mcp_server.json`.
+```
+# Regenerate the fixture (writes to the path above):
+UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \
+  server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture
+
+# Validate the fixture matches the live tool surface:
+cargo test -p djinn-control-plane --lib \
+  server_tests::tests::djinn_mcp_server_corpus_fixture_is_current
+```
+
+The tools are sorted by `name` for deterministic diffs.
 
 ## Refresh path
 
@@ -134,14 +142,11 @@ by checking:
    discovered or an existing one is re-characterized — never as a side
    effect of tool-surface drift.
 
-### Adding the DjinnMcpServer snapshot (future)
+### Regenerating the DjinnMcpServer snapshot
 
 ```sh
-# Run from a test that can construct DjinnMcpServer (e.g. server/ tests):
-# Write a test that serializes all_tool_schemas() to JSON, then:
-cargo test -p djinn --test tool_schemas -- \
-  serialize_djinn_mcp_server_corpus \
-  --nocapture  # prints JSON to stdout, redirect to the fixture file
+UPDATE_DJINN_MCP_SERVER_FIXTURE=1 cargo test -p djinn-control-plane --lib \
+  server_tests::tests::djinn_mcp_server_corpus_fixture_is_current -- --nocapture
 ```
 
 ## Proposal mpen regression shapes

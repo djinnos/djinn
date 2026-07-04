@@ -24,6 +24,12 @@ use serde_json::Value;
 /// (which is the CWD for integration tests).
 const FIXTURE_DIR: &str = "tests/fixtures/tool_schema_projection";
 
+/// Path to the committed full-server DjinnMcpServer fixture.
+const DJINN_MCP_SERVER_FIXTURE: &str = "builtin/djinn_mcp_server.json";
+/// Robust lower bound for the DjinnMcpServer corpus size. The exact count
+/// drifts as tools are added or removed; this only asserts a full-server size.
+const DJINN_MCP_SERVER_MIN_TOOLS: usize = 140;
+
 // ─── Fixture loading helpers ──────────────────────────────────────────────────
 
 /// Load and parse a JSON fixture relative to `FIXTURE_DIR`.
@@ -73,6 +79,50 @@ fn manifest_json_loads_and_has_expected_groups() {
         groups.contains_key("regression"),
         "manifest must have a 'regression' group"
     );
+}
+
+#[test]
+fn manifest_includes_djinn_mcp_server_fixture() {
+    let manifest = load_fixture("manifest.json");
+    let files = manifest["groups"]["builtin"]["files"]
+        .as_array()
+        .expect("manifest builtin group has no 'files' array");
+    let file_strings: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        file_strings.contains(&DJINN_MCP_SERVER_FIXTURE),
+        "builtin manifest must include '{DJINN_MCP_SERVER_FIXTURE}'"
+    );
+}
+
+#[test]
+fn djinn_mcp_server_fixture_is_substantial_and_well_formed() {
+    let tools = load_fixture(DJINN_MCP_SERVER_FIXTURE)
+        .as_array()
+        .unwrap_or_else(|| panic!("{DJINN_MCP_SERVER_FIXTURE} must be a JSON array of tools"))
+        .clone();
+    assert!(
+        tools.len() >= DJINN_MCP_SERVER_MIN_TOOLS,
+        "{DJINN_MCP_SERVER_FIXTURE} has only {} tools; expected at least {DJINN_MCP_SERVER_MIN_TOOLS}",
+        tools.len()
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for tool in &tools {
+        let name = tool_name(tool);
+        assert!(
+            seen.insert(name),
+            "duplicate tool name '{name}' in {DJINN_MCP_SERVER_FIXTURE}"
+        );
+        let schema = &tool["inputSchema"];
+        assert!(
+            schema.is_object(),
+            "tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} has a non-object 'inputSchema'"
+        );
+        assert!(
+            schema.get("type").is_some(),
+            "tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} inputSchema should have a 'type' field"
+        );
+    }
 }
 
 #[test]
