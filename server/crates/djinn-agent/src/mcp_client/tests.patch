@@ -1,0 +1,2 @@
+// Auto-generated patch to add server_instructions field to all McpToolRegistry constructors in tests.rs.
+// This is a stopgap file to avoid losing work; it will be removed before final submission.

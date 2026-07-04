@@ -22,6 +22,9 @@ pub(crate) struct McpAndSkills {
     pub resolved_skills: Vec<ResolvedSkill>,
     /// Names of native skills prepended for telemetry tracking.
     pub native_skill_names: Vec<String>,
+    /// Per-server MCP instructions from connected servers, in deterministic
+    /// server-name order. Failed or no-instruction servers are omitted.
+    pub mcp_server_instructions: std::collections::BTreeMap<String, String>,
 }
 
 /// Fetch project environment config, resolve the effective MCP server + skill
@@ -58,6 +61,10 @@ pub(crate) async fn resolve_mcp_and_skills(
         app_state,
     )
     .await;
+    let mcp_server_instructions = mcp_registry
+        .as_ref()
+        .map(|r| r.server_instructions().clone())
+        .unwrap_or_default();
     let project_skills =
         load_project_skills(worktree_path, task_short_id, role_name, &effective_skills).await;
     let (resolved_skills, native_skill_names) =
@@ -78,6 +85,7 @@ pub(crate) async fn resolve_mcp_and_skills(
         mcp_registry,
         resolved_skills,
         native_skill_names,
+        mcp_server_instructions,
     }
 }
 

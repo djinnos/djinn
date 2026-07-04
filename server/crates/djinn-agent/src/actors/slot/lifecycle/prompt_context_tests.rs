@@ -9,8 +9,8 @@ use crate::roles::{LeadRole, WorkerRole};
 use crate::test_helpers::{agent_context_from_db, create_test_project};
 
 use super::test_support::{
-    assemble_for_role, assemble_for_role_with_resume, assert_contains_all, assert_ordered,
-    create_epic, create_project_epic_task, create_task,
+    assemble_for_role, assemble_for_role_with_mcp_instructions, assemble_for_role_with_resume,
+    assert_contains_all, assert_ordered, create_epic, create_project_epic_task, create_task,
 };
 
 async fn lead_prompt_context(db: Database, task: &Task) -> PromptContext {
@@ -166,8 +166,9 @@ fn format_activity_text_absence_and_comment_counts() {
 
 #[test]
 fn apply_prompt_sections_cases() {
+    let empty_instructions = std::collections::BTreeMap::new();
     assert_eq!(
-        apply_prompt_sections("Base prompt.", "", None, &[], &[]),
+        apply_prompt_sections("Base prompt.", "", None, &[], &[], &empty_instructions),
         "Base prompt."
     );
     let result = apply_prompt_sections(
@@ -176,6 +177,7 @@ fn apply_prompt_sections_cases() {
         None,
         &[skill("test-skill", "A test skill", "Skill body.", false)],
         &[source("sibling-repo", "Sibling")],
+        &empty_instructions,
     );
     assert_contains_all(
         &result,
@@ -529,4 +531,106 @@ fn worker_resume_note_minimal_fields() {
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
     assert!(note.contains("sess-1"));
+}
+
+// ── MCP server instructions prompt tests ────────────────────────────
+
+#[tokio::test]
+async fn empty_mcp_instructions_omits_section_from_prompt() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "No MCP epic", "No MCP task").await;
+    let instructions = std::collections::BTreeMap::new();
+    let ctx = assemble_for_role_with_mcp_instructions(db, &task, &LeadRole, &instructions).await;
+    assert!(
+        !ctx.system_prompt.contains("MCP Server Instructions"),
+        "empty instructions should not produce an MCP section"
+    );
+}
+
+#[tokio::test]
+async fn single_server_instructions_rendered_in_prompt() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "MCP epic", "MCP task").await;
+    let mut instructions = std::collections::BTreeMap::new();
+    instructions.insert(
+        "search-server".to_string(),
+        "Use web_search for live information.".to_string(),
+    );
+    let ctx = assemble_for_role_with_mcp_instructions(db, &task, &LeadRole, &instructions).await;
+    assert_contains_all(
+        &ctx.system_prompt,
+        &[
+            "## MCP Server Instructions",
+            "### search-server",
+            "Use web_search for live information.",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn multiple_servers_rendered_in_deterministic_name_order() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Multi MCP epic", "Multi MCP task").await;
+    let mut instructions = std::collections::BTreeMap::new();
+    // Insert in reverse-alphabetical order; BTreeMap sorts by key.
+    instructions.insert(
+        "zebra-server".to_string(),
+        "Zebra instructions.".to_string(),
+    );
+    instructions.insert(
+        "alpha-server".to_string(),
+        "Alpha instructions.".to_string(),
+    );
+    instructions.insert(
+        "middle-server".to_string(),
+        "Middle instructions.".to_string(),
+    );
+    let ctx = assemble_for_role_with_mcp_instructions(db, &task, &LeadRole, &instructions).await;
+    assert_contains_all(
+        &ctx.system_prompt,
+        &[
+            "## MCP Server Instructions",
+            "### alpha-server",
+            "Alpha instructions.",
+            "### middle-server",
+            "Middle instructions.",
+            "### zebra-server",
+            "Zebra instructions.",
+        ],
+    );
+    assert_ordered(
+        &ctx.system_prompt,
+        &["### alpha-server", "### middle-server", "### zebra-server"],
+    );
+}
+
+#[test]
+fn format_mcp_instructions_omits_empty_map() {
+    let instructions = std::collections::BTreeMap::new();
+    assert!(
+        super::format_mcp_instructions(&instructions).is_none(),
+        "empty map should produce None"
+    );
+}
+
+#[test]
+fn format_mcp_instructions_renders_sorted_subsections() {
+    let mut instructions = std::collections::BTreeMap::new();
+    instructions.insert("beta".to_string(), "Beta instructions.".to_string());
+    instructions.insert("alpha".to_string(), "Alpha instructions.".to_string());
+    let result = super::format_mcp_instructions(&instructions).expect("should produce Some");
+    assert_contains_all(
+        &result,
+        &[
+            "## MCP Server Instructions",
+            "### alpha",
+            "Alpha instructions.",
+            "### beta",
+            "Beta instructions.",
+        ],
+    );
+    assert_ordered(&result, &["### alpha", "### beta"]);
 }

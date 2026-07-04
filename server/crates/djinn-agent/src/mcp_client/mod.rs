@@ -4,7 +4,7 @@
 //! definitions via `tools/list`, and provides dispatch for tool calls routed
 //! to those servers during the reply loop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
@@ -136,6 +136,11 @@ struct RoutingState {
     /// Per-server request timeout in milliseconds, populated at discovery time
     /// from each server's `McpServerConfig::request_timeout_ms`.
     request_timeouts: HashMap<String, u64>,
+    /// Server instructions captured at initialization from each successfully
+    /// connected server. Stored in deterministic server-name order; empty or
+    /// whitespace-only instructions are omitted.
+    #[allow(dead_code)] // Mirrored on McpToolRegistry; stored here for future refresh use.
+    server_instructions: BTreeMap<String, String>,
     /// Tools that were advertised at session start but have since been removed
     /// by a `tools/list_changed` refresh. These remain in the routing maps
     /// (so `has_tool` returns `true`) but `call_tool` returns a deterministic
@@ -160,6 +165,10 @@ pub struct McpToolRegistry {
     /// All discovered tool schemas ready to append to the session tool list.
     /// Session-fixed: once set at construction, never mutated.
     tool_schemas: Vec<serde_json::Value>,
+    /// Server instructions captured at initialization, in deterministic order.
+    /// Mirrors the `RoutingState` value so consumers can read it without
+    /// acquiring the lock.
+    server_instructions: BTreeMap<String, String>,
     #[cfg(test)]
     test_dispatch: Option<Arc<TestDispatchFn>>,
 }
@@ -258,6 +267,13 @@ impl McpToolRegistry {
     /// refresh (i.e., the server no longer advertises it).
     pub fn is_unavailable(&self, name: &str) -> bool {
         self.routing.read().unwrap().unavailable.contains(name)
+    }
+
+    /// Returns the non-empty server instructions captured at initialization,
+    /// in server-name-sorted order. Failed servers and servers that returned no
+    /// instructions are omitted.
+    pub fn server_instructions(&self) -> &BTreeMap<String, String> {
+        &self.server_instructions
     }
 
     /// Dispatch a tool call to the MCP server that owns the given tool name.
@@ -454,6 +470,7 @@ pub async fn connect_and_discover(
     let mut peers: HashMap<String, Arc<Peer<RoleClient>>> = HashMap::new();
     let mut request_timeouts: HashMap<String, u64> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
+    let mut server_instructions: BTreeMap<String, String> = BTreeMap::new();
 
     for (name, config) in servers {
         let resolved = match resolve_server_config(name, config, app_state).await {
@@ -556,6 +573,12 @@ pub async fn connect_and_discover(
                 has_logging_capability = info.capabilities.logging.is_some(),
                 "MCP server initialize capabilities"
             );
+            if let Some(instr) = info.instructions.as_deref() {
+                let trimmed = instr.trim();
+                if !trimmed.is_empty() {
+                    server_instructions.insert(name.clone(), trimmed.to_string());
+                }
+            }
         }
 
         // Discover tools from this server.
@@ -622,8 +645,10 @@ pub async fn connect_and_discover(
             peers,
             request_timeouts,
             unavailable: HashSet::new(),
+            server_instructions: server_instructions.clone(),
         })),
         tool_schemas,
+        server_instructions,
         #[cfg(test)]
         test_dispatch: None,
     })
