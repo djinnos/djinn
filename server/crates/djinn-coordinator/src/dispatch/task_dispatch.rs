@@ -1602,6 +1602,34 @@ impl CoordinatorActor {
                 }
             }
 
+            // uv3p Part B: forced model rotation on the post-intervention retry
+            // path. When the human-park rung declined to park because no session
+            // has reached submit_work yet, it redispatches — but a redispatch to
+            // the SAME model that just terminated pre-submission (loop-guard trip,
+            // infra death) would loop identically (kibj went back to k2p7 twice).
+            // Drop the models whose post-intervention sessions terminated without
+            // submitting, derived from durable session history so no new state is
+            // needed. Degrades to the unfiltered list when exclusion would empty
+            // it (only one viable model → plan-lane retry, then park at the bound).
+            if role == "worker" && task.intervention_count >= 1 {
+                let history = self.post_intervention_history(&task).await;
+                if !history.non_attempt_models.is_empty() {
+                    let filtered: Vec<String> = model_ids
+                        .iter()
+                        .filter(|m| !history.non_attempt_models.contains(m))
+                        .cloned()
+                        .collect();
+                    if !filtered.is_empty() && filtered.len() < model_ids.len() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            excluded = ?history.non_attempt_models,
+                            "uv3p: forcing model rotation on post-intervention redispatch — excluding models that terminated pre-submission"
+                        );
+                        model_ids = filtered;
+                    }
+                }
+            }
+
             // Cross-model ("Thorough") review: when this is a reviewer dispatch
             // and the creator has `diverse_review` on, steer the fallback list so
             // the first viable model id differs from the one that implemented the
