@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_db::{Database, ProjectRepository};
+use djinn_db::{Database, ProjectRepository, TaskRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
     BiStream, ResolvedCredentials, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent,
@@ -61,6 +61,7 @@ use uuid::Uuid;
 use crate::config::KubernetesConfig;
 use crate::job::{build_task_run_job, taskrun_job_ref_from_job};
 use crate::secret::{build_task_run_secret, job_owner_reference, task_run_resource_name};
+use crate::sidecar::ImageServiceResolution;
 
 /// Bound on the [`ConnectionRegistry::register_pending`] buffer used by
 /// `prepare`.  Large enough that a busy worker doesn't back-pressure on
@@ -102,6 +103,22 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(600);
 const TEARDOWN_POLL_TIMEOUT: Duration = Duration::from_secs(11_400);
 /// Poll interval used inside [`poll_job_terminal_state`].
 const TEARDOWN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+fn service_resolution_activity_payload(
+    task_run_id: &str,
+    project_id: &str,
+    resolution: &ImageServiceResolution,
+) -> serde_json::Value {
+    json!({
+        "task_run_id": task_run_id,
+        "project_id": project_id,
+        "image": resolution.image,
+        "requested": resolution.requested_preset_ids,
+        "injected": resolution.injected,
+        "skipped": resolution.skipped,
+        "errors": resolution.lookup_error.as_ref().map(|error| vec![error]).unwrap_or_default(),
+    })
+}
 
 /// Poll interval for the in-flight infra-death watch
 /// ([`KubernetesRuntime::watch_infra_death`]). Coarser than the teardown poll:
@@ -353,8 +370,78 @@ impl SessionRuntime for KubernetesRuntime {
 
         // 2. Build + create the Job manifest. Resolve the backing services
         //    declared on the project's image so they're injected as native
-        //    sidecars (best-effort — never blocks dispatch; see resolver).
-        let services = crate::sidecar::resolve_image_services(db, &spec.project_id).await;
+        //    sidecars. Dispatch remains fail-open, but the resolution is now
+        //    observable on the task activity log: configured-but-not-injected
+        //    presets must not disappear silently.
+        let service_resolution =
+            crate::sidecar::resolve_image_services_with_metadata(db, &spec.project_id).await;
+        let services = &service_resolution.services;
+        let service_payload = service_resolution_activity_payload(
+            &task_run_id_str,
+            &spec.project_id,
+            &service_resolution,
+        );
+        let requested_service_count = service_resolution.requested_preset_ids.len();
+        let injected_service_count = service_resolution.injected.len();
+        let skipped_service_count = service_resolution.skipped.len();
+        let requested_preset_ids = service_resolution.requested_preset_ids.join(",");
+        let injected_service_types = service_resolution
+            .injected
+            .iter()
+            .map(|service| service.service_type.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let skipped_preset_ids = service_resolution
+            .skipped
+            .iter()
+            .map(|skipped| format!("{}:{}", skipped.preset_id, skipped.reason))
+            .collect::<Vec<_>>()
+            .join(",");
+        let lookup_error = service_resolution.lookup_error.as_deref().unwrap_or("");
+        if service_resolution.lookup_error.is_some()
+            || requested_service_count != injected_service_count
+        {
+            warn!(
+                task_run_id = %task_run_id_str,
+                project_id = %spec.project_id,
+                requested_service_count,
+                injected_service_count,
+                skipped_service_count,
+                requested_preset_ids = %requested_preset_ids,
+                injected_service_types = %injected_service_types,
+                skipped_preset_ids = %skipped_preset_ids,
+                lookup_error = %lookup_error,
+                "kubernetes_runtime: task-run backing service resolution incomplete"
+            );
+        } else {
+            info!(
+                task_run_id = %task_run_id_str,
+                project_id = %spec.project_id,
+                requested_service_count,
+                injected_service_count,
+                requested_preset_ids = %requested_preset_ids,
+                injected_service_types = %injected_service_types,
+                "kubernetes_runtime: task-run backing services resolved"
+            );
+        }
+        match TaskRepository::new(db.clone(), djinn_core::events::EventBus::noop())
+            .log_activity(
+                Some(&spec.task_id),
+                "system",
+                "system",
+                "task_run_services_resolved",
+                &service_payload.to_string(),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => warn!(
+                task_run_id = %task_run_id_str,
+                project_id = %spec.project_id,
+                %error,
+                "kubernetes_runtime: failed to log task-run service resolution activity"
+            ),
+        }
 
         // Load the project's EnvironmentConfig to extract the
         // cargo_cache_policy for the task-run Job's env vars. Fail-open:
@@ -378,7 +465,7 @@ impl SessionRuntime for KubernetesRuntime {
             &spec.project_id,
             &resource_name,
             &project_image_tag,
-            &services,
+            services,
             cargo_cache_policy.as_ref(),
             spec.is_evidence_spike,
         );
@@ -1163,6 +1250,49 @@ mod tests {
         // `kube::Client`, so we gate that work into PR 3's integration tests.
         fn assert_object_safe<T: ?Sized>() {}
         assert_object_safe::<dyn SessionRuntime>();
+    }
+
+    #[test]
+    fn service_resolution_activity_payload_records_requested_injected_and_skipped() {
+        let resolution = ImageServiceResolution {
+            image: Some(crate::sidecar::ResolvedImageMetadata {
+                id: "image-djinn".into(),
+                name: "djinn".into(),
+                tag: Some("registry.local/djinn:task".into()),
+            }),
+            requested_preset_ids: vec!["preset-postgres-18".into(), "preset-does-not-exist".into()],
+            injected: vec![crate::sidecar::InjectedServiceMetadata {
+                preset_id: "preset-postgres-18".into(),
+                service_type: "postgres".into(),
+                port: 5432,
+                conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+            }],
+            skipped: vec![crate::sidecar::SkippedServicePreset {
+                preset_id: "preset-does-not-exist".into(),
+                reason: "unknown service preset".into(),
+            }],
+            lookup_error: Some("image_service_presets lookup failed".into()),
+            services: Vec::new(),
+        };
+
+        let payload = service_resolution_activity_payload("run-123", "project-123", &resolution);
+
+        assert_eq!(payload["task_run_id"], "run-123");
+        assert_eq!(payload["project_id"], "project-123");
+        assert_eq!(payload["image"]["id"], "image-djinn");
+        assert_eq!(
+            payload["requested"],
+            serde_json::json!(["preset-postgres-18", "preset-does-not-exist"])
+        );
+        assert_eq!(payload["injected"][0]["preset_id"], "preset-postgres-18");
+        assert_eq!(payload["injected"][0]["service_type"], "postgres");
+        assert_eq!(payload["injected"][0]["port"], 5432);
+        assert_eq!(payload["skipped"][0]["preset_id"], "preset-does-not-exist");
+        assert_eq!(payload["skipped"][0]["reason"], "unknown service preset");
+        assert_eq!(
+            payload["errors"],
+            serde_json::json!(["image_service_presets lookup failed"])
+        );
     }
 
     // ── ld18 "kill actually kills" teardown coverage ─────────────────────
