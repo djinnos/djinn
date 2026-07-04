@@ -27,6 +27,7 @@ use djinn_orchestration_types::trigger::CoordinatorTrigger;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 
 use crate::helpers::ProviderCredential;
+use crate::reply_loop::compaction_guard::CompactionCriticalSection;
 
 /// Identifies the knowledge-write target for a session.
 #[derive(Debug, Clone, PartialEq, Eq)]

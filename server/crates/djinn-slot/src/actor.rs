@@ -295,6 +295,7 @@ impl SlotHandle {
         runner: LifecycleRunner,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
+        let compaction_cs = CompactionCriticalSection::new();
         let mut app_state = app_state;
         app_state.compaction_cs = compaction_cs.clone();
         let actor = SlotActor {
