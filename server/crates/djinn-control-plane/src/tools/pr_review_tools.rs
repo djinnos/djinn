@@ -181,39 +181,8 @@ const LIMITATIONS_NOTE: &str = "Base-graph-only analysis — this tool cannot de
 /// Resolve the base commit SHA via `git rev-parse HEAD` in
 /// `project_path`. On any failure returns `"unknown"` so the response
 /// remains well-formed.
-fn resolve_base_commit(project_path: &str) -> String {
-    let mut cmd = Command::new("git");
-    cmd.args(["rev-parse", "HEAD"]).current_dir(project_path);
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if sha.is_empty() {
-                tracing::warn!(
-                    project = %project_path,
-                    "git rev-parse HEAD returned empty output; reporting 'unknown'"
-                );
-                "unknown".to_string()
-            } else {
-                sha
-            }
-        }
-        Ok(out) => {
-            tracing::warn!(
-                project = %project_path,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "git rev-parse HEAD failed; reporting 'unknown'"
-            );
-            "unknown".to_string()
-        }
-        Err(e) => {
-            tracing::warn!(
-                project = %project_path,
-                error = %e,
-                "git rev-parse HEAD could not spawn; reporting 'unknown'"
-            );
-            "unknown".to_string()
-        }
-    }
+async fn resolve_base_commit_async(project_path: &str) -> String {
+    crate::tools::git_ops::resolve_base_commit(project_path).await
 }
 
 /// Cap a finding's message to ≤ 200 chars — longer descriptions belong
@@ -294,7 +263,7 @@ impl DjinnMcpServer {
             sub_path: None,
         };
 
-        let base_commit = resolve_base_commit(&clone_path);
+        let base_commit = resolve_base_commit_async(&clone_path).await;
 
         // Step 2: diff_touches on base graph.
         let diff = self

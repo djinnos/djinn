@@ -33,7 +33,7 @@ fn lower_process_priority(cmd: &mut tokio::process::Command) {
 /// any repo regardless of cross-UID ownership. Env vars (not `-c` flag) so
 /// that inner git subprocesses spawned by `git clone --local` also inherit
 /// the rule.
-fn apply_safe_directory_env(cmd: &mut tokio::process::Command) {
+pub fn apply_safe_directory_env(cmd: &mut tokio::process::Command) {
     cmd.env("GIT_CONFIG_COUNT", "1");
     cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
     cmd.env("GIT_CONFIG_VALUE_0", "*");
@@ -491,6 +491,26 @@ pub async fn run_git_command_with_timeout_in(
     timeout: std::time::Duration,
 ) -> Result<CommandOutput, GitError> {
     run_git_command_with_timeout(cwd.to_path_buf(), args, timeout).await
+}
+/// Like [`run_git_command_in`] but synchronous and returns the raw
+/// `std::process::Output` (including stdout/stderr as `Vec<u8>`) so callers
+/// that need binary/NUL-delimited output are not forced through lossy UTF-8
+/// conversion. Used by the workspace mtime normalization path, which runs
+/// inside `spawn_blocking`.
+pub fn run_git_command_output_in(
+    cwd: &Path,
+    args: Vec<String>,
+) -> Result<std::process::Output, GitError> {
+    use std::process::Stdio;
+    let mut cmd = std::process::Command::new("git");
+    apply_safe_directory_env(&mut cmd);
+    cmd.args(&args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = cmd.output()?;
+    Ok(output)
 }
 
 /// Like [`run_git_command_in`] but accepts additional environment variables

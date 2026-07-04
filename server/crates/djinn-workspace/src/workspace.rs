@@ -10,6 +10,7 @@ use tempfile::TempDir;
 use thiserror::Error;
 use tokio::process::Command;
 use tracing::{debug, warn};
+use crate::git_helpers;
 
 #[derive(Debug, Error)]
 pub enum EphemeralWorkspaceError {
@@ -341,23 +342,9 @@ impl Workspace {
         // B, 1 when it is not. Other non-zero exits are real errors. We can't
         // use `run_git` (which treats every non-zero exit as an error), so call
         // git directly and discriminate on the exit code.
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(self.root.path())
-            .args(["merge-base", "--is-ancestor", &merge_ref, "HEAD"])
-            .output()
-            .await?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(EphemeralWorkspaceError::Git(format!(
-                    "git merge-base --is-ancestor {merge_ref} HEAD: {}",
-                    stderr.trim()
-                )))
-            }
-        }
+        git_helpers::is_ancestor(self.root.path(), &merge_ref, "HEAD")
+            .await
+            .map_err(EphemeralWorkspaceError::Git)
     }
 
     /// Fetch `target_branch` from `origin` and attempt a no-fast-forward merge
@@ -393,34 +380,20 @@ impl Workspace {
         // values match what `commit` injects so any merge commit produced by
         // the subsequent auto-commit stage carries a consistent author.
         let merge_ref = format!("origin/{target_branch}");
-        let mut cmd = Command::new("git");
-        cmd.arg("-C")
-            .arg(self.root.path())
-            .args(["merge", "--no-commit", "--no-ff", &merge_ref])
-            .env("GIT_AUTHOR_NAME", "djinn-bot")
-            .env("GIT_AUTHOR_EMAIL", "bot@djinn.local")
-            .env("GIT_COMMITTER_NAME", "djinn-bot")
-            .env("GIT_COMMITTER_EMAIL", "bot@djinn.local");
-        let output = cmd.output().await?;
-        if output.status.success() {
+        let clean = git_helpers::try_merge_no_commit_no_ff(self.root.path(), &merge_ref)
+            .await
+            .map_err(EphemeralWorkspaceError::Git)?;
+        if clean {
             return Ok(MergeOutcome::Clean);
         }
 
-        let unmerged = self
-            .run_git(&["diff", "--name-only", "--diff-filter=U"], &[])
-            .await?;
-        let files: Vec<String> = unmerged
-            .lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+        let files = git_helpers::unmerged_files(self.root.path())
+            .await
+            .map_err(EphemeralWorkspaceError::Git)?;
 
         if files.is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(EphemeralWorkspaceError::Git(format!(
-                "git merge --no-commit --no-ff {merge_ref}: {}",
-                stderr.trim()
+                "git merge --no-commit --no-ff {merge_ref} failed with no conflicts"
             )));
         }
 
@@ -446,23 +419,9 @@ impl Workspace {
         ancestor: &str,
         descendant: &str,
     ) -> Result<bool, EphemeralWorkspaceError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(self.root.path())
-            .args(["merge-base", "--is-ancestor", ancestor, descendant])
-            .output()
-            .await?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(EphemeralWorkspaceError::Git(format!(
-                    "git merge-base --is-ancestor {ancestor} {descendant}: {}",
-                    stderr.trim()
-                )))
-            }
-        }
+        git_helpers::is_ancestor(self.root.path(), ancestor, descendant)
+            .await
+            .map_err(EphemeralWorkspaceError::Git)
     }
 
     /// Supervisor-owned guarantee that a ConflictRetry resolution lands as a
@@ -618,21 +577,25 @@ impl Workspace {
         args: &[&str],
         extra_env: &[(&str, &str)],
     ) -> Result<String, EphemeralWorkspaceError> {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.root.path()).args(args);
-        for (k, v) in extra_env {
-            cmd.env(k, v);
-        }
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let owned_env: Vec<(String, String)> = extra_env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let out = djinn_git::run_git_command_in_with_env(
+            self.root.path(),
+            owned_args,
+            owned_env,
+        )
+        .await?;
+        if out.code != 0 {
             return Err(EphemeralWorkspaceError::Git(format!(
                 "git {}: {}",
                 args.join(" "),
-                stderr.trim()
+                out.stderr.trim()
             )));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(out.stdout)
     }
 }
 
@@ -805,12 +768,9 @@ fn normalize_mtimes_blocking(root: &Path) -> Result<NormalizeStats, EphemeralWor
 /// Used by [`normalize_mtimes_blocking`] where output is NUL/`\x1e`-delimited
 /// binary that must not pass through lossy UTF-8 conversion.
 fn git_capture(root: &Path, args: &[&str]) -> Result<Vec<u8>, EphemeralWorkspaceError> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .map_err(EphemeralWorkspaceError::Io)?;
+    let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let out = djinn_git::run_git_command_output_in(root, owned_args)
+        .map_err(|e| EphemeralWorkspaceError::Git(e.to_string()))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(EphemeralWorkspaceError::Git(format!(
