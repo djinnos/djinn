@@ -164,7 +164,6 @@ impl CoordinatorActor {
         false
     }
 
-impl CoordinatorActor {
     /// Resolve a user model priority using an optional explicit lane override.
     ///
     /// When `effective_lane` is `Some`, the user's model selection for that lane

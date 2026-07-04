@@ -5,7 +5,7 @@
 const ENV_USE_PLAN_LANE_FOR_POST_INTERVENTION_WORKERS: &str =
     "DJINN_USE_PLAN_LANE_FOR_POST_INTERVENTION_WORKERS";
 
-fn use_plan_lane_for_post_intervention_workers() -> bool {
+pub(crate) fn use_plan_lane_for_post_intervention_workers() -> bool {
     match std::env::var(ENV_USE_PLAN_LANE_FOR_POST_INTERVENTION_WORKERS) {
         Ok(val) => !matches!(
             val.trim().to_ascii_lowercase().as_str(),

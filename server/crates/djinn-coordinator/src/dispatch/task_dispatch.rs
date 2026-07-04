@@ -1,6 +1,7 @@
 // djinn:allow-oversize — legacy dispatch module over size-guard threshold; split when touched substantively.
 use super::super::*;
 use super::DispatchOutcome;
+use super::post_intervention_lane;
 #[cfg(test)]
 use super::admission::{DispatchCapObservation, DispatchCapObservationStage};
 #[cfg(test)]

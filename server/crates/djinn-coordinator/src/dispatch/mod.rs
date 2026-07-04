@@ -8,7 +8,6 @@ mod outcome;
 // metadata to the session lifecycle path.
 pub mod resume_source;
 mod post_intervention_lane;
-pub(crate) use post_intervention_lane::use_plan_lane_for_post_intervention_workers;
 mod retry;
 pub(crate) mod session_recovery;
 mod task_dispatch;
