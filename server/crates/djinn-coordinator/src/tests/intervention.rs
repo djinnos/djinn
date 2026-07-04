@@ -1,6 +1,7 @@
 // djinn:allow-oversize
 use super::*;
 use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_disposition};
+use djinn_core::models::{ReopenClass, TransitionAction};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::{DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
@@ -2557,4 +2558,331 @@ async fn intervention_uses_db_quality_count_not_raw_reopen_count() {
         !intervened,
         "no re-intervention when quality count hasn't changed and marker exists"
     );
+}
+
+// ── End-to-end mixed reopen quality-strike regression tests (wfui) ───────────
+
+/// Walk a task to `pr_review` and apply `PrChangesRequested`.
+async fn walk_pr_changes_requested_cycle(repo: &TaskRepository, task_id: &str) {
+    repo.transition(task_id, TransitionAction::Start, "w", "worker", None, None)
+        .await
+        .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::SubmitTaskReview,
+        "w",
+        "worker",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::TaskReviewStart,
+        "r",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::TaskReviewApprove,
+        "r",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::PrCreated,
+        "sys",
+        "system",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::PrUndraft,
+        "sys",
+        "system",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::PrChangesRequested,
+        "sys",
+        "system",
+        Some("changes requested on PR"),
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+/// Walk a task to `pr_draft` and apply `PrCiFailed`.
+async fn walk_pr_ci_failed_cycle(repo: &TaskRepository, task_id: &str) {
+    repo.transition(task_id, TransitionAction::Start, "w", "worker", None, None)
+        .await
+        .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::SubmitTaskReview,
+        "w",
+        "worker",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::TaskReviewStart,
+        "r",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::TaskReviewApprove,
+        "r",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::PrCreated,
+        "sys",
+        "system",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        task_id,
+        TransitionAction::PrCiFailed,
+        "sys",
+        "system",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+}
+
+/// Inject a synthetic `status_changed` activity row with an optional
+/// `reopen_class` payload. Used to exercise historical rows and classes that
+/// have no production transition.
+async fn inject_reopen_activity(
+    repo: &TaskRepository,
+    task_id: &str,
+    from_status: &str,
+    to_status: &str,
+    reopen_class: Option<&str>,
+) {
+    let payload = if let Some(class) = reopen_class {
+        serde_json::json!({
+            "from_status": from_status,
+            "to_status": to_status,
+            "reopen_class": class,
+        })
+    } else {
+        serde_json::json!({
+            "from_status": from_status,
+            "to_status": to_status,
+        })
+    };
+    repo.log_activity(
+        Some(task_id),
+        "test",
+        "system",
+        "status_changed",
+        &payload.to_string(),
+    )
+    .await
+    .unwrap();
+}
+
+/// End-to-end regression for typed reopen classification and quality-strike
+/// aggregation. A mixed ledger (review_rejected, stale review_rejected,
+/// PrChangesRequested, merge_queue_failed, merge_conflict, superseded,
+/// historical other, and an unclassified raw-only reopen) yields
+/// `raw_reopen_count > quality_reopen_count`. The second-strike human park
+/// decision uses the DB-backed quality count after a fresh reload, and the park
+/// telemetry emits the requested strike-class breakdown labels.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdown() {
+    djinn_telemetry::init().unwrap();
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // Pretend a prior planner intervention already happened: reset raw counters
+    // and bump intervention_count so the next intervention routes to the
+    // human-review park path.
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+
+    // 1. Quality strike: plain review rejection.
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        TransitionAction::TaskReviewReject,
+        "implementation rejected",
+    )
+    .await;
+
+    // 2. Quality strike: stale review rejection.
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        TransitionAction::TaskReviewRejectStale,
+        "stale context",
+    )
+    .await;
+
+    // 3. Excluded class: conflict rejection does not increment raw reopen_count.
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        TransitionAction::TaskReviewRejectConflict,
+        "merge_conflict:{\"head\":\"abc\"}",
+    )
+    .await;
+
+    // 4. Quality strike: PR changes requested (review_rejected).
+    walk_pr_changes_requested_cycle(&repo, &task.id).await;
+
+    // 5. Quality strike: merge/verification failure (merge_queue_failed).
+    walk_pr_ci_failed_cycle(&repo, &task.id).await;
+
+    // 6. Excluded class: superseded reopen injected directly.
+    inject_reopen_activity(&repo, &task.id, "pr_review", "open", Some("superseded")).await;
+
+    // 7. Historical other: status_changed with no `reopen_class` field. It
+    // defaults to `other` and counts as a quality strike.
+    repo.set_status(&task.id, "closed").await.unwrap();
+    repo.set_status(&task.id, "open").await.unwrap();
+
+    // 8. Unclassified raw-only reopen: set_status from `in_progress` to `open`.
+    // Increments `task.reopen_count` but is excluded from the ledger's
+    // from_status allow-list, so it is not counted as a quality strike.
+    repo.set_status(&task.id, "in_progress").await.unwrap();
+    repo.set_status(&task.id, "open").await.unwrap();
+
+    // Reload from DB and verify the mixed ledger divergence.
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        t.reopen_count, 6,
+        "raw count includes six reopen increments (four quality + one historical + one unclassified)"
+    );
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(
+        quality, 5,
+        "quality count excludes merge_conflict, superseded, and the unclassified in_progress->open transition"
+    );
+    assert!(
+        t.reopen_count > quality,
+        "raw_reopen_count must be greater than quality_reopen_count in this mixed ledger"
+    );
+
+    // The recent ledger contains the classified/historical rows; the raw-only
+    // set_status row is excluded from its allow-list.
+    let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+    assert_eq!(
+        ledger.len(),
+        7,
+        "ledger contains classified and historical reopen rows, not the raw-only transition"
+    );
+    let quality_in_ledger = ledger
+        .iter()
+        .filter(|e| e.reopen_class.is_quality_strike())
+        .count();
+    assert_eq!(
+        quality_in_ledger, 5,
+        "ledger quality rows match quality_reopen_count"
+    );
+    let conflict_in_ledger = ledger
+        .iter()
+        .filter(|e| e.reopen_class == ReopenClass::MergeConflict)
+        .count();
+    assert_eq!(
+        conflict_in_ledger, 1,
+        "ledger contains one merge_conflict row"
+    );
+    let superseded_in_ledger = ledger
+        .iter()
+        .filter(|e| e.reopen_class == ReopenClass::Superseded)
+        .count();
+    assert_eq!(
+        superseded_in_ledger, 1,
+        "ledger contains one superseded row"
+    );
+
+    // The park guard uses the DB-backed quality count, not the in-memory raw
+    // counter, so it fires even though the raw count is strictly above the
+    // quality count.
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        intervened,
+        "quality=5 above threshold must trigger second-strike park"
+    );
+
+    // Verify the source is held (open + blocked on a human-review remediation).
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(parked.status, "open", "parked task stays open");
+    assert!(
+        parked.close_reason.is_none(),
+        "parked task must not carry a close_reason"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "second-strike park must create a single human-review remediation blocker"
+    );
+    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    assert_eq!(remediation.issue_type, "review");
+    assert!(
+        planner_intervention_markers(&repo, &task.id)
+            .await
+            .is_empty(),
+        "second-strike park must not write a fresh planner intervention marker"
+    );
+
+    // Park telemetry emitted the requested breakdown labels.
+    let rendered = djinn_telemetry::render().unwrap();
+    let line = rendered
+        .lines()
+        .find(|l| {
+            l.starts_with("djinn_tasks_parked_total")
+                && l.contains("quality_strikes=\"5\"")
+                && l.contains("merge_conflict_reopens=\"1\"")
+                && l.contains("superseded_reopens=\"1\"")
+                && l.contains("raw_reopen_count=\"6\"")
+        })
+        .expect("parked metric line with strike-class breakdown not found");
+    let value: f64 = line
+        .rsplit_once(' ')
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("metric value parses");
+    assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
 }
