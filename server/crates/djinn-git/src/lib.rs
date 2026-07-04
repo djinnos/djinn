@@ -1,6 +1,29 @@
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use djinn_core::clock::{Clock, SystemClock};
+
+/// Synchronous counterpart to [`lower_process_priority`] for
+/// `std::process::Command`. Errors are intentionally ignored.
+#[cfg(unix)]
+fn lower_process_priority_sync(cmd: &mut std::process::Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+            #[cfg(target_os = "linux")]
+            {
+                const IOPRIO_WHO_PROCESS: i32 = 1;
+                const IOPRIO_CLASS_BE: i32 = 2;
+                let ioprio_val = (IOPRIO_CLASS_BE << 13) | 7;
+                let _ = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_val);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn lower_process_priority_sync(_cmd: &mut std::process::Command) {}
 
 /// Lower CPU and I/O priority for a child process so djinn operations do not
 /// starve interactive user applications (browser, editor, etc.).
@@ -29,9 +52,19 @@ fn lower_process_priority(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Set GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0/VALUE_0 on `cmd` so git accepts
-/// any repo regardless of cross-UID ownership. Env vars (not `-c` flag) so
-/// that inner git subprocesses spawned by `git clone --local` also inherit
+/// Set GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0/VALUE_0 on a `std::process::Command`
+/// so git accepts any repo regardless of cross-UID ownership. Env vars (not
+/// `-c` flag) so that inner git subprocesses spawned by `git clone --local`
+/// also inherit the rule.
+fn apply_safe_directory_env_std(cmd: &mut std::process::Command) {
+    cmd.env("GIT_CONFIG_COUNT", "1");
+    cmd.env("GIT_CONFIG_KEY_0", "safe.directory");
+    cmd.env("GIT_CONFIG_VALUE_0", "*");
+}
+
+/// Set GIT_CONFIG_COUNT=1 + GIT_CONFIG_KEY_0/VALUE_0 on a tokio `Command` so git
+/// accepts any repo regardless of cross-UID ownership. Env vars (not `-c` flag)
+/// so that inner git subprocesses spawned by `git clone --local` also inherit
 /// the rule.
 pub fn apply_safe_directory_env(cmd: &mut tokio::process::Command) {
     cmd.env("GIT_CONFIG_COUNT", "1");
@@ -213,6 +246,22 @@ impl CommandOutput {
     /// `std::process::ExitStatus::code()`.
     pub fn exit_code(&self) -> Option<i32> {
         Some(self.code)
+    }
+}
+
+/// Raw binary output from a git command, returned when the output may contain
+/// NUL-delimited or non-UTF-8 bytes and must not pass through lossy conversion.
+#[derive(Debug, Clone)]
+pub struct BinaryCommandOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub code: i32,
+}
+
+impl BinaryCommandOutput {
+    /// True when the recorded exit code represents a successful exit (code 0).
+    pub fn is_success(&self) -> bool {
+        self.code == 0
     }
 }
 
@@ -510,20 +559,35 @@ pub async fn run_git_command_with_timeout_in(
 /// that need binary/NUL-delimited output are not forced through lossy UTF-8
 /// conversion. Used by the workspace mtime normalization path, which runs
 /// inside `spawn_blocking`.
-pub fn run_git_command_output_in(
+pub fn run_git_command_binary_in(
     cwd: &Path,
     args: Vec<String>,
-) -> Result<std::process::Output, GitError> {
+) -> Result<BinaryCommandOutput, GitError> {
     use std::process::Stdio;
     let mut cmd = std::process::Command::new("git");
-    apply_safe_directory_env(&mut cmd);
+    apply_safe_directory_env_std(&mut cmd);
     cmd.args(&args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    lower_process_priority_sync(&mut cmd);
     let output = cmd.output()?;
-    Ok(output)
+    let code = output.status.code().unwrap_or(-1);
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            code,
+            command: args.join(" "),
+            cwd: cwd.display().to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(BinaryCommandOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        code,
+    })
 }
 
 /// Like [`run_git_command_in`] but accepts additional environment variables

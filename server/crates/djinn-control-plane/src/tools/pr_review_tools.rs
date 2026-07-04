@@ -6,8 +6,6 @@
 //! parsed. See [`PrReviewContextResponse::limitations_note`] for the
 //! exact v1 constraints.
 
-use std::process::Command;
-
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -769,9 +769,9 @@ fn normalize_mtimes_blocking(root: &Path) -> Result<NormalizeStats, EphemeralWor
 /// binary that must not pass through lossy UTF-8 conversion.
 fn git_capture(root: &Path, args: &[&str]) -> Result<Vec<u8>, EphemeralWorkspaceError> {
     let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let out = djinn_git::run_git_command_output_in(root, owned_args)
+    let out = djinn_git::run_git_command_binary_in(root, owned_args)
         .map_err(|e| EphemeralWorkspaceError::Git(e.to_string()))?;
-    if !out.status.success() {
+    if !out.is_success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(EphemeralWorkspaceError::Git(format!(
             "git {}: {}",
