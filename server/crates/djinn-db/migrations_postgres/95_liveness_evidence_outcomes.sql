@@ -1,5 +1,9 @@
--- Migration 94: Additive liveness classifier evidence, stable outcomes,
+-- Migration 95: Additive liveness classifier evidence, stable outcomes,
 -- and claim-extension metadata for proposal `twis` / epic `5ric`.
+--
+-- Note: this migration is V95, not V94, because V94 (`task_attempts`) was
+-- merged into main after this task started. Both migrations live alongside
+-- each other and apply cleanly on a fresh database via sqlx::migrate!.
 --
 -- This is a foundation-only, additive schema: no existing objects are dropped
 -- or renamed, and all new data is nullable so old rows remain readable

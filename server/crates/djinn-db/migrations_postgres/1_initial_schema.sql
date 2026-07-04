@@ -1,8 +1,8 @@
 -- Postgres initial schema (flattened). Single source of truth for fresh installs.
--- Managed by sqlx::migrate!. DO NOT MODIFY after commit — add a new V{N}__{slug}.sql instead.
+-- Managed by sqlx::migrate!. DO NOT MODIFY after commit — add a new {N}_{slug}.sql instead.
 --
 -- Liveness classifier evidence/outcome tables and columns are added in later
--- migrations (e.g. V94__liveness_evidence_outcomes.sql) so this file stays a
+-- migrations (e.g. 95_liveness_evidence_outcomes.sql) so this file stays a
 -- frozen baseline for fresh installs.  See that migration for the current
 -- additive schema for verdicts, outcomes, and claim-extension metadata.
 --
