@@ -71,15 +71,25 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
 /// Seed raw session rows directly into the database for integration-level
 /// contract tests that need actual query results.
 pub async fn seed_session_row(db: &Database, seed: UsageTestSessionSeed<'_>) {
-    db.ensure_initialized().await.unwrap();
     let id = uuid::Uuid::now_v7().to_string();
+    seed_session_row_with_id(db, &id, seed).await;
+}
+
+/// Like [`seed_session_row`] but accepts an explicit session id so callers
+/// can control the id (e.g. for boundary tests that need a known session id).
+pub async fn seed_session_row_with_id(
+    db: &Database,
+    session_id: &str,
+    seed: UsageTestSessionSeed<'_>,
+) {
+    db.ensure_initialized().await.unwrap();
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
     )
-    .bind(&id)
+    .bind(session_id)
     .bind(seed.project_id)
     .bind(seed.task_id)
     .bind(seed.model_id)

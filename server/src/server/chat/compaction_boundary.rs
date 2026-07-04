@@ -226,18 +226,24 @@ mod tests {
 
     async fn seed_chat_session(db: &djinn_db::Database, session_id: &str) {
         seed_project(db, "project-test", "test project").await;
-        db.ensure_initialized().await.unwrap();
-        sqlx::query(
-            "INSERT INTO sessions \
-             (id, project_id, task_id, model_id, agent_type, status, \
-              started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
-             VALUES ($1, 'project-test', NULL, 'test-model', 'chat', 'completed', \
-                     '2025-01-01T00:00:00Z', 0, 0, 0, 0, NULL, '')",
+        djinn_db::test_support::seed_session_row_with_id(
+            db,
+            session_id,
+            djinn_db::test_support::UsageTestSessionSeed {
+                project_id: "project-test",
+                model_id: "test-model",
+                agent_type: "chat",
+                started_at: "2025-01-01T00:00:00Z",
+                tokens_in: 0,
+                tokens_out: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost_usd: None,
+                cost_basis: "",
+                task_id: None,
+            },
         )
-        .bind(session_id)
-        .execute(db.pool())
-        .await
-        .expect("failed to seed session row");
+        .await;
     }
 
     fn compacted_conversation() -> Conversation {
