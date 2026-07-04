@@ -96,6 +96,38 @@ pub(crate) async fn assemble_for_role(
         app_state: &app_state,
         read_sources,
         worker_resume_note: None,
+        mcp_server_instructions: &std::collections::BTreeMap::new(),
+    })
+    .await
+}
+
+/// Variant of [`assemble_for_role`] that accepts MCP server instructions,
+/// used by prompt-instructions tests.
+#[allow(dead_code)]
+pub(crate) async fn assemble_for_role_with_mcp_instructions(
+    db: Database,
+    task: &Task,
+    role: &dyn AgentRole,
+    mcp_server_instructions: &std::collections::BTreeMap<String, String>,
+) -> PromptContext {
+    let app_state = agent_context_from_db(db, CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    assemble_prompt_context(PromptContextInputs {
+        task,
+        runtime_role: role,
+        role_for_epic_check: role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: None,
+        mcp_server_instructions,
     })
     .await
 }
@@ -125,6 +157,7 @@ pub(crate) async fn assemble_for_role_with_resume(
         app_state: &app_state,
         read_sources: &[],
         worker_resume_note,
+        mcp_server_instructions: &std::collections::BTreeMap::new(),
     })
     .await
 }

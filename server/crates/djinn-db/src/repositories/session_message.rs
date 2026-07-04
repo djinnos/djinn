@@ -980,4 +980,182 @@ mod tests {
         assert_eq!(conv.messages[4].role, Role::User);
         assert_eq!(conv.messages[4].text_content(), "u2");
     }
+
+    // ── Regression: raw history intact when only a failed-compaction
+    //    Started boundary exists (no prior completed boundary) ──────────
+
+    /// Regression: a session that has only a `Started` boundary from a failed
+    /// compaction attempt (no prior completed boundary) must load the raw
+    /// conversation unchanged. This proves that a summarizer error, early stream
+    /// end, or process crash that leaves only a `Started` row does not corrupt
+    /// or modify the visible history.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn load_conversation_raw_history_preserved_with_failed_started_only_boundary() {
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
+
+        let msg_repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
+        let boundary_repo = SessionCompactionBoundaryRepository::new(db);
+
+        let messages = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("What is Rust?"),
+            Message::assistant("Rust is a systems programming language."),
+            Message::user("Tell me more."),
+            Message::assistant("Rust focuses on safety and performance."),
+        ];
+        msg_repo
+            .insert_messages_batch(&session_id, &task_id, &messages)
+            .await
+            .unwrap();
+
+        // Simulate a failed compaction: only a Started row is written, never
+        // completed (summarizer error, crash, early stream end, etc.).
+        boundary_repo
+            .record_compaction_started(BeginCompactionParams {
+                session_id: &session_id,
+                schema_version: 1,
+                first_message_id: None,
+                last_compacted_message_id: None,
+                first_retained_message_id: None,
+                retained_tail_hash: None,
+                marker_metadata: None,
+            })
+            .await
+            .unwrap();
+
+        // Verify the Started-only boundary exists.
+        let latest_completed = boundary_repo
+            .latest_completed_boundary(&session_id)
+            .await
+            .unwrap();
+        assert!(
+            latest_completed.is_none(),
+            "no completed boundary should exist after failed compaction"
+        );
+        assert_eq!(
+            boundary_repo.boundary_count(&session_id).await.unwrap(),
+            1,
+            "started boundary row should exist"
+        );
+
+        // load_conversation must return raw history unchanged.
+        let conv = msg_repo.load_conversation(&session_id).await.unwrap();
+        assert_eq!(conv.messages.len(), 5);
+        assert_eq!(conv.messages[0].role, Role::System);
+        assert_eq!(
+            conv.messages[0].text_content(),
+            "You are a helpful assistant."
+        );
+        assert_eq!(conv.messages[1].role, Role::User);
+        assert_eq!(conv.messages[1].text_content(), "What is Rust?");
+        assert_eq!(conv.messages[2].role, Role::Assistant);
+        assert_eq!(
+            conv.messages[2].text_content(),
+            "Rust is a systems programming language."
+        );
+        assert_eq!(conv.messages[3].role, Role::User);
+        assert_eq!(conv.messages[3].text_content(), "Tell me more.");
+        assert_eq!(conv.messages[4].role, Role::Assistant);
+        assert_eq!(
+            conv.messages[4].text_content(),
+            "Rust focuses on safety and performance."
+        );
+        for msg in &conv.messages {
+            assert!(
+                msg.metadata.is_none(),
+                "no metadata should be injected for raw history"
+            );
+        }
+    }
+
+    // ── Regression: normal message turns do not create boundary rows ──
+
+    /// Regression: multiple normal message-turn insertions (single + batch)
+    /// must never create compaction boundary rows. Boundary rows are written
+    /// only at compaction start/completion paths.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multiple_normal_turns_never_create_boundary_rows() {
+        let db = test_db();
+        let (_project_id, task_id, session_id) = create_session(db.clone(), EventBus::noop()).await;
+
+        let msg_repo = SessionMessageRepository::new(db.clone(), EventBus::noop());
+        let boundary_repo = SessionCompactionBoundaryRepository::new(db);
+
+        // Simulate several normal message turns (alternating single insert and
+        // batch insert as the reply loop does).
+        // Turn 1: batch insert of system + initial user message.
+        msg_repo
+            .insert_messages_batch(
+                &session_id,
+                &task_id,
+                &[
+                    Message::system("You are a worker."),
+                    Message::user("Do the task."),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            boundary_repo.boundary_count(&session_id).await.unwrap(),
+            0,
+            "no boundary rows after initial batch insert"
+        );
+
+        // Turn 2: assistant response (single insert).
+        msg_repo
+            .insert_message(
+                &session_id,
+                &task_id,
+                "assistant",
+                r#"[{"type":"text","text":"Working on it."}]"#,
+                Some(15),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            boundary_repo.boundary_count(&session_id).await.unwrap(),
+            0,
+            "no boundary rows after assistant single insert"
+        );
+
+        // Turn 3: tool result (single insert).
+        msg_repo
+            .insert_message(
+                &session_id,
+                &task_id,
+                "user",
+                r#"[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]"#,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            boundary_repo.boundary_count(&session_id).await.unwrap(),
+            0,
+            "no boundary rows after tool result insert"
+        );
+
+        // Turn 4: batch insert (assistant + user follow-up).
+        msg_repo
+            .insert_messages_batch(
+                &session_id,
+                &task_id,
+                &[
+                    Message::assistant("Task is done."),
+                    Message::user("Thanks."),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            boundary_repo.boundary_count(&session_id).await.unwrap(),
+            0,
+            "no boundary rows after follow-up batch insert"
+        );
+
+        // Verify the full conversation loads correctly with no boundary effect.
+        let conv = msg_repo.load_conversation(&session_id).await.unwrap();
+        assert_eq!(conv.messages.len(), 6);
+    }
 }

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_ref_siblings",
+  "description": "Regression shape: $ref with sibling keywords (type, properties, required). JSON Schema §8.2.3.1 says siblings of $ref are ignored by validators, but strict providers may reject or misinterpret them. Moonshot strips siblings; OpenAI strict mode may fail.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "workspace": {
+        "$ref": "#/$defs/Workspace",
+        "type": "object",
+        "description": "A workspace reference with siblings",
+        "properties": {
+          "id": { "type": "string" }
+        },
+        "required": ["id"]
+      }
+    },
+    "required": ["workspace"],
+    "$defs": {
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "slug": { "type": "string" },
+          "name": { "type": "string" }
+        },
+        "required": ["slug", "name"]
+      }
+    }
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}

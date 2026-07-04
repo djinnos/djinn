@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_unevaluated_items",
+  "description": "Regression shape: unevaluatedItems keyword (Draft 2020-12). Not supported by Moonshot/Kimi, OpenAI strict function-calling, or Anthropic. Also tests nested unevaluatedItems and the interaction with regular items.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "strict_list": {
+        "type": "array",
+        "items": { "type": "string" },
+        "unevaluatedItems": false
+      },
+      "nested": {
+        "type": "object",
+        "properties": {
+          "inner_list": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "unevaluatedItems": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "required": ["strict_list"]
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}

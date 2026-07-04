@@ -1,7 +1,9 @@
 use djinn_core::message::{CacheBreakpoint, Conversation, Message};
 use djinn_provider::provider::client::ApiClient;
 use djinn_provider::provider::format::anthropic::AnthropicProvider;
+use djinn_provider::provider::format::google::GoogleProvider;
 use djinn_provider::provider::format::openai::OpenAIProvider;
+use djinn_provider::provider::format::openai_responses::OpenAIResponsesProvider;
 use djinn_provider::provider::{
     AuthMethod, FormatFamily, LlmProvider, ProviderCapabilities, ProviderConfig, ToolChoice,
 };
@@ -41,6 +43,41 @@ fn anthropic_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
             streaming: true,
             max_tokens_default: Some(64_000),
         },
+        reasoning_effort: None,
+        tool_schema_compat: None,
+    }
+}
+
+fn openai_responses_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
+    // Mirrors the helpers above: native/no-quirk `tool_schema_compat: None` is
+    // the explicit assertion target for these tests. The OpenAI Responses
+    // `strict: false` emission is the documented exception (see test body).
+    ProviderConfig {
+        base_url,
+        auth,
+        format_family: FormatFamily::OpenAIResponses,
+        model_id: "gpt-5.1-codex".to_string(),
+        context_window: 128_000,
+        telemetry: None,
+        session_affinity_key: None,
+        provider_headers: Default::default(),
+        capabilities: ProviderCapabilities::default(),
+        reasoning_effort: None,
+        tool_schema_compat: None,
+    }
+}
+
+fn google_config(base_url: String, auth: AuthMethod) -> ProviderConfig {
+    ProviderConfig {
+        base_url,
+        auth,
+        format_family: FormatFamily::Google,
+        model_id: "gemini-2.5-pro".to_string(),
+        context_window: 1_048_000,
+        telemetry: None,
+        session_affinity_key: None,
+        provider_headers: Default::default(),
+        capabilities: ProviderCapabilities::default(),
         reasoning_effort: None,
         tool_schema_compat: None,
     }
@@ -149,6 +186,29 @@ fn anthropic_sse_template() -> ResponseTemplate {
             "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n\
              data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":0}}\n\n\
              data: {\"type\":\"message_stop\"}\n\n",
+        )
+}
+
+/// Minimal Responses-API SSE body: a `response.completed` event with empty
+/// output and a token-count usage chunk. Enough to satisfy the parser without
+/// dragging in any extra Providers-specific JSON shape.
+fn openai_responses_sse_template() -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n\
+             data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+        )
+}
+
+/// Minimal Gemini AI Studio SSE body: a single `candidates` chunk with a text
+/// delta and a `STOP` finish reason. The stream parser only needs at least one
+/// data line to terminate.
+fn google_sse_template() -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n",
         )
 }
 
@@ -589,4 +649,331 @@ async fn anthropic_provider_serializes_none_tool_choice_in_request_body() {
     let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
     assert_eq!(body["tool_choice"]["type"], "none");
     assert_eq!(body["tools"][0]["name"], "shell");
+}
+
+// ─── Native no-quirk (`tool_schema_compat: None`) wire-shape goldens ───────────
+//
+// These tests pin the request body each provider emits when the slot resolver
+// leaves `tool_schema_compat: None` on the provider config — i.e. the native
+// path. The acceptance criterion for proposal mpen is: the schema passes
+// through identity except where the provider explicitly enforces a different
+// shape (the documented OpenAI Responses `strict: false` emission).
+//
+// Each test uses a compact, inline tool definition so the native shape is
+// obvious; no corpus fixture or `tool_projection::project` quirk is exercised.
+// See `provider/format/openai.rs`, `openai_responses.rs`, `google.rs`, and
+// `anthropic/tools.rs` for the per-provider serialization seams.
+
+/// Compact tool schema that all four providers should pass through verbatim
+/// under `tool_schema_compat: None`. The RMCP-camelCase `inputSchema` field
+/// plus the Anthropic-snake-case `input_schema` alias are both included so a
+/// single fixture exercises the field-shape dispatch in each provider's
+/// `convert_tool` / `convert_tools_to_openai` / Google `build_request` path.
+fn native_tool_definition() -> Vec<Value> {
+    vec![json!({
+        "name": "shell",
+        "description": "Run a shell command",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"}
+            },
+            "required": ["cmd"]
+        },
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"}
+            },
+            "required": ["cmd"]
+        }
+    })]
+}
+
+#[tokio::test]
+async fn openai_chat_completions_native_no_quirk_preserves_schema_envelope() {
+    // Native OpenAI chat-completions request bodies must wrap each tool as
+    // `{type, function: {name, description, parameters}}` and forward the
+    // `inputSchema` parameters verbatim when `tool_schema_compat` is `None`.
+    // Crucially: NO `strict` field on the function spec, and NO compat-driven
+    // rewrites (keyword stripping, anyOf flattening, etc.).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(openai_config(
+        server.uri(),
+        AuthMethod::BearerToken("openai-native".to_string()),
+    ));
+    drain_provider_stream(&provider, &native_tool_definition(), Some(ToolChoice::Auto)).await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+
+    // Endpoint + envelope.
+    assert_eq!(body["model"], "gpt-4o-mini");
+    assert_eq!(body["stream"], true);
+
+    let tool = &body["tools"][0];
+    assert_eq!(tool["type"], "function");
+    assert_eq!(tool["function"]["name"], "shell");
+    assert_eq!(tool["function"]["description"], "Run a shell command");
+
+    // The schema must be forwarded identity: the exact `inputSchema` keys
+    // (`type`, `properties.cmd.type`, `required`) reach the wire unchanged.
+    let params = &tool["function"]["parameters"];
+    assert_eq!(params["type"], "object");
+    assert_eq!(params["properties"]["cmd"]["type"], "string");
+    assert_eq!(params["required"][0], "cmd");
+
+    // Native path must NOT emit `strict` on the function spec (OpenAI
+    // Chat-Completions does not use strict-mode tools the way Responses does),
+    // and the snake-case `input_schema` alias MUST NOT leak into the chat
+    // envelope. Anthropic field-shape conversion runs on the Anthropic path,
+    // not here.
+    assert!(
+        tool["function"].get("strict").is_none(),
+        "OpenAI chat-completions native path must not emit strict; got {}",
+        tool["function"]
+    );
+    assert!(
+        tool.get("input_schema").is_none(),
+        "OpenAI chat-completions native path must not emit the Anthropic `input_schema` alias"
+    );
+    assert!(
+        params.get("input_schema").is_none(),
+        "Anthropic-style `input_schema` alias must not leak into chat-completions parameters"
+    );
+}
+
+#[tokio::test]
+async fn anthropic_native_no_quirk_preserves_input_schema_envelope() {
+    // Anthropic must convert RMCP's `inputSchema` (camelCase) to its wire
+    // `input_schema` (snake_case) under any compat — that field-shape
+    // conversion is unconditional — and the schema body itself must pass
+    // through identity when `tool_schema_compat: None`.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(anthropic_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(anthropic_config(
+        server.uri(),
+        AuthMethod::ApiKeyHeader {
+            header: "x-api-key".to_string(),
+            key: "anthropic-native".to_string(),
+        },
+    ));
+    drain_provider_stream(&provider, &native_tool_definition(), Some(ToolChoice::Auto)).await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+
+    assert_eq!(body["model"], "claude-3-5-sonnet");
+    assert_eq!(body["max_tokens"], 64_000);
+
+    let tool = &body["tools"][0];
+    // Anthropic field shape: NO top-level `type`, just `name`/`description`/`input_schema`.
+    assert!(tool.get("type").is_none());
+    assert_eq!(tool["name"], "shell");
+    assert_eq!(tool["description"], "Run a shell command");
+    assert!(
+        tool.get("inputSchema").is_none(),
+        "Anthropic wire format must convert inputSchema → input_schema"
+    );
+    let input_schema = &tool["input_schema"];
+    assert_eq!(input_schema["type"], "object");
+    assert_eq!(input_schema["properties"]["cmd"]["type"], "string");
+    assert_eq!(input_schema["required"][0], "cmd");
+
+    // Native Anthropic must not surface `strict` either — Responses-only
+    // emission, not an Anthropic wire concern.
+    assert!(
+        tool.get("strict").is_none(),
+        "Anthropic native path must not emit strict"
+    );
+    // No Moonshot / Gemini rewrites: `$ref` siblings, `prefixItems`,
+    // `unevaluatedItems` would only be stripped under a non-`None` compat.
+    // The native fixture is plain enough to read straight through.
+}
+
+#[tokio::test]
+async fn openai_responses_native_no_quirk_emits_strict_false_on_function_tools() {
+    // OpenAI Responses is the documented exception: every emitted function
+    // tool spec MUST carry `"strict": false`. This is a wire-shape quirk
+    // unrelated to `tool_schema_compat` — Responses disables strict-schema
+    // validation uniformly because the RMCP-emitted input schemas do not
+    // satisfy OpenAI's strict-schema requirements. The other native
+    // providers must NOT emit `strict`.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(openai_responses_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIResponsesProvider::new(openai_responses_config(
+        server.uri(),
+        AuthMethod::BearerToken("responses-native".to_string()),
+    ));
+
+    // Multi-tool fixture to prove every emitted function spec gets the flag.
+    let tools = vec![
+        json!({
+            "name": "shell",
+            "description": "Run a shell command",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"]
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}}
+                }
+            }
+        }),
+    ];
+    drain_provider_stream(&provider, &tools, Some(ToolChoice::Auto)).await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+
+    assert_eq!(body["model"], "gpt-5.1-codex");
+    // The Codex model triggers `reasoning.effort=medium`; the documented
+    // native path still emits it because `reasoning_effort == None` falls
+    // back to the default. The point of these tests is the *tools* envelope,
+    // but assert this so a change to the reasoning default surfaces here.
+    assert_eq!(body["reasoning"]["effort"], "medium");
+
+    let tools_arr = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools_arr.len(), 2);
+
+    for tool in tools_arr {
+        assert_eq!(tool["type"], "function");
+        // `name` and `description` are top-level on Responses, not nested
+        // under `function` (the OpenAI Responses format differs from
+        // chat-completions here).
+        assert!(
+            tool["name"].is_string(),
+            "Responses tools must hoist `name`"
+        );
+        assert!(
+            tool["description"].is_string(),
+            "Responses tools must hoist `description`"
+        );
+        assert!(
+            tool["function"].is_null(),
+            "Responses native path must not nest under `function` (chat-completions shape)"
+        );
+        assert!(
+            tool["parameters"].is_object(),
+            "Responses native path must expose `parameters` at the top level"
+        );
+        // The intended non-native-shape exception: every function tool spec
+        // emits `strict: false`. Documented as a deliberate Responses-only
+        // emission in the openai_responses.rs serializer.
+        assert_eq!(
+            tool["strict"], false,
+            "every emitted Responses function tool must carry strict: false"
+        );
+    }
+
+    // First tool came from RMCP `inputSchema`; assert the schema passes
+    // through identity (no compat rewrite would strip `required` here).
+    assert_eq!(tools_arr[0]["name"], "shell");
+    assert_eq!(tools_arr[0]["parameters"]["type"], "object");
+    assert_eq!(
+        tools_arr[0]["parameters"]["properties"]["cmd"]["type"],
+        "string"
+    );
+    assert_eq!(tools_arr[0]["parameters"]["required"][0], "cmd");
+
+    // Second tool came from OpenAI's chat-completions shape; the Responses
+    // serializer unwraps it (`function.parameters` → `parameters`).
+    assert_eq!(tools_arr[1]["name"], "read");
+    assert_eq!(tools_arr[1]["parameters"]["type"], "object");
+    assert_eq!(
+        tools_arr[1]["parameters"]["properties"]["path"]["type"],
+        "string"
+    );
+}
+
+#[tokio::test]
+async fn google_native_no_quirk_emits_function_declarations_envelope() {
+    // Google AI Studio wraps tool definitions under `tools[0].functionDeclarations`
+    // with `{name, description, parameters}` (NOT `inputSchema`). With
+    // `tool_schema_compat: None` the parameters schema must be forwarded
+    // identity — no Gemini keyword whitelist, no `required` filtering, no
+    // `nullable` rewrite.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1beta/models/gemini-2.5-pro:streamGenerateContent"))
+        .respond_with(google_sse_template())
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new(google_config(
+        server.uri(),
+        AuthMethod::BearerToken("google-native".to_string()),
+    ));
+    drain_provider_stream(&provider, &native_tool_definition(), Some(ToolChoice::Auto)).await;
+
+    let requests = server.received_requests().await.expect("captured requests");
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("json body");
+
+    // Envelope shape: tools array always contains exactly one object whose
+    // sole field is `functionDeclarations` (the only declared tool group
+    // Google's wire format understands).
+    let tools_arr = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools_arr.len(), 1);
+    assert!(tools_arr[0].get("functionDeclarations").is_some());
+    assert_eq!(
+        tools_arr[0]
+            .as_object()
+            .map(|o| o.keys().collect::<Vec<_>>())
+            .unwrap_or_default(),
+        vec!["functionDeclarations"],
+        "Gemini wire format expects exactly one `functionDeclarations` group"
+    );
+
+    let decl = &body["tools"][0]["functionDeclarations"][0];
+    assert_eq!(decl["name"], "shell");
+    assert_eq!(decl["description"], "Run a shell command");
+
+    // `parameters` is the wire field — the RMCP `inputSchema` shape is converted.
+    let params = &decl["parameters"];
+    assert!(decl.get("inputSchema").is_none());
+    assert!(decl.get("input_schema").is_none());
+    assert_eq!(params["type"], "object");
+    assert_eq!(params["properties"]["cmd"]["type"], "string");
+    assert_eq!(params["required"][0], "cmd");
+
+    // No Gemini-compat rewrites: native path keeps `required` intact and
+    // does not introduce a `nullable` coercion.
+    assert_eq!(params["required"].as_array().unwrap().len(), 1);
+
+    // Native Google does not surface `strict` either — Responses-only.
+    assert!(decl.get("strict").is_none());
+    // No `toolConfig` for the `Auto` choice — that's emitted only when the
+    // tool choice is `Required` or `None`.
+    assert!(
+        body.get("toolConfig").is_none(),
+        "Auto tool choice on the native path must not emit toolConfig"
+    );
 }

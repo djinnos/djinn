@@ -4,6 +4,7 @@ use crate::test_helpers::{
     agent_context_from_db, create_test_db, create_test_epic, create_test_project, create_test_task,
 };
 use djinn_core::commands::CommandSpec;
+use djinn_core::models::{ReopenClass, ReopenLedgerEntry};
 use djinn_db::TaskRepository;
 use tokio_util::sync::CancellationToken;
 
@@ -154,10 +155,12 @@ fn command_formatters() {
 
 #[tokio::test]
 async fn recent_feedback_filters_orders_and_limits() {
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::FullFixture {
+        db,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_full_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     repo.log_activity(
         Some(&task.id),
@@ -212,11 +215,13 @@ async fn recent_feedback_filters_orders_and_limits() {
 
 #[tokio::test]
 async fn initial_user_message_default_and_feedback() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     let default_msg = initial_user_message_for_task(&task.id, &state).await;
     assert_eq!(
@@ -295,11 +300,13 @@ fn latest_ci_feedback_respects_cycle_floor() {
 
 #[tokio::test]
 async fn initial_user_message_combines_reviewer_and_ci_feedback() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     // PR review feedback (system / pr_review_feedback) with at least one inline
     // comment so `pr_review_feedback_context` returns Some(..).
@@ -347,11 +354,13 @@ async fn initial_user_message_combines_reviewer_and_ci_feedback() {
 
 #[tokio::test]
 async fn initial_user_message_reviewer_only_preserves_behavior() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     let feedback_payload = serde_json::json!({
         "pull_number": 7,
@@ -447,6 +456,110 @@ fn combined_budget_lends_unused_room_when_both_large() {
 }
 
 #[test]
+fn recent_feedback_includes_structured_rejected_review_without_comment_twin() {
+    let activity = vec![djinn_core::models::ActivityEntry {
+        id: "evt-1".to_string(),
+        task_id: Some("t".to_string()),
+        actor_id: "agent-supervisor".to_string(),
+        actor_role: "reviewer".to_string(),
+        event_type: "review_submitted".to_string(),
+        payload: serde_json::json!({
+            "verdict": "rejected",
+            "feedback": "missing edge case handling"
+        })
+        .to_string(),
+        created_at: "2026-06-01T11:00:00Z".to_string(),
+    }];
+    let feedback = recent_feedback(&activity, 10);
+    assert_eq!(feedback.len(), 1);
+    assert!(feedback[0].contains("Reviewer rejection"));
+    assert!(feedback[0].contains("missing edge case handling"));
+}
+
+#[test]
+fn recent_feedback_structured_rejection_chronological_order_with_comments() {
+    let activity = vec![
+        activity_entry(
+            "reviewer",
+            "comment",
+            "earlier review comment",
+            "2026-06-01T10:00:00Z",
+        ),
+        djinn_core::models::ActivityEntry {
+            id: "evt-2".to_string(),
+            task_id: Some("t".to_string()),
+            actor_id: "agent-supervisor".to_string(),
+            actor_role: "reviewer".to_string(),
+            event_type: "review_submitted".to_string(),
+            payload: serde_json::json!({
+                "verdict": "rejected",
+                "feedback": "structured rejection: fix the naming"
+            })
+            .to_string(),
+            created_at: "2026-06-01T11:00:00Z".to_string(),
+        },
+        activity_entry(
+            "verification",
+            "comment",
+            "CI failure",
+            "2026-06-01T12:00:00Z",
+        ),
+    ];
+    let feedback = recent_feedback(&activity, 10);
+    assert_eq!(feedback.len(), 3);
+    assert!(feedback[0].contains("Reviewer feedback"));
+    assert!(feedback[0].contains("earlier review comment"));
+    assert!(feedback[1].contains("Reviewer rejection"));
+    assert!(feedback[1].contains("structured rejection: fix the naming"));
+    assert!(feedback[2].contains("Verification failure"));
+    assert!(feedback[2].contains("CI failure"));
+}
+
+#[test]
+fn recent_feedback_approved_review_is_not_included() {
+    let activity = vec![djinn_core::models::ActivityEntry {
+        id: "evt-1".to_string(),
+        task_id: Some("t".to_string()),
+        actor_id: "agent-supervisor".to_string(),
+        actor_role: "reviewer".to_string(),
+        event_type: "review_submitted".to_string(),
+        payload: serde_json::json!({
+            "verdict": "approved",
+            "feedback": "looks good"
+        })
+        .to_string(),
+        created_at: "2026-06-01T11:00:00Z".to_string(),
+    }];
+    assert!(recent_feedback(&activity, 10).is_empty());
+}
+
+#[test]
+fn recent_feedback_limit_drops_oldest_keeps_freshest_rejection() {
+    let activity = vec![
+        activity_entry("pm", "comment", "pm note 1", "2026-06-01T09:00:00Z"),
+        activity_entry("pm", "comment", "pm note 2", "2026-06-01T10:00:00Z"),
+        djinn_core::models::ActivityEntry {
+            id: "evt-3".to_string(),
+            task_id: Some("t".to_string()),
+            actor_id: "agent-supervisor".to_string(),
+            actor_role: "reviewer".to_string(),
+            event_type: "review_submitted".to_string(),
+            payload: serde_json::json!({
+                "verdict": "rejected",
+                "feedback": "freshest rejection"
+            })
+            .to_string(),
+            created_at: "2026-06-01T11:00:00Z".to_string(),
+        },
+    ];
+    let feedback = recent_feedback(&activity, 2);
+    assert_eq!(feedback.len(), 2);
+    assert!(feedback[0].contains("pm note 2"));
+    assert!(feedback[1].contains("Reviewer rejection"));
+    assert!(feedback[1].contains("freshest rejection"));
+}
+
+#[test]
 fn combined_budget_single_section_gets_more_than_floor() {
     // When only one section has content, it should be allowed well past the
     // per-section floor (it borrows the empty peer's whole share).
@@ -456,4 +569,266 @@ fn combined_budget_single_section_gets_more_than_floor() {
     assert!(rev_out.len() > COMBINED_BRIEF_SECTION_FLOOR_CHARS * 2);
     assert!(rev_out.len() <= COMBINED_BRIEF_TOTAL_CHARS);
     assert_eq!(ci_out, "");
+}
+
+// ── Reopen ledger tests ─────────────────────────────────────────────────────
+
+fn ledger_entry(
+    reopen_class: ReopenClass,
+    from_status: &str,
+    reason: Option<&str>,
+    created_at: &str,
+) -> ReopenLedgerEntry {
+    ReopenLedgerEntry {
+        reopen_class,
+        created_at: created_at.to_string(),
+        from_status: from_status.to_string(),
+        reason: reason.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn reopen_ledger_empty_returns_none() {
+    assert!(format_reopen_ledger(&[]).is_none());
+}
+
+#[test]
+fn reopen_ledger_renders_class_source_and_reason() {
+    // DB returns newest-first; function should reverse so oldest first.
+    let entries = vec![
+        ledger_entry(
+            ReopenClass::ReviewRejected,
+            "in_task_review",
+            Some("missing edge case"),
+            "2026-06-01T12:00:00Z",
+        ),
+        ledger_entry(
+            ReopenClass::MergeConflict,
+            "pr_review",
+            Some("conflict in src/main.rs"),
+            "2026-06-01T10:00:00Z",
+        ),
+    ];
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    // Oldest first (Round 1 = merge_conflict, Round 2 = review_rejected).
+    assert!(output.contains("Reopen history (newest last)"));
+    assert!(output.contains("Round 1"));
+    assert!(output.contains("merge_conflict"));
+    assert!(output.contains("from: pr_review"));
+    assert!(output.contains("conflict in src/main.rs"));
+    assert!(output.contains("Round 2"));
+    assert!(output.contains("review_rejected"));
+    assert!(output.contains("from: in_task_review"));
+    assert!(output.contains("missing edge case"));
+}
+
+#[test]
+fn reopen_ledger_six_entry_cap() {
+    // Build 6 entries — format_reopen_ledger renders whatever slice it receives.
+    // The cap is enforced at the call site via `recent_reopen_ledger(task_id, 6)`.
+    let entries: Vec<ReopenLedgerEntry> = (0..6)
+        .map(|i| {
+            ledger_entry(
+                ReopenClass::ReviewRejected,
+                "in_task_review",
+                Some(&format!("reason {i}")),
+                &format!("2026-06-01T{:02}:00:00Z", i),
+            )
+        })
+        .collect();
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    for i in 0..6 {
+        assert!(output.contains(&format!("reason {i}")));
+    }
+    // Exactly 6 round markers.
+    for round in 1..=6 {
+        assert!(output.contains(&format!("Round {round}")));
+    }
+    assert!(!output.contains("Round 7"));
+}
+
+#[test]
+fn reopen_ledger_long_reason_is_truncated() {
+    let long_reason = "x".repeat(500);
+    let entries = vec![ledger_entry(
+        ReopenClass::Other,
+        "closed",
+        Some(&long_reason),
+        "2026-06-01T10:00:00Z",
+    )];
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    // The raw "x".repeat(500) should NOT appear verbatim.
+    assert!(!output.contains(&"x".repeat(500)));
+    // But the first 120 chars plus ellipsis should.
+    let expected_head: String = "x".chars().take(120).collect();
+    assert!(output.contains(&expected_head));
+    assert!(output.contains("…"));
+}
+
+#[test]
+fn reopen_ledger_none_reason_shows_dash() {
+    let entries = vec![ledger_entry(
+        ReopenClass::MergeQueueFailed,
+        "pr_draft",
+        None,
+        "2026-06-01T10:00:00Z",
+    )];
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    assert!(output.contains("—"));
+}
+
+#[test]
+fn reopen_ledger_output_within_budget() {
+    // Build 6 entries with very long reasons to stress the budget.
+    let long_reason = "r".repeat(2000);
+    let entries: Vec<ReopenLedgerEntry> = (0..6)
+        .map(|i| {
+            ledger_entry(
+                ReopenClass::ReviewRejected,
+                "in_task_review",
+                Some(&long_reason),
+                &format!("2026-06-01T{:02}:00:00Z", i),
+            )
+        })
+        .collect();
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    // Output must be within the ledger budget (may be truncated by smart_truncate).
+    assert!(
+        output.len() <= LEDGER_BUDGET_CHARS + 200,
+        "ledger output {} exceeds budget {}",
+        output.len(),
+        LEDGER_BUDGET_CHARS
+    );
+    // Still contains the header.
+    assert!(output.contains("Reopen history"));
+}
+
+#[test]
+fn reopen_ledger_budget_stays_compact_for_typical_input() {
+    // A typical 3-entry ledger should be well under budget with no truncation.
+    let entries = vec![
+        ledger_entry(
+            ReopenClass::ReviewRejected,
+            "in_task_review",
+            Some("rename foo to bar"),
+            "2026-06-01T10:00:00Z",
+        ),
+        ledger_entry(
+            ReopenClass::MergeConflict,
+            "pr_review",
+            Some("conflict in lib.rs"),
+            "2026-06-01T11:00:00Z",
+        ),
+        ledger_entry(
+            ReopenClass::ReviewRejected,
+            "in_task_review",
+            Some("fix the tests"),
+            "2026-06-01T12:00:00Z",
+        ),
+    ];
+    let output = format_reopen_ledger(&entries).expect("expected ledger output");
+    // Should be far under budget — no truncation markers.
+    assert!(
+        output.len() < 500,
+        "expected compact output, got {} chars",
+        output.len()
+    );
+    assert!(!output.contains("bytes omitted"));
+}
+
+#[tokio::test]
+async fn initial_user_message_includes_ledger_when_present() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
+    // Seed a status_changed activity that `recent_reopen_ledger` can find.
+    // The ledger query looks for event_type='status_changed', to_status='open',
+    // from_status in (in_task_review, pr_draft, pr_review, closed, approved).
+    let payload = serde_json::json!({
+        "to_status": "open",
+        "from_status": "in_task_review",
+        "reopen_class": "review_rejected",
+        "reason": "fix the naming conventions"
+    })
+    .to_string();
+    repo.log_activity(
+        Some(&task.id),
+        "supervisor",
+        "system",
+        "status_changed",
+        &payload,
+    )
+    .await
+    .unwrap();
+    let msg = initial_user_message_for_task(&task.id, &state).await;
+    // The ledger section should appear.
+    assert!(
+        msg.contains("Reopen history"),
+        "expected ledger in message: {msg}"
+    );
+    assert!(msg.contains("review_rejected"));
+    assert!(msg.contains("fix the naming conventions"));
+}
+
+#[tokio::test]
+async fn initial_user_message_omits_ledger_when_empty() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    // No activity at all — default message, no ledger.
+    let msg = initial_user_message_for_task(&task.id, &state).await;
+    assert_eq!(
+        msg,
+        "Start by understanding the task context and execute it fully before stopping."
+    );
+    assert!(!msg.contains("Reopen history"));
+}
+
+#[tokio::test]
+async fn initial_user_message_ledger_combined_with_feedback() {
+    let db = create_test_db();
+    let state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
+    // PM feedback → triggers "important feedback" path.
+    repo.log_activity(
+        Some(&task.id),
+        "pm1",
+        "pm",
+        "comment",
+        r#"{"body":"fix the tests"}"#,
+    )
+    .await
+    .unwrap();
+    // Reopen entry.
+    let payload = serde_json::json!({
+        "to_status": "open",
+        "from_status": "in_task_review",
+        "reopen_class": "review_rejected",
+        "reason": "missing null check"
+    })
+    .to_string();
+    repo.log_activity(
+        Some(&task.id),
+        "supervisor",
+        "system",
+        "status_changed",
+        &payload,
+    )
+    .await
+    .unwrap();
+    let msg = initial_user_message_for_task(&task.id, &state).await;
+    // Both feedback and ledger present.
+    assert!(msg.contains("important feedback"), "msg: {msg}");
+    assert!(msg.contains("fix the tests"));
+    assert!(msg.contains("Reopen history"), "msg: {msg}");
+    assert!(msg.contains("review_rejected"));
+    assert!(msg.contains("missing null check"));
 }
