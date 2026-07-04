@@ -16,7 +16,16 @@
 #   cleanup_issue    = link to a tracking issue for the cleanup.
 #
 # At least one of "expires" or "cleanup_issue" must be present.
+#
+# Verification commands used after the Wave 1 migrations (cgcl, 58ml, x8y8, 7chr):
+#   find server -name '*.rs' | sh scripts/check-git-boundary.sh --files-from-stdin
+#   find server -name '*.rs' | sh scripts/check-http-boundary.sh --files-from-stdin
+#   find server -name '*.rs' | sh scripts/check-k8s-boundary.sh --files-from-stdin
 
+# ── Synthetic fixture entry ────────────────────────────────────────────────
+# Used by the shared guard self-test even though the fixture file is generated
+# at test time; keeping it lets the self-test assert allowlist hits without
+# depending on a real production file.
 
 [[entries]]
 capability = "git"
@@ -26,43 +35,40 @@ capability = "git"
 	rationale = "Synthetic allowlist fixture for the shared guard self-test."
 	expires = "2099-12-31"
 
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn_capability_guard_fixture/src/allowed.rs"
-	matcher = "git2::"
-	owner = "team/capability-guard-self-test"
-	rationale = "Synthetic allowlist fixture for the shared guard self-test."
-	expires = "2099-12-31"
+# ── Remaining git baseline after Wave 1 migrations ────────────────────────
+# Wave 1 (cgcl, 58ml, and the related graph migrations) moved djinn-graph's
+# canonical_graph.rs and coupling_index.rs shell-outs behind djinn-git. The
+# remaining non-owner git usage falls into three categories:
+#   1. Intentional / test-local helpers that create temporary git repos in unit
+#      tests (e.g. coordinator, slot, agent, workspace, supervisor tests).
+#   2. Still-pending owner-crate migrations that should eventually route
+#      through djinn-git (control-plane tools, workspace runtime, agent-worker
+#      test helpers, djinn-stack detection, k8s graph warmer, coordinator retry).
+#   3. Production call sites that are too large to migrate in this wave and
+#      are tracked by epic/fztz.
 
-# ── Baseline git capability allowlist entries ─────────────────────────────
-# These entries pre-allowlist existing git usage outside djinn-git/ so the
-# guard runs cleanly today.  They will be cleaned up as crates migrate to
-# djinn-git (tracked by epic fztz).
-
-# djinn-agent-worker
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/tests.rs"
 	matcher = "Command::new(\"git\")"
-	owner = "team/agent-worker"
-	rationale = "Test helper `git()` uses sync Command for test repo setup; production checkpoint/checkpoint-safety code uses djinn-git."
+	owner = "team/agent"
+	rationale = "Test-local helper for creating temporary git repos in checkpoint-safety unit tests. Not used by production checkpoint logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-agent-worker/src/main.rs"
 	matcher = "Command::new(\"git\")"
-	owner = "team/agent-worker"
-	rationale = "Test helper `git()` uses sync Command for test repo setup; production main.rs git operations use djinn-git."
+	owner = "team/agent"
+	rationale = "Still-pending owner-crate migration: agent-worker CLI / bootstrap code that shells out to git for workspace introspection. Should be routed through djinn-git once a helper exists for this call pattern."
 	cleanup_issue = "epic/fztz"
 
-# djinn-agent
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-agent/src/actors/slot/lifecycle/prompt_context.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent"
-	rationale = "Pre-existing git shell-out for prompt context; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: prompt-context assembly uses direct git shell-outs to collect repo state. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -70,16 +76,15 @@ capability = "git"
 	path = "server/crates/djinn-agent/tests/phase1_supervisor.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent"
-	rationale = "Pre-existing git shell-out in supervisor tests; to be migrated to djinn-git."
+	rationale = "Test-local helper for creating temporary git repos in the phase1 supervisor integration test. Not used by production agent logic."
 	cleanup_issue = "epic/fztz"
 
-# djinn-control-plane
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-control-plane/src/tools/memory_tools/mod.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/control-plane"
-	rationale = "Pre-existing git shell-out for memory tools; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: control-plane memory tool collects git history for context. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -87,7 +92,7 @@ capability = "git"
 	path = "server/crates/djinn-control-plane/src/tools/pr_review_tools.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/control-plane"
-	rationale = "Pre-existing git shell-out for PR review tools; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: PR-review tool shells out to git for diff metadata. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -95,16 +100,23 @@ capability = "git"
 	path = "server/crates/djinn-control-plane/src/tools/project_tools/lifecycle_ops.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/control-plane"
-	rationale = "Pre-existing git shell-out for project lifecycle ops; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: project lifecycle operations shell out to git for repo initialization. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
-# djinn-coordinator
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-coordinator/src/dispatch/retry.rs"
 	matcher = "git2::"
 	owner = "team/coordinator"
-	rationale = "Pre-existing libgit2 usage for retry dispatch; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: worktree dirty-state probe in coordinator dispatch. Must be routed through djinn-git once djinn-git exposes a synchronous worktree-status helper."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
+	path = "server/crates/djinn-coordinator/src/preapproval_gate.rs"
+	matcher = "Command::new(\"git\")"
+	owner = "team/coordinator"
+	rationale = "Test-local helper for creating temporary git repos in unit tests. Not used by production preapproval logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -112,32 +124,23 @@ capability = "git"
 	path = "server/crates/djinn-coordinator/src/tests/mod.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"
-	rationale = "Pre-existing git shell-out in coordinator tests; to be migrated to djinn-git."
+	rationale = "Test-local helper for creating temporary git repos in coordinator unit tests. Not used by production coordinator logic."
 	cleanup_issue = "epic/fztz"
 
-# djinn-graph
-# All four previously-baseline git shell-outs in `djinn-graph` were migrated
-# behind `djinn-git` owner-crate helpers (run_git_command_in / head_commit_sha
-# / rev_list_count) by cgcl. The detectors no longer match these files, so
-# the corresponding allowlist entries were removed to keep the allowlist in
-# sync with the actual source-call baseline.
-
-# djinn-k8s
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-k8s/src/graph_warmer.rs"
 	matcher = "tokio::process::Command::new(\"git\")"
 	owner = "team/k8s"
-	rationale = "Pre-existing async git shell-out for graph warmer; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: k8s graph warmer shells out to git to warm repository graphs. Should be routed through djinn-git once an async helper exists for this call pattern."
 	cleanup_issue = "epic/fztz"
 
-# djinn-slot
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-slot/src/finalize_handlers_fingerprint_tests.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/slot"
-	rationale = "Pre-existing git shell-out in fingerprint tests; to be migrated to djinn-git."
+	rationale = "Test-local helper for creating temporary git repos in finalize-handler fingerprint tests. Not used by production slot logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -145,34 +148,31 @@ capability = "git"
 	path = "server/crates/djinn-slot/src/reply_loop/tests.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/slot"
-	rationale = "Pre-existing git shell-out in reply loop tests; to be migrated to djinn-git."
+	rationale = "Test-local helper for creating temporary git repos in reply-loop tests. Not used by production slot logic."
 	cleanup_issue = "epic/fztz"
 
-# djinn-stack
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-stack/src/detect.rs"
 	matcher = "git2::"
 	owner = "team/stack"
-	rationale = "Pre-existing libgit2 usage for stack detection; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: stack detection uses libgit2 directly for repository inspection. Must be routed through djinn-git once djinn-git exposes the equivalent synchronous helpers."
 	cleanup_issue = "epic/fztz"
 
-# djinn-supervisor
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-supervisor/src/lib.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/supervisor"
-	rationale = "Pre-existing git shell-out in supervisor; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: supervisor runtime shells out to git for workspace operations. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
-# djinn-workspace
 [[entries]]
 capability = "git"
 	path = "server/crates/djinn-workspace/src/workspace.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/workspace"
-	rationale = "Pre-existing git shell-out for workspace operations; to be migrated to djinn-git."
+	rationale = "Still-pending owner-crate migration: workspace runtime shells out to git for repo state queries. Should be routed through djinn-git once the helper surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -180,29 +180,21 @@ capability = "git"
 	path = "server/crates/djinn-workspace/tests/smoke.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/workspace"
-	rationale = "Pre-existing git shell-out in workspace smoke tests; to be migrated to djinn-git."
+	rationale = "Test-local helper for creating temporary git repos in workspace smoke tests. Not used by production workspace logic."
 	cleanup_issue = "epic/fztz"
 
-# ── Baseline HTTP capability allowlist entries ─────────────────────────────
-# These entries pre-allowlist existing HTTP client usage outside djinn-provider/
-# so the guard runs cleanly today.  They will be cleaned up as crates migrate to
-# djinn-provider (tracked by epic fztz).
-
-# server
-[[entries]]
-capability = "http"
-	path = "server/src/server/org_sync.rs"
-	matcher = "reqwest::{"
-	owner = "team/server"
-	rationale = "Pre-existing destructured reqwest import for org sync operations; to be migrated to djinn-provider."
-	cleanup_issue = "epic/fztz"
+# ── Remaining HTTP baseline after Wave 1 migrations ───────────────────────
+# Wave 1 (x8y8) moved control-plane toolchain-version HTTP client construction
+# behind djinn-provider. The remaining non-owner HTTP usage is direct outbound
+# client construction in the server binary (org_sync, auth, github_install),
+# which is too large to migrate in this wave and is tracked by epic/fztz.
 
 [[entries]]
 capability = "http"
 	path = "server/src/server/auth.rs"
 	matcher = "reqwest::Client"
 	owner = "team/server"
-	rationale = "Pre-existing reqwest::Client import for auth operations; to be migrated to djinn-provider."
+	rationale = "Still-pending owner-crate migration: server authentication path constructs an outbound reqwest::Client directly. Should be routed through djinn-provider once the provider surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -210,85 +202,82 @@ capability = "http"
 	path = "server/src/server/github_install.rs"
 	matcher = "reqwest::Client"
 	owner = "team/server"
-	rationale = "Pre-existing reqwest::Client import for GitHub installation; to be migrated to djinn-provider."
+	rationale = "Still-pending owner-crate migration: GitHub app installation handler constructs an outbound reqwest::Client directly. Should be routed through djinn-provider once the provider surface supports this use case."
 	cleanup_issue = "epic/fztz"
 
-# Header-only reqwest imports (not HTTP client construction)
 [[entries]]
 capability = "http"
-path = "server/crates/djinn-agent/src/mcp_client.rs"
-matcher = "reqwest::{"
-owner = "team/agent"
-rationale = "Pre-existing reqwest::header destructured import for MCP client headers; not HTTP client construction."
-cleanup_issue = "epic/fztz"
+	path = "server/src/server/org_sync.rs"
+	matcher = "reqwest::{"
+	owner = "team/server"
+	rationale = "Still-pending owner-crate migration: org-sync handler imports reqwest client types for outbound GitHub API calls. Should be routed through djinn-provider once the provider surface supports this use case."
+	cleanup_issue = "epic/fztz"
 
-# ── Baseline k8s capability allowlist entries ──────────────────────────────
-# These entries pre-allowlist existing Kubernetes client/object access outside
-# djinn-k8s/ so the guard runs cleanly today.  They will be cleaned up as crates
-# migrate to djinn-k8s (tracked by epic fztz).
-
-# djinn-image-controller
-[[entries]]
-capability = "k8s"
-path = "server/crates/djinn-image-controller/src/watcher.rs"
-matcher = "kube::"
-owner = "team/image-controller"
-rationale = "Pre-existing kube client/watcher usage for image build watching; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+# ── Remaining K8s baseline after Wave 1 migrations ────────────────────────
+# Wave 1 (7chr) routed token-review Kubernetes access through djinn-k8s. The
+# remaining non-owner K8s usage is the image-controller (large deferred
+# migration) and the server state module, both tracked by epic/fztz.
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/src/watcher.rs"
-matcher = "k8s_openapi"
-owner = "team/image-controller"
-rationale = "Pre-existing k8s_openapi type usage for image build watching; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/src/build_job.rs"
+	matcher = "k8s_openapi"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller build-job constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/src/controller.rs"
-matcher = "kube::"
-owner = "team/image-controller"
-rationale = "Pre-existing kube::Client/api usage in image controller; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/src/controller.rs"
+	matcher = "k8s_openapi"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller controller constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/src/controller.rs"
-matcher = "k8s_openapi"
-owner = "team/image-controller"
-rationale = "Pre-existing k8s_openapi type usage in image controller; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/src/controller.rs"
+	matcher = "kube::"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller controller uses the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/src/build_job.rs"
-matcher = "k8s_openapi"
-owner = "team/image-controller"
-rationale = "Pre-existing k8s_openapi type usage for building image controller jobs; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/src/watcher.rs"
+	matcher = "k8s_openapi"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller watcher constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/tests/unit.rs"
-matcher = "kube::"
-owner = "team/image-controller"
-rationale = "Pre-existing kube runtime watcher usage in image controller tests; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/src/watcher.rs"
+	matcher = "kube::"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller watcher uses the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
 [[entries]]
 capability = "k8s"
-path = "server/crates/djinn-image-controller/tests/unit.rs"
-matcher = "k8s_openapi"
-owner = "team/image-controller"
-rationale = "Pre-existing k8s_openapi type usage in image controller tests; to be migrated to djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/tests/unit.rs"
+	matcher = "k8s_openapi"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller unit tests construct Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
 
-# server
 [[entries]]
 capability = "k8s"
-path = "server/src/server/state/mod.rs"
-matcher = "kube::"
-owner = "team/server"
-rationale = "Pre-existing kube::Client construction for image controller and graph warmer runtime wiring; the RPC token review path has moved behind djinn-k8s."
-cleanup_issue = "epic/fztz"
+	path = "server/crates/djinn-image-controller/tests/unit.rs"
+	matcher = "kube::"
+	owner = "team/image-controller"
+	rationale = "Deferred large migration: image-controller unit tests use the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "k8s"
+	path = "server/src/server/state/mod.rs"
+	matcher = "kube::"
+	owner = "team/server"
+	rationale = "Still-pending owner-crate migration: server state module uses kube types for Kubernetes client configuration. Should be routed through djinn-k8s once the k8s surface supports this use case."
+	cleanup_issue = "epic/fztz"
