@@ -560,6 +560,14 @@ pub enum TransitionAction {
     /// Non-worker role (planner/architect) completed with file changes —
     /// route through the approved → PR pipeline instead of closing directly.
     SubmitForMerge,
+    /// Pre-approval CI-grade verification gate (proposal `uv3p`) rejected an
+    /// approved submission whose focused Quality-Gate check set failed for the
+    /// touched paths. Moves `approved → open` so the same task returns to a
+    /// worker round carrying the gate feedback. Like `ParkForRemediation` this
+    /// is a strike-free re-route, NOT a rework: it does NOT increment
+    /// `reopen_count`, carries no `reopen_class`, and records no intervention,
+    /// so a red CI-grade result never costs a reopen/quality strike.
+    PreApprovalVerifyRejected,
 }
 
 impl TransitionAction {
@@ -611,6 +619,7 @@ impl TransitionAction {
             "pr_changes_requested" => Ok(Self::PrChangesRequested),
             "park_for_remediation" => Ok(Self::ParkForRemediation),
             "submit_for_merge" => Ok(Self::SubmitForMerge),
+            "preapproval_verify_rejected" => Ok(Self::PreApprovalVerifyRejected),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -1016,6 +1025,21 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Open)
         }
+
+        TransitionAction::PreApprovalVerifyRejected => {
+            // Pre-approval CI-grade verification gate (proposal `uv3p`) blocked
+            // the approved → PR-push path because the focused Quality-Gate check
+            // set failed for the touched paths. Return the task to a worker
+            // round by landing it at `open`. This is deliberately strike-free:
+            // no `increment_reopen`, no `reopen_class`, no `record_intervention`
+            // — a red CI-grade result is delivered as feedback, not counted as a
+            // reopen/quality strike. Only legal from `approved` (the seam the
+            // coordinator enforces just before pushing the task branch).
+            if *from != TaskStatus::Approved {
+                return bad("preapproval_verify_rejected is only valid from approved");
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
     })
 }
 
@@ -1090,7 +1114,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 27] = [
+    const ACTIONS: [TransitionAction; 28] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -1118,6 +1142,7 @@ mod tests {
         TransitionAction::PrMerge,
         TransitionAction::PrChangesRequested,
         TransitionAction::ParkForRemediation,
+        TransitionAction::PreApprovalVerifyRejected,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -1195,6 +1220,9 @@ mod tests {
                 | TaskStatus::InTaskReview
                 | TaskStatus::Approved,
             ) => Some(TaskStatus::Open),
+            (TransitionAction::PreApprovalVerifyRejected, TaskStatus::Approved) => {
+                Some(TaskStatus::Open)
+            }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
                 Some(TaskStatus::Approved)
             }
