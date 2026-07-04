@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -14,7 +14,6 @@ use std::future::Future;
 #[cfg(test)]
 use std::pin::Pin;
 
-use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -29,10 +28,9 @@ use rmcp::transport::{
 use crate::context::AgentContext;
 use crate::extension::shared_schemas;
 use crate::mcp_settings::McpServerConfig;
-use djinn_provider::repos::CredentialRepository;
 
-static PLACEHOLDER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_]+)\}").expect("valid MCP placeholder regex"));
+mod config;
+use config::{McpTransportKind, resolve_server_config};
 
 /// Maximum length of the advertised provider-facing MCP namespaced tool name,
 /// including the `mcp__` prefix and both `__` separators.
@@ -494,56 +492,6 @@ type TestDispatchFuture = Pin<Box<dyn Future<Output = Result<serde_json::Value, 
 type TestDispatchFn = dyn Fn(&str, Option<serde_json::Map<String, serde_json::Value>>) -> TestDispatchFuture
     + Send
     + Sync;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedMcpServerConfig {
-    url: Option<String>,
-    command: Option<String>,
-    args: Vec<String>,
-    env: HashMap<String, String>,
-    headers: HashMap<String, String>,
-    startup_timeout_ms: u64,
-    request_timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum McpTransportKind {
-    Http,
-    Stdio,
-    Unsupported,
-}
-
-#[allow(dead_code)]
-impl ResolvedMcpServerConfig {
-    fn transport_kind(&self) -> McpTransportKind {
-        if self.url.is_some() {
-            McpTransportKind::Http
-        } else if self.command.is_some() {
-            McpTransportKind::Stdio
-        } else {
-            McpTransportKind::Unsupported
-        }
-    }
-
-    fn startup_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.startup_timeout_ms)
-    }
-
-    fn request_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.request_timeout_ms)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MissingPlaceholder {
-    field: String,
-    variable: String,
-}
-
-enum PlaceholderLookup {
-    Found(String),
-    Missing,
-}
 
 impl McpToolRegistry {
     /// Returns true if this registry has a tool with the given name.
@@ -1100,6 +1048,10 @@ pub async fn connect_and_discover(
                     server_instructions.insert(name.clone(), trimmed.to_string());
                 }
             }
+            // Track servers that advertise the resources capability.
+            if info.capabilities.resources.is_some() {
+                resource_capable_servers_set.insert(name.clone());
+            }
         }
 
         // Discover tools from this server.
@@ -1182,110 +1134,6 @@ pub async fn connect_and_discover(
     })
 }
 
-async fn resolve_server_config(
-    server_name: &str,
-    config: &McpServerConfig,
-    app_state: &AgentContext,
-) -> Result<ResolvedMcpServerConfig, MissingPlaceholder> {
-    Ok(ResolvedMcpServerConfig {
-        url: match &config.url {
-            Some(url) => Some(
-                resolve_placeholder_value(app_state, url, &format!("server `{server_name}` url"))
-                    .await?,
-            ),
-            None => None,
-        },
-        command: config.command.clone(),
-        args: config.args.clone(),
-        env: resolve_placeholder_map(
-            app_state,
-            &config.env,
-            &format!("server `{server_name}` env"),
-        )
-        .await?,
-        headers: resolve_placeholder_map(
-            app_state,
-            &config.headers,
-            &format!("server `{server_name}` header"),
-        )
-        .await?,
-        startup_timeout_ms: config.startup_timeout_ms,
-        request_timeout_ms: config.request_timeout_ms,
-    })
-}
-
-async fn resolve_placeholder_map(
-    app_state: &AgentContext,
-    values: &HashMap<String, String>,
-    field_prefix: &str,
-) -> Result<HashMap<String, String>, MissingPlaceholder> {
-    let mut resolved = HashMap::with_capacity(values.len());
-    for (key, value) in values {
-        resolved.insert(
-            key.clone(),
-            resolve_placeholder_value(app_state, value, &format!("{field_prefix} `{key}`")).await?,
-        );
-    }
-    Ok(resolved)
-}
-
-async fn resolve_placeholder_value(
-    app_state: &AgentContext,
-    value: &str,
-    field: &str,
-) -> Result<String, MissingPlaceholder> {
-    let mut resolved = String::with_capacity(value.len());
-    let mut last_end = 0;
-
-    for captures in PLACEHOLDER_RE.captures_iter(value) {
-        let full = captures.get(0).expect("full placeholder match");
-        let variable = captures
-            .get(1)
-            .expect("placeholder variable capture")
-            .as_str();
-
-        resolved.push_str(&value[last_end..full.start()]);
-        match lookup_placeholder_value(app_state, variable).await {
-            PlaceholderLookup::Found(replacement) => resolved.push_str(&replacement),
-            PlaceholderLookup::Missing => {
-                return Err(MissingPlaceholder {
-                    field: field.to_string(),
-                    variable: variable.to_string(),
-                });
-            }
-        }
-        last_end = full.end();
-    }
-
-    if last_end == 0 {
-        return Ok(value.to_string());
-    }
-
-    resolved.push_str(&value[last_end..]);
-    Ok(resolved)
-}
-
-async fn lookup_placeholder_value(app_state: &AgentContext, variable: &str) -> PlaceholderLookup {
-    if let Ok(value) = std::env::var(variable) {
-        return PlaceholderLookup::Found(value);
-    }
-
-    let credential_repo =
-        CredentialRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    match credential_repo.get_decrypted(variable).await {
-        Ok(Some(value)) => PlaceholderLookup::Found(value),
-        Ok(None) => PlaceholderLookup::Missing,
-        Err(error) => {
-            tracing::warn!(
-                variable = variable,
-                error = %error,
-                "Failed to resolve MCP placeholder from credential store"
-            );
-            PlaceholderLookup::Missing
-        }
-    }
-}
-
 /// Establish a connection to an MCP server via Streamable HTTP transport.
 ///
 /// The returned peer uses a [`McpNotificationHandler`] that observes
@@ -1356,5 +1204,9 @@ async fn startup_and_list(
     Ok((peer, result))
 }
 
+#[cfg(test)]
+mod capability_tests;
+#[cfg(test)]
+mod resource_tests;
 #[cfg(test)]
 mod tests;

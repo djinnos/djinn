@@ -1,3 +1,4 @@
+use super::config::ResolvedMcpServerConfig;
 use super::*;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
 use djinn_core::events::EventBus;
@@ -109,7 +110,7 @@ fn call_tool_result_error() {
 }
 
 /// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps.
-fn make_routing(
+pub(super) fn make_routing(
     tool_to_server: HashMap<String, String>,
     namespaced_to_original: HashMap<String, String>,
 ) -> Arc<RwLock<RoutingState>> {
@@ -1076,129 +1077,6 @@ async fn request_timeout_stored_per_server_at_discovery() {
     );
     // Unknown server should not be present.
     assert!(!routing_state.request_timeouts.contains_key("server-c"));
-}
-
-// ── rmcp capability access / adapter validation ────────────────────
-//
-// These compile-time probes verify that the rmcp API touchpoints
-// needed by sibling epics (yjc6, hyeu) are accessible through the
-// types already used in mcp_client.rs.  If a future rmcp upgrade
-// removes or renames any of these fields, these tests will fail to
-// compile — giving early warning before the sibling epics attempt
-// to use them.
-//
-// NOT exposed to the model:
-// - `InitializeResult.instructions` → yjc6 (prompt instructions block)
-// - resource tools → hyeu (resources-as-tools)
-//
-// Validated access points:
-// - `ServerCapabilities.tools` / `.resources` / `.logging` / `.prompts`
-// - `ToolsCapability.list_changed`
-// - `LoggingMessageNotification` type exists (notification handler shape)
-// - `ServerNotification` enum variants for handler dispatch
-
-#[test]
-fn rmcp_initialize_result_instructions_field_is_accessible() {
-    // Compile-time probe: InitializeResult has an `instructions` field.
-    // Used by yjc6 to extract server prompt instructions.
-    let result = rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default());
-    // instructions defaults to None
-    assert!(result.instructions.is_none());
-    // Can set instructions
-    let with_inst = result.with_instructions("test instructions");
-    assert_eq!(with_inst.instructions.as_deref(), Some("test instructions"));
-}
-
-#[test]
-fn rmcp_server_capabilities_fields_are_accessible() {
-    // Compile-time probe: ServerCapabilities exposes tools, resources,
-    // prompts, and logging fields.
-    let caps = rmcp::model::ServerCapabilities::default();
-    assert!(caps.tools.is_none());
-    assert!(caps.resources.is_none());
-    assert!(caps.prompts.is_none());
-    assert!(caps.logging.is_none());
-}
-
-#[test]
-fn rmcp_tools_capability_list_changed_is_accessible() {
-    // Compile-time probe: ToolsCapability.list_changed indicates whether
-    // the server supports tools/list_changed notifications.
-    let tc = rmcp::model::ToolsCapability {
-        list_changed: Some(true),
-    };
-    assert_eq!(tc.list_changed, Some(true));
-}
-
-#[test]
-fn rmcp_logging_notification_type_is_accessible() {
-    // Compile-time probe: LoggingMessageNotification exists and can be
-    // pattern-matched from ServerNotification. This is the type that a
-    // notification handler/channel adapter would need to receive.
-    use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam, ServerNotification};
-
-    // Construct a minimal logging notification.
-    let logging =
-        LoggingMessageNotificationParam::new(LoggingLevel::Info, serde_json::json!("test message"));
-
-    // Verify the param fields are accessible.
-    assert_eq!(logging.level, LoggingLevel::Info);
-    assert_eq!(logging.data, serde_json::json!("test message"));
-
-    // Wrap in ServerNotification to confirm the variant exists and is matchable.
-    let notif =
-        ServerNotification::LoggingMessageNotification(rmcp::model::Notification::new(logging));
-
-    // Pattern-match to verify the handler dispatch shape.
-    match notif {
-        ServerNotification::LoggingMessageNotification(inner) => {
-            assert_eq!(inner.params.level, LoggingLevel::Info);
-        }
-        _ => panic!("expected LoggingMessageNotification variant"),
-    }
-}
-
-#[test]
-fn rmcp_tool_list_changed_notification_type_is_accessible() {
-    // Compile-time probe: ToolListChangedNotification exists and can be
-    // constructed/matched. This is the type that a notification handler
-    // for tools/list_changed would receive.
-    use rmcp::model::ServerNotification;
-
-    // ToolListChangedNotification is NotificationNoParam<Method>, which
-    // derives Default since the Method is a unit struct.
-    let changed: rmcp::model::ToolListChangedNotification = Default::default();
-    let notif = ServerNotification::ToolListChangedNotification(changed);
-
-    match notif {
-        ServerNotification::ToolListChangedNotification(_) => {
-            // Successfully matched — the variant and type are accessible.
-        }
-        _ => panic!("expected ToolListChangedNotification variant"),
-    }
-}
-
-#[test]
-fn startup_timeout_defaults_match_config() {
-    // Verify the startup/request timeout defaults from McpServerConfig
-    // match the expected values.
-    assert_eq!(McpServerConfig::default_startup_timeout_ms(), 30_000);
-    assert_eq!(McpServerConfig::default_request_timeout_ms(), 120_000);
-}
-
-#[test]
-fn resolved_config_startup_and_request_timeouts_from_duration_helpers() {
-    let config = ResolvedMcpServerConfig {
-        url: Some("https://example.com/mcp".to_string()),
-        command: None,
-        args: Vec::new(),
-        env: HashMap::new(),
-        headers: HashMap::new(),
-        startup_timeout_ms: 5_000,
-        request_timeout_ms: 30_000,
-    };
-    assert_eq!(config.startup_timeout(), Duration::from_millis(5_000));
-    assert_eq!(config.request_timeout(), Duration::from_millis(30_000));
 }
 
 // ── Server instructions accessor tests ─────────────────────────────

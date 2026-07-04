@@ -1,0 +1,260 @@
+use super::tests::make_routing;
+use super::*;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+
+// ── Resource capability detection tests ──────────────────────────────
+
+/// Helper: build an `Arc<RwLock<RoutingState>>` with explicit resource-capable servers.
+fn make_routing_with_resources(
+    tool_to_server: HashMap<String, String>,
+    namespaced_to_original: HashMap<String, String>,
+    resource_capable_servers: HashSet<String>,
+) -> Arc<RwLock<RoutingState>> {
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
+        resource_capable_servers,
+    }))
+}
+
+/// Helper: build an `McpToolRegistry` with explicit resource-capable servers.
+fn make_registry_with_resources(resource_capable_servers: Vec<String>) -> McpToolRegistry {
+    McpToolRegistry {
+        routing: make_routing_with_resources(
+            HashMap::new(),
+            HashMap::new(),
+            resource_capable_servers.iter().cloned().collect(),
+        ),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: resource_capable_servers.into_iter().collect(),
+        #[cfg(test)]
+        test_dispatch: None,
+    }
+}
+
+#[test]
+fn has_resource_capable_servers_returns_false_by_default() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    assert!(!registry.has_resource_capable_servers());
+}
+
+#[test]
+fn has_resource_capable_servers_returns_true_when_populated() {
+    let registry =
+        make_registry_with_resources(vec!["alpha-server".to_string(), "beta-server".to_string()]);
+    assert!(registry.has_resource_capable_servers());
+}
+
+#[tokio::test]
+async fn list_resources_returns_empty_when_no_resource_servers() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    let result = registry.list_resources(None).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn list_resources_returns_error_for_non_resource_server() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    let result = registry.list_resources(Some("unknown-server")).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("does not support resources"),
+        "expected resource-capable error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn read_resource_returns_error_for_non_resource_server() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    let result = registry
+        .read_resource("unknown-server", "file:///test.txt")
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("does not support resources"),
+        "expected resource-capable error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn read_resource_returns_error_for_missing_peer() {
+    // Server is resource-capable but has no peer (shouldn't happen in practice
+    // but tests the deterministic error path).
+    let mut resource_capable = HashSet::new();
+    resource_capable.insert("orphan-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing_with_resources(HashMap::new(), HashMap::new(), resource_capable),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: {
+            let mut s = HashSet::new();
+            s.insert("orphan-server".to_string());
+            s
+        },
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    let result = registry
+        .read_resource("orphan-server", "file:///test.txt")
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("peer not found"),
+        "expected peer-not-found error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn list_resources_returns_empty_json_when_no_peers() {
+    // Build a resource-capable routing state with no peers.
+    // list_resources uses the real peer (not test_dispatch), so with no peers
+    // the snapshot is empty and it returns Ok([]).
+    let mut resource_capable = HashSet::new();
+    resource_capable.insert("no-peer-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing_with_resources(HashMap::new(), HashMap::new(), resource_capable),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: {
+            let mut s = HashSet::new();
+            s.insert("no-peer-server".to_string());
+            s
+        },
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    // No peers in routing state → snapshot is empty → returns Ok([]).
+    let result = registry.list_resources(None).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn list_resources_specific_server_not_resource_capable() {
+    let registry = make_registry_with_resources(vec!["resource-server".to_string()]);
+    // Requesting a server that is NOT in resource_capable_servers should fail.
+    let result = registry.list_resources(Some("other-server")).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("does not support resources"),
+        "expected not-resource-capable error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn list_resources_from_specific_resource_server_no_peer() {
+    // Server is resource-capable but has no peer handle (empty routing).
+    let registry = make_registry_with_resources(vec!["resource-server".to_string()]);
+    let result = registry.list_resources(Some("resource-server")).await;
+    // No peers → snapshot is empty → returns Ok([]).
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn read_resource_errors_for_missing_peer_with_default_timeout() {
+    // Verify the same fallback behavior as call_tool: when a server is not in
+    // request_timeouts, the default timeout (120_000ms) is used. With no peer,
+    // the deterministic "peer not found" error is returned.
+    let mut resource_capable = HashSet::new();
+    resource_capable.insert("resource-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing_with_resources(HashMap::new(), HashMap::new(), resource_capable),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: {
+            let mut s = HashSet::new();
+            s.insert("resource-server".to_string());
+            s
+        },
+        #[cfg(test)]
+        test_dispatch: None,
+    };
+    // No peer for this server → deterministic error.
+    let result = registry
+        .read_resource("resource-server", "file:///test.txt")
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("peer not found"),
+        "expected peer-not-found error, got: {err}"
+    );
+}
+
+// ── rmcp type compile-time probes ────────────────────────────────────
+//
+// Verify the rmcp types used by read_resource are accessible.
+
+#[test]
+fn rmcp_resource_contents_text_is_accessible() {
+    // Compile-time probe: ResourceContents::TextResourceContents can be matched.
+    let contents = ResourceContents::text("hello world", "str:///hello");
+    match &contents {
+        ResourceContents::TextResourceContents { uri, text, .. } => {
+            assert_eq!(uri, "str:///hello");
+            assert_eq!(text, "hello world");
+        }
+        _ => panic!("expected TextResourceContents"),
+    }
+}
+
+#[test]
+fn rmcp_resource_contents_blob_is_accessible() {
+    // Compile-time probe: ResourceContents::BlobResourceContents can be matched.
+    let contents = ResourceContents::blob("base64data", "file:///image.png");
+    match &contents {
+        ResourceContents::BlobResourceContents { uri, blob, .. } => {
+            assert_eq!(uri, "file:///image.png");
+            assert_eq!(blob, "base64data");
+        }
+        _ => panic!("expected BlobResourceContents"),
+    }
+}
+
+#[test]
+fn rmcp_read_resource_request_params_construction() {
+    // Compile-time probe: ReadResourceRequestParams::new works.
+    let params = ReadResourceRequestParams::new("file:///test.txt");
+    assert_eq!(params.uri, "file:///test.txt");
+}
