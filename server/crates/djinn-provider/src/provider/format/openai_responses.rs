@@ -6,11 +6,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::provider::format::tool_projection::project;
-use crate::provider::FormatFamily;
 use crate::message::{ContentBlock, Conversation};
+use crate::provider::FormatFamily;
 use crate::provider::client::ApiClient;
 use crate::provider::error::ProviderError;
+use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -81,7 +81,9 @@ impl OpenAIResponsesProvider {
                         .or_else(|| tool.get("input_schema"))
                         .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
                         .cloned()
-                        .map(|schema| project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI));
+                        .map(|schema| {
+                            project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI)
+                        });
                     json!({
                         "type": "function",
                         "name": name,
@@ -1043,6 +1045,64 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["type"], "string");
         assert_eq!(items[1]["type"], "integer");
+    }
+
+    #[test]
+    fn test_build_request_native_no_quirk_emits_strict_false_per_tool() {
+        // Captures the wire-shape OpenAI Responses emits for a native
+        // (`tool_schema_compat: None`) provider config, without going through
+        // HTTP. The companion integration test in
+        // `tests/provider_client_requests.rs::openai_responses_native_*`
+        // does the full request round-trip; this in-crate test pins the
+        // `build_request` shape independently.
+        //
+        // The Responses path is the documented exception to the no-quirk
+        // identity rule: every emitted function tool spec MUST carry
+        // `"strict": false` because the RMCP-emitted input schemas do not
+        // satisfy OpenAI's strict-schema requirements. Native=no-quirk
+        // everywhere else — only `strict` is intentionally non-native.
+        let provider = test_provider();
+        let mut conv = Conversation::new();
+        conv.push(Message::user("list files"));
+        let tools = vec![
+            json!({
+                "name": "bash",
+                "description": "Run a shell command",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"cmd": {"type": "string"}},
+                    "required": ["cmd"]
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}}
+                    }
+                }
+            }),
+        ];
+
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::Auto));
+        let tools_arr = req["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 2);
+
+        for tool in tools_arr {
+            assert_eq!(tool["type"], "function");
+            // Responses hoists `name`/`description`/`parameters` to the top
+            // level; the chat-completions `function` wrapper is gone.
+            assert!(tool["name"].is_string());
+            assert!(tool["description"].is_string());
+            assert!(tool["function"].is_null());
+            assert!(tool["parameters"].is_object());
+            // The intended non-native-shape exception: every function tool
+            // spec carries `strict: false` regardless of compat.
+            assert_eq!(tool["strict"], false);
+        }
     }
 
     #[test]
