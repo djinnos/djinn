@@ -1154,6 +1154,7 @@ dependencies = [
  "djinn-provider",
  "futures",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "workspace-hack",

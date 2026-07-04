@@ -3275,3 +3275,100 @@ async fn failed_reactive_compaction_leaves_started_only_boundary() {
         persisted.messages.len()
     );
 }
+
+/// Regression: persisting a compaction boundary for a worker conversation whose
+/// messages have no `provider_data["id"]` must succeed against real Postgres.
+///
+/// Before the fix, `message_identity` produced `hash:<64-hex>` (69 chars) for
+/// the fallback, overflowing the `VARCHAR(36)` columns in migration 92 and
+/// triggering Postgres error 22001. The shared `bounded_message_identity`
+/// helper now caps the fallback at 36 chars (`h:<34-hex>`).
+#[tokio::test]
+async fn worker_compaction_boundary_with_no_provider_id_succeeds() {
+    let cancel = CancellationToken::new();
+    let db = test_helpers::create_test_db();
+    let ctx = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let project = test_helpers::create_test_project(&db).await;
+    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let session_repo = SessionRepository::new(db.clone(), ctx.event_bus.clone());
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &project.id,
+            task_id: Some(&task.id),
+            model: "test/mock-model",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .expect("create session");
+
+    // Build a conversation with NO provider ids — every message triggers the
+    // hash fallback in bounded_message_identity.
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+    conv.push(Message::assistant("Working on it."));
+    conv.push(Message::user("Keep going."));
+
+    let boundary_repo = SessionCompactionBoundaryRepository::new(db.clone());
+
+    // record_compaction_started → gather_boundary_identity → bounded_message_identity
+    let boundary_id =
+        super::persistence::record_compaction_started(&boundary_repo, &session.id, &conv)
+            .await
+            .expect("boundary persistence must succeed (no 22001)");
+
+    let boundary = boundary_repo
+        .fetch_by_id(&boundary_id)
+        .await
+        .expect("fetch boundary");
+    assert_eq!(boundary.phase, djinn_db::CompactionPhase::Started);
+
+    // Every id column must have been populated and must fit VARCHAR(36).
+    let first_id = boundary
+        .first_message_id
+        .as_deref()
+        .expect("first_message_id must be set");
+    let last_id = boundary
+        .last_compacted_message_id
+        .as_deref()
+        .expect("last_compacted_message_id must be set");
+    assert!(
+        first_id.len() <= 36,
+        "first_message_id too long: {first_id} ({} chars)",
+        first_id.len()
+    );
+    assert!(
+        last_id.len() <= 36,
+        "last_compacted_message_id too long: {last_id} ({} chars)",
+        last_id.len()
+    );
+    assert!(
+        first_id.starts_with("h:"),
+        "expected hash fallback prefix, got: {first_id}"
+    );
+    assert!(
+        last_id.starts_with("h:"),
+        "expected hash fallback prefix, got: {last_id}"
+    );
+
+    // complete_compaction_boundary also persists via bounded_message_identity.
+    super::persistence::complete_compaction_boundary(
+        &boundary_repo,
+        Some(&boundary_id),
+        &conv,
+        "test summary",
+    )
+    .await;
+
+    let completed = boundary_repo
+        .fetch_by_id(&boundary_id)
+        .await
+        .expect("fetch completed boundary");
+    assert_eq!(completed.phase, djinn_db::CompactionPhase::Ended);
+    assert_eq!(completed.summary_text.as_deref(), Some("test summary"));
+}
