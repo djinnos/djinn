@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_allof_if_then_conditionals",
+  "description": "Regression shape: allOf/if/then conditional schemas. These are valid JSON Schema Draft 2020-12 but not understood by strict OpenAI function-calling or Gemini functionDeclarations.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "kind": {
+        "type": "string",
+        "enum": ["a", "b"]
+      },
+      "value": {}
+    },
+    "required": ["kind"],
+    "allOf": [
+      {
+        "if": {
+          "properties": { "kind": { "const": "a" } },
+          "required": ["kind"]
+        },
+        "then": {
+          "properties": {
+            "value": { "type": "string" }
+          },
+          "required": ["value"]
+        }
+      },
+      {
+        "if": {
+          "properties": { "kind": { "const": "b" } },
+          "required": ["kind"]
+        },
+        "then": {
+          "properties": {
+            "value": { "type": "integer" }
+          },
+          "required": ["value"]
+        }
+      }
+    ]
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}

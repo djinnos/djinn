@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_gemini_forbidden_keywords",
+  "description": "Regression shape: Gemini-forbidden keywords and safety annotation keys. Gemini's functionDeclarations schema format does not support: unevaluatedProperties, $schema, const, patternProperties, dependentSchemas, contentEncoding, contentMediaType, if/then/else, allOf, oneOf, $id, $anchor. Also includes safety-annotation-style keys (readOnly, destructive, idempotent, openWorld, concurrent_safe) that are tool-level metadata, not inputSchema keywords — these must never leak into the projected inputSchema.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["fast", "slow"],
+        "description": "Processing mode"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100
+      }
+    },
+    "required": ["mode"],
+    "unevaluatedProperties": false,
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:regression:gemini-forbidden",
+    "$anchor": "GeminiForbidden",
+    "const": "never",
+    "patternProperties": {
+      "^x_": { "type": "string" }
+    },
+    "dependentSchemas": {
+      "limit": {
+        "properties": {
+          "mode": { "const": "slow" }
+        }
+      }
+    },
+    "contentEncoding": "base64",
+    "contentMediaType": "application/octet-stream",
+    "allOf": [
+      { "properties": { "limit": { "type": "integer" } } }
+    ],
+    "oneOf": [
+      { "required": ["mode"] }
+    ]
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}
