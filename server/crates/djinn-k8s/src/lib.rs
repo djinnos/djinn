@@ -27,3 +27,4 @@ pub use graph_warmer::{
 };
 pub use runtime::KubernetesRuntime;
 pub use warm_job::build_warm_job;
+pub use token_review::TokenReviewer;
