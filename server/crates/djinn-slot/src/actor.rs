@@ -351,6 +351,10 @@ pub struct SlotHandle {
     id: usize,
     model_id: String,
     sender: mpsc::Sender<SlotCommand>,
+    /// Clone of the per-lifecycle `CompactionCriticalSection` so the pool can
+    /// synchronously query whether the slot's reply loop is mid-compaction
+    /// without a channel round-trip.
+    compaction_cs: CompactionCriticalSection,
 }
 
 impl SlotHandle {
@@ -399,6 +403,7 @@ impl SlotHandle {
         let compaction_cs = CompactionCriticalSection::new();
         let mut app_state = app_state;
         app_state.compaction_cs = compaction_cs.clone();
+        let cs_for_handle = app_state.compaction_cs.clone();
         let actor = SlotActor {
             id,
             model_id: model_id.clone(),
@@ -414,6 +419,7 @@ impl SlotHandle {
             id,
             model_id,
             sender,
+            compaction_cs: cs_for_handle,
         }
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -432,6 +438,17 @@ impl SlotHandle {
     }
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+    /// Returns `true` if the slot's reply loop is currently inside a
+    /// compaction critical section.  The pool uses this to decide whether
+    /// to defer settlement and mapping release during teardown.
+    pub fn is_compacting(&self) -> bool {
+        self.compaction_cs.is_compacting()
+    }
+    /// Test-only accessor for the per-lifecycle compaction critical section.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_compaction_cs(&self) -> &CompactionCriticalSection {
+        &self.compaction_cs
     }
     #[tracing::instrument(
         name = "djinn.slot.run_task",

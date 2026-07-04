@@ -30,7 +30,8 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
-use djinn_db::{Database, ImageRepository, ServicePresetRepository};
+use djinn_db::{Database, ImageRepository, ServicePreset, ServicePresetRepository};
+use serde::{Deserialize, Serialize};
 
 use crate::config::KubernetesConfig;
 
@@ -54,6 +55,42 @@ pub struct BackingServiceSpec {
     pub memory_limit: String,
     pub conn_template: String,
     pub conn_env_var: String,
+}
+
+/// Catalog image selected for a project while resolving native sidecars.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedImageMetadata {
+    pub id: String,
+    pub name: String,
+    pub tag: Option<String>,
+}
+
+/// A service preset that resolved to an injected sidecar spec.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InjectedServiceMetadata {
+    pub preset_id: String,
+    pub service_type: String,
+    pub port: i32,
+    pub conn_env_var: String,
+}
+
+/// A declared preset that could not be converted into a sidecar spec.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedServicePreset {
+    pub preset_id: String,
+    pub reason: String,
+}
+
+/// Full resolution result used for task-run observability.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ImageServiceResolution {
+    pub image: Option<ResolvedImageMetadata>,
+    pub requested_preset_ids: Vec<String>,
+    pub injected: Vec<InjectedServiceMetadata>,
+    pub skipped: Vec<SkippedServicePreset>,
+    pub lookup_error: Option<String>,
+    #[serde(skip)]
+    pub services: Vec<BackingServiceSpec>,
 }
 
 /// The pod-level `/dev/shm` Memory `emptyDir` referenced by the sidecar mounts.
@@ -195,82 +232,166 @@ fn parse_resources(json: &str) -> (String, String, String, String) {
     )
 }
 
+fn append_preset_resolution(
+    project_id: &str,
+    preset_id: &str,
+    preset: Result<Option<ServicePreset>, String>,
+    specs: &mut Vec<BackingServiceSpec>,
+    injected: &mut Vec<InjectedServiceMetadata>,
+    skipped: &mut Vec<SkippedServicePreset>,
+) {
+    match preset {
+        Ok(Some(p)) => {
+            let (cpu_request, memory_request, cpu_limit, memory_limit) =
+                parse_resources(&p.resources);
+            injected.push(InjectedServiceMetadata {
+                preset_id: preset_id.to_string(),
+                service_type: p.service_type.clone(),
+                port: p.port,
+                conn_env_var: p.conn_env_var.clone(),
+            });
+            specs.push(BackingServiceSpec {
+                service_type: p.service_type,
+                image: p.image,
+                port: p.port,
+                env: parse_env(&p.env),
+                cpu_request,
+                memory_request,
+                cpu_limit,
+                memory_limit,
+                conn_template: p.conn_template,
+                conn_env_var: p.conn_env_var,
+            });
+        }
+        Ok(None) => {
+            skipped.push(SkippedServicePreset {
+                preset_id: preset_id.to_string(),
+                reason: "unknown service preset".to_string(),
+            });
+            tracing::warn!(
+                project_id = %project_id,
+                preset_id = %preset_id,
+                "sidecar: image references an unknown service preset; skipping"
+            );
+        }
+        Err(error) => {
+            let reason = format!("service preset read failed: {error}");
+            skipped.push(SkippedServicePreset {
+                preset_id: preset_id.to_string(),
+                reason,
+            });
+            tracing::warn!(
+                project_id = %project_id,
+                preset_id = %preset_id,
+                %error,
+                "sidecar: service preset read failed; skipping"
+            );
+        }
+    }
+}
+
 /// Resolve the backing services declared on a project's selected catalog image.
 ///
 /// Returns an empty list when the project has no catalog image, the image
 /// declares no services, or any read fails — service injection is best-effort
 /// and must never block task dispatch.
 pub async fn resolve_image_services(db: &Database, project_id: &str) -> Vec<BackingServiceSpec> {
+    resolve_image_services_with_metadata(db, project_id)
+        .await
+        .services
+}
+
+/// Resolve the backing services declared on a project's selected catalog image,
+/// preserving enough metadata for task-run logs/activity to show requested vs.
+/// actually injected services.
+///
+/// Like [`resolve_image_services`], this is fail-open for dispatch: lookup
+/// errors are represented in the returned metadata rather than returned as
+/// errors. The important invariant is that once an image declares preset ids,
+/// every configured-but-not-injected preset appears in `skipped` or
+/// `lookup_error` instead of disappearing silently.
+pub async fn resolve_image_services_with_metadata(
+    db: &Database,
+    project_id: &str,
+) -> ImageServiceResolution {
     let image_repo = ImageRepository::new(db.clone());
     let image = match image_repo.resolve_for_project(project_id).await {
         Ok(Some(image)) => image,
-        Ok(None) => return Vec::new(),
+        Ok(None) => return ImageServiceResolution::default(),
         Err(error) => {
+            let error = error.to_string();
             tracing::warn!(
                 project_id = %project_id,
                 %error,
                 "sidecar: resolve_for_project failed; injecting no backing services"
             );
-            return Vec::new();
+            return ImageServiceResolution {
+                lookup_error: Some(error),
+                ..ImageServiceResolution::default()
+            };
         }
+    };
+
+    let image_metadata = ResolvedImageMetadata {
+        id: image.id.clone(),
+        name: image.name.clone(),
+        tag: image.tag.clone(),
     };
 
     let preset_ids = match image_repo.list_service_presets(&image.id).await {
         Ok(ids) => ids,
         Err(error) => {
+            let error = error.to_string();
             tracing::warn!(
                 project_id = %project_id,
                 image_id = %image.id,
                 %error,
                 "sidecar: list_service_presets failed; injecting no backing services"
             );
-            return Vec::new();
+            return ImageServiceResolution {
+                image: Some(image_metadata),
+                lookup_error: Some(error),
+                ..ImageServiceResolution::default()
+            };
         }
     };
     if preset_ids.is_empty() {
-        return Vec::new();
+        return ImageServiceResolution {
+            image: Some(image_metadata),
+            ..ImageServiceResolution::default()
+        };
     }
 
     let preset_repo = ServicePresetRepository::new(db.clone());
     let mut specs = Vec::with_capacity(preset_ids.len());
-    for preset_id in preset_ids {
-        match preset_repo.get(&preset_id).await {
-            Ok(Some(p)) => {
-                let (cpu_request, memory_request, cpu_limit, memory_limit) =
-                    parse_resources(&p.resources);
-                specs.push(BackingServiceSpec {
-                    service_type: p.service_type,
-                    image: p.image,
-                    port: p.port,
-                    env: parse_env(&p.env),
-                    cpu_request,
-                    memory_request,
-                    cpu_limit,
-                    memory_limit,
-                    conn_template: p.conn_template,
-                    conn_env_var: p.conn_env_var,
-                });
-            }
-            Ok(None) => tracing::warn!(
-                project_id = %project_id,
-                %preset_id,
-                "sidecar: image references an unknown service preset; skipping"
-            ),
-            Err(error) => tracing::warn!(
-                project_id = %project_id,
-                %preset_id,
-                %error,
-                "sidecar: service preset read failed; skipping"
-            ),
-        }
+    let mut injected = Vec::with_capacity(preset_ids.len());
+    let mut skipped = Vec::new();
+    for preset_id in &preset_ids {
+        append_preset_resolution(
+            project_id,
+            preset_id,
+            preset_repo
+                .get(preset_id)
+                .await
+                .map_err(|error| error.to_string()),
+            &mut specs,
+            &mut injected,
+            &mut skipped,
+        );
     }
-    specs
+    ImageServiceResolution {
+        image: Some(image_metadata),
+        requested_preset_ids: preset_ids,
+        injected,
+        skipped,
+        lookup_error: None,
+        services: specs,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn spec() -> BackingServiceSpec {
         BackingServiceSpec {
             service_type: "postgres".into(),
@@ -283,6 +404,21 @@ mod tests {
             memory_limit: "512Mi".into(),
             conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
             conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+        }
+    }
+
+    fn preset() -> ServicePreset {
+        ServicePreset {
+            id: "preset-postgres-18".into(),
+            name: "Postgres 18".into(),
+            service_type: "postgres".into(),
+            image: "postgres:18-alpine".into(),
+            port: 5432,
+            env: r#"{"POSTGRES_PASSWORD":"postgres"}"#.into(),
+            resources: r#"{"cpu_request":"100m","memory_request":"256Mi","cpu_limit":"500m","memory_limit":"512Mi"}"#.into(),
+            conn_template: "postgres://postgres:postgres@{host}:{port}/app_test".into(),
+            conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+            client_package: Some("postgresql-client".into()),
         }
     }
 
@@ -327,5 +463,80 @@ mod tests {
             .expect("container securityContext");
         assert_eq!(sc.run_as_user, Some(0));
         assert_eq!(sc.run_as_non_root, Some(false));
+    }
+
+    #[test]
+    fn resolver_metadata_records_requested_and_injected_preset() {
+        let requested = vec!["preset-postgres-18".to_string()];
+        let mut services = Vec::new();
+        let mut injected = Vec::new();
+        let mut skipped = Vec::new();
+        append_preset_resolution(
+            "project-valid-service",
+            &requested[0],
+            Ok(Some(preset())),
+            &mut services,
+            &mut injected,
+            &mut skipped,
+        );
+        let resolution = ImageServiceResolution {
+            image: Some(ResolvedImageMetadata {
+                id: "image-valid-service".into(),
+                name: "image-valid-service".into(),
+                tag: Some("registry.local/image:tag".into()),
+            }),
+            requested_preset_ids: requested,
+            injected,
+            skipped,
+            lookup_error: None,
+            services,
+        };
+
+        assert_eq!(resolution.requested_preset_ids, vec!["preset-postgres-18"]);
+        assert_eq!(resolution.services.len(), 1);
+        assert_eq!(resolution.injected.len(), 1);
+        assert_eq!(resolution.injected[0].preset_id, "preset-postgres-18");
+        assert_eq!(resolution.injected[0].service_type, "postgres");
+        assert_eq!(resolution.injected[0].port, 5432);
+        assert!(resolution.skipped.is_empty());
+        assert!(resolution.lookup_error.is_none());
+    }
+
+    #[test]
+    fn resolver_metadata_records_unknown_preset_as_skipped() {
+        let requested = vec!["preset-does-not-exist".to_string()];
+        let mut services = Vec::new();
+        let mut injected = Vec::new();
+        let mut skipped = Vec::new();
+        append_preset_resolution(
+            "project-missing-service",
+            &requested[0],
+            Ok(None),
+            &mut services,
+            &mut injected,
+            &mut skipped,
+        );
+        let resolution = ImageServiceResolution {
+            image: Some(ResolvedImageMetadata {
+                id: "image-missing-service".into(),
+                name: "image-missing-service".into(),
+                tag: None,
+            }),
+            requested_preset_ids: requested,
+            injected,
+            skipped,
+            lookup_error: None,
+            services,
+        };
+
+        assert_eq!(
+            resolution.requested_preset_ids,
+            vec!["preset-does-not-exist"]
+        );
+        assert!(resolution.services.is_empty());
+        assert!(resolution.injected.is_empty());
+        assert_eq!(resolution.skipped.len(), 1);
+        assert_eq!(resolution.skipped[0].preset_id, "preset-does-not-exist");
+        assert!(resolution.skipped[0].reason.contains("unknown"));
     }
 }

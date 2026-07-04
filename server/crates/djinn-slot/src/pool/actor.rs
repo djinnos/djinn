@@ -27,6 +27,13 @@ pub(super) struct SlotPool {
     task_started: HashMap<String, Instant>,
     draining_slots: HashSet<usize>,
     retired_slots: HashSet<usize>,
+    /// Task IDs whose settlement and mapping release are deferred because the
+    /// associated slot's reply loop is inside a compaction critical section.
+    /// Entries are removed when the eventual `SlotEvent::Killed` arrives and
+    /// `handle_event` performs the normal final release path.  Repeated
+    /// kill/drain/reclaim for the same task while it remains in this set is a
+    /// no-op (idempotent).
+    pending_teardown_tasks: HashSet<String>,
     ctx: SlotContext,
     cancel: CancellationToken,
     slot_factory: SlotFactory,
@@ -67,6 +74,7 @@ impl SlotPool {
             task_started: HashMap::new(),
             draining_slots: HashSet::new(),
             retired_slots: HashSet::new(),
+            pending_teardown_tasks: HashSet::new(),
             ctx,
             cancel,
             slot_factory,
@@ -421,6 +429,12 @@ impl SlotPool {
                 task_id,
             } => {
                 let owns_task_mapping = self.task_to_slot.get(&task_id).copied() == Some(slot_id);
+                // Remove any deferred-teardown tracking for this task.  For
+                // compacting sessions the pool deferred settlement in
+                // kill_session / reclaim_session; the actual settlement
+                // happens right here when the slot actor's Kill event arrives
+                // after compaction exits.
+                self.pending_teardown_tasks.remove(&task_id);
                 // On a killed lifecycle (stall-kill, interrupt_all/project,
                 // explicit Kill command) settle the session DB row to a terminal
                 // state *now*, at the moment the kill lands. A worker that is
@@ -430,6 +444,11 @@ impl SlotPool {
                 if killed && owns_task_mapping {
                     self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
                         .await;
+                    // TODO(teardown-flush): the idempotent in-flight turn flush
+                    // (task djxg) runs inside the slot actor's
+                    // apply_deferred_lifecycle_intent before the completion event
+                    // is emitted.  Settlement below assumes any flushable
+                    // assistant/tool rows have already been persisted.
                     self.settle_session_row(&task_id).await;
                 }
                 if owns_task_mapping {
@@ -449,7 +468,7 @@ impl SlotPool {
             }
         }
     }
-    async fn kill_session(&self, task_id: &str) -> Result<(), PoolError> {
+    async fn kill_session(&mut self, task_id: &str) -> Result<(), PoolError> {
         let slot_id =
             self.task_to_slot
                 .get(task_id)
@@ -457,10 +476,33 @@ impl SlotPool {
                 .ok_or_else(|| PoolError::TaskNotFound {
                     task_id: task_id.to_string(),
                 })?;
+        // Idempotent: if a teardown is already pending (deferred by active
+        // compaction), the kill command was already sent and settlement will
+        // happen when the eventual Killed event arrives via handle_event.
+        if self.pending_teardown_tasks.contains(task_id) {
+            return Ok(());
+        }
+        // If the slot's reply loop is mid-compaction, defer settlement and
+        // mapping release.  The slot actor will also defer the kill command
+        // until compaction exits (5n1c); the eventual Killed event triggers
+        // settlement through handle_event's normal final release path.
+        if self.slots.get(slot_id).is_some_and(|h| h.is_compacting()) {
+            tracing::info!(
+                event = "pool.kill_deferred_compacting",
+                task_id = %task_id,
+                slot_id = slot_id,
+            );
+            // Send the kill — the slot actor parks it as pending_kill during
+            // compaction and applies it once the critical section exits.
+            self.slot(slot_id)?.kill().await?;
+            self.pending_teardown_tasks.insert(task_id.to_string());
+            return Ok(());
+        }
+        // Normal (non-compacting) path: settle eagerly so the Killed event
+        // handler sees no running session and does not tear down the same
+        // task-run Job twice.
         self.teardown_taskrun_jobs_for_task(task_id, "kill_session")
             .await;
-        // Settle the row now so the Killed event handler sees no running session
-        // and does not tear down the same task-run Job twice.
         self.settle_session_row(task_id).await;
         self.slot(slot_id)?.kill().await?;
         Ok(())
@@ -497,6 +539,30 @@ impl SlotPool {
             }
             return Ok(());
         };
+        // Idempotent: if a teardown is already pending for this task, the
+        // kill command was already sent and settlement will happen when the
+        // Killed event arrives.
+        if self.pending_teardown_tasks.contains(task_id) {
+            return Ok(());
+        }
+        // If the slot's reply loop is mid-compaction, defer settlement and
+        // mapping release.  The slot actor will also defer the kill command
+        // until compaction exits.  The eventual Killed event triggers
+        // settlement through handle_event's normal final release path.
+        if self.slots.get(slot_id).is_some_and(|h| h.is_compacting()) {
+            tracing::info!(
+                event = "pool.reclaim_deferred_compacting",
+                task_id = %task_id,
+                slot_id = slot_id,
+                reason = %reason,
+            );
+            // Best-effort kill; the slot actor parks it during compaction.
+            if let Ok(slot) = self.slot(slot_id) {
+                let _ = slot.kill().await;
+            }
+            self.pending_teardown_tasks.insert(task_id.to_string());
+            return Ok(());
+        }
         self.teardown_taskrun_jobs_for_task(task_id, reason).await;
         // Best-effort terminate; ignore errors — the point of eviction is that
         // this reclaim path must not be blocked by an unresponsive slot.
@@ -641,13 +707,13 @@ impl SlotPool {
         }
         Ok(())
     }
-    async fn interrupt_all(&self, _reason: &str) {
+    async fn interrupt_all(&mut self, _reason: &str) {
         let task_ids: Vec<String> = self.task_to_slot.keys().cloned().collect();
         for task_id in task_ids {
             let _ = self.kill_session(&task_id).await;
         }
     }
-    async fn interrupt_project(&self, project_id: &str, _reason: &str) {
+    async fn interrupt_project(&mut self, project_id: &str, _reason: &str) {
         let affected: Vec<String> = self
             .task_projects
             .iter()
@@ -935,5 +1001,17 @@ impl SlotPool {
     #[cfg(test)]
     pub(super) async fn test_handle_slot_event(&mut self, event: SlotEvent) {
         self.handle_event(event).await;
+    }
+    #[cfg(test)]
+    pub(super) fn test_pending_teardown_tasks(&self) -> &HashSet<String> {
+        &self.pending_teardown_tasks
+    }
+    #[cfg(test)]
+    pub(super) async fn test_kill_session(&mut self, task_id: &str) -> Result<(), PoolError> {
+        self.kill_session(task_id).await
+    }
+    #[cfg(test)]
+    pub(super) fn test_slot_is_compacting(&self, slot_id: usize) -> bool {
+        self.slots.get(slot_id).is_some_and(|h| h.is_compacting())
     }
 }
