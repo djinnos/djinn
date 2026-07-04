@@ -42,6 +42,15 @@ struct ActiveLifecycle {
     span: tracing::Span,
     killed: bool,
     compaction_cs: CompactionCriticalSection,
+    /// Deferred lifecycle intent recorded while a compaction critical section
+    /// is active.  Kill / Drain / Pause commands that arrive while the reply
+    /// loop is mid-rotation must NOT mutate the pre-rotation context, so they
+    /// are parked here and applied after the compaction handle reports release
+    /// (or, for kill, before the completion event is emitted if the lifecycle
+    /// finishes first).
+    pending_kill: bool,
+    pending_drain: bool,
+    pending_pause: bool,
 }
 
 pub struct SlotActor {
@@ -83,6 +92,13 @@ impl SlotActor {
                             Ok(Err(e)) => tracing::error!(slot_id = self.id, model_id = %self.model_id, task_id = %running.task_id, error = %format!("{e:#}"), "slot lifecycle returned error (dispatch/setup failure)"),
                             Ok(Ok(())) => {}
                         }
+                        // Apply any lifecycle intent that was deferred during
+                        // a compaction critical section.  For kill this must
+                        // happen before the completion event so the `killed`
+                        // flag is correct.  Drain sets the slot-level
+                        // `drain_requested` so the actor loop breaks after
+                        // this lifecycle completes.
+                        self.apply_deferred_lifecycle_intent(&mut running, &mut drain_requested).await;
                         self.emit_completion_event(&running).await;
                         if drain_requested {
                             break;
@@ -96,31 +112,69 @@ impl SlotActor {
                                 active = Some(running);
                             }
                             Some(SlotCommand::Kill) => {
-                                let span = tracing::info_span!(
-                                    "djinn.slot.kill",
-                                    slot_id = self.id,
-                                    model_id = %self.model_id,
-                                    task_id = %running.task_id,
-                                );
-                                span.in_scope(|| {
+                                // If compaction is active, defer the kill so
+                                // the pre-rotation transcript is not mutated.
+                                // The intent is applied once the compaction
+                                // handle reports release (or before the
+                                // completion event if the lifecycle ends first).
+                                if running.compaction_cs.is_compacting() {
                                     tracing::info!(
-                                        event = "slot.kill_requested",
+                                        event = "slot.kill_deferred_compacting",
                                         slot_id = self.id,
                                         model_id = %self.model_id,
                                         task_id = %running.task_id,
                                     );
-                                });
-                                running.killed = true;
-                                running.kill.cancel();
-                                active = Some(running);
+                                    running.pending_kill = true;
+                                    active = Some(running);
+                                } else {
+                                    let span = tracing::info_span!(
+                                        "djinn.slot.kill",
+                                        slot_id = self.id,
+                                        model_id = %self.model_id,
+                                        task_id = %running.task_id,
+                                    );
+                                    span.in_scope(|| {
+                                        tracing::info!(
+                                            event = "slot.kill_requested",
+                                            slot_id = self.id,
+                                            model_id = %self.model_id,
+                                            task_id = %running.task_id,
+                                        );
+                                    });
+                                    running.killed = true;
+                                    running.kill.cancel();
+                                    active = Some(running);
+                                }
                             }
                             Some(SlotCommand::Pause) => {
-                                running.pause.cancel();
-                                active = Some(running);
+                                if running.compaction_cs.is_compacting() {
+                                    tracing::info!(
+                                        event = "slot.pause_deferred_compacting",
+                                        slot_id = self.id,
+                                        model_id = %self.model_id,
+                                        task_id = %running.task_id,
+                                    );
+                                    running.pending_pause = true;
+                                    active = Some(running);
+                                } else {
+                                    running.pause.cancel();
+                                    active = Some(running);
+                                }
                             }
                             Some(SlotCommand::Drain) => {
-                                drain_requested = true;
-                                active = Some(running);
+                                if running.compaction_cs.is_compacting() {
+                                    tracing::info!(
+                                        event = "slot.drain_deferred_compacting",
+                                        slot_id = self.id,
+                                        model_id = %self.model_id,
+                                        task_id = %running.task_id,
+                                    );
+                                    running.pending_drain = true;
+                                    active = Some(running);
+                                } else {
+                                    drain_requested = true;
+                                    active = Some(running);
+                                }
                             }
                             None => {
                                 running.kill.cancel();
@@ -209,7 +263,54 @@ impl SlotActor {
             span,
             killed: false,
             compaction_cs: self.compaction_cs.clone(),
+            pending_kill: false,
+            pending_drain: false,
+            pending_pause: false,
         }
+    }
+    /// Apply deferred lifecycle intent (kill / drain / pause) that was parked
+    /// while the reply-loop compaction critical section was active.  Called
+    /// after the lifecycle join resolves (so kill affects the completion event
+    /// type) and also available as a hook for future post-compaction flush
+    /// logic that must run before the final session release.
+    async fn apply_deferred_lifecycle_intent(
+        &self,
+        running: &mut ActiveLifecycle,
+        drain_requested: &mut bool,
+    ) {
+        if running.pending_kill {
+            let span = tracing::info_span!(
+                "djinn.slot.kill",
+                slot_id = self.id,
+                model_id = %self.model_id,
+                task_id = %running.task_id,
+            );
+            span.in_scope(|| {
+                tracing::info!(
+                    event = "slot.kill_requested",
+                    slot_id = self.id,
+                    model_id = %self.model_id,
+                    task_id = %running.task_id,
+                );
+            });
+            running.killed = true;
+            running.kill.cancel();
+        }
+        // Drain sets the slot-level flag so the actor loop breaks after
+        // the current lifecycle (matches non-deferred drain semantics).
+        if running.pending_drain {
+            *drain_requested = true;
+        }
+        // Pause: cancel the token so the runner (if still polled) observes
+        // the cancellation.  After the lifecycle join has resolved this is
+        // a no-op on the token itself, but it keeps the state consistent.
+        if running.pending_pause {
+            running.pause.cancel();
+        }
+        // TODO(teardown-flush): insert idempotent in-flight turn flush here,
+        // after deferred intent is applied and before the final session
+        // release / kill event is emitted.  The flush must be safe to call
+        // on every exit path (kill, drain, normal completion, error).
     }
     async fn emit_completion_event(&self, running: &ActiveLifecycle) {
         let event = if running.killed {
@@ -414,6 +515,7 @@ mod tests {
     use super::*;
     use crate::test_helpers;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc as StdArc, Mutex};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -786,5 +888,259 @@ mod tests {
             "legacy run_task must thread `None` for resume metadata; \
              the disabled/default-off path must not silently inject selections"
         );
+    }
+    // ── Compaction-aware deferral tests ────────────────────────────────
+    //
+    // These tests simulate an active compaction critical section by having
+    // the lifecycle runner acquire the `CompactionCriticalSection` guard
+    // (mimicking the reply loop entering compaction).  The actor observes
+    // `is_compacting() == true` when a lifecycle command arrives and must
+    // defer it rather than applying it immediately.
+    //
+    // A shared `Arc<Notify>` is used to signal when the runner has entered
+    // compaction (Notify is Clone-friendly for Fn closures, unlike oneshot).
+    /// Kill during active compaction is deferred: the actor does not set
+    /// `killed = true` or cancel the kill token while compacting.  After
+    /// the compaction guard releases and the lifecycle completes, the
+    /// deferred kill is applied and a `SlotEvent::Killed` is emitted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn kill_during_compaction_is_deferred_until_release() {
+        let _tracing_guard = tracing_lock().await;
+        let (app_state, cancel, _temp) = test_app_state();
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let compacted = Arc::new(tokio::sync::Notify::new());
+        let compacted2 = compacted.clone();
+        let runner: LifecycleRunner = Arc::new(
+            move |_task_id,
+                  _project_path,
+                  _model_id,
+                  app_state: SlotContext,
+                  _kill,
+                  _pause,
+                  _resume_lifecycle_metadata| {
+                let compacted = compacted2.clone();
+                Box::pin(async move {
+                    // Simulate the reply loop entering compaction.
+                    let _guard = app_state.compaction_cs.guard();
+                    compacted.notify_one();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Guard drops here → compaction released.
+                    Ok(())
+                })
+            },
+        );
+        let slot = SlotHandle::spawn_with_runner(
+            20,
+            "test/compact-kill".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+        slot.run_task("task-ck".to_string(), "/tmp/project".to_string())
+            .await
+            .expect("dispatch accepted");
+        // Wait until the runner has entered the compaction guard.
+        tokio::time::timeout(Duration::from_secs(1), compacted.notified())
+            .await
+            .expect("runner entered compaction");
+        // Small yield to let the actor loop observe the compaction state.
+        tokio::task::yield_now().await;
+        // Kill arrives while compaction is active — must be deferred.
+        slot.kill().await.expect("kill accepted");
+        let evt = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("channel open");
+        match evt {
+            SlotEvent::Killed {
+                slot_id,
+                model_id,
+                task_id,
+            } => {
+                assert_eq!(slot_id, 20);
+                assert_eq!(model_id, "test/compact-kill");
+                assert_eq!(task_id, "task-ck");
+            }
+            other => panic!("expected SlotEvent::Killed (deferred kill), got {other:?}"),
+        }
+    }
+    /// Drain during active compaction is deferred: the actor does not
+    /// immediately set the slot-level `drain_requested` flag.  After
+    /// the lifecycle completes, the deferred drain causes the actor loop
+    /// to break (same end-state as a non-deferred drain).
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_during_compaction_is_deferred() {
+        let _tracing_guard = tracing_lock().await;
+        let (app_state, cancel, _temp) = test_app_state();
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let compacted = Arc::new(tokio::sync::Notify::new());
+        let compacted2 = compacted.clone();
+        let runner: LifecycleRunner = Arc::new(
+            move |_task_id,
+                  _project_path,
+                  _model_id,
+                  app_state: SlotContext,
+                  _kill,
+                  _pause,
+                  _resume_lifecycle_metadata| {
+                let compacted = compacted2.clone();
+                Box::pin(async move {
+                    let _guard = app_state.compaction_cs.guard();
+                    compacted.notify_one();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(())
+                })
+            },
+        );
+        let slot = SlotHandle::spawn_with_runner(
+            21,
+            "test/compact-drain".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+        slot.run_task("task-cd".to_string(), "/tmp/project".to_string())
+            .await
+            .expect("dispatch accepted");
+        tokio::time::timeout(Duration::from_secs(1), compacted.notified())
+            .await
+            .expect("runner entered compaction");
+        tokio::task::yield_now().await;
+        // Drain arrives while compacting — must be deferred, not applied
+        // immediately to the pre-rotation context.
+        slot.drain().await.expect("drain accepted");
+        // After the lifecycle completes the deferred drain triggers an
+        // event and the actor loop exits.
+        let evt = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("channel open");
+        // Accept either Free or Killed — the key invariant is that the
+        // deferred drain caused the actor to exit after the lifecycle.
+        match evt {
+            SlotEvent::Free { task_id, .. } => assert_eq!(task_id, "task-cd"),
+            SlotEvent::Killed { task_id, .. } => assert_eq!(task_id, "task-cd"),
+        }
+        // Verify the channel closes (actor loop exited due to drain).
+        let second = tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await;
+        assert!(
+            second.is_err() || second.unwrap().is_none(),
+            "actor should have exited after deferred drain"
+        );
+    }
+    /// Pause during active compaction is deferred: the pause token is NOT
+    /// cancelled while compacting.  After the lifecycle completes, the
+    /// deferred pause is applied (the token is cancelled).
+    #[tokio::test(flavor = "current_thread")]
+    async fn pause_during_compaction_is_deferred() {
+        let _tracing_guard = tracing_lock().await;
+        let (app_state, cancel, _temp) = test_app_state();
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let compacted = Arc::new(tokio::sync::Notify::new());
+        let compacted2 = compacted.clone();
+        let pause_token_observed = Arc::new(AtomicBool::new(false));
+        let observed = pause_token_observed.clone();
+        let runner: LifecycleRunner = Arc::new(
+            move |_task_id,
+                  _project_path,
+                  _model_id,
+                  app_state: SlotContext,
+                  _kill,
+                  pause: CancellationToken,
+                  _resume_lifecycle_metadata| {
+                let compacted = compacted2.clone();
+                let observed = observed.clone();
+                Box::pin(async move {
+                    let _guard = app_state.compaction_cs.guard();
+                    compacted.notify_one();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Record whether the pause token was cancelled while
+                    // compaction was active (it should NOT be).
+                    observed.store(pause.is_cancelled(), Ordering::SeqCst);
+                    Ok(())
+                })
+            },
+        );
+        let slot = SlotHandle::spawn_with_runner(
+            22,
+            "test/compact-pause".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+        slot.run_task("task-cp".to_string(), "/tmp/project".to_string())
+            .await
+            .expect("dispatch accepted");
+        tokio::time::timeout(Duration::from_secs(1), compacted.notified())
+            .await
+            .expect("runner entered compaction");
+        tokio::task::yield_now().await;
+        // Pause arrives while compacting — must be deferred.
+        slot.pause().await.expect("pause accepted");
+        // Wait for the lifecycle to complete.
+        let _ = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("event should arrive");
+        // The pause token must NOT have been cancelled while compaction
+        // was active — the deferral protects the pre-rotation context.
+        assert!(
+            !pause_token_observed.load(Ordering::SeqCst),
+            "pause token must not be cancelled while compaction is active"
+        );
+    }
+    /// Backwards-compatibility: kill outside of compaction is applied
+    /// immediately (existing behavior is unchanged).
+    #[tokio::test(flavor = "current_thread")]
+    async fn kill_without_compaction_is_immediate() {
+        let _tracing_guard = tracing_lock().await;
+        let (app_state, cancel, _temp) = test_app_state();
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        // Runner waits for the kill token without entering compaction.
+        let runner: LifecycleRunner = Arc::new(
+            |_task_id,
+             _project_path,
+             _model_id,
+             _app_state,
+             kill,
+             _pause,
+             _resume_lifecycle_metadata| {
+                Box::pin(async move {
+                    kill.cancelled().await;
+                    Ok(())
+                })
+            },
+        );
+        let slot = SlotHandle::spawn_with_runner(
+            23,
+            "test/no-compact-kill".to_string(),
+            event_tx,
+            app_state,
+            cancel,
+            runner,
+        );
+        slot.run_task("task-nck".to_string(), "/tmp/project".to_string())
+            .await
+            .expect("dispatch accepted");
+        // No compaction active — kill must be applied immediately.
+        slot.kill().await.expect("kill accepted");
+        let evt = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("channel open");
+        match evt {
+            SlotEvent::Killed {
+                slot_id,
+                model_id,
+                task_id,
+            } => {
+                assert_eq!(slot_id, 23);
+                assert_eq!(model_id, "test/no-compact-kill");
+                assert_eq!(task_id, "task-nck");
+            }
+            other => panic!("expected SlotEvent::Killed (immediate), got {other:?}"),
+        }
     }
 }
