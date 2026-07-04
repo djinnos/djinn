@@ -250,13 +250,17 @@ fn is_fireworks_base_url(base_url: &str) -> bool {
 // ─── Schema helper ────────────────────────────────────────────────────────────
 
 /// OpenAI requires `"properties"` on object schemas. Ensure it exists.
-pub(super) fn ensure_object_properties(mut schema: Value) -> Value {
-    if let Some(obj) = schema.as_object_mut()
-        && obj.get("type").and_then(|v| v.as_str()) == Some("object")
-    {
-        obj.entry("properties").or_insert_with(|| json!({}));
-    }
-    schema
+///
+/// This is a thin compatibility wrapper over the shared projection core so the
+/// existing `openai_responses.rs` call site keeps compiling.  The full
+/// OpenAI-family rewrite (deep properties enforcement and top-level anyOf
+/// flattening) lives in `tool_projection.rs`.
+pub(super) fn ensure_object_properties(schema: Value) -> Value {
+    crate::provider::format::tool_projection::project(
+        schema,
+        Some(crate::provider::ToolSchemaCompat::OpenAi),
+        crate::provider::FormatFamily::OpenAI,
+    )
 }
 
 // ─── SSE parsing helpers ──────────────────────────────────────────────────────
