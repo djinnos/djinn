@@ -171,9 +171,24 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
                         .get("server")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    let result = registry.list_resources(server.as_deref()).await?;
-                    serde_json::to_string_pretty(&result)
-                        .map_err(|e| format!("failed to serialize resource list: {e}"))
+                    let resources = registry.list_resources(server.as_deref()).await?;
+                    if resources.is_empty() {
+                        return Ok("No resources found.".to_string());
+                    }
+                    let mut out = String::new();
+                    for (server_name, resource) in &resources {
+                        out.push_str(&format!(
+                            "- server: {server_name}\n  uri: {}\n  name: {}\n",
+                            resource.uri, resource.name
+                        ));
+                        if let Some(desc) = &resource.description {
+                            out.push_str(&format!("  description: {desc}\n"));
+                        }
+                        if let Some(mime) = &resource.mime_type {
+                            out.push_str(&format!("  mime_type: {mime}\n"));
+                        }
+                    }
+                    Ok(out)
                 }
                 "read_mcp_resource" => {
                     let server = args
@@ -184,7 +199,35 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
                         .get("uri")
                         .and_then(|v| v.as_str())
                         .ok_or("missing required argument `uri` (string)")?;
-                    registry.read_resource(server, uri).await
+                    let contents = registry.read_resource(server, uri).await?;
+                    let mut out = String::new();
+                    for content in &contents {
+                        match content {
+                            rmcp::model::ResourceContents::TextResourceContents {
+                                uri,
+                                mime_type,
+                                text,
+                                ..
+                            } => {
+                                out.push_str(&format!("Resource: {uri}\n"));
+                                if let Some(mime) = mime_type {
+                                    out.push_str(&format!("MIME: {mime}\n"));
+                                }
+                                out.push_str(text);
+                            }
+                            rmcp::model::ResourceContents::BlobResourceContents {
+                                uri,
+                                mime_type,
+                                ..
+                            } => {
+                                out.push_str(&format!(
+                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted]",
+                                    mime_type.as_deref().unwrap_or("application/octet-stream")
+                                ));
+                            }
+                        }
+                    }
+                    Ok(out)
                 }
                 _ => Err(format!("unknown resource tool: {tool}")),
             }

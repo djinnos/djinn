@@ -842,7 +842,7 @@ pub(crate) async fn execute_stage(
         // server advertised the `resources` capability.  These are ordinary
         // native tools (not remote `mcp__...` server tools) and are
         // read-only/non-destructive.
-        if registry.has_resource_capable_servers() {
+        if registry.has_resource_servers() {
             tools.push(serde_json::json!({
                 "type": "function",
                 "function": {
