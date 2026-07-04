@@ -2852,6 +2852,259 @@ async fn second_strike_no_progress_submission_settles_session() {
     assert_eq!(provider.remaining(), 0);
 }
 
+/// gs37-shaped end-to-end rework-loop regression (proposal `ivek`).
+///
+/// Walks the full gs37 scenario at the highest fidelity the djinn-slot harness
+/// allows — a fabricated no-edit submit after a genuine rejection, then a
+/// merge-conflict hold, then the redispatch prompt build — and asserts the two
+/// slot-side halves of the acceptance criterion:
+///
+///   1. Seed a genuine reviewer rejection round: a real `TaskReviewReject`
+///      transition (`reopen_class=review_rejected`) plus a structured
+///      `review_submitted` rejection activity carrying the newest rejection
+///      text, and persist the rejected diff fingerprint.
+///   2. Fabricated no-edit submit (worktree fingerprint identical to the
+///      rejected fingerprint): the guard bounces the first identical submit
+///      and typed-finalizes the second as `no_progress_submission` — WITHOUT
+///      consuming a quality reopen strike.
+///   3. Merge-conflict reopen (`TaskReviewRejectConflict` →
+///      `reopen_class=merge_conflict`): a real reopen event that is excluded
+///      from the quality strike count.
+///   4. The redispatch prompt (`initial_user_message_for_task`) includes the
+///      newest reviewer rejection verbatim and renders the bounded reopen
+///      ledger.
+///
+/// Across the whole scenario exactly ONE quality reopen strike is consumed (the
+/// genuine rejection), well below the coordinator's
+/// `REOPEN_INTERVENTION_THRESHOLD` (3). The park-guard half of the acceptance
+/// criterion — that Trigger A does NOT reach the human-review park threshold —
+/// lives in djinn-coordinator (the threshold constant and
+/// `maybe_intervene_on_stuck_task` are not visible from this crate) and is
+/// asserted authoritatively in the sibling coordinator test
+/// `gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reopen_advance`.
+#[tokio::test]
+async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt_carries_rejection()
+{
+    // The verbatim reviewer rejection the redispatch prompt must carry forward.
+    const NEWEST_REJECTION: &str = "AC-2 unmet: the handler is implemented but never registered with the \
+         service. Wire it into `build_router` before resubmitting.";
+
+    let worktree = init_git_repo_with_dirty_file();
+    let worktree_path = worktree.path().to_path_buf();
+    let fp = djinn_git::compute_submission_diff_fingerprint(&worktree_path)
+        .await
+        .expect("compute fingerprint");
+    let fingerprint = fp.fingerprint().expect("must be a Diff").to_string();
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let repo = TaskRepository::new(slot_ctx.db.clone(), slot_ctx.event_bus.clone());
+    // The review lifecycle (SubmitTaskReview) requires acceptance criteria.
+    repo.set_acceptance_criteria(&task_id, r#"[{"title":"AC-1"},{"title":"AC-2"}]"#)
+        .await
+        .expect("set acceptance criteria");
+
+    // ── Step 1: seed a genuine reviewer rejection round ──────────────────────
+    // open → in_progress → needs_task_review → in_task_review, then reject.
+    for (action, actor_role) in [
+        (djinn_core::models::TransitionAction::Start, "worker"),
+        (
+            djinn_core::models::TransitionAction::SubmitTaskReview,
+            "worker",
+        ),
+        (
+            djinn_core::models::TransitionAction::TaskReviewStart,
+            "reviewer",
+        ),
+    ] {
+        repo.transition(&task_id, action, actor_role, actor_role, None, None)
+            .await
+            .expect("valid setup transition");
+    }
+    repo.transition(
+        &task_id,
+        djinn_core::models::TransitionAction::TaskReviewReject,
+        "reviewer",
+        "reviewer",
+        Some(NEWEST_REJECTION),
+        None,
+    )
+    .await
+    .expect("reviewer rejection transition");
+    // Structured reviewer rejection activity — `recent_feedback` surfaces this
+    // verbatim into the redispatch prompt (0kws).
+    repo.log_activity(
+        Some(&task_id),
+        "reviewer",
+        "reviewer",
+        "review_submitted",
+        &serde_json::json!({ "verdict": "rejected", "feedback": NEWEST_REJECTION }).to_string(),
+    )
+    .await
+    .expect("log review_submitted");
+    // Persist the rejected diff fingerprint — the submission-integrity anchor
+    // the no-progress guard compares against.
+    record_rejected_integrity_entry(
+        &task_id,
+        &slot_ctx,
+        djinn_core::models::RejectedVerdictKind::ReviewerReject.as_str(),
+        None,
+        None,
+        &fingerprint,
+    )
+    .await;
+
+    assert_eq!(
+        repo.quality_reopen_count(&task_id).await.unwrap(),
+        1,
+        "the genuine reviewer rejection is exactly one quality strike"
+    );
+
+    // ── Step 2: fabricated no-edit submit → first bounce, second-strike settle ─
+    // Turn 1 submit_work (identical fingerprint) is bounced; turn 3 submit_work
+    // (still identical) settles the session as a typed no_progress_submission.
+    let provider = MockProvider::new(vec![
+        MockResponse::tool_call_with_input(
+            "submit-1",
+            "submit_work",
+            serde_json::json!({"task_id": task_id, "summary": "done", "files_changed": []}),
+            100,
+        ),
+        MockResponse::text_only("I'll try resubmitting anyway.", 100),
+        MockResponse::tool_call_with_input(
+            "submit-2",
+            "submit_work",
+            serde_json::json!({"task_id": task_id, "summary": "done again", "files_changed": []}),
+            100,
+        ),
+    ]);
+    let mut conv = Conversation::new();
+    conv.push(Message::system("You are a worker."));
+    conv.push(Message::user("Do the task."));
+    let (_result, output, _, _, _, _) = run_reply_loop(
+        ReplyLoopContext {
+            provider: &provider,
+            tools: &[serde_json::json!({
+                "type": "function",
+                "function": { "name": "submit_work", "description": "submit", "parameters": {"type": "object"} },
+                "concurrent_safe": false
+            })],
+            task_id: &task_id,
+            task_short_id: "t1",
+            session_id: &session_id,
+            project_path: &project_path,
+            worktree_path: &worktree_path,
+            role_name: "worker",
+            finalize_tool_names: &["submit_work", "request_lead"],
+            context_window: 10_000,
+            model_id: "test/mock-model",
+            cancel: &cancel,
+            global_cancel: &cancel,
+            ctx: &slot_ctx,
+            active_skill_names: &[],
+            active_mcp_server_names: &[],
+            max_turns_override: None,
+        },
+        &mut conv,
+        false,
+    )
+    .await;
+    assert!(
+        output.no_progress_submission,
+        "second identical no-edit submit must settle as no_progress_submission"
+    );
+    assert!(
+        output.finalize_payload.is_none(),
+        "the fabricated no-edit submit must NOT be accepted as a finalize"
+    );
+    // The typed no_progress_submission was logged, and it consumed NO quality
+    // reopen strike — the count is unchanged from step 1.
+    let np_entries = repo
+        .query_activity(djinn_db::repositories::task::ActivityQuery {
+            task_id: Some(task_id.clone()),
+            event_type: Some("no_progress_submission".to_string()),
+            actor_role: None,
+            project_id: None,
+            from_time: None,
+            to_time: None,
+            limit: 10,
+            offset: 0,
+        })
+        .await
+        .expect("query activity");
+    assert!(
+        !np_entries.is_empty(),
+        "a typed no_progress_submission activity must be logged"
+    );
+    assert_eq!(
+        repo.quality_reopen_count(&task_id).await.unwrap(),
+        1,
+        "the no-edit submit bounce + settlement must NOT consume a quality reopen strike"
+    );
+
+    // ── Step 3: merge-conflict hold → reopen excluded from quality strikes ────
+    // The task is back at `open` after the rejection; walk another review round
+    // and reject it as a merge conflict.
+    for (action, actor_role) in [
+        (djinn_core::models::TransitionAction::Start, "worker"),
+        (
+            djinn_core::models::TransitionAction::SubmitTaskReview,
+            "worker",
+        ),
+        (
+            djinn_core::models::TransitionAction::TaskReviewStart,
+            "reviewer",
+        ),
+    ] {
+        repo.transition(&task_id, action, actor_role, actor_role, None, None)
+            .await
+            .expect("valid setup transition");
+    }
+    repo.transition(
+        &task_id,
+        djinn_core::models::TransitionAction::TaskReviewRejectConflict,
+        "reviewer",
+        "reviewer",
+        Some("merge_conflict: base branch advanced under the PR"),
+        None,
+    )
+    .await
+    .expect("merge-conflict reject transition");
+    assert_eq!(
+        repo.quality_reopen_count(&task_id).await.unwrap(),
+        1,
+        "the merge_conflict reopen is excluded from the quality strike count"
+    );
+    let ledger = repo.recent_reopen_ledger(&task_id, 6).await.unwrap();
+    assert_eq!(
+        ledger.len(),
+        2,
+        "two reopen events: the reviewer rejection and the merge conflict"
+    );
+    // Newest first.
+    assert_eq!(
+        ledger[0].reopen_class,
+        djinn_core::models::ReopenClass::MergeConflict
+    );
+    assert_eq!(
+        ledger[1].reopen_class,
+        djinn_core::models::ReopenClass::ReviewRejected
+    );
+
+    // ── Step 4: redispatch prompt carries the newest rejection + reopen ledger ─
+    let prompt = crate::helpers::initial_user_message_for_task(&task_id, &slot_ctx).await;
+    assert!(
+        prompt.contains(NEWEST_REJECTION),
+        "redispatch prompt must include the newest reviewer rejection verbatim; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("Reopen history"),
+        "redispatch prompt must render the reopen ledger; got: {prompt}"
+    );
+    assert!(
+        prompt.contains("review_rejected") && prompt.contains("merge_conflict"),
+        "reopen ledger must render both reopen classes; got: {prompt}"
+    );
+}
+
 /// Regression: when a worker submits a changed (non-matching) fingerprint,
 /// the guard allows the finalize to proceed. The `no_progress_submission`
 /// flag must remain false.

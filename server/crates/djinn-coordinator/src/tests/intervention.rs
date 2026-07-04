@@ -2886,3 +2886,118 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         .expect("metric value parses");
     assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
 }
+
+// ── gs37-shaped park-guard regression (proposal ivek) ────────────────────────
+
+/// gs37-shaped rework-loop park-guard regression (proposal `ivek`).
+///
+/// This is the coordinator-side half of the gs37 acceptance criterion; the
+/// slot-side half (the fabricated no-edit submit is bounced/typed-finalized
+/// without consuming a quality strike, and the redispatch prompt carries the
+/// newest rejection verbatim + the reopen ledger) lives in the djinn-slot test
+/// `gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt_carries_rejection`.
+///
+/// Scenario: a genuine reviewer rejection (the sole quality strike), a
+/// fabricated no-edit submit settled as a typed `no_progress_submission`
+/// (recorded, but NOT a reopen), then repeated merge-conflict holds. Each
+/// merge-conflict is a real reopen EVENT — it bounces the task back to `open`
+/// and lands in the reopen ledger — so the raw reopen-event count advances
+/// past `REOPEN_INTERVENTION_THRESHOLD`. But `merge_conflict` is excluded from
+/// the quality strike count, which stays at 1. Trigger A
+/// (`maybe_intervene_on_stuck_task`) reads the QUALITY count, so the task is
+/// NOT parked to human review and no Planner intervention is armed — proving
+/// the acceptance criterion's "does not reach the human-review park threshold"
+/// clause despite the raw reopen counter having advanced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reopen_advance() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+
+    // 1. One genuine reviewer rejection — the sole quality strike.
+    walk_review_reject_cycle(
+        &repo,
+        &task.id,
+        djinn_core::models::TransitionAction::TaskReviewReject,
+        "AC-2 unmet: handler not registered",
+    )
+    .await;
+
+    // 2. A fabricated no-edit submit settled as a typed no_progress_submission.
+    //    The live settlement lives in djinn-slot; here we assert the
+    //    coordinator-visible invariant — the activity is recorded but does NOT
+    //    perturb the quality ledger (it is not a reopen).
+    repo.log_activity(
+        Some(&task.id),
+        "worker",
+        "system",
+        "no_progress_submission",
+        &serde_json::json!({ "reason": "no_progress_submission" }).to_string(),
+    )
+    .await
+    .unwrap();
+
+    // 3. Repeated merge-conflict holds — each a real reopen event, excluded
+    //    from quality strikes. This drives the raw reopen-event count past the
+    //    park threshold while the quality count stays put.
+    for _ in 0..3 {
+        walk_review_reject_cycle(
+            &repo,
+            &task.id,
+            djinn_core::models::TransitionAction::TaskReviewRejectConflict,
+            "merge_conflict: base branch advanced",
+        )
+        .await;
+    }
+
+    let t = repo.get(&task.id).await.unwrap().unwrap();
+
+    // Raw reopen-event count (the untyped ledger) has advanced to 4 — past the
+    // park threshold of 3.
+    let ledger = repo.recent_reopen_ledger(&task.id, 10).await.unwrap();
+    assert_eq!(
+        ledger.len(),
+        4,
+        "one reviewer rejection + three merge-conflict reopen events"
+    );
+    assert!(
+        (ledger.len() as i64) >= REOPEN_INTERVENTION_THRESHOLD,
+        "raw reopen-event count must have advanced to/past the park threshold"
+    );
+
+    // But the QUALITY strike count excludes the merge_conflict reopens.
+    let quality = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(
+        quality, 1,
+        "only the genuine reviewer rejection is a quality strike"
+    );
+    assert!(
+        quality < REOPEN_INTERVENTION_THRESHOLD,
+        "quality strike count must stay below the park threshold"
+    );
+
+    // Trigger A reads the quality count → the park guard does NOT fire.
+    let intervened = actor.maybe_intervene_on_stuck_task(&t).await;
+    assert!(
+        !intervened,
+        "park guard must NOT trigger while quality strikes stay below threshold, \
+         despite the raw reopen counter having advanced"
+    );
+    assert!(
+        planner_intervention_markers(&repo, &task.id)
+            .await
+            .is_empty(),
+        "no planner-intervention marker may be written below the quality threshold"
+    );
+
+    // And no Planner intervention (review) task was spawned.
+    let reviews = repo.list_by_status("open").await.unwrap();
+    assert!(
+        !reviews
+            .iter()
+            .any(|r| r.issue_type == "review" && r.project_id == t.project_id),
+        "no Planner intervention (review) task may be created below the park threshold"
+    );
+}
