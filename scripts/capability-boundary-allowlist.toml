@@ -193,7 +193,8 @@ capability = "git"
 # ── Remaining K8s baseline after Wave 1 migrations ────────────────────────
 # Wave 1 (7chr) routed token-review Kubernetes access through djinn-k8s. The
 # remaining non-owner K8s usage is the image-controller (large deferred
-# migration) and the server state module, both tracked by epic/fztz.
+# migration); the server state module was migrated (ouss) and its entry
+# removed.
 
 [[entries]]
 capability = "k8s"
@@ -249,12 +250,4 @@ capability = "k8s"
 	matcher = "kube::"
 	owner = "team/image-controller"
 	rationale = "Deferred large migration: image-controller unit tests use the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "k8s"
-	path = "server/src/server/state/mod.rs"
-	matcher = "kube::"
-	owner = "team/server"
-	rationale = "Still-pending owner-crate migration: server state module uses kube types for Kubernetes client configuration. Should be routed through djinn-k8s once the k8s surface supports this use case."
 	cleanup_issue = "epic/fztz"
