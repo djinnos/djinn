@@ -37,8 +37,12 @@ pub(super) async fn record_compaction_started(
     session_id: &str,
     conversation: &Conversation,
 ) -> Option<String> {
-    let (first_message_id, last_compacted_message_id, first_retained_message_id, retained_tail_hash) =
-        gather_boundary_identity(conversation);
+    let (
+        first_message_id,
+        last_compacted_message_id,
+        first_retained_message_id,
+        retained_tail_hash,
+    ) = gather_boundary_identity(conversation);
 
     let marker_metadata = serde_json::json!({
         "marker_kind": "compaction_summary",
@@ -93,8 +97,12 @@ pub(super) async fn complete_compaction_boundary(
         return;
     };
 
-    let (first_message_id, last_compacted_message_id, first_retained_message_id, retained_tail_hash) =
-        gather_boundary_identity(compacted_conversation);
+    let (
+        first_message_id,
+        last_compacted_message_id,
+        first_retained_message_id,
+        retained_tail_hash,
+    ) = gather_boundary_identity(compacted_conversation);
 
     let marker_metadata = serde_json::json!({
         "marker_kind": "compaction_summary",
@@ -132,7 +140,12 @@ pub(super) async fn complete_compaction_boundary(
 /// of the message JSON is used as a synthetic identity.
 fn gather_boundary_identity(
     conversation: &Conversation,
-) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     use sha2::{Digest, Sha256};
 
     let first_message_id = conversation
@@ -150,15 +163,16 @@ fn gather_boundary_identity(
     for msg in &conversation.messages {
         if found_summary
             && msg.role != Role::System
-            && msg.text_content() != "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task."
-            && !msg.text_content().starts_with("Part of your context was compacted.")
+            && msg.text_content()
+                != "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task."
+            && !msg
+                .text_content()
+                .starts_with("Part of your context was compacted.")
         {
             first_retained_message_id = Some(message_identity(msg));
             break;
         }
-        if msg.role == Role::User
-            && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
-        {
+        if msg.role == Role::User && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER) {
             found_summary = true;
         }
     }
@@ -182,10 +196,8 @@ fn gather_boundary_identity(
 }
 
 fn message_identity(msg: &Message) -> String {
-    if let Some(serde_json::Value::Object(provider_data)) = msg
-        .metadata
-        .as_ref()
-        .and_then(|m| m.provider_data.as_ref())
+    if let Some(serde_json::Value::Object(provider_data)) =
+        msg.metadata.as_ref().and_then(|m| m.provider_data.as_ref())
         && let Some(serde_json::Value::String(id)) = provider_data.get("id")
     {
         return id.clone();
