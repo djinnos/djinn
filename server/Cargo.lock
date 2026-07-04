@@ -1123,6 +1123,7 @@ dependencies = [
  "djinn-graph",
  "djinn-provider",
  "djinn-runtime",
+ "djinn-slot",
  "djinn-stack",
  "djinn-supervisor",
  "djinn-telemetry",
