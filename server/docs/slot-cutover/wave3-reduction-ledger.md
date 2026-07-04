@@ -779,3 +779,83 @@ Environment limitations:
 
 - DB-backed tests (compaction, finalize, extraction, pool) fail on missing `djinn_test_template` database — same limitation as all prior slices. No tests were disabled or weakened.
 - `OPENSSL_NO_VENDOR=1` is required; the container lacks `make` for vendored OpenSSL.
+
+---
+
+## Slice: canonical djinn-slot test fixture consolidation — follow-up (6ad0)
+
+Task: `019f26bd-2cab-7140-85a1-3d15581de9f4` (6ad0) — Follow-up to address CI unused-variable warnings and continue fixture consolidation.
+
+### Why this follow-up was needed
+
+The previous 6ad0 slice (commit `807083456`) consolidated `ContextFixture`/`FullFixture` destructuring across `finalize_handlers_tests.rs`, `finalize_handlers_fingerprint_tests.rs`, and `helpers_tests.rs`. CI later failed with 40 `unused_variables` errors because many destructuring bindings named `project` and `epic` were not used. The current workspace has those bindings converted to `project: _, epic: _` (and `db: _` where unused), so the crate compiles clean under `RUSTFLAGS=-D warnings`.
+
+### Additional consolidation in this session
+
+- `server/crates/djinn-slot/src/llm_extraction_tests.rs`
+  - Added `TestFixture::note_repo()` helper that returns a `NoteRepository` backed by the fixture DB and a noop event bus.
+  - Replaced ~27 repeated `NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop())` (and one `events.clone()` variant) construction sites with `fixture.note_repo()` / `empty_fixture.note_repo()` / `failed_fixture.note_repo()`.
+  - This removes the need for the `events` local in `structural_extraction_flushes_co_access_associations` and shrinks the repeated 3-line construction block to a single method call.
+
+### Line-count proof
+
+```sh
+find server/crates/djinn-agent/src/actors/slot -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-agent/src/actors/slot server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+```
+
+Before this follow-up:
+
+| Tree | Before |
+|---|---:|
+| `djinn-agent/src/actors/slot` | 7,285 |
+| `djinn-slot/src` | 30,029 |
+| **Combined** | **37,314** |
+
+After this follow-up:
+
+| Tree | After | Delta |
+|---|---|---:|
+| `djinn-agent/src/actors/slot` | 7,285 | 0 |
+| `djinn-slot/src` | 30,028 | **−1** |
+| **Combined** | **37,313** | **−1** |
+
+The net line reduction is small because the helper method body offsets the per-call savings, and `cargo fmt` kept the existing multi-line destructuring patterns in the other files. The structural win is fewer repeated `NoteRepository::new(..., EventBus::noop())` calls, not a large raw line drop.
+
+### Assertion preservation
+
+No assertions were removed or weakened. The `note_repo()` helper only centralizes construction; all existing behavioral checks in `llm_extraction_tests.rs` remain unchanged.
+
+### Validation
+
+Formatting:
+
+```sh
+cargo fmt --manifest-path server/Cargo.toml -p djinn-slot
+```
+
+Result: applied.
+
+Type-check / lint:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo clippy --manifest-path server/Cargo.toml -p djinn-slot --lib --tests --no-deps -- -D warnings
+```
+
+Result: passed clean — zero errors, zero warnings.
+
+Focused tests:
+
+```sh
+OPENSSL_NO_VENDOR=1 cargo test --manifest-path server/Cargo.toml -p djinn-slot --lib -- llm_extraction_tests::structural_extraction_flushes_co_access_associations
+```
+
+Result: 1 passed, 0 failed.
+
+Environment limitations:
+
+- DB-backed tests (extraction, finalize, pool, compaction) fail on missing `djinn_test_template` database — same limitation as prior slices. No tests were disabled or weakened.
+- `OPENSSL_NO_VENDOR=1` is required because the container lacks `make` for vendored OpenSSL.
+
+---
