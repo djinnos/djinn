@@ -155,10 +155,12 @@ fn command_formatters() {
 
 #[tokio::test]
 async fn recent_feedback_filters_orders_and_limits() {
-    let db = create_test_db();
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::FullFixture {
+        db,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_full_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     repo.log_activity(
         Some(&task.id),
@@ -213,11 +215,13 @@ async fn recent_feedback_filters_orders_and_limits() {
 
 #[tokio::test]
 async fn initial_user_message_default_and_feedback() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     let default_msg = initial_user_message_for_task(&task.id, &state).await;
     assert_eq!(
@@ -296,11 +300,13 @@ fn latest_ci_feedback_respects_cycle_floor() {
 
 #[tokio::test]
 async fn initial_user_message_combines_reviewer_and_ci_feedback() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     // PR review feedback (system / pr_review_feedback) with at least one inline
     // comment so `pr_review_feedback_context` returns Some(..).
@@ -348,11 +354,13 @@ async fn initial_user_message_combines_reviewer_and_ci_feedback() {
 
 #[tokio::test]
 async fn initial_user_message_reviewer_only_preserves_behavior() {
-    let db = create_test_db();
-    let state = agent_context_from_db(db.clone(), CancellationToken::new());
-    let project = create_test_project(&db).await;
-    let epic = create_test_epic(&db, &project.id).await;
-    let task = create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx: state,
+        project: _,
+        epic: _,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
     let feedback_payload = serde_json::json!({
         "pull_number": 7,

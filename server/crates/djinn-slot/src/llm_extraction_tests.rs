@@ -101,6 +101,12 @@ struct TestFixture {
     tmpdir: TempDir,
 }
 
+impl TestFixture {
+    fn note_repo(&self) -> NoteRepository {
+        NoteRepository::new(self.db.clone(), djinn_core::events::EventBus::noop())
+    }
+}
+
 /// Build a complete test fixture: DB + project + epic + task + session.
 async fn make_fixture() -> TestFixture {
     let tmpdir = make_tmpdir();
@@ -301,8 +307,7 @@ fn structural_extraction_produces_correct_taxonomy() {
 async fn structural_extraction_flushes_co_access_associations() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-    let events = djinn_core::events::EventBus::noop();
-    let note_repo = NoteRepository::new(fixture.db.clone(), events.clone());
+    let note_repo = fixture.note_repo();
     let note_a = note_repo
         .create(
             &fixture.project.id,
@@ -387,7 +392,7 @@ async fn llm_extraction_with_fake_provider_writes_case_pattern_pitfall_notes() {
     };
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -449,7 +454,7 @@ async fn llm_extracted_notes_have_confidence_0_5() {
     };
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -492,7 +497,7 @@ async fn llm_extracted_notes_contain_session_id_provenance() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -519,7 +524,7 @@ async fn llm_extraction_graceful_degradation_failing_provider_no_notes_written()
     };
     let provider = Arc::new(FailingProvider::new("injected LLM failure for test"));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -543,10 +548,7 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
         empty_provider,
     )
     .await;
-    let empty_note_repo = NoteRepository::new(
-        empty_fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let empty_note_repo = empty_fixture.note_repo();
     assert!(
         empty_note_repo
             .list(&empty_fixture.project.id, None)
@@ -581,10 +583,7 @@ async fn llm_extraction_distinguishes_empty_success_from_failed_call() {
         failed_provider,
     )
     .await;
-    let failed_note_repo = NoteRepository::new(
-        failed_fixture.db.clone(),
-        djinn_core::events::EventBus::noop(),
-    );
+    let failed_note_repo = failed_fixture.note_repo();
     assert!(
         failed_note_repo
             .list(&failed_fixture.project.id, None)
@@ -632,7 +631,7 @@ async fn llm_extraction_intra_batch_dedup_collapses_duplicate_notes() {
         provider,
     )
     .await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let cases: Vec<_> = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -702,7 +701,7 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
         !captured.contains("dropping underspecified note at admission gate"),
         "missing-provider path must stay distinct from admission/quality-gate rejection; captured: {captured}"
     );
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -714,7 +713,7 @@ async fn llm_extraction_graceful_degradation_no_provider_configured() {
 async fn llm_extraction_semantic_duplicate_skips_create_and_boosts_existing_confidence() {
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let existing = note_repo
         .create_db_note(
             &fixture.project.id,
@@ -853,7 +852,7 @@ async fn llm_extraction_novelty_check_failure_falls_back_to_create() {
         novelty_failure_candidate_lookup,
     )
     .await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -883,7 +882,7 @@ async fn llm_extraction_admission_gate_drops_pattern_with_no_required_sections()
         r#"{"cases":[],"patterns":[{"title":"Underspecified Pattern Dropped","content":"Recommended approach for this task: keep a temporary hypothesis about the current migration and maybe investigate the next step later so the team can continue the session. Why it works: it preserves context during the current task, but it is still temporary and should not become durable memory.","scope_paths":["server/crates/djinn-agent/src/actors/slot"]}],"pitfalls":[]}"#,
     ));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -932,7 +931,7 @@ async fn llm_extraction_admission_gate_drops_pattern_missing_adr_054_sections() 
         }).to_string(),
     ));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1016,7 +1015,7 @@ async fn full_reflection_pipeline_structural_then_llm_extraction() {
     assert_eq!(stored_taxonomy.files_changed, 1);
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx_llm, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1069,7 +1068,7 @@ async fn llm_extraction_persists_applies_when_as_retrieval_anchor() {
     };
     let provider = anchor_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let all_notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1113,7 +1112,7 @@ async fn llm_extraction_persists_note_without_anchor_when_model_omits_applies_wh
     // Use the existing fake_extraction_provider (no anchor field on any note).
     let provider = fake_extraction_provider();
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1158,7 +1157,7 @@ async fn llm_extraction_treats_empty_anchor_as_missing() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1300,7 +1299,7 @@ async fn admission_gate_passes_complete_case_note() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1414,7 +1413,7 @@ async fn admission_gate_drops_case_missing_required_section() {
         !captured.contains("llm_extraction: no LLM provider available; skipping extraction"),
         "provider-backed admission-gate rejection must not be misclassified as missing provider; captured: {captured}"
     );
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1470,7 +1469,7 @@ async fn admission_gate_drops_short_body_note() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1521,7 +1520,7 @@ async fn admission_gate_drops_low_paragraph_note() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1569,7 +1568,7 @@ async fn admission_gate_preserves_applies_when_and_scope_paths() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1604,7 +1603,7 @@ async fn admission_gate_preserves_novelty_dedup() {
     // signal. Drop counter for this candidate must remain 0.
     let fixture = make_fixture().await;
     let ctx = agent_context_from_db(fixture.db.clone(), fixture.cancel.clone());
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let existing = note_repo
         .create_db_note(
             &fixture.project.id,
@@ -1806,7 +1805,7 @@ async fn admission_gate_increments_metric_for_each_drop() {
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let notes = note_repo
         .list(&fixture.project.id, None)
         .await
@@ -1849,7 +1848,7 @@ async fn admission_gate_does_not_affect_human_writes() {
     // `admission_dropped` counter remains at zero because no extraction run
     // happens in this test.
     let fixture = make_fixture().await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let created = note_repo
         .create_db_note_with_scope_and_retrieval_anchor(
             &fixture.project.id,
@@ -1917,7 +1916,7 @@ async fn session_with_gate_drops_surfaces_nonzero_admission_dropped_in_health() 
     .to_string();
     let provider = Arc::new(FakeProvider::text(&json));
     run_llm_extraction_with_provider(fixture.session_id.clone(), taxonomy, ctx, provider).await;
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let health = note_repo
         .health(&fixture.project.id)
         .await
@@ -1970,7 +1969,7 @@ async fn session_with_zero_gate_drops_writes_zero_admission_dropped_metric() {
         extraction_metric.admission_dropped_note_count, 0,
         "admission_dropped_note_count must be 0 when no candidates are dropped"
     );
-    let note_repo = NoteRepository::new(fixture.db.clone(), djinn_core::events::EventBus::noop());
+    let note_repo = fixture.note_repo();
     let health = note_repo
         .health(&fixture.project.id)
         .await
