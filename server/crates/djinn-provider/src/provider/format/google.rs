@@ -6,8 +6,10 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 use crate::provider::format::tool_projection::project;
+use crate::provider::{
+    FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
+};
 
 pub struct GoogleProvider {
     config: ProviderConfig,
@@ -556,7 +558,11 @@ mod tests {
         assert!(gemini_decl.get("inputSchema").is_none());
         let required = gemini_decl["parameters"]["required"].as_array().unwrap();
         assert_eq!(required, &["cmd"]);
-        assert!(gemini_decl["parameters"].get("unevaluatedProperties").is_none());
+        assert!(
+            gemini_decl["parameters"]
+                .get("unevaluatedProperties")
+                .is_none()
+        );
 
         // Reasoning effort high sets the thinking budget.
         let mut config = test_google_config();

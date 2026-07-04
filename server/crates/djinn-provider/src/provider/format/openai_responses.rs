@@ -6,11 +6,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::pin::Pin;
 
-use crate::provider::format::tool_projection::project;
-use crate::provider::FormatFamily;
 use crate::message::{ContentBlock, Conversation};
+use crate::provider::FormatFamily;
 use crate::provider::client::ApiClient;
 use crate::provider::error::ProviderError;
+use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -81,7 +81,9 @@ impl OpenAIResponsesProvider {
                         .or_else(|| tool.get("input_schema"))
                         .or_else(|| tool.get("function").and_then(|f| f.get("parameters")))
                         .cloned()
-                        .map(|schema| project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI));
+                        .map(|schema| {
+                            project(schema, self.config.tool_schema_compat, FormatFamily::OpenAI)
+                        });
                     json!({
                         "type": "function",
                         "name": name,
