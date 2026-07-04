@@ -38,8 +38,8 @@ use super::loop_guard::{
     ToolCallSignature, ToolFailureClass,
 };
 use super::persistence::{
-    complete_compaction_boundary, persist_session_message, record_compaction_started,
-    serialize_llm_input, serialize_message,
+    complete_compaction_boundary, flush_in_flight_turn, persist_session_message,
+    record_compaction_started, serialize_llm_input, serialize_message,
 };
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
@@ -788,7 +788,7 @@ pub async fn run_reply_loop(
                 tool_dispatcher,
                 otel_session: otel_session.as_ref(),
             };
-            let stream_state = consume_provider_stream(StreamLoopContext {
+            let mut stream_state = consume_provider_stream(StreamLoopContext {
                 provider,
                 stream,
                 tool_metadata: &tool_metadata,
@@ -814,6 +814,32 @@ pub async fn run_reply_loop(
                 total_reasoning_out: &mut total_reasoning_out,
             })
             .await?;
+            // Flush any observed assistant/tool content before returning on
+            // interrupt, cancellation, or early stream end.  This persists the
+            // in-flight turn so it survives session release and is visible on
+            // resume/timeline.  The flush is idempotent: repeated calls within the
+            // same turn are no-ops once the turn is marked flushed.
+            let has_in_flight_content =
+                !stream_state.turn_text.is_empty()
+                || !stream_state.turn_thinking.is_empty()
+                || !stream_state.turn_provider_state.is_empty()
+                || !stream_state.turn_tool_calls.is_empty()
+                || !stream_state.streaming_results.is_empty();
+            let should_flush = stream_state.interrupted.is_some()
+                || (stream_state.early_stream_end && has_in_flight_content);
+            if should_flush {
+                let now_ts = slot_ctx.clock.now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                flush_in_flight_turn(&msg_repo, session_id, task_id, now_ts, &mut stream_state).await;
+            }
+            // Normal completion: the turn will be finalized below.  Mark it
+            // flushed so any future caller cannot accidentally re-persist the
+            // same rows.
+            if stream_state.interrupted.is_none() && !stream_state.early_stream_end {
+                stream_state.turn_flushed = true;
+            }
             let StreamTurnState {
                 turn_text,
                 turn_thinking,
@@ -829,6 +855,8 @@ pub async fn run_reply_loop(
                 needs_reactive_compaction,
                 streaming_results,
                 streaming_dispatched,
+                early_stream_end: _,
+                turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
             if let Some(llm) = otel_llm {
@@ -1512,7 +1540,8 @@ mod tests {
     // abnormal early exit (a summarizer panic that unwinds through the helper).
 
     use crate::test_helpers::{
-        FailingProvider, FakeProvider, agent_context_from_db, create_test_db,
+        FailingProvider, FakeProvider, agent_context_from_db, create_test_db, create_test_epic,
+        create_test_project, create_test_task,
     };
     use djinn_provider::provider::StreamEvent;
 
@@ -1701,6 +1730,265 @@ mod tests {
         assert!(
             !section.is_compacting(),
             "guard must release on a panic / early-exit unwinding through the helper"
+        );
+    }
+
+    // ---- idempotent in-flight turn flush (djxg) --------------------------
+
+    use super::super::persistence::flush_in_flight_turn;
+    use super::super::streaming::StreamTurnState;
+    use djinn_db::SessionMessageRepository;
+    use djinn_db::repositories::session::{CreateSessionParams, SessionRepository};
+
+    /// Create a project + epic + task + session in the test DB and return
+    /// `(session_id, task_id)` for flush tests that need a valid FK target.
+    async fn create_flush_test_session(db: &djinn_db::Database) -> (String, String) {
+        let project = create_test_project(db).await;
+        let epic = create_test_epic(db, &project.id).await;
+        let task = create_test_task(db, &project.id, &epic.id).await;
+        let session_repo = SessionRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test-model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+        (session.id, task.id)
+    }
+
+    /// Build a `StreamTurnState` with assistant text and a completed streaming
+    /// tool result — the typical in-flight state at interrupt time.
+    fn inflight_turn_state() -> StreamTurnState {
+        let mut state = StreamTurnState::new();
+        state.turn_text = "Let me check the file.".to_string();
+        state.turn_thinking = "Thinking about the task.".to_string();
+        state.turn_tool_calls = vec![ContentBlock::ToolUse {
+            id: "call_1".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({ "file_path": "/tmp/test.rs" }),
+        }];
+        state.streaming_results = vec![(
+            0,
+            ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: vec![ContentBlock::text("file contents here")],
+                is_error: false,
+            },
+        )];
+        state
+    }
+
+    /// Repeated `flush_in_flight_turn` calls must not duplicate persisted
+    /// session messages: the `turn_flushed` guard is set after the first call.
+    #[tokio::test]
+    async fn flush_in_flight_turn_is_idempotent() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut state = inflight_turn_state();
+
+        // First flush: should persist assistant + tool-result messages.
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+        assert!(
+            state.turn_flushed,
+            "turn_flushed must be set after first flush"
+        );
+
+        // Second flush: no-op due to idempotency guard.
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+
+        // Verify exactly 2 messages (assistant + tool result) were persisted,
+        // not 4 (which would happen without idempotency).
+        let conversation = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load_raw_conversation should succeed");
+        assert_eq!(
+            conversation.messages.len(),
+            2,
+            "expected exactly 2 messages (assistant + tool result), found {}",
+            conversation.messages.len()
+        );
+    }
+
+    /// An empty turn (no text, no thinking, no tool calls) should not persist
+    /// any messages and should still mark the turn as flushed.
+    #[tokio::test]
+    async fn flush_in_flight_turn_empty_noop() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut state = StreamTurnState::new();
+
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+        assert!(
+            state.turn_flushed,
+            "turn_flushed must be set even for empty turn"
+        );
+
+        let conversation = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load_raw_conversation should succeed");
+        assert!(
+            conversation.messages.is_empty(),
+            "empty turn should not persist any messages"
+        );
+    }
+
+    /// Flushed assistant/tool messages are visible in the raw conversation
+    /// (load_raw_conversation) — the timeline/resume path.
+    #[tokio::test]
+    async fn flush_in_flight_turn_visible_on_resume_timeline() {
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let (session_id, task_id) = create_flush_test_session(&db).await;
+        let msg_repo =
+            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
+        let mut state = inflight_turn_state();
+
+        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
+
+        let conversation = msg_repo
+            .load_raw_conversation(&session_id)
+            .await
+            .expect("load_raw_conversation should succeed");
+
+        // Should have an assistant message and a tool result message.
+        assert_eq!(conversation.messages.len(), 2);
+
+        let assistant = &conversation.messages[0];
+        assert_eq!(assistant.role, Role::Assistant);
+        let text = assistant.text_content();
+        assert!(
+            text.contains("Let me check the file."),
+            "assistant text should be present on resume: {text}"
+        );
+        // Thinking should be preserved.
+        assert!(
+            assistant
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { thinking } if thinking.contains("Thinking about"))),
+            "thinking content should be preserved in the assistant message"
+        );
+        // Tool use block should be present.
+        assert!(
+            assistant.content.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolUse { id, name, .. } if id == "call_1" && name == "read"
+            )),
+            "tool_use block should be present in the assistant message"
+        );
+
+        let tool_result = &conversation.messages[1];
+        assert_eq!(tool_result.role, Role::User);
+        assert!(
+            tool_result.content.iter().any(|b| matches!(
+                b,
+                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_1"
+            )),
+            "tool result should be present with correct tool_use_id"
+        );
+    }
+
+    /// `consume_provider_stream` records `early_stream_end` when the provider
+    /// stream ends without `StreamEvent::Done`, preserving observed text so the
+    /// reply loop can flush it before session release.
+    #[tokio::test]
+    async fn consume_provider_stream_early_end_records_flush_signal() {
+        use super::super::streaming::StreamLoopContext;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+        use tokio_util::sync::CancellationToken;
+
+        let db = create_test_db();
+        db.ensure_initialized().await.expect("db init");
+        let slot_ctx = agent_context_from_db(db, CancellationToken::new());
+        let provider = FakeProvider::script(vec![vec![
+            StreamEvent::Delta(ContentBlock::Text {
+                text: "partial output".to_string(),
+            }),
+            // No StreamEvent::Done — simulate early stream end.
+        ]]);
+        let tool_metadata = super::super::tool_dispatch::tool_runtime_metadata(&[]);
+        let conversation = Conversation::new();
+        let stream = provider
+            .stream(&conversation, &[], None)
+            .await
+            .expect("stream");
+        let cancel = CancellationToken::new();
+        let global_cancel = CancellationToken::new();
+        let activity_ts = Arc::new(AtomicU64::new(0));
+        let last_rpc_touch = Arc::new(AtomicU64::new(0));
+        let last_token_flush = Arc::new(AtomicU64::new(0));
+        let mut current_context_tokens = 0u32;
+        let mut total_tokens_in = 0u32;
+        let mut total_tokens_out = 0u32;
+        let mut total_cache_read = 0u32;
+        let mut total_cache_write = 0u32;
+        let mut total_reasoning_out = 0u32;
+        let dispatcher = slot_ctx
+            .tool_dispatcher
+            .as_deref()
+            .expect("test SlotContext has a tool dispatcher");
+        let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
+            ctx: &slot_ctx,
+            task_id: "task",
+            worktree_path: std::path::Path::new("/tmp"),
+            role_name: "worker",
+            tool_metadata: &tool_metadata,
+            tool_dispatcher: dispatcher,
+            otel_session: None,
+        };
+
+        let state = consume_provider_stream(StreamLoopContext {
+            provider: &provider,
+            stream,
+            tool_metadata: &tool_metadata,
+            dispatch: &dispatch_ctx,
+            task_id: "task",
+            session_id: "session",
+            role_name: "worker",
+            project_path: "/tmp",
+            worktree_path: std::path::Path::new("/tmp"),
+            context_window: 100_000,
+            ctx: &slot_ctx,
+            cancel: &cancel,
+            global_cancel: &global_cancel,
+            activity_ts: &activity_ts,
+            last_rpc_touch: &last_rpc_touch,
+            last_token_flush: &last_token_flush,
+            compaction_attempts: 0,
+            current_context_tokens: &mut current_context_tokens,
+            total_tokens_in: &mut total_tokens_in,
+            total_tokens_out: &mut total_tokens_out,
+            total_cache_read: &mut total_cache_read,
+            total_cache_write: &mut total_cache_write,
+            total_reasoning_out: &mut total_reasoning_out,
+        })
+        .await
+        .expect("consume_provider_stream");
+
+        assert!(
+            state.early_stream_end,
+            "early stream end must be recorded when stream ends without Done"
+        );
+        assert_eq!(state.turn_text, "partial output");
+        assert!(
+            state.interrupted.is_none(),
+            "early stream end is not an interruption"
         );
     }
 }

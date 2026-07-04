@@ -444,11 +444,10 @@ impl SlotPool {
                 if killed && owns_task_mapping {
                     self.teardown_taskrun_jobs_for_task(&task_id, "slot_event_killed")
                         .await;
-                    // TODO(teardown-flush): the idempotent in-flight turn flush
-                    // (task djxg) runs inside the slot actor's
-                    // apply_deferred_lifecycle_intent before the completion event
-                    // is emitted.  Settlement below assumes any flushable
-                    // assistant/tool rows have already been persisted.
+                    // The idempotent in-flight turn flush (djxg) runs inside
+                    // the reply loop's interrupt/cancellation path before the
+                    // lifecycle task exits.  Settlement below assumes any
+                    // flushable assistant/tool rows have already been persisted.
                     self.settle_session_row(&task_id).await;
                 }
                 if owns_task_mapping {
