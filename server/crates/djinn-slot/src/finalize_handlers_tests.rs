@@ -58,8 +58,8 @@ async fn budget_park_logs_extractor_compatible_work_submitted() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     handle_budget_park(
@@ -89,8 +89,8 @@ async fn budget_park_empty_summary_skips_activity() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     handle_budget_park("   ", "ignored", &task.id, &ctx).await;
@@ -104,8 +104,8 @@ async fn submit_work_logs_activity_with_summary_and_files() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
@@ -134,8 +134,8 @@ async fn budget_park_submit_work_activity_surfaces_unchanged() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
@@ -163,10 +163,10 @@ async fn budget_park_submit_work_activity_surfaces_unchanged() {
 #[tokio::test]
 async fn submit_work_malformed_payload_does_not_crash() {
     let crate::test_helpers::ContextFixture {
-        db,
+        db: _,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // Missing required "summary" field.
@@ -180,8 +180,8 @@ async fn submit_review_atomically_sets_ac_from_criteria_array() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // Seed AC with met=false.
@@ -215,8 +215,8 @@ async fn submit_review_logs_verdict_activity() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
@@ -238,10 +238,10 @@ async fn submit_review_logs_verdict_activity() {
 #[tokio::test]
 async fn submit_review_malformed_payload_does_not_crash() {
     let crate::test_helpers::ContextFixture {
-        db,
+        db: _,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // "verdict" is required but missing.
@@ -254,8 +254,8 @@ async fn submit_decision_logs_decision_activity() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let payload = Some(serde_json::json!({
@@ -282,10 +282,10 @@ async fn submit_decision_logs_decision_activity() {
 #[tokio::test]
 async fn submit_decision_malformed_payload_does_not_crash() {
     let crate::test_helpers::ContextFixture {
-        db,
+        db: _,
         ctx,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // "decision" is required but missing.
@@ -431,7 +431,7 @@ async fn submit_work_with_auto_submit_metadata_records_model_called_true() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // Create a task_run so the metadata can reference it.
@@ -501,7 +501,7 @@ async fn auto_submit_payload_records_model_called_false() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let run_id = uuid::Uuid::now_v7().to_string();

@@ -67,7 +67,7 @@ async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
@@ -105,7 +105,7 @@ async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // Create a clean git repo with no dirty changes.
@@ -163,7 +163,7 @@ async fn rejected_review_skips_persistence_when_no_worktree() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     // Task run with no workspace_path.
@@ -189,7 +189,7 @@ async fn accepted_review_does_not_record_rejected_fingerprint() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
@@ -224,7 +224,7 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
@@ -284,7 +284,7 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
@@ -451,7 +451,7 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
         db,
         ctx,
         project,
-        epic,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let worktree_run1 = init_git_repo_with_dirty_file();

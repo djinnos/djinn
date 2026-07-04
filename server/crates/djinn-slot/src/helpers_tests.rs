@@ -157,8 +157,8 @@ fn command_formatters() {
 async fn recent_feedback_filters_orders_and_limits() {
     let crate::test_helpers::FullFixture {
         db,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_full_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
@@ -218,8 +218,8 @@ async fn initial_user_message_default_and_feedback() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx: state,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
@@ -303,8 +303,8 @@ async fn initial_user_message_combines_reviewer_and_ci_feedback() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx: state,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
@@ -357,8 +357,8 @@ async fn initial_user_message_reviewer_only_preserves_behavior() {
     let crate::test_helpers::ContextFixture {
         db,
         ctx: state,
-        project,
-        epic,
+        project: _,
+        epic: _,
         task,
     } = crate::test_helpers::seed_context_fixture().await;
     let repo = TaskRepository::new(db.clone(), crate::test_helpers::test_events());
