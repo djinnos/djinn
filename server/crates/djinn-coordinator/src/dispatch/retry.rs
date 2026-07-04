@@ -24,6 +24,16 @@ pub(crate) struct PostInterventionHistory {
     pub non_attempt_models: Vec<String>,
     /// `sess <id8> (model)` labels for the truthful park reason.
     pub non_attempt_session_labels: Vec<String>,
+    /// The newest post-intervention `work_submitted` activity is newer than any
+    /// rejection/CI-failure evidence — the submission is pending review
+    /// (`needs_task_review` / `in_task_review`) and the round is still in flight.
+    /// When `true`, the park rung must NOT park: the attempt has not concluded.
+    pub submission_pending_review: bool,
+    /// ISO-8601 timestamp of the latest post-intervention `work_submitted`
+    /// activity. Used for the CI-staleness check: CI evidence whose
+    /// `first_seen_at` predates this timestamp is from a prior head SHA and
+    /// must not serve as the park-triggering strike.
+    pub latest_submission_at: Option<String>,
 }
 
 /// Which kind of remediation task to create for a stuck source task.
@@ -612,7 +622,7 @@ impl CoordinatorActor {
         };
 
         // Did any post-intervention session reach submit_work?
-        let any_submitted = match self
+        let (any_submitted, latest_submission_at) = match self
             .task_repo()
             .query_activity(ActivityQuery {
                 task_id: Some(task.id.clone()),
@@ -626,9 +636,14 @@ impl CoordinatorActor {
             })
             .await
         {
-            Ok(entries) => entries
-                .iter()
-                .any(|entry| entry.created_at.as_str() > floor.as_str()),
+            Ok(entries) => {
+                let latest = entries
+                    .iter()
+                    .filter(|entry| entry.created_at.as_str() > floor.as_str())
+                    .map(|entry| entry.created_at.clone())
+                    .max();
+                (latest.is_some(), latest)
+            }
             Err(e) => {
                 // Fail safe: without evidence, treat as "attempted" so the caller
                 // parks rather than looping — the conservative direction.
@@ -645,8 +660,18 @@ impl CoordinatorActor {
         };
 
         if any_submitted {
+            // Check if the submission is still pending review. A post-intervention
+            // session submitted work, but if the task hasn't been reviewed/rejected
+            // yet, the round is still in flight and the park must not fire.
+            // Additionally, CI evidence whose head SHA predates the latest submitted
+            // work (ci_first_seen_at before the submission) is stale and must not
+            // serve as a park-triggering strike.
+            let submission_pending_review =
+                matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
             return PostInterventionHistory {
                 any_submitted: true,
+                submission_pending_review,
+                latest_submission_at,
                 ..Default::default()
             };
         }
@@ -686,6 +711,8 @@ impl CoordinatorActor {
             any_submitted: false,
             non_attempt_models,
             non_attempt_session_labels,
+            submission_pending_review: false,
+            latest_submission_at: None,
         }
     }
 
@@ -820,14 +847,29 @@ impl CoordinatorActor {
             // and refuse to park on evidence the fleet never tried.
             let history = self.post_intervention_history(task).await;
 
+            // CI staleness check (2vxr): CI evidence whose head SHA predates
+            // the latest submitted work must not serve as the park-triggering
+            // strike. If the CI was first observed before the latest submission,
+            // the fingerprint is from a prior head and is stale.
+            let ci_stale = match (
+                task.ci_first_seen_at.as_deref(),
+                history.latest_submission_at.as_deref(),
+            ) {
+                (Some(ci_ts), Some(sub_ts)) => ci_ts < sub_ts,
+                _ => false,
+            };
+
             // First-occurrence CI fingerprint (8y3q): a park-triggering strike
             // whose failure_fingerprint is brand new on this task deserves exactly
             // one remediation before any park — "re-dispatching would only loop"
             // is unfounded against a novel failure (8y3q's fix was one token).
-            if let Some(fingerprint) = task
-                .ci_failure_fingerprint
-                .as_deref()
-                .filter(|f| !f.is_empty())
+            // Skip the fingerprint check when CI evidence is stale (from a prior
+            // head SHA) — it cannot serve as a park-triggering strike.
+            if !ci_stale
+                && let Some(fingerprint) = task
+                    .ci_failure_fingerprint
+                    .as_deref()
+                    .filter(|f| !f.is_empty())
             {
                 match self.park_fingerprint_seen(task, fingerprint).await {
                     Ok(false) => {
@@ -879,6 +921,25 @@ impl CoordinatorActor {
                     intervention_count = task.intervention_count,
                     non_attempt_models = ?history.non_attempt_models,
                     "uv3p: human-park rung declined to park — no post-intervention session reached submit_work yet; redispatching with forced model rotation instead of parking"
+                );
+                return false;
+            }
+
+            // Submission-pending-review guard (2vxr): a post-intervention session
+            // submitted work that hasn't been reviewed/rejected yet — the round is
+            // still in flight. CI evidence from a head SHA older than the submission
+            // (mirror-vs-GitHub staleness) must not serve as the park-triggering
+            // strike. If the task is in needs_task_review/in_task_review with no
+            // rejection newer than the submission, do not park.
+            if history.any_submitted && history.submission_pending_review {
+                self.record_park_redispatch_marker(task, "submission_pending_review", None, 0)
+                    .await;
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    task_status = %task.status,
+                    "uv3p: human-park rung declined to park — newest post-intervention \
+                     submission is pending review ({}); the round is still in flight",
+                    task.status,
                 );
                 return false;
             }
