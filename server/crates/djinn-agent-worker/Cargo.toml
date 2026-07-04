@@ -16,6 +16,7 @@ path = "src/main.rs"
 djinn-agent = { path = "../djinn-agent" }
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
+djinn-git = { path = "../djinn-git" }
 djinn-graph = { path = "../djinn-graph" }
 djinn-provider = { path = "../djinn-provider" }
 djinn-runtime = { path = "../djinn-runtime" }
