@@ -24,6 +24,7 @@ use crate::lifecycle::teardown::settle_no_progress_submission;
 use super::budget::{
     SessionBudgetPolicy, hard_budget_threshold_exceeded, soft_budget_threshold_exceeded,
 };
+use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
     empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
@@ -440,6 +441,13 @@ pub struct ReplyLoopContext<'a> {
     pub active_skill_names: &'a [String],
     pub active_mcp_server_names: &'a [String],
     pub max_turns_override: Option<u32>,
+    /// Shared compaction critical section for this slot/reply-loop session.
+    ///
+    /// The reply loop enters it around every `compact_conversation` call and
+    /// releases it on every exit path. Actor/pool command routing can observe
+    /// the same instance to decide whether to defer or demote work that would
+    /// otherwise apply to the pre-rotation transcript.
+    pub compaction_cs: &'a CompactionCriticalSection,
 }
 
 /// Djinn-native reply loop. Drives an `LlmProvider` stream, dispatches tool
@@ -468,6 +476,7 @@ pub async fn run_reply_loop(
         active_skill_names,
         active_mcp_server_names,
         max_turns_override,
+        compaction_cs,
     } = ctx;
     let tool_dispatcher = match slot_ctx.tool_dispatcher.as_ref() {
         Some(d) => d.as_ref(),
@@ -734,29 +743,17 @@ pub async fn run_reply_loop(
                     if let Some(llm) = otel_llm {
                         llm.end_error("context_length_exceeded");
                     }
-                    let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
-                    let boundary_id = record_compaction_started(
-                        &boundary_repo, session_id, conversation,
-                    ).await;
-                    let compacted = compact_conversation(
-                        provider, conversation, session_id, task_id,
-                        CompactionContext::MidSession(role_name.to_string()),
+                    let compacted = compact_conversation_in_critical_section(
+                        provider,
+                        conversation,
+                        session_id,
+                        task_id,
+                        role_name,
                         context_window,
-                    ).await;
-                    if compacted {
-                        let summary = conversation
-                            .messages
-                            .iter()
-                            .find(|m| {
-                                m.role == Role::User
-                                    && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
-                            })
-                            .map(|m| strip_compaction_markers(&m.text_content()))
-                            .unwrap_or_default();
-                        complete_compaction_boundary(
-                            &boundary_repo, boundary_id.as_deref(), conversation, &summary,
-                        ).await;
-                    }
+                        compaction_cs,
+                        slot_ctx,
+                    )
+                    .await;
                     if compacted {
                         total_tokens_in = 0;
                         total_tokens_out = 0;
@@ -873,29 +870,17 @@ pub async fn run_reply_loop(
                     compaction_attempts,
                     "ReplyLoop: context_length_exceeded mid-stream; compacting reactively"
                 );
-                let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
-                let boundary_id = record_compaction_started(
-                    &boundary_repo, session_id, conversation,
-                ).await;
-                let compacted = compact_conversation(
-                    provider, conversation, session_id, task_id,
-                    CompactionContext::MidSession(role_name.to_string()),
+                let compacted = compact_conversation_in_critical_section(
+                    provider,
+                    conversation,
+                    session_id,
+                    task_id,
+                    role_name,
                     context_window,
-                ).await;
-                if compacted {
-                    let summary = conversation
-                        .messages
-                        .iter()
-                        .find(|m| {
-                            m.role == Role::User
-                                && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
-                        })
-                        .map(|m| strip_compaction_markers(&m.text_content()))
-                        .unwrap_or_default();
-                    complete_compaction_boundary(
-                        &boundary_repo, boundary_id.as_deref(), conversation, &summary,
-                    ).await;
-                }
+                    compaction_cs,
+                    slot_ctx,
+                )
+                .await;
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
@@ -1069,33 +1054,17 @@ pub async fn run_reply_loop(
                     usage_pct = current_context_tokens as f64 / context_window as f64,
                     "ReplyLoop: compaction threshold reached, compacting"
                 );
-                let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
-                let boundary_id = record_compaction_started(
-                    &boundary_repo, session_id, conversation,
-                ).await;
-                let compacted = compact_conversation(
+                let compacted = compact_conversation_in_critical_section(
                     provider,
                     conversation,
                     session_id,
                     task_id,
-                    CompactionContext::MidSession(role_name.to_string()),
+                    role_name,
                     context_window,
+                    compaction_cs,
+                    slot_ctx,
                 )
                 .await;
-                if compacted {
-                    let summary = conversation
-                        .messages
-                        .iter()
-                        .find(|m| {
-                            m.role == Role::User
-                                && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
-                        })
-                        .map(|m| strip_compaction_markers(&m.text_content()))
-                        .unwrap_or_default();
-                    complete_compaction_boundary(
-                        &boundary_repo, boundary_id.as_deref(), conversation, &summary,
-                    ).await;
-                }
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
@@ -1444,6 +1413,63 @@ pub async fn run_reply_loop(
     )
 }
 
+/// Run `compact_conversation` inside the shared compaction critical section.
+///
+/// Enters the critical section (via the RAII [`CompactionGuard`]), records a
+/// `Started` boundary, invokes the compaction, and — only when compaction is
+/// accepted — completes the boundary. The guard releases the critical section
+/// on every exit path (success, summarizer failure, early return, panic
+/// unwinding); retry/backoff decisions stay with the caller so this helper does
+/// not alter loop semantics.
+#[allow(clippy::too_many_arguments)]
+async fn compact_conversation_in_critical_section(
+    provider: &dyn LlmProvider,
+    conversation: &mut Conversation,
+    session_id: &str,
+    task_id: &str,
+    role_name: &str,
+    context_window: i64,
+    compaction_cs: &CompactionCriticalSection,
+    slot_ctx: &SlotContext,
+) -> bool {
+    // Held for the whole record -> compact -> complete sequence; `Drop` releases
+    // the section on any exit path below.
+    let _guard = compaction_cs.guard();
+
+    let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
+    let boundary_id = record_compaction_started(&boundary_repo, session_id, conversation).await;
+
+    let compacted = compact_conversation(
+        provider,
+        conversation,
+        session_id,
+        task_id,
+        CompactionContext::MidSession(role_name.to_string()),
+        context_window,
+    )
+    .await;
+
+    if compacted {
+        let summary = conversation
+            .messages
+            .iter()
+            .find(|m| {
+                m.role == Role::User && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
+            })
+            .map(|m| strip_compaction_markers(&m.text_content()))
+            .unwrap_or_default();
+        complete_compaction_boundary(
+            &boundary_repo,
+            boundary_id.as_deref(),
+            conversation,
+            &summary,
+        )
+        .await;
+    }
+
+    compacted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1475,5 +1501,206 @@ mod tests {
                 .expect("Codex empty-turn error must carry EmptyCompletion");
             assert_eq!(*typed, ProviderError::EmptyCompletion);
         }
+    }
+
+    // ---- compaction critical-section guard (nlus) -------------------------
+    //
+    // These tests exercise the real `compact_conversation_in_critical_section`
+    // helper (not a hand-rolled mimic) and assert the shared critical section is
+    // released after every outcome of the underlying compaction: a successful
+    // compaction, a benign no-op that returns false, a summarizer error, and an
+    // abnormal early exit (a summarizer panic that unwinds through the helper).
+
+    use crate::test_helpers::{
+        FailingProvider, FakeProvider, agent_context_from_db, create_test_db,
+    };
+    use djinn_provider::provider::StreamEvent;
+
+    fn guard_test_slot_ctx() -> SlotContext {
+        agent_context_from_db(create_test_db(), tokio_util::sync::CancellationToken::new())
+    }
+
+    /// A conversation whose old tool-result turns can be micro-compacted, so
+    /// `compact_conversation` reports a real (`true`) compaction without ever
+    /// invoking the summarizer provider.
+    fn micro_compactable_conversation(num_turns: usize) -> Conversation {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("You are a coding agent."));
+        conversation.push(Message::user("Do the task."));
+        for i in 0..num_turns {
+            let call_id = format!("call_{i}");
+            conversation.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: call_id.clone(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": format!("echo turn {i}") }),
+                }],
+                metadata: None,
+            });
+            conversation.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: call_id,
+                    content: vec![ContentBlock::text(format!(
+                        "verbose tool result from turn {i}: {}",
+                        "x".repeat(400)
+                    ))],
+                    is_error: false,
+                }],
+                metadata: None,
+            });
+            conversation.push(Message::assistant(format!("Processed turn {i}.")));
+        }
+        conversation
+    }
+
+    fn tiny_conversation() -> Conversation {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::system("You are a worker."));
+        conversation.push(Message::user("Do the task."));
+        conversation
+    }
+
+    /// Successful compaction: the guard releases and the helper returns `true`.
+    #[tokio::test]
+    async fn helper_releases_guard_on_successful_compaction() {
+        let section = CompactionCriticalSection::new();
+        // A provider that would panic if the summarizer were ever called — this
+        // path succeeds via micro-compaction, before any LLM round-trip.
+        let provider = FailingProvider::new("summarizer must not be called on the micro path");
+        let mut conversation = micro_compactable_conversation(12);
+        let slot_ctx = guard_test_slot_ctx();
+
+        let compacted = compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-success",
+            "t-success",
+            "worker",
+            1_000_000,
+            &section,
+            &slot_ctx,
+        )
+        .await;
+
+        assert!(
+            compacted,
+            "micro-compaction should report a successful compaction"
+        );
+        assert!(
+            !section.is_compacting(),
+            "guard must release after a successful compaction"
+        );
+    }
+
+    /// False / no-compaction: the summarizer yields nothing usable and the
+    /// conversation is too small to truncate, so the helper returns `false`.
+    /// Distinct from the summarizer-error case: here the provider does not error,
+    /// it simply produces empty summaries.
+    #[tokio::test]
+    async fn helper_releases_guard_when_compaction_is_a_noop() {
+        let section = CompactionCriticalSection::new();
+        // Empty summaries across every removal-percentage attempt: a benign
+        // no-op, not an error. Extra scripted turns are harmless if unused.
+        let provider = FakeProvider::script(vec![
+            vec![StreamEvent::Done],
+            vec![StreamEvent::Done],
+            vec![StreamEvent::Done],
+            vec![StreamEvent::Done],
+            vec![StreamEvent::Done],
+            vec![StreamEvent::Done],
+        ]);
+        let mut conversation = tiny_conversation();
+        let slot_ctx = guard_test_slot_ctx();
+
+        let compacted = compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-noop",
+            "t-noop",
+            "worker",
+            10_000,
+            &section,
+            &slot_ctx,
+        )
+        .await;
+
+        assert!(!compacted, "an empty-summary no-op yields no compaction");
+        assert!(
+            !section.is_compacting(),
+            "guard must release after a no-op compaction"
+        );
+    }
+
+    /// Summarizer error / `compact_conversation` error path: the provider stream
+    /// errors, so no compaction happens; the guard must still release. This is a
+    /// distinct test (and a distinct provider/failure mode) from the no-op case.
+    #[tokio::test]
+    async fn helper_releases_guard_on_summarizer_error() {
+        let section = CompactionCriticalSection::new();
+        let provider = FailingProvider::new("summarizer boom");
+        let mut conversation = tiny_conversation();
+        let slot_ctx = guard_test_slot_ctx();
+
+        let compacted = compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-error",
+            "t-error",
+            "worker",
+            10_000,
+            &section,
+            &slot_ctx,
+        )
+        .await;
+
+        assert!(!compacted, "a summarizer error yields no compaction");
+        assert!(
+            !section.is_compacting(),
+            "guard must release after a summarizer error"
+        );
+    }
+
+    /// Early / abnormal exit: the summarizer panics mid-compaction and the panic
+    /// unwinds *through* the real helper. The RAII guard must still release the
+    /// critical section during unwinding.
+    #[tokio::test]
+    async fn helper_releases_guard_on_panic_early_exit() {
+        use futures::FutureExt;
+
+        let section = CompactionCriticalSection::new();
+        // An exhausted script: the first `stream()` call panics, standing in for
+        // a summarizer that blows up mid-compaction.
+        let provider = FakeProvider::script(vec![]);
+        let mut conversation = tiny_conversation();
+        // Enough turns that micro-compaction is skipped and the provider is
+        // actually invoked (and thus panics).
+        conversation.push(Message::assistant("first"));
+        conversation.push(Message::user("second"));
+        conversation.push(Message::assistant("third"));
+        let slot_ctx = guard_test_slot_ctx();
+
+        let outcome = std::panic::AssertUnwindSafe(compact_conversation_in_critical_section(
+            &provider,
+            &mut conversation,
+            "s-panic",
+            "t-panic",
+            "worker",
+            10_000,
+            &section,
+            &slot_ctx,
+        ))
+        .catch_unwind()
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "the summarizer panic must unwind out of the helper"
+        );
+        assert!(
+            !section.is_compacting(),
+            "guard must release on a panic / early-exit unwinding through the helper"
+        );
     }
 }

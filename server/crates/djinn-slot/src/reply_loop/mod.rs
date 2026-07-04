@@ -10,6 +10,7 @@
 //! directly; and `djinn-agent` is never imported.
 
 pub(crate) mod budget;
+pub mod compaction_guard;
 pub mod error_handling;
 pub mod loop_guard;
 mod persistence;
@@ -17,6 +18,7 @@ mod streaming;
 mod tool_dispatch;
 mod turn;
 
+pub use compaction_guard::CompactionCriticalSection;
 pub use turn::{ReplyLoopContext, run_reply_loop};
 
 // Soft-budget tests hold `SESSION_BUDGET_ENV_LOCK` across `.await` on

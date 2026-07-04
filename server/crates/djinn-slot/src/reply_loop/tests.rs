@@ -297,6 +297,7 @@ impl ReplyLoopHarness {
         let worktree_path = std::path::PathBuf::from("/tmp");
         run_reply_loop(
             ReplyLoopContext {
+                compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
                 provider,
                 tools,
                 task_id: &self.task_id,
@@ -391,6 +392,7 @@ async fn proactive_compaction_fires_when_current_context_exceeds_threshold() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
             task_id: &task_id,
@@ -472,6 +474,7 @@ async fn no_compaction_when_sum_large_but_current_context_small() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
             task_id: &task_id,
@@ -598,6 +601,7 @@ async fn reactive_compaction_on_context_length_error() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[],
             task_id: &task_id,
@@ -837,6 +841,7 @@ async fn run_scripted_reply_loop_with_dispatcher(
     conv.push(Message::user("Do the task."));
     let (result, output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider,
             tools,
             task_id: &task_id,
@@ -1011,6 +1016,7 @@ async fn tool_choice_required_for_supported_providers() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
             task_id: &task_id,
@@ -1128,6 +1134,7 @@ async fn max_step_cap_injects_wind_down_and_ends_gracefully() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
             task_id: &task_id,
@@ -1231,6 +1238,7 @@ async fn max_step_wind_down_ignored_falls_back_to_hard_error() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
             task_id: &task_id,
@@ -1803,6 +1811,7 @@ async fn soft_budget_threshold_triggers_one_shot_converge_reminder() {
     conv.push(Message::user("Do the task."));
     let (result, _output, _tokens_in, _tokens_out, _cr, _cw) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
             task_id: &task_id,
@@ -2227,6 +2236,7 @@ async fn dangling_tool_call_is_sanitized_before_reaching_provider() {
     });
     let (result, _output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &tools,
             task_id: &task_id,
@@ -2355,6 +2365,7 @@ async fn first_no_progress_submit_intercepted_returns_corrective_and_continues()
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2437,6 +2448,7 @@ async fn missing_rejected_fingerprint_skips_comparison_and_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2509,6 +2521,7 @@ async fn non_worker_role_bypasses_guard() {
     conv.push(Message::user("Plan the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2576,6 +2589,7 @@ async fn different_fingerprint_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2672,6 +2686,7 @@ async fn empty_worktree_skips_guard_and_allows_finalize() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2768,6 +2783,7 @@ async fn second_strike_no_progress_submission_settles_session() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -2981,6 +2997,7 @@ async fn gs37_no_edit_submit_after_rejection_keeps_one_quality_strike_and_prompt
     conv.push(Message::user("Do the task."));
     let (_result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
@@ -3141,6 +3158,7 @@ async fn changed_diff_fingerprint_does_not_trigger_no_progress_submission() {
     conv.push(Message::user("Do the task."));
     let (result, output, _, _, _, _) = run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider: &provider,
             tools: &[serde_json::json!({
                 "type": "function",
