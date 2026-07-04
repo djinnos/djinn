@@ -454,6 +454,8 @@ async fn connect_to_server_sends_resolved_headers() {
             "Authorization".to_string(),
             "Bearer resolved-secret".to_string(),
         )]),
+        "test-server",
+        "test-task",
     )
     .await;
 
@@ -997,4 +999,137 @@ fn server_instructions_clone_shares_same_data() {
             .map(String::as_str),
         Some("Shared instructions.")
     );
+}
+
+// ── Notification handler / logging level mapping tests ───────────────
+
+#[test]
+fn mcp_log_level_mapping_is_deterministic() {
+    use rmcp::model::LoggingLevel;
+
+    // Each MCP level maps to exactly one tracing level.
+    let cases: &[(LoggingLevel, tracing::Level)] = &[
+        (LoggingLevel::Debug, tracing::Level::TRACE),
+        (LoggingLevel::Info, tracing::Level::DEBUG),
+        (LoggingLevel::Notice, tracing::Level::INFO),
+        (LoggingLevel::Warning, tracing::Level::WARN),
+        (LoggingLevel::Error, tracing::Level::ERROR),
+        (LoggingLevel::Critical, tracing::Level::ERROR),
+        (LoggingLevel::Alert, tracing::Level::ERROR),
+        (LoggingLevel::Emergency, tracing::Level::ERROR),
+    ];
+
+    for (mcp_level, expected_tracing_level) in cases {
+        assert_eq!(
+            mcp_log_level_to_tracing(*mcp_level),
+            *expected_tracing_level,
+            "mcp level {mcp_level:?} should map to {expected_tracing_level:?}"
+        );
+    }
+}
+
+#[test]
+fn log_data_to_message_extracts_string_value() {
+    assert_eq!(
+        log_data_to_message(&serde_json::json!("hello world")),
+        "hello world"
+    );
+}
+
+#[test]
+fn log_data_to_message_handles_null_value() {
+    assert_eq!(log_data_to_message(&serde_json::json!(null)), "<null>");
+}
+
+#[test]
+fn log_data_to_message_serializes_objects() {
+    let obj = serde_json::json!({"key": "value", "count": 42});
+    let msg = log_data_to_message(&obj);
+    // Should produce valid JSON string
+    let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid JSON");
+    assert_eq!(parsed["key"], "value");
+    assert_eq!(parsed["count"], 42);
+}
+
+#[test]
+fn log_data_to_message_handles_arrays() {
+    let arr = serde_json::json!([1, "two", 3]);
+    let msg = log_data_to_message(&arr);
+    let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid JSON");
+    assert_eq!(parsed, serde_json::json!([1, "two", 3]));
+}
+
+#[test]
+fn notification_handler_structures() {
+    // Verify McpNotificationHandler can be constructed and cloned.
+    let handler = McpNotificationHandler {
+        server_name: "test-server".to_string(),
+        task_short_id: "abc123".to_string(),
+    };
+    let clone = handler.clone();
+    assert_eq!(clone.server_name, "test-server");
+    assert_eq!(clone.task_short_id, "abc123");
+}
+
+/// Compile-time probe: `McpNotificationHandler` implements
+/// `rmcp::ClientHandler`. This validates that:
+/// - `on_logging_message` has the correct signature
+/// - The handler is `Clone + Send + Sync + 'static` (required by ClientHandler)
+/// - The handler can be used with `ServiceExt::serve` to connect to MCP servers
+///
+/// `NotificationContext` is `#[non_exhaustive]` in rmcp and `Peer::new` is
+/// `pub(crate)`, so runtime invocation of `on_logging_message` requires the
+/// full rmcp framework (transport handshake). The handler's notification
+/// processing is tested indirectly through the `connect_to_server` integration
+/// path and the level-mapping/message-extraction unit tests above.
+#[test]
+fn notification_handler_implements_client_handler() {
+    fn assert_client_handler<T: rmcp::ClientHandler>() {}
+    assert_client_handler::<McpNotificationHandler>();
+}
+
+#[test]
+fn log_level_mapping_covers_all_mcp_variants() {
+    use rmcp::model::LoggingLevel;
+
+    // Verify that every MCP variant has a deterministic tracing mapping.
+    // No variant should panic or fall through to a default.
+    let all_variants = [
+        LoggingLevel::Debug,
+        LoggingLevel::Info,
+        LoggingLevel::Notice,
+        LoggingLevel::Warning,
+        LoggingLevel::Error,
+        LoggingLevel::Critical,
+        LoggingLevel::Alert,
+        LoggingLevel::Emergency,
+    ];
+
+    for variant in &all_variants {
+        let tracing_level = mcp_log_level_to_tracing(*variant);
+        // All levels must be one of the 5 standard tracing levels.
+        assert!(
+            matches!(
+                tracing_level,
+                tracing::Level::TRACE
+                    | tracing::Level::DEBUG
+                    | tracing::Level::INFO
+                    | tracing::Level::WARN
+                    | tracing::Level::ERROR
+            ),
+            "unexpected tracing level for {variant:?}: {tracing_level:?}"
+        );
+    }
+}
+
+#[test]
+fn log_data_to_message_handles_number_values() {
+    assert_eq!(log_data_to_message(&serde_json::json!(42)), "42");
+    assert_eq!(log_data_to_message(&serde_json::json!(1.5)), "1.5");
+}
+
+#[test]
+fn log_data_to_message_handles_boolean_values() {
+    assert_eq!(log_data_to_message(&serde_json::json!(true)), "true");
+    assert_eq!(log_data_to_message(&serde_json::json!(false)), "false");
 }

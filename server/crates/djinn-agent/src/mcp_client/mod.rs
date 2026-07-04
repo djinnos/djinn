@@ -122,6 +122,113 @@ fn annotate_external_tool_schema_safety(value: &mut serde_json::Value) {
     );
 }
 
+// ── MCP notification handler ─────────────────────────────────────────
+
+/// Maps an MCP [`LoggingLevel`] to the corresponding [`tracing::Level`].
+///
+/// The mapping follows syslog-to-tracing conventions:
+/// - `Debug` → `TRACE` (MCP debug is the most verbose)
+/// - `Info` → `DEBUG` (MCP info is informational noise)
+/// - `Notice` → `INFO` (MCP notice is worth highlighting)
+/// - `Warning` → `WARN`
+/// - `Error` → `ERROR`
+/// - `Critical` / `Alert` / `Emergency` → `ERROR` (tracing has no above-error)
+fn mcp_log_level_to_tracing(level: rmcp::model::LoggingLevel) -> tracing::Level {
+    match level {
+        rmcp::model::LoggingLevel::Debug => tracing::Level::TRACE,
+        rmcp::model::LoggingLevel::Info => tracing::Level::DEBUG,
+        rmcp::model::LoggingLevel::Notice => tracing::Level::INFO,
+        rmcp::model::LoggingLevel::Warning => tracing::Level::WARN,
+        rmcp::model::LoggingLevel::Error
+        | rmcp::model::LoggingLevel::Critical
+        | rmcp::model::LoggingLevel::Alert
+        | rmcp::model::LoggingLevel::Emergency => tracing::Level::ERROR,
+    }
+}
+
+/// Extract a human-readable message string from a logging notification's
+/// `data` field. Handles strings, null, and objects/arrays by falling
+/// back to their JSON representation.
+fn log_data_to_message(data: &serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "<null>".to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| format!("{other:?}")),
+    }
+}
+
+/// An rmcp `ClientHandler` that observes MCP `notifications/message`
+/// from connected servers and emits them through host `tracing` with
+/// structured fields.
+#[derive(Clone)]
+struct McpNotificationHandler {
+    server_name: String,
+    task_short_id: String,
+}
+
+impl rmcp::ClientHandler for McpNotificationHandler {
+    fn on_logging_message(
+        &self,
+        params: rmcp::model::LoggingMessageNotificationParam,
+        _context: rmcp::service::NotificationContext<rmcp::service::RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        // Extract all values into owned types before the tracing call so the
+        // returned `ready` future does not borrow any locals that would be
+        // dropped at function exit.
+        let level = mcp_log_level_to_tracing(params.level);
+        let logger = params.logger.unwrap_or_default();
+        let msg = log_data_to_message(&params.data);
+        let server = self.server_name.clone();
+        let task = self.task_short_id.clone();
+        let lvl = params.level; // LoggingLevel is Copy
+
+        // tracing macros require a literal Level, so we dispatch explicitly.
+        // Each structured field (server, logger, level, task_short_id) is
+        // included as a named field on the tracing event. The tracing `target`
+        // defaults to the module path; the `server` field identifies the MCP
+        // server that produced the log message.
+        match level {
+            tracing::Level::TRACE => {
+                tracing::trace!(
+                    server = %server, logger = %logger,
+                    level = ?lvl, task_short_id = %task,
+                    "{msg}"
+                );
+            }
+            tracing::Level::DEBUG => {
+                tracing::debug!(
+                    server = %server, logger = %logger,
+                    level = ?lvl, task_short_id = %task,
+                    "{msg}"
+                );
+            }
+            tracing::Level::INFO => {
+                tracing::info!(
+                    server = %server, logger = %logger,
+                    level = ?lvl, task_short_id = %task,
+                    "{msg}"
+                );
+            }
+            tracing::Level::WARN => {
+                tracing::warn!(
+                    server = %server, logger = %logger,
+                    level = ?lvl, task_short_id = %task,
+                    "{msg}"
+                );
+            }
+            tracing::Level::ERROR => {
+                tracing::error!(
+                    server = %server, logger = %logger,
+                    level = ?lvl, task_short_id = %task,
+                    "{msg}"
+                );
+            }
+        }
+
+        std::future::ready(())
+    }
+}
+
 /// Interior-mutable routing state for [`McpToolRegistry`].
 ///
 /// Wrapped in `Arc<RwLock<_>>` so the registry is `Clone`-safe and supports
@@ -518,8 +625,11 @@ pub async fn connect_and_discover(
         // within `startup_timeout_ms`; nonresponsive servers are logged and
         // skipped without failing the whole discovery.
         let startup_duration = resolved.startup_timeout();
-        let startup_result =
-            tokio::time::timeout(startup_duration, startup_and_list(&url, &resolved.headers)).await;
+        let startup_result = tokio::time::timeout(
+            startup_duration,
+            startup_and_list(&url, &resolved.headers, name, task_short_id),
+        )
+        .await;
 
         let (peer, list_result) = match startup_result {
             Ok(Ok((peer, list_result))) => {
@@ -759,9 +869,15 @@ async fn lookup_placeholder_value(app_state: &AgentContext, variable: &str) -> P
 }
 
 /// Establish a connection to an MCP server via Streamable HTTP transport.
+///
+/// The returned peer uses a [`McpNotificationHandler`] that observes
+/// `LoggingMessageNotification`s from the server and emits them through
+/// host `tracing` with structured `{server, logger, level, task_short_id}` fields.
 async fn connect_to_server(
     url: &str,
     headers: &HashMap<String, String>,
+    server_name: &str,
+    task_short_id: &str,
 ) -> Result<Peer<RoleClient>, String> {
     let mut custom_headers = HashMap::new();
     for (name, value) in headers {
@@ -775,12 +891,18 @@ async fn connect_to_server(
     let config = StreamableHttpClientTransportConfig::with_uri(url.to_string())
         .custom_headers(custom_headers);
     let transport = StreamableHttpClientTransport::from_config(config);
-    let service = ()
+
+    let handler = McpNotificationHandler {
+        server_name: server_name.to_string(),
+        task_short_id: task_short_id.to_string(),
+    };
+    let service = handler
         .serve(transport)
         .await
         .map_err(|e| format!("MCP transport handshake failed: {e}"))?;
     let peer = service.peer().clone();
-    // Keep the service alive in the background.
+    // Keep the service alive in the background so notification processing
+    // continues for the lifetime of the connection.
     tokio::spawn(async move {
         let _ = service.waiting().await;
     });
@@ -799,8 +921,10 @@ async fn connect_to_server(
 async fn startup_and_list(
     url: &str,
     headers: &HashMap<String, String>,
+    server_name: &str,
+    task_short_id: &str,
 ) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), String> {
-    let peer = connect_to_server(url, headers).await?;
+    let peer = connect_to_server(url, headers, server_name, task_short_id).await?;
     let result = peer
         .list_tools(None)
         .await
