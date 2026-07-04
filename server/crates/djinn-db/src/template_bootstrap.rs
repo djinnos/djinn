@@ -1,3 +1,21 @@
+//! djinn-repo-specific test scaffolding ("dogfooding").
+//!
+//! This module bootstraps djinn's OWN `djinn_test_template` database by running
+//! djinn's OWN sqlx migrations, so that djinn agents editing the djinn repo can
+//! run djinn's DB-backed tests inside a worker pod whose image provides a bare
+//! Postgres sidecar. It is intrinsically coupled to djinn's schema/migrations.
+//!
+//! It is NOT a general mechanism for making arbitrary target repos' test
+//! databases work in the pod, and must not be generalized in place — hardcoding
+//! the `djinn_test_template` name and djinn's migrations is intentional.
+//!
+//! The generic, reusable half of this capability lives in `djinn-k8s`: service
+//! preset injection (`sidecar::resolve_image_services_with_metadata`) stands up
+//! the sidecar and exposes an injected connection env var. The intended reusable
+//! path for a non-djinn target repo to bootstrap its own test DB is a
+//! project-declared lifecycle / pre-task bootstrap command run against that
+//! injected connection env var — NOT code here in `djinn-db`.
+
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
