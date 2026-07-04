@@ -41,7 +41,6 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use reqwest::Client;
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +49,7 @@ use djinn_db::{
     CreateUserAuthSession, NewOrgConfig, OrgConfigRepository, SessionAuthRepository, UserRepository,
 };
 use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
+use djinn_provider::github_server::{AppInstallation, GitHubServerClient};
 use djinn_provider::oauth::github_app_user::{self, GithubUserTokens};
 
 pub(super) const SESSION_COOKIE: &str = "djinn_session";
@@ -702,21 +702,13 @@ struct GhUser {
 }
 
 async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
-    let client = Client::new();
-    let resp = client
-        .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "djinn-server")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("GitHub /user returned {status}: {body}"));
-    }
-    resp.json::<GhUser>().await.map_err(|e| e.to_string())
+    let user = GitHubServerClient::new().fetch_user(access_token).await?;
+    Ok(GhUser {
+        id: user.id,
+        login: user.login,
+        name: user.name,
+        avatar_url: user.avatar_url,
+    })
 }
 
 /// Verify `access_token` belongs to an **active** member of `org_login`.
@@ -732,40 +724,9 @@ async fn fetch_github_user(access_token: &str) -> Result<GhUser, String> {
 ///     surfaced as an error so callers can decide whether to 502.
 ///   * `Err(_)` — network or decode failure.
 async fn check_org_membership(access_token: &str, org_login: &str) -> Result<bool, String> {
-    #[derive(Deserialize)]
-    struct Membership {
-        #[serde(default)]
-        state: Option<String>,
-    }
-
-    // Percent-encode the org segment so a weird login can't escape the path.
-    let url = format!(
-        "https://api.github.com/user/memberships/orgs/{}",
-        urlencode(org_login),
-    );
-    let client = Client::new();
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "djinn-server")
-        .send()
+    GitHubServerClient::new()
+        .check_org_membership(access_token, org_login)
         .await
-        .map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    if status == StatusCode::NOT_FOUND || status == StatusCode::FORBIDDEN {
-        return Ok(false);
-    }
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "GitHub /user/memberships/orgs/{org_login} returned {status}: {body}"
-        ));
-    }
-    let parsed: Membership = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(parsed.state.as_deref() == Some("active"))
 }
 
 // ─── Cookie + misc helpers ────────────────────────────────────────────────────
@@ -974,14 +935,14 @@ async fn app_setup_callback(
     };
 
     if !installation
-        .account
+        .account()
         .account_type
         .eq_ignore_ascii_case("Organization")
     {
         tracing::warn!(
             installation_id,
-            account_type = %installation.account.account_type,
-            account_login = %installation.account.login,
+            account_type = %installation.account().account_type,
+            account_login = %installation.account().login,
             "app_setup_callback: rejecting non-org installation",
         );
         return (
@@ -990,7 +951,8 @@ async fn app_setup_callback(
                 "This deployment requires a GitHub *organization* installation, \
                  but installation {installation_id} is bound to account '{}' (type={}). \
                  Reinstall the App on an organization.",
-                installation.account.login, installation.account.account_type,
+                installation.account().login,
+                installation.account().account_type,
             ),
         )
             .into_response();
@@ -1002,7 +964,7 @@ async fn app_setup_callback(
     // 409, just redirect them home.
     if let Ok(Some(existing)) = org_repo.get().await
         && existing.installation_id as u64 == installation_id
-        && existing.github_org_id as u64 == installation.account.id
+        && existing.github_org_id as u64 == installation.account().id
     {
         tracing::info!(
             installation_id,
@@ -1014,8 +976,8 @@ async fn app_setup_callback(
 
     if let Err(e) = org_repo
         .set(NewOrgConfig {
-            github_org_id: installation.account.id as i64,
-            github_org_login: &installation.account.login,
+            github_org_id: installation.account().id as i64,
+            github_org_login: &installation.account().login,
             app_id: cfg.app_id as i64,
             installation_id: installation_id as i64,
         })
@@ -1024,7 +986,7 @@ async fn app_setup_callback(
         tracing::error!(
             error = %e,
             installation_id,
-            account = %installation.account.login,
+            account = %installation.account().login,
             "app_setup_callback: org_config set failed",
         );
         return (
@@ -1036,7 +998,7 @@ async fn app_setup_callback(
 
     tracing::info!(
         installation_id,
-        account = %installation.account.login,
+        account = %installation.account().login,
         action,
         "app_setup_callback: org_config bound",
     );
@@ -1054,46 +1016,12 @@ fn redirect_to_web() -> Response {
     (StatusCode::FOUND, resp_headers).into_response()
 }
 
-/// Fetch an installation's account info via the App JWT. Returns only the
-/// fields `app_setup_callback` needs for the `org_config` binding (numeric
-/// account id, login, and account type).
-async fn fetch_installation_for_setup(installation_id: u64) -> Result<InstallationDetail, String> {
+/// Fetch an installation's account info via the App JWT.
+async fn fetch_installation_for_setup(installation_id: u64) -> Result<AppInstallation, String> {
     let jwt = mint_app_jwt_anyhow().map_err(|e| e.to_string())?;
-    let url = format!("https://api.github.com/app/installations/{installation_id}");
-    let client = Client::new();
-    let resp = client
-        .get(&url)
-        .bearer_auth(&jwt)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "djinn-server")
-        .send()
+    GitHubServerClient::new()
+        .fetch_app_installation(&jwt, installation_id)
         .await
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("{status}: {body}"));
-    }
-    resp.json::<InstallationDetail>()
-        .await
-        .map_err(|e| format!("decode /app/installations/{installation_id}: {e}"))
-}
-
-#[derive(Deserialize)]
-struct InstallationDetail {
-    #[allow(dead_code)]
-    id: u64,
-    account: InstallationAccount,
-}
-
-#[derive(Deserialize)]
-struct InstallationAccount {
-    id: u64,
-    #[serde(default)]
-    login: String,
-    #[serde(rename = "type", default)]
-    account_type: String,
 }
 
 // ─── Setup-status endpoint (Phase 2) ──────────────────────────────────────────

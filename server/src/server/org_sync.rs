@@ -44,19 +44,16 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 
 use crate::server::{AppState, authenticate};
 use djinn_db::repositories::user::User;
 use djinn_db::{OrgConfigRepository, SessionAuthRepository, UserRepository};
 use djinn_provider::github_app::get_installation_token;
+use djinn_provider::github_server::GitHubServerClient;
 
 /// How often the background loop fires a reconciliation.
 pub(super) const SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
-
-const GITHUB_API: &str = "https://api.github.com";
-const USER_AGENT: &str = "djinn-server/0.1 (+https://github.com/djinnos/server)";
 
 // ─── Public surface ───────────────────────────────────────────────────────────
 
@@ -237,11 +234,7 @@ pub async fn sync_once(state: &AppState) -> SyncReport {
 // ─── Internals ────────────────────────────────────────────────────────────────
 
 /// One entry from `GET /orgs/{org}/members`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub(super) struct GithubOrgMember {
-    pub id: i64,
-    pub login: String,
-}
+pub(super) type GithubOrgMember = djinn_provider::github_server::GithubOrgMember;
 
 /// The pure diff between local state and the GitHub response. Separated out
 /// so unit tests can exercise it without any HTTP or DB dependency.
@@ -286,110 +279,9 @@ async fn fetch_org_members(
     installation_token: &str,
     org_login: &str,
 ) -> Result<Vec<GithubOrgMember>, String> {
-    let client = Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|e| format!("reqwest client: {e}"))?;
-
-    let mut next = Some(format!(
-        "{GITHUB_API}/orgs/{}/members?per_page=100",
-        urlencode_path_segment(org_login),
-    ));
-    let mut out: Vec<GithubOrgMember> = Vec::new();
-
-    // Cap pages so a runaway pagination loop can't hang the background task.
-    let mut pages_seen = 0usize;
-    const MAX_PAGES: usize = 100; // 100 * 100/page = 10 000 members, well above any plausible org.
-
-    while let Some(url) = next.take() {
-        pages_seen += 1;
-        if pages_seen > MAX_PAGES {
-            return Err(format!(
-                "org_sync: aborting after {MAX_PAGES} pages — pagination loop?"
-            ));
-        }
-
-        let resp = client
-            .get(&url)
-            .bearer_auth(installation_token)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .map_err(|e| format!("http: {e}"))?;
-
-        let status = resp.status();
-        if status == StatusCode::FORBIDDEN {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!(
-                "403 Forbidden from /orgs/{org_login}/members — the GitHub App \
-                 likely lacks the 'Members: Read' organization permission. \
-                 Update it at https://github.com/settings/apps/<slug>/permissions \
-                 and re-install. Body: {body}"
-            ));
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("{status}: {body}"));
-        }
-
-        // Capture Link header before consuming the body.
-        let link_header = resp
-            .headers()
-            .get(reqwest::header::LINK)
-            .and_then(|h| h.to_str().ok())
-            .map(str::to_string);
-
-        let page: Vec<GithubOrgMember> =
-            resp.json().await.map_err(|e| format!("decode page: {e}"))?;
-        out.extend(page);
-
-        next = link_header.as_deref().and_then(parse_next_link);
-    }
-
-    Ok(out)
-}
-
-/// Parse a GitHub `Link` header and return the URL whose `rel="next"`, if any.
-///
-/// Format (per RFC 5988):
-///   `<https://api.github.com/…?page=2>; rel="next", <…>; rel="last"`
-fn parse_next_link(header: &str) -> Option<String> {
-    for segment in header.split(',') {
-        let segment = segment.trim();
-        let Some((target, params)) = segment.split_once(';') else {
-            continue;
-        };
-        let target = target.trim();
-        let target = target.strip_prefix('<')?.strip_suffix('>')?;
-        for param in params.split(';') {
-            let param = param.trim();
-            // Accept `rel=next`, `rel="next"`.
-            if let Some(rest) = param.strip_prefix("rel=") {
-                let value = rest.trim_matches('"');
-                if value == "next" {
-                    return Some(target.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Minimal percent-encoder for a single path segment (mirrors the helper in
-/// `auth.rs` — copy-pasted so this module stays self-contained).
-fn urlencode_path_segment(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.as_bytes() {
-        let c = *b;
-        match c {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(c as char);
-            }
-            _ => out.push_str(&format!("%{c:02X}")),
-        }
-    }
-    out
+    GitHubServerClient::new()
+        .fetch_org_members(installation_token, org_login)
+        .await
 }
 
 fn log_report(report: &SyncReport) {
@@ -525,37 +417,6 @@ mod tests {
         assert!(diff.to_activate.is_empty());
         assert!(diff.to_deactivate.is_empty());
         assert_eq!(diff.present_members_to_touch.len(), 2);
-    }
-
-    #[test]
-    fn parse_next_link_handles_github_format() {
-        let header = "<https://api.github.com/orgs/x/members?page=2&per_page=100>; \
-                      rel=\"next\", <https://api.github.com/orgs/x/members?page=5>; rel=\"last\"";
-        assert_eq!(
-            parse_next_link(header).as_deref(),
-            Some("https://api.github.com/orgs/x/members?page=2&per_page=100")
-        );
-    }
-
-    #[test]
-    fn parse_next_link_returns_none_when_no_next() {
-        let header = "<https://api.github.com/orgs/x/members?page=5>; rel=\"last\"";
-        assert!(parse_next_link(header).is_none());
-    }
-
-    #[test]
-    fn parse_next_link_tolerates_unquoted_rel() {
-        let header = "<https://api.github.com/orgs/x/members?page=2>; rel=next";
-        assert_eq!(
-            parse_next_link(header).as_deref(),
-            Some("https://api.github.com/orgs/x/members?page=2")
-        );
-    }
-
-    #[test]
-    fn urlencode_path_segment_escapes_reserved() {
-        assert_eq!(urlencode_path_segment("acme-corp"), "acme-corp");
-        assert_eq!(urlencode_path_segment("weird org"), "weird%20org");
     }
 
     /// End-to-end happy path against a real in-memory DB: seed local users,

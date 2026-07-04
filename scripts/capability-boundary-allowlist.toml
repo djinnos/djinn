@@ -185,33 +185,10 @@ capability = "git"
 
 # ── Remaining HTTP baseline after Wave 1 migrations ───────────────────────
 # Wave 1 (x8y8) moved control-plane toolchain-version HTTP client construction
-# behind djinn-provider. The remaining non-owner HTTP usage is direct outbound
-# client construction in the server binary (org_sync, auth, github_install),
-# which is too large to migrate in this wave and is tracked by epic/fztz.
-
-[[entries]]
-capability = "http"
-	path = "server/src/server/auth.rs"
-	matcher = "reqwest::Client"
-	owner = "team/server"
-	rationale = "Still-pending owner-crate migration: server authentication path constructs an outbound reqwest::Client directly. Should be routed through djinn-provider once the provider surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "http"
-	path = "server/src/server/github_install.rs"
-	matcher = "reqwest::Client"
-	owner = "team/server"
-	rationale = "Still-pending owner-crate migration: GitHub app installation handler constructs an outbound reqwest::Client directly. Should be routed through djinn-provider once the provider surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "http"
-	path = "server/src/server/org_sync.rs"
-	matcher = "reqwest::{"
-	owner = "team/server"
-	rationale = "Still-pending owner-crate migration: org-sync handler imports reqwest client types for outbound GitHub API calls. Should be routed through djinn-provider once the provider surface supports this use case."
-	cleanup_issue = "epic/fztz"
+# behind djinn-provider. Wave 2 (srqd) moved the server GitHub/auth/org-sync
+# outbound clients behind djinn-provider. The remaining non-owner HTTP usage
+# is limited to status/error-value-only usage inside owner crates and tests
+# where the detector does not flag it.
 
 # ── Remaining K8s baseline after Wave 1 migrations ────────────────────────
 # Wave 1 (7chr) routed token-review Kubernetes access through djinn-k8s. The
