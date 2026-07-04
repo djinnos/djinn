@@ -201,6 +201,236 @@ What happens if D fails?
     }
 }
 
+// ── Body excerpt / include_bodies tests ───────────────────────────────────
+
+#[cfg(test)]
+mod body_excerpt_tests {
+    use crate::server::DjinnMcpServer;
+    use crate::state::stubs::test_mcp_state;
+    use djinn_core::events::EventBus;
+    use djinn_db::{Database, ProposalCreateInput, ProposalRepository};
+
+    async fn test_server() -> (DjinnMcpServer, Database) {
+        let db = Database::open_in_memory().unwrap();
+        db.ensure_initialized().await.unwrap();
+        (DjinnMcpServer::new(test_mcp_state(db.clone())), db)
+    }
+
+    /// Excerpt helper: caps at exactly 512 Unicode scalars, no ellipsis.
+    #[test]
+    fn excerpt_caps_at_512_scalars() {
+        use crate::tools::proposal_ops::body_excerpt;
+
+        // Exactly 512 chars — not truncated.
+        let body_512: String = "a".repeat(512);
+        let (ex, truncated) = body_excerpt(&body_512);
+        assert_eq!(ex.len(), 512);
+        assert!(!truncated);
+        assert_eq!(ex, body_512);
+
+        // 513 chars — truncated to 512.
+        let body_513: String = "b".repeat(513);
+        let (ex, truncated) = body_excerpt(&body_513);
+        assert_eq!(ex.chars().count(), 512);
+        assert!(truncated);
+        assert!(ex.starts_with(&"b".repeat(512)));
+
+        // Empty body — not truncated.
+        let (ex, truncated) = body_excerpt("");
+        assert_eq!(ex, "");
+        assert!(!truncated);
+    }
+
+    /// Excerpt caps on Unicode scalar values, not bytes or grapheme clusters.
+    #[test]
+    fn excerpt_respects_unicode_scalars() {
+        use crate::tools::proposal_ops::body_excerpt;
+
+        // Each emoji is 1 Unicode scalar but 4 UTF-8 bytes. 512 emojis = 512
+        // scalars = 2048 bytes. Should NOT truncate.
+        let emojis: String = "🦀".repeat(512);
+        let (ex, truncated) = body_excerpt(&emojis);
+        assert_eq!(ex.chars().count(), 512);
+        assert!(!truncated);
+        assert_eq!(ex, emojis);
+
+        // 513 emojis → truncated at 512.
+        let emojis_513: String = "🦀".repeat(513);
+        let (ex, truncated) = body_excerpt(&emojis_513);
+        assert_eq!(ex.chars().count(), 512);
+        assert!(truncated);
+    }
+
+    /// Default `proposal_list` rows omit full body, include excerpt + truncated.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_list_omits_full_body() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "This is a short test body for excerpt verification.";
+        repo.create(ProposalCreateInput {
+            title: "Excerpt Test",
+            body,
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
+            .await
+            .unwrap();
+        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+
+        let rows = list["proposals"].as_array().expect("proposals array");
+        assert!(!rows.is_empty());
+        let row = &rows[0];
+
+        // Excerpt metadata present.
+        assert_eq!(row["body_excerpt"].as_str().unwrap(), body);
+        assert!(!row["body_truncated"].as_bool().unwrap());
+
+        // Full body must NOT be serialized when include_bodies is omitted.
+        assert!(
+            row.get("body").is_none(),
+            "full body must be absent on default list rows"
+        );
+    }
+
+    /// `include_bodies: true` restores full body and retains excerpt metadata.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn include_bodies_true_restores_full_body() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "Full body content that should be present when opted in.";
+        repo.create(ProposalCreateInput {
+            title: "Full Body Test",
+            body,
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .await
+            .unwrap();
+        assert!(list.get("error").is_none(), "list failed: {:?}", list.get("error"));
+
+        let rows = list["proposals"].as_array().expect("proposals array");
+        let row = &rows[0];
+
+        // Full body present.
+        assert_eq!(row["body"].as_str().unwrap(), body);
+        // Excerpt metadata still present.
+        assert_eq!(row["body_excerpt"].as_str().unwrap(), body);
+        assert!(!row["body_truncated"].as_bool().unwrap());
+    }
+
+    /// `include_bodies: false` explicitly — same as omitted (no full body).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn include_bodies_false_explicit() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        repo.create(ProposalCreateInput {
+            title: "Explicit False",
+            body: "some body",
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": false }))
+            .await
+            .unwrap();
+        assert!(list.get("error").is_none());
+
+        let rows = list["proposals"].as_array().expect("proposals array");
+        assert!(
+            rows[0].get("body").is_none(),
+            "full body must be absent when include_bodies=false"
+        );
+    }
+
+    /// Long body is properly truncated in excerpt but full body available.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn long_body_truncated_in_excerpt() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let long_body: String = "x".repeat(2000);
+        repo.create(ProposalCreateInput {
+            title: "Long Body",
+            body: &long_body,
+            acceptance_criteria: None,
+            status: None,
+            body_format: None,
+        })
+        .await
+        .unwrap();
+
+        // Default: excerpt truncated, no full body.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10 }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert_eq!(row["body_excerpt"].as_str().unwrap().chars().count(), 512);
+        assert!(row["body_truncated"].as_bool().unwrap());
+        assert!(row.get("body").is_none());
+
+        // With include_bodies: true — full body available, excerpt still truncated.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 10, "include_bodies": true }))
+            .await
+            .unwrap();
+        let row = &list["proposals"].as_array().unwrap()[0];
+        assert_eq!(row["body"].as_str().unwrap(), &long_body);
+        assert_eq!(row["body_excerpt"].as_str().unwrap().chars().count(), 512);
+        assert!(row["body_truncated"].as_bool().unwrap());
+    }
+
+    /// Pagination, filters, and list_summary still work with the new row model.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_preserves_pagination_and_summary() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+
+        for i in 0..3 {
+            repo.create(ProposalCreateInput {
+                title: &format!("Proposal {i}"),
+                body: &format!("Body content for proposal {i}"),
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Pagination works.
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 2, "offset": 0 }))
+            .await
+            .unwrap();
+        let meta = &list["meta"];
+        assert_eq!(meta["limit"].as_i64().unwrap(), 2);
+        assert_eq!(meta["total_count"].as_i64().unwrap(), 3);
+        assert!(meta["has_more"].as_bool().unwrap());
+
+        let rows = list["proposals"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        // Rows carry excerpt fields.
+        assert!(rows[0].get("body_excerpt").is_some());
+        assert!(rows[0].get("body_truncated").is_some());
+    }
+}
+
 // ── Schema-lean regression tests ──────────────────────────────────────────
 //
 // Guard `ProposalCreateParams` and `ProposalUpdateParams` against accidental
