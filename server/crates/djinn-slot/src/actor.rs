@@ -295,6 +295,8 @@ impl SlotHandle {
         runner: LifecycleRunner,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
+        let mut app_state = app_state;
+        app_state.compaction_cs = compaction_cs.clone();
         let actor = SlotActor {
             id,
             model_id: model_id.clone(),
@@ -303,7 +305,7 @@ impl SlotHandle {
             app_state,
             cancel,
             runner,
-            compaction_cs: CompactionCriticalSection::new(),
+            compaction_cs,
         };
         tokio::spawn(actor.run());
         Self {

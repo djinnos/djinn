@@ -185,6 +185,10 @@ pub(crate) async fn run_reply_loop(
         is_evidence_spike,
     } = ctx;
     let mut slot_ctx = super::host_callbacks::agent_to_reply_loop_slot_context(app_state, services);
+    // Use the compaction critical section already threaded into SlotContext by
+    // the slot actor; do not create a separate local instance so the reply loop
+    // and actor observe the same active/release transitions.
+    let compaction_cs = &slot_ctx.compaction_cs;
     // Evidence-spike sessions get the restricted tool set as allowed_schemas
     // for defense-in-depth dispatch-time enforcement.  For normal sessions
     // this is None (no dispatch-time gate — the full role schema applies).
@@ -199,10 +203,6 @@ pub(crate) async fn run_reply_loop(
         mcp_registry,
         allowed_for_dispatch,
     )));
-    // Shared compaction critical section for this reply-loop session; the slot
-    // reply loop enters it around every context rotation and releases it on
-    // every exit path.
-    let compaction_cs = djinn_slot::reply_loop::CompactionCriticalSection::new();
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
@@ -223,7 +223,7 @@ pub(crate) async fn run_reply_loop(
                 active_skill_names,
                 active_mcp_server_names,
                 max_turns_override,
-                compaction_cs: &compaction_cs,
+                compaction_cs,
             },
             conversation,
             is_resumed_session,
