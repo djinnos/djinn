@@ -8,8 +8,8 @@ use djinn_core::clock::{Clock, SystemClock};
 
 use tempfile::TempDir;
 use thiserror::Error;
-use tokio::process::Command;
 use tracing::{debug, warn};
+
 use crate::git_helpers;
 
 #[derive(Debug, Error)]
@@ -19,6 +19,12 @@ pub enum EphemeralWorkspaceError {
 
     #[error("git: {0}")]
     Git(String),
+}
+
+impl From<djinn_git::GitError> for EphemeralWorkspaceError {
+    fn from(err: djinn_git::GitError) -> Self {
+        Self::Git(err.to_string())
+    }
 }
 
 /// A committer / author identity used for automated commits inside a workspace.
@@ -582,12 +588,8 @@ impl Workspace {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        let out = djinn_git::run_git_command_in_with_env(
-            self.root.path(),
-            owned_args,
-            owned_env,
-        )
-        .await?;
+        let out =
+            djinn_git::run_git_command_in_with_env(self.root.path(), owned_args, owned_env).await?;
         if out.code != 0 {
             return Err(EphemeralWorkspaceError::Git(format!(
                 "git {}: {}",

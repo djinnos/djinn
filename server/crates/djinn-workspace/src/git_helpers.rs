@@ -59,10 +59,7 @@ pub async fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result
 /// identity injected. Returns `Ok(true)` on a clean merge, `Ok(false)` when the
 /// merge stops on conflicts (no error; caller must inspect unmerged files), and
 /// `Err` on any other failure.
-pub async fn try_merge_no_commit_no_ff(
-    cwd: &Path,
-    merge_ref: &str,
-) -> Result<bool, String> {
+pub async fn try_merge_no_commit_no_ff(cwd: &Path, merge_ref: &str) -> Result<bool, String> {
     let output = timeout(
         GIT_CMD_TIMEOUT,
         djinn_git::run_git_command_in_with_env(
@@ -75,9 +72,15 @@ pub async fn try_merge_no_commit_no_ff(
             ],
             vec![
                 ("GIT_AUTHOR_NAME".to_string(), "djinn-bot".to_string()),
-                ("GIT_AUTHOR_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                (
+                    "GIT_AUTHOR_EMAIL".to_string(),
+                    "bot@djinn.local".to_string(),
+                ),
                 ("GIT_COMMITTER_NAME".to_string(), "djinn-bot".to_string()),
-                ("GIT_COMMITTER_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                (
+                    "GIT_COMMITTER_EMAIL".to_string(),
+                    "bot@djinn.local".to_string(),
+                ),
             ],
         ),
     )
@@ -92,7 +95,9 @@ pub async fn try_merge_no_commit_no_ff(
     if output.exit_code() == Some(1) {
         Ok(false)
     } else {
-        Err(format!("git merge --no-commit --no-ff {merge_ref}: {stderr}"))
+        Err(format!(
+            "git merge --no-commit --no-ff {merge_ref}: {stderr}"
+        ))
     }
 }
 
@@ -153,9 +158,15 @@ pub async fn commit_tree_merge(
             ],
             vec![
                 ("GIT_AUTHOR_NAME".to_string(), "djinn-bot".to_string()),
-                ("GIT_AUTHOR_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                (
+                    "GIT_AUTHOR_EMAIL".to_string(),
+                    "bot@djinn.local".to_string(),
+                ),
                 ("GIT_COMMITTER_NAME".to_string(), "djinn-bot".to_string()),
-                ("GIT_COMMITTER_EMAIL".to_string(), "bot@djinn.local".to_string()),
+                (
+                    "GIT_COMMITTER_EMAIL".to_string(),
+                    "bot@djinn.local".to_string(),
+                ),
             ],
         ),
     )
