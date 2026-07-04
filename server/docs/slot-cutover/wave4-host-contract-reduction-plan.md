@@ -30,11 +30,11 @@ Outputs:
 |---|---|
 | Original combined baseline (q7y6 / abi6 proof) | **45,312** |
 | Required target (≤ 30,312) | **30,312** |
-| Current combined count | **37,731** |
-| Reduction so far | **7,581** lines (45,312 − 37,731) |
-| Required remaining reduction | **7,419** lines (37,731 − 30,312) |
+| Current combined count (gn1e final — see §8) | **37,744** |
+| Reduction so far | **7,568** lines (45,312 − 37,744) |
+| Required remaining reduction | **7,432** lines (37,744 − 30,312) |
 
-The 15,000-line reduction target is **not met**. The remaining shortfall is **7,419 lines**.
+The 15,000-line reduction target is **not met**. The remaining shortfall is **7,432 lines**. (The §1 table above is the Wave-4-planning-time snapshot of **37,731**; the current combined count of **37,744** is the gn1e-final measurement — the +13 is `main` growth in the scoped trees since that snapshot. See §8 for the final measured state.)
 
 ## 2. Largest remaining files
 
@@ -142,7 +142,7 @@ Any future Wave 4 cleanup must preserve the following known consumers (identifie
 | Consumer | Symbols / paths used | Why protected |
 |---|---|---|
 | `djinn-control-plane/tests/execution_tools.rs` | `SlotFactory`, `SlotHandle`, `SlotPoolConfig`, `SlotPoolHandle`, `TestLifecycleRunner` | External crate imports; no `djinn-slot` equivalents |
-| `djinn-agent-worker/src/worker_services.rs` | `OAuthConfigWire` and related helpers | Agent-local types; crate lacks direct `djinn-slot` dependency |
+| `djinn-agent-worker/src/worker_services.rs` | `OAuthConfigWire` (host-only wire type) | Agent-local serialization type; stays on the `djinn_agent` facade. Its five pure provider helpers were migrated to `djinn_slot::helpers` in gn1e (crate now has a direct `djinn-slot` dependency). |
 | `djinn-agent/src/supervisor_impl/stage.rs` | `build_telemetry_meta_with_attribution` | Internal caller migrated in Wave 3 |
 | `djinn-agent/src/direct_services.rs` | `build_telemetry_meta_with_attribution` | Internal caller migrated in Wave 3 |
 | `djinn-agent/src/lib.rs` | Public facade re-exports | Compatibility contract |
@@ -154,10 +154,38 @@ Any future Wave 4 cleanup must preserve the following known consumers (identifie
 |---|---|
 | Fresh scoped line counts recorded | ✅ §1 |
 | Top largest files listed | ✅ §2 |
-| 7,419-line remaining shortfall made explicit | ✅ §1.1 |
+| 7,432-line remaining shortfall made explicit | ✅ §1.1, §8 |
 | Spike conclusion that full raw target is structurally unlikely without spec reconciliation | ✅ §5 |
 | Allowed cleanup categories listed | ✅ §3 |
 | Non-solutions explicitly rejected | ✅ §4 |
+| Final measured state + next-planner recommendation | ✅ §8 |
+
+## 8. Final measured state (gn1e) and next-planner recommendation
+
+gn1e was the final serialized post-spike cleanup slice for epic `ttlg`. Its `−150 net lines` gate was formally invalidated by the planner (2026-07-04): parallel `main` growth in the scoped trees offset honest reductions, and the safety boundary forbids public-API removal, so the numeric gate was structurally unachievable. gn1e was rescoped to exact measurement + accurate ledger/plan reconciliation + safe consumer migration only.
+
+### Final measured state (this branch HEAD, three scoped commands, verbatim)
+
+| Tree | Lines |
+|---|---:|
+| `server/crates/djinn-agent/src/actors/slot` | **7,463** |
+| `server/crates/djinn-slot/src` | **30,281** |
+| **Combined** | **37,744** |
+
+| Metric | Value |
+|---|---:|
+| Original baseline | **45,312** |
+| Total reduction achieved | **7,568** (45,312 − 37,744) |
+| Raw target | **≤ 30,312** |
+| **Remaining shortfall** | **7,432** (37,744 − 30,312) |
+
+gn1e itself made **0** net change to the scoped combined count: its only code migration (`worker_services.rs` five pure helpers → `djinn_slot::helpers`, plus a `djinn-slot` dependency on `djinn-agent-worker`) lands in `djinn-agent-worker/`, which is outside the two scoped count trees by design. Honest consumer migration cannot move the scoped raw count.
+
+### Recommendation to the next planner
+
+The raw `≤ 30,312` combined-line target is **not met** (37,744; shortfall 7,432) and is **not reachable** through honest, non-destructive cleanup. The remaining mass is canonical `djinn-slot` implementation/tests (30,281 — the intended extraction destination) plus host-only `AgentContext`→`SlotContext` adapter/lifecycle/actor wiring and test infrastructure in the facade (7,463) — neither contains removable duplication under the public-compatibility boundary.
+
+**Do NOT** close epic `ttlg` as if the raw target were met, and **do NOT** spawn deletion-only follow-up tasks (they would either delete host behavior/tests or narrow the public API — both out of scope and previously rejected). **Instead, reconcile/amend the raw line-count criterion** in the governing proposal (`flpe`): replace the raw combined line-count gate with a duplicate-code / facade-thinness gate, or exclude canonical `djinn-slot` implementation/tests that were legitimately added during the extraction. Only then can the epic be closed against a criterion that reflects the actual architecture.
 
 ---
 

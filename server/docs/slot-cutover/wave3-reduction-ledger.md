@@ -859,3 +859,89 @@ Environment limitations:
 - `OPENSSL_NO_VENDOR=1` is required because the container lacks `make` for vendored OpenSSL.
 
 ---
+
+## Slice: gn1e — migrate safe internal slot helper consumers (Wave 3 post-spike, final)
+
+Task: `019f26bd-bd95-7833-bf03-0efd4b07e5a2` (gn1e) — Migrate safe internal/workspace consumers away from unnecessary `djinn-agent::actors::slot` helper imports to canonical `djinn-slot` imports where compile-safe, preserving all public compatibility shims, and record the final measured state.
+
+> **AC note.** The planner formally rescoped this task on 2026-07-04 (`intervention_count=1`). The original hard `−150 net lines relative to post-6ad0 baseline` gate was ruled *invalid* for this final cleanup slice: parallel `main` growth in the scoped trees offset honest reductions, and the remaining agent-side code is functional host wiring that cannot shrink without deleting behavior or narrowing the public API. This slice therefore measures the exact delta, reconciles the ledger/plan to reality, and does **not** chase the superseded numeric target.
+
+### Line-count proof (three scoped commands)
+
+```sh
+find server/crates/djinn-agent/src/actors/slot -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+find server/crates/djinn-agent/src/actors/slot server/crates/djinn-slot/src -name '*.rs' -type f -print0 | xargs -0 cat | wc -l
+```
+
+Documented post-`6ad0` baseline (from the `6ad0` slice above):
+
+| Tree | Post-6ad0 baseline |
+|---|---:|
+| `server/crates/djinn-agent/src/actors/slot` | 7,285 |
+| `server/crates/djinn-slot/src` | 30,028 |
+| **Combined** | **37,313** |
+
+gn1e starting point (this task's merge-base = current `origin/main`, measured verbatim):
+
+| Tree | Count |
+|---|---:|
+| `server/crates/djinn-agent/src/actors/slot` | 7,463 |
+| `server/crates/djinn-slot/src` | 30,281 |
+| **Combined** | **37,744** |
+
+After the gn1e slice (measured verbatim on this branch HEAD):
+
+| Tree | Count | Delta vs gn1e start | Delta vs post-6ad0 baseline |
+|---|---:|---:|---:|
+| `server/crates/djinn-agent/src/actors/slot` | **7,463** | **0** | **+178** |
+| `server/crates/djinn-slot/src` | **30,281** | **0** | **+253** |
+| **Combined** | **37,744** | **0** | **+431** |
+
+The scoped combined count is unchanged by this slice, and is **+431 above** the post-6ad0 baseline. That `+431` is entirely `main` growth in the two scoped trees between the `6ad0` merge and this task's merge-base — **not** a regression introduced here. The migration performed by this slice lands in `server/crates/djinn-agent-worker/`, which is deliberately **outside** the two scoped count trees, so honest consumer migration cannot and does not move the scoped raw count. This is exactly the structural mismatch the planner cited when invalidating the `−150` gate.
+
+### What changed (migration)
+
+- **`server/crates/djinn-agent-worker/src/worker_services.rs`** — migrated the five pure provider-identification helpers (`auth_method_for_provider`, `capabilities_for_provider`, `default_base_url`, `format_family_for_provider`, `parse_model_id`) from the re-export facade `djinn_agent::actors::slot::helpers::{…}` to their canonical home `djinn_slot::helpers::{…}`. The host-specific wire type `OAuthConfigWire` (worker Secret serialization) stays imported from `djinn_agent`.
+- **`server/crates/djinn-agent-worker/Cargo.toml`** — added `djinn-slot = { path = "../djinn-slot" }`. `djinn-slot` was already transitively present via `djinn-agent`; the direct dependency lets the worker consume the pure helpers from their canonical crate.
+
+### Consumers intentionally NOT migrated (rationale / remaining shims)
+
+- **`server/crates/djinn-control-plane/tests/execution_tools.rs`** — imports agent-local slot-actor types (`ModelSlotConfig`, `SlotFactory`, `SlotHandle`, `SlotPoolConfig`, `SlotPoolHandle`, `TestLifecycleRunner`). These live in the `djinn-agent` actor system, not in `djinn-slot`, and `djinn-control-plane` carries no `djinn-slot` dependency. Not migratable without relocating the actor system — out of scope.
+- **`server/crates/djinn-agent/src/supervisor_impl/stage.rs`** and **`server/crates/djinn-agent/src/direct_services.rs`** — their pure-helper references (`default_base_url`, …) already resolve to the canonical `djinn-slot` functions through the agent facade's `pub use djinn_slot::helpers::provider_resolution::{…}` re-export, so repointing the import path would be pure churn with zero behavioral or line effect. Their remaining helper calls (`load_task`, `conflict_context_for_dispatch`, `build_provider_from_resolved`, `build_telemetry_meta_with_attribution`, `resolved_needs_base_url`, and the `lifecycle::*` / `reply_loop::*` types) are agent-local: they are either `pub(crate)`-only in `djinn-slot`, or take the agent-owned `ResolvedModelCredential` type, or belong to the agent-only actor lifecycle. They correctly stay on the facade.
+- **`ProviderCredential` consolidation — explicitly rejected.** `djinn_slot::helpers::ProviderCredential` is structurally identical to the agent-local enum but lacks the host-specific `to_serializable()` inherent method (it depends on the agent-local `OAuthConfigWire`). Re-exporting the `djinn-slot` type in place of the agent enum would remove a public inherent method from `djinn_agent::actors::slot::helpers::ProviderCredential` — a violation of this task's safety boundary (no removing/narrowing public `djinn_agent::actors::slot` symbols) and precisely the metric-gaming relocation the planner forbade. Left as-is.
+
+### Public compatibility preservation
+
+No public `djinn_agent::actors::slot` symbol was removed, renamed, relocated, visibility-narrowed, or signature-changed. This slice edits only an external consumer's import path plus a `Cargo.toml` dependency line; `slot/mod.rs`, `helpers/mod.rs`, and all `pub`/`pub use` exports are byte-for-byte identical to `origin/main`.
+
+### Cumulative Wave 3 post-spike summary (final, measured)
+
+| Metric | Value |
+|---|---:|
+| Original ttlg / Wave 3 baseline | **45,312** |
+| Final combined count (this branch HEAD) | **37,744** |
+| **Total reduction from 45,312** | **7,568** |
+| Raw target | **≤ 30,312** |
+| **Remaining shortfall to 30,312** | **7,432** |
+
+The remaining 37,744 combined lines are `djinn-slot/src` (30,281 — the canonical extraction destination) plus `djinn-agent/src/actors/slot` (7,463 — host-only `AgentContext`→`SlotContext` adapter/lifecycle wiring, actor plumbing, and test infrastructure). Neither block contains removable duplication reachable under the non-destructive / no-public-API-removal boundary, so the raw `≤ 30,312` target remains structurally unmet by honest cleanup. See the Wave 4 plan for the next-planner recommendation.
+
+### Validation
+
+All from `server/`, `SQLX_OFFLINE=true OPENSSL_NO_VENDOR=1`:
+
+```sh
+cargo check   -p djinn-agent-worker                                  # clean
+cargo clippy  -p djinn-agent-worker --all-targets --all-features -- -D warnings
+cargo fmt     --check -p djinn-agent-worker                          # clean
+cargo test    -p djinn-agent-worker --bins -- worker_services        # 4 passed / 0 failed
+cargo test    -p djinn-slot --lib -- helpers::provider_resolution    # 5 passed / 0 failed
+```
+
+- `cargo check` / `cargo test`: clean; `worker_services` 4/4 pass and `djinn-slot` `provider_resolution` 5/5 pass with the migrated imports.
+- `cargo clippy -D warnings`: the only findings are two **pre-existing** `clippy::needless_borrow` lints at `djinn-agent-worker/src/main.rs:1838` (identical on `origin/main`, a file this slice does not touch). The touched file `worker_services.rs` is clippy-clean.
+- `cargo fmt --check`: clean after formatting the new import block.
+- Environment limitation: DB-backed tests still require `djinn_test_template`; none were disabled or weakened.
+
+---
