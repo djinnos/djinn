@@ -1,83 +1,301 @@
+//! Typed fuzzy-match strategy core for the edit tool.
+//!
+//! This module exposes a lower-level, typed matcher (`find_match`) that
+//! locates the single best candidate for `old_text` in file `content` using a
+//! strict→loose strategy chain, returning rich metadata (strategy, outcome,
+//! byte/line range, reindentation flag, and placeholder fields for future
+//! nearest-miss scoring, guard rejection, and Unicode-splice status). The
+//! matcher never writes files or performs the replacement — that is the job of
+//! the compatibility wrapper `fuzzy_replace`, which translates typed metadata
+//! into the existing `(String, Option<String>)` surface consumed by
+//! `call_edit`.
+//!
+//! Conceptual design only — no third-party source (e.g. Hermes) is vendored or
+//! copied. Strategy ordering and guard concepts are original to this project;
+//! see [[design/c77e-roadmap]].
+
 use std::path::Path;
 
-enum FuzzyResult {
-    Unique(String),
-    Ambiguous(usize),
+// ════════════════════════════════════════════════════════════════════════════
+// Typed strategy identification
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Matching strategies, ordered strict → loose. The matcher consults them in
+/// `STRATEGY_ORDER` and returns the result of the first strategy that produces
+/// any candidate (unique match or ambiguity). Future waves will extend this
+/// enum with `escape_normalized`, `trimmed_boundary`, `unicode_normalized`,
+/// `block_anchor`, and `context_aware` — see [[design/c77e-roadmap]].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MatchStrategy {
+    /// Exact byte-for-byte match.
+    Exact,
+    /// Match after trimming trailing whitespace per line.
+    LineTrimmed,
+    /// Match after collapsing runs of spaces/tabs to a single space.
+    WhitespaceNormalized,
+    /// Match after stripping leading whitespace per line; the replacement is
+    /// reindented to the matched block's base indentation.
+    IndentationFlexible,
 }
 
-/// Multi-layer fuzzy string replacement for the edit tool.
-///
-/// Tries matching strategies in order of strictness:
-/// 1. Exact match
-/// 2. Line-trimmed match (trailing whitespace stripped per line)
-/// 3. Whitespace-normalized match (runs of whitespace collapsed to single space)
-/// 4. Indentation-flexible match (leading whitespace stripped per line)
-///
-/// Returns `(new_content, optional_match_note)`.
-pub(super) fn fuzzy_replace(
-    content: &str,
-    old_text: &str,
-    new_text: &str,
-    path: &Path,
-) -> Result<(String, Option<String>), String> {
-    let count = content.matches(old_text).count();
-    if count == 1 {
-        return Ok((content.replacen(old_text, new_text, 1), None));
+impl MatchStrategy {
+    /// Stable machine-readable identifier for telemetry/schema use.
+    #[allow(dead_code)]
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::LineTrimmed => "line_trimmed",
+            Self::WhitespaceNormalized => "whitespace_normalized",
+            Self::IndentationFlexible => "indentation_flexible",
+        }
     }
-    if count > 1 {
-        return Err(format!(
-            "old_text appears {count} times in file (must be unique): {}",
-            path.display()
+}
+
+/// The ordered strategy chain. First-match-wins: a strategy earlier in the
+/// list is only skipped when it finds zero candidates. Exposed as a `const` so
+/// the ordering is documented and verifiable independently of the dispatch
+/// logic.
+const STRATEGY_ORDER: &[MatchStrategy] = &[
+    MatchStrategy::Exact,
+    MatchStrategy::LineTrimmed,
+    MatchStrategy::WhitespaceNormalized,
+    MatchStrategy::IndentationFlexible,
+];
+
+// ════════════════════════════════════════════════════════════════════════════
+// Typed outcome & metadata
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The outcome of a strategy's candidate search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MatchOutcome {
+    /// Exactly one candidate found and all guards passed.
+    Success,
+    /// Multiple candidates found — caller must disambiguate.
+    Ambiguous,
+    /// No candidate found by this strategy (or by any strategy in the chain).
+    NoMatch,
+    /// Candidate found but a safety guard rejected it. Reserved for future
+    /// guard work (UTF-8 boundary, CRLF preservation, escape balance, etc.);
+    /// Wave 1 strategies never produce this outcome.
+    #[allow(dead_code)]
+    GuardRejected,
+}
+
+/// Placeholder for grapheme-safe Unicode splice status. Populated only by the
+/// Unicode-normalized strategy in a later wave; Wave 1 strategies always leave
+/// this as `None`, signalling no Unicode splice was performed. Conceptual
+/// design only — no third-party source (e.g. Hermes) is vendored or copied.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnicodeSpliceStatus {
+    /// Splice landed on a valid UTF-8 boundary; original non-ASCII bytes
+    /// preserved byte-for-byte.
+    Clean,
+    /// Splice required grapheme-boundary adjustment.
+    Adjusted,
+}
+
+/// Candidate byte range, half-open `[start, end)` into the original content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ByteRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Candidate line range, 1-based, inclusive `[start, end]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Typed metadata produced by the matcher for a single consultation of the
+/// strategy chain. The compatibility wrapper `fuzzy_replace` translates this
+/// into the existing string notes/errors so `call_edit` is unchanged until
+/// sibling handler/schema epics consume richer metadata.
+//
+// Several fields are intentional placeholders for future-wave strategies and
+// guards (nearest-miss scoring, guard rejection reason, Unicode splice
+// status). They are never read on the Wave 1 path; the `#[allow(dead_code)]`
+// silences the `-D warnings` gate until sibling tasks consume them.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(super) struct MatchMetadata {
+    /// Which strategy produced this result. For `NoMatch` this is the last
+    /// strategy consulted in the chain (conventional; no strategy decided).
+    pub strategy: MatchStrategy,
+    /// Outcome for the deciding strategy.
+    pub outcome: MatchOutcome,
+    /// How many candidates the deciding strategy found.
+    pub candidate_count: usize,
+    /// Byte range of the unique candidate in the original content.
+    /// `None` unless `outcome == Success`.
+    pub byte_range: Option<ByteRange>,
+    /// 1-based inclusive line range of the unique candidate.
+    /// `None` unless `outcome == Success`.
+    pub line_range: Option<LineRange>,
+    /// Nearest-miss score placeholder for future fuzzy scoring (0.0..=1.0).
+    /// Always `None` for Wave 1 strategies, which have no partial scoring.
+    pub nearest_miss: Option<f64>,
+    /// `true` when the replacement must be reindented to the matched block's
+    /// base indentation (indentation_flexible strategy only).
+    pub reindented: bool,
+    /// Guard-rejection reason placeholder. `None` unless a future guard
+    /// rejects a candidate. Wave 1 never rejects.
+    pub guard_rejected_reason: Option<&'static str>,
+    /// Unicode splice status placeholder. `None` for Wave 1.
+    pub unicode_splice: Option<UnicodeSpliceStatus>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Lower-level typed matcher
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Lower-level typed matcher. Locates the single best candidate for
+/// `old_text` in `content` using the strict→loose strategy chain and returns
+/// typed metadata. Does NOT write files or perform the replacement — the
+/// compatibility wrapper `fuzzy_replace` applies `new_text` to the returned
+/// byte range.
+///
+/// First-match-wins: the first strategy that produces any candidate (unique
+/// or ambiguous) determines the outcome and stops the chain. A strategy with
+/// zero candidates is skipped. If no strategy produces any candidate, the
+/// outcome is `NoMatch`.
+pub(super) fn find_match(content: &str, old_text: &str) -> MatchMetadata {
+    for &strategy in STRATEGY_ORDER {
+        if let Some(metadata) = run_strategy(strategy, content, old_text) {
+            return metadata;
+        }
+    }
+    // No strategy found any candidate.
+    no_match_metadata()
+}
+
+/// Dispatch a single strategy. Returns `None` when the strategy found zero
+/// candidates (so the chain falls through to the next strategy), or
+/// `Some(metadata)` when it found one (Success) or many (Ambiguous).
+fn run_strategy(strategy: MatchStrategy, content: &str, old_text: &str) -> Option<MatchMetadata> {
+    match strategy {
+        MatchStrategy::Exact => try_exact(content, old_text),
+        MatchStrategy::LineTrimmed => try_line_trimmed(content, old_text),
+        MatchStrategy::WhitespaceNormalized => try_whitespace_normalized(content, old_text),
+        MatchStrategy::IndentationFlexible => try_indentation_flexible(content, old_text),
+    }
+}
+
+// ── Metadata constructors ───────────────────────────────────────────────────
+
+fn success_metadata(
+    strategy: MatchStrategy,
+    byte_range: ByteRange,
+    line_range: LineRange,
+) -> MatchMetadata {
+    MatchMetadata {
+        strategy,
+        outcome: MatchOutcome::Success,
+        candidate_count: 1,
+        byte_range: Some(byte_range),
+        line_range: Some(line_range),
+        nearest_miss: None,
+        reindented: false,
+        guard_rejected_reason: None,
+        unicode_splice: None,
+    }
+}
+
+fn success_metadata_reindented(
+    strategy: MatchStrategy,
+    byte_range: ByteRange,
+    line_range: LineRange,
+) -> MatchMetadata {
+    MatchMetadata {
+        strategy,
+        outcome: MatchOutcome::Success,
+        candidate_count: 1,
+        byte_range: Some(byte_range),
+        line_range: Some(line_range),
+        nearest_miss: None,
+        reindented: true,
+        guard_rejected_reason: None,
+        unicode_splice: None,
+    }
+}
+
+fn ambiguous_metadata(strategy: MatchStrategy, count: usize) -> MatchMetadata {
+    MatchMetadata {
+        strategy,
+        outcome: MatchOutcome::Ambiguous,
+        candidate_count: count,
+        byte_range: None,
+        line_range: None,
+        nearest_miss: None,
+        reindented: false,
+        guard_rejected_reason: None,
+        unicode_splice: None,
+    }
+}
+
+/// Metadata for when the entire strategy chain produced no candidate. The
+/// `strategy` field is set to the last strategy consulted (conventional).
+fn no_match_metadata() -> MatchMetadata {
+    MatchMetadata {
+        strategy: *STRATEGY_ORDER.last().expect("strategy chain is non-empty"),
+        outcome: MatchOutcome::NoMatch,
+        candidate_count: 0,
+        byte_range: None,
+        line_range: None,
+        nearest_miss: None,
+        reindented: false,
+        guard_rejected_reason: None,
+        unicode_splice: None,
+    }
+}
+
+/// Compute the 1-based inclusive line range for a half-open byte range
+/// `[start, end)` in `content`. Line numbers count `\n` separators. If `end`
+/// lands immediately after a newline (the byte at `end-1` is `\n`), that
+/// trailing newline does not open a new matched line — the last matched line
+/// is the one the newline terminates.
+fn line_range_for(content: &str, start: usize, end: usize) -> LineRange {
+    let line_start = content[..start].matches('\n').count() + 1;
+    // For the end line, count newlines strictly inside [start, end-1): a
+    // trailing `\n` at byte end-1 closes the last matched line rather than
+    // opening a new one.
+    let last_byte = end.max(start).saturating_sub(1);
+    let prefix = &content[..last_byte];
+    let line_end = prefix.matches('\n').count() + 1;
+    LineRange {
+        start: line_start,
+        end: line_end,
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Individual strategies
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Exact byte-for-byte match. Duplicate occurrences are an ambiguity failure.
+fn try_exact(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let count = content.matches(old_text).count();
+    if count == 0 {
+        return None;
+    }
+    if count == 1 {
+        let start = content.find(old_text).unwrap_or(0);
+        let end = start + old_text.len();
+        return Some(success_metadata(
+            MatchStrategy::Exact,
+            ByteRange { start, end },
+            line_range_for(content, start, end),
         ));
     }
-
-    if let Some(result) = try_line_trimmed_match(content, old_text, new_text) {
-        return match result {
-            FuzzyResult::Unique(new_content) => Ok((
-                new_content,
-                Some("(matched after trimming trailing whitespace)".to_string()),
-            )),
-            FuzzyResult::Ambiguous(n) => Err(format!(
-                "old_text appears {n} times after trimming trailing whitespace \
-                 (must be unique): {}",
-                path.display()
-            )),
-        };
-    }
-
-    if let Some(result) = try_whitespace_normalized_match(content, old_text, new_text) {
-        return match result {
-            FuzzyResult::Unique(new_content) => Ok((
-                new_content,
-                Some("(matched with whitespace normalization)".to_string()),
-            )),
-            FuzzyResult::Ambiguous(n) => Err(format!(
-                "old_text appears {n} times after whitespace normalization \
-                 (must be unique): {}",
-                path.display()
-            )),
-        };
-    }
-
-    if let Some(result) = try_indentation_flexible_match(content, old_text, new_text) {
-        return match result {
-            FuzzyResult::Unique(new_content) => Ok((
-                new_content,
-                Some("(matched with flexible indentation)".to_string()),
-            )),
-            FuzzyResult::Ambiguous(n) => Err(format!(
-                "old_text appears {n} times after stripping indentation \
-                 (must be unique): {}",
-                path.display()
-            )),
-        };
-    }
-
-    Err(format!("old_text not found in file: {}", path.display()))
+    Some(ambiguous_metadata(MatchStrategy::Exact, count))
 }
 
-/// Trim trailing whitespace from each line, then find the match.
-fn try_line_trimmed_match(content: &str, old_text: &str, new_text: &str) -> Option<FuzzyResult> {
+/// Trim trailing whitespace from each line, then match. Duplicates are an
+/// ambiguity failure.
+fn try_line_trimmed(content: &str, old_text: &str) -> Option<MatchMetadata> {
     let trimmed_content: String = content
         .lines()
         .map(|l| l.trim_end())
@@ -94,19 +312,228 @@ fn try_line_trimmed_match(content: &str, old_text: &str, new_text: &str) -> Opti
         return None;
     }
     if count > 1 {
-        return Some(FuzzyResult::Ambiguous(count));
+        return Some(ambiguous_metadata(MatchStrategy::LineTrimmed, count));
     }
 
     let start = trimmed_content.find(&trimmed_old)?;
     let end = start + trimmed_old.len();
 
     let (orig_start, orig_end) = map_trimmed_to_original(content, &trimmed_content, start, end);
-    let mut result = String::with_capacity(content.len());
-    result.push_str(&content[..orig_start]);
-    result.push_str(new_text);
-    result.push_str(&content[orig_end..]);
-    Some(FuzzyResult::Unique(result))
+    Some(success_metadata(
+        MatchStrategy::LineTrimmed,
+        ByteRange {
+            start: orig_start,
+            end: orig_end,
+        },
+        line_range_for(content, orig_start, orig_end),
+    ))
 }
+
+/// Collapse all runs of spaces/tabs to a single space, then match. Duplicates
+/// are an ambiguity failure.
+fn try_whitespace_normalized(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let (norm_content, content_map) = normalize_whitespace_with_map(content);
+    let (norm_old, _) = normalize_whitespace_with_map(old_text);
+
+    let count = norm_content.matches(&norm_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(ambiguous_metadata(
+            MatchStrategy::WhitespaceNormalized,
+            count,
+        ));
+    }
+
+    let norm_start = norm_content.find(&norm_old)?;
+    let norm_end = norm_start + norm_old.len();
+
+    let orig_start = content_map[norm_start];
+    let orig_end = if norm_end >= content_map.len() {
+        content.len()
+    } else {
+        content_map[norm_end]
+    };
+
+    Some(success_metadata(
+        MatchStrategy::WhitespaceNormalized,
+        ByteRange {
+            start: orig_start,
+            end: orig_end,
+        },
+        line_range_for(content, orig_start, orig_end),
+    ))
+}
+
+/// Strip leading whitespace from each line, match, then report the candidate
+/// range with a reindentation flag so the wrapper can reindent the
+/// replacement. Duplicates are an ambiguity failure.
+fn try_indentation_flexible(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let stripped_content: String = content
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let stripped_old: String = old_text
+        .lines()
+        .map(|l| l.trim_start())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if stripped_old.is_empty() {
+        return None;
+    }
+
+    let count = stripped_content.matches(&stripped_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(ambiguous_metadata(
+            MatchStrategy::IndentationFlexible,
+            count,
+        ));
+    }
+
+    let stripped_start = stripped_content.find(&stripped_old)?;
+
+    let match_start_line = stripped_content[..stripped_start]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count();
+    let old_line_count = stripped_old.chars().filter(|&c| c == '\n').count() + 1;
+
+    let content_lines: Vec<&str> = content.lines().collect();
+
+    let mut orig_start = 0usize;
+    for line in &content_lines[..match_start_line] {
+        orig_start += line.len() + 1;
+    }
+    let mut orig_end = orig_start;
+    for (i, line) in content_lines[match_start_line..]
+        .iter()
+        .enumerate()
+        .take(old_line_count)
+    {
+        orig_end += line.len();
+        if match_start_line + i + 1 < content_lines.len() {
+            orig_end += 1;
+        }
+    }
+    orig_end = orig_end.min(content.len());
+
+    Some(success_metadata_reindented(
+        MatchStrategy::IndentationFlexible,
+        ByteRange {
+            start: orig_start,
+            end: orig_end,
+        },
+        line_range_for(content, orig_start, orig_end),
+    ))
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Compatibility wrapper (preserves the call_edit contract)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Multi-layer fuzzy string replacement for the edit tool.
+///
+/// Tries matching strategies in order of strictness:
+/// 1. Exact match
+/// 2. Line-trimmed match (trailing whitespace stripped per line)
+/// 3. Whitespace-normalized match (runs of whitespace collapsed to single space)
+/// 4. Indentation-flexible match (leading whitespace stripped per line)
+///
+/// Returns `(new_content, optional_match_note)`. Internally delegates to the
+/// typed `find_match` core and translates its metadata into the existing
+/// string surface so `call_edit` continues to behave as before.
+pub(super) fn fuzzy_replace(
+    content: &str,
+    old_text: &str,
+    new_text: &str,
+    path: &Path,
+) -> Result<(String, Option<String>), String> {
+    let metadata = find_match(content, old_text);
+
+    match metadata.outcome {
+        MatchOutcome::Success => {
+            let byte_range = metadata
+                .byte_range
+                .expect("success metadata must carry a byte range");
+            let start = byte_range.start;
+            let end = byte_range.end;
+
+            let replacement = if metadata.reindented {
+                let matched_block = &content[start..end];
+                let reindented = reindent_replacement(matched_block, new_text);
+                let needs_trailing_newline =
+                    content[..end].ends_with('\n') && !reindented.ends_with('\n');
+                let mut r = reindented;
+                if needs_trailing_newline {
+                    r.push('\n');
+                }
+                r
+            } else {
+                new_text.to_string()
+            };
+
+            let mut result = String::with_capacity(content.len());
+            result.push_str(&content[..start]);
+            result.push_str(&replacement);
+            result.push_str(&content[end..]);
+
+            Ok((result, match_note_for(metadata.strategy)))
+        }
+        MatchOutcome::Ambiguous => Err(format!(
+            "old_text appears {} times {} (must be unique): {}",
+            metadata.candidate_count,
+            ambiguity_phrase(metadata.strategy),
+            path.display()
+        )),
+        MatchOutcome::NoMatch => Err(format!("old_text not found in file: {}", path.display())),
+        MatchOutcome::GuardRejected => Err(format!(
+            "old_text match rejected by safety guard{}: {}",
+            metadata
+                .guard_rejected_reason
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default(),
+            path.display()
+        )),
+    }
+}
+
+/// Human-readable match note for a successful strategy, or `None` for exact
+/// (which needs no note). Matches the pre-refactor user-visible strings.
+fn match_note_for(strategy: MatchStrategy) -> Option<String> {
+    match strategy {
+        MatchStrategy::Exact => None,
+        MatchStrategy::LineTrimmed => {
+            Some("(matched after trimming trailing whitespace)".to_string())
+        }
+        MatchStrategy::WhitespaceNormalized => {
+            Some("(matched with whitespace normalization)".to_string())
+        }
+        MatchStrategy::IndentationFlexible => {
+            Some("(matched with flexible indentation)".to_string())
+        }
+    }
+}
+
+/// Ambiguity qualifier used in the error message. Matches the pre-refactor
+/// user-visible phrasing.
+fn ambiguity_phrase(strategy: MatchStrategy) -> &'static str {
+    match strategy {
+        MatchStrategy::Exact => "in file",
+        MatchStrategy::LineTrimmed => "after trimming trailing whitespace",
+        MatchStrategy::WhitespaceNormalized => "after whitespace normalization",
+        MatchStrategy::IndentationFlexible => "after stripping indentation",
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Reindentation helper
+// ════════════════════════════════════════════════════════════════════════════
 
 pub(super) fn reindent_replacement(matched_block: &str, replacement: &str) -> String {
     let matched_lines: Vec<&str> = matched_block.split('\n').collect();
@@ -195,40 +622,6 @@ fn map_trimmed_to_original(
     (result_start, result_end)
 }
 
-/// Collapse all runs of spaces/tabs to a single space, then find the match.
-fn try_whitespace_normalized_match(
-    content: &str,
-    old_text: &str,
-    new_text: &str,
-) -> Option<FuzzyResult> {
-    let (norm_content, content_map) = normalize_whitespace_with_map(content);
-    let (norm_old, _) = normalize_whitespace_with_map(old_text);
-
-    let count = norm_content.matches(&norm_old as &str).count();
-    if count == 0 {
-        return None;
-    }
-    if count > 1 {
-        return Some(FuzzyResult::Ambiguous(count));
-    }
-
-    let norm_start = norm_content.find(&norm_old)?;
-    let norm_end = norm_start + norm_old.len();
-
-    let orig_start = content_map[norm_start];
-    let orig_end = if norm_end >= content_map.len() {
-        content.len()
-    } else {
-        content_map[norm_end]
-    };
-
-    let mut result = String::with_capacity(content.len());
-    result.push_str(&content[..orig_start]);
-    result.push_str(new_text);
-    result.push_str(&content[orig_end..]);
-    Some(FuzzyResult::Unique(result))
-}
-
 /// Normalize whitespace: collapse runs of spaces/tabs to a single space.
 /// Returns (normalized_string, map from normalized byte index to original byte
 /// index).
@@ -259,82 +652,19 @@ fn normalize_whitespace_with_map(s: &str) -> (String, Vec<usize>) {
     (normalized, map)
 }
 
-/// Strip leading whitespace from each line, match, then apply edit preserving
-/// the file's original indentation.
-fn try_indentation_flexible_match(
-    content: &str,
-    old_text: &str,
-    new_text: &str,
-) -> Option<FuzzyResult> {
-    let stripped_content: String = content
-        .lines()
-        .map(|l| l.trim_start())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let stripped_old: String = old_text
-        .lines()
-        .map(|l| l.trim_start())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if stripped_old.is_empty() {
-        return None;
-    }
-
-    let count = stripped_content.matches(&stripped_old as &str).count();
-    if count == 0 {
-        return None;
-    }
-    if count > 1 {
-        return Some(FuzzyResult::Ambiguous(count));
-    }
-
-    let stripped_start = stripped_content.find(&stripped_old)?;
-
-    let match_start_line = stripped_content[..stripped_start]
-        .chars()
-        .filter(|&c| c == '\n')
-        .count();
-    let old_line_count = stripped_old.chars().filter(|&c| c == '\n').count() + 1;
-
-    let content_lines: Vec<&str> = content.lines().collect();
-
-    let mut orig_start = 0usize;
-    for line in &content_lines[..match_start_line] {
-        orig_start += line.len() + 1;
-    }
-    let mut orig_end = orig_start;
-    for (i, line) in content_lines[match_start_line..]
-        .iter()
-        .enumerate()
-        .take(old_line_count)
-    {
-        orig_end += line.len();
-        if match_start_line + i + 1 < content_lines.len() {
-            orig_end += 1;
-        }
-    }
-    orig_end = orig_end.min(content.len());
-
-    let matched_block = &content[orig_start..orig_end];
-    let reindented = reindent_replacement(matched_block, new_text);
-
-    let needs_trailing_newline = content[..orig_end].ends_with('\n') && !reindented.ends_with('\n');
-
-    let mut result = String::with_capacity(content.len());
-    result.push_str(&content[..orig_start]);
-    result.push_str(&reindented);
-    if needs_trailing_newline {
-        result.push('\n');
-    }
-    result.push_str(&content[orig_end..]);
-    Some(FuzzyResult::Unique(result))
-}
+// ════════════════════════════════════════════════════════════════════════════
+// Tests
+// ════════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod tests {
-    use super::{fuzzy_replace, reindent_replacement};
+    use super::{
+        MatchOutcome, MatchStrategy, ambiguity_phrase, find_match, fuzzy_replace, line_range_for,
+        match_note_for, reindent_replacement,
+    };
     use std::path::Path;
+
+    // ── Existing wrapper-level tests (unchanged behaviour) ──────────────────
 
     #[test]
     fn rebases_multiline_replacement_using_matched_indentation() {
@@ -377,5 +707,217 @@ mod tests {
             reindent_replacement(matched_block, replacement),
             "        if ready {\n            let nested = || {\n                execute();\n            };\n            nested();\n        }"
         );
+    }
+
+    // ── Typed metadata tests ───────────────────────────────────────────────
+
+    #[test]
+    fn exact_match_returns_success_metadata() {
+        let content = "hello world\nfoo bar\n";
+        let old_text = "world";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::Exact);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert_eq!(m.candidate_count, 1);
+        let br = m.byte_range.expect("exact success has byte range");
+        assert_eq!(br.start, 6);
+        assert_eq!(br.end, 11);
+        let lr = m.line_range.expect("exact success has line range");
+        assert_eq!(lr.start, 1);
+        assert_eq!(lr.end, 1);
+        assert!(!m.reindented);
+        assert!(m.nearest_miss.is_none());
+        assert!(m.guard_rejected_reason.is_none());
+        assert!(m.unicode_splice.is_none());
+    }
+
+    #[test]
+    fn exact_match_note_is_none() {
+        assert!(match_note_for(MatchStrategy::Exact).is_none());
+    }
+
+    #[test]
+    fn line_trimmed_match_returns_success_metadata() {
+        // Content has trailing spaces; old_text does not.
+        let content = "let x = 1;   \nlet y = 2;\n";
+        let old_text = "let x = 1;\nlet y = 2;";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::LineTrimmed);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert_eq!(m.candidate_count, 1);
+        assert!(m.byte_range.is_some());
+        assert!(m.line_range.is_some());
+        assert!(!m.reindented);
+    }
+
+    #[test]
+    fn whitespace_normalized_match_returns_success_metadata() {
+        // Content has extra spaces between tokens; old_text has single spaces.
+        let content = "fn    main()   {  }";
+        let old_text = "fn main() { }";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::WhitespaceNormalized);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert_eq!(m.candidate_count, 1);
+        let br = m.byte_range.expect("whitespace success has byte range");
+        // Byte range should cover the matched span in original content.
+        assert_eq!(&content[br.start..br.end], "fn    main()   {  }");
+        assert!(!m.reindented);
+    }
+
+    #[test]
+    fn indentation_flexible_match_returns_success_with_reindentation_metadata() {
+        // Content is indented more than old_text.
+        let content = "fn outer() {\n    if ready {\n        do_thing();\n    }\n}\n";
+        let old_text = "if ready {\n    do_thing();\n}";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::IndentationFlexible);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert_eq!(m.candidate_count, 1);
+        let br = m.byte_range.expect("indentation success has byte range");
+        // The matched block in the original includes the file's indentation.
+        // The byte range also includes the trailing newline of the matched
+        // region (the wrapper compensates via `needs_trailing_newline`), so we
+        // assert the block up to the closing brace and separately confirm the
+        // range extends to cover the last matched line.
+        assert!(content[br.start..br.end].starts_with("    if ready {"));
+        assert!(
+            content[br.start..br.end].contains("do_thing();"),
+            "byte range must cover the matched block: {:?}",
+            &content[br.start..br.end]
+        );
+        let lr = m.line_range.expect("indentation success has line range");
+        assert_eq!(lr.start, 2);
+        assert_eq!(lr.end, 4);
+        assert!(
+            m.reindented,
+            "indentation_flexible success must set the reindentation flag"
+        );
+    }
+
+    #[test]
+    fn ambiguous_match_returns_ambiguity_metadata() {
+        let content = "foo\nbar\nfoo\nbaz\n";
+        let old_text = "foo";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::Exact);
+        assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+        assert_eq!(m.candidate_count, 2);
+        assert!(m.byte_range.is_none());
+        assert!(m.line_range.is_none());
+    }
+
+    #[test]
+    fn no_match_returns_no_match_metadata() {
+        let content = "hello world\n";
+        let old_text = "this text does not exist anywhere";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.outcome, MatchOutcome::NoMatch);
+        assert_eq!(m.candidate_count, 0);
+        assert!(m.byte_range.is_none());
+        assert!(m.line_range.is_none());
+    }
+
+    #[test]
+    fn strategy_as_str_returns_stable_identifiers() {
+        assert_eq!(MatchStrategy::Exact.as_str(), "exact");
+        assert_eq!(MatchStrategy::LineTrimmed.as_str(), "line_trimmed");
+        assert_eq!(
+            MatchStrategy::WhitespaceNormalized.as_str(),
+            "whitespace_normalized"
+        );
+        assert_eq!(
+            MatchStrategy::IndentationFlexible.as_str(),
+            "indentation_flexible"
+        );
+    }
+
+    #[test]
+    fn ambiguity_phrases_match_legacy_wording() {
+        assert_eq!(ambiguity_phrase(MatchStrategy::Exact), "in file");
+        assert_eq!(
+            ambiguity_phrase(MatchStrategy::LineTrimmed),
+            "after trimming trailing whitespace"
+        );
+        assert_eq!(
+            ambiguity_phrase(MatchStrategy::WhitespaceNormalized),
+            "after whitespace normalization"
+        );
+        assert_eq!(
+            ambiguity_phrase(MatchStrategy::IndentationFlexible),
+            "after stripping indentation"
+        );
+    }
+
+    #[test]
+    fn line_range_for_single_line() {
+        let content = "aaa\nbbb\nccc";
+        let lr = line_range_for(content, 4, 7);
+        assert_eq!(lr.start, 2);
+        assert_eq!(lr.end, 2);
+    }
+
+    #[test]
+    fn line_range_for_multiline() {
+        let content = "aaa\nbbb\nccc";
+        let lr = line_range_for(content, 4, 11);
+        assert_eq!(lr.start, 2);
+        assert_eq!(lr.end, 3);
+    }
+
+    #[test]
+    fn wrapper_preserves_exact_match_note_absence() {
+        let content = "hello world";
+        let (updated, note) =
+            fuzzy_replace(content, "world", "universe", Path::new("test.rs")).unwrap();
+        assert_eq!(updated, "hello universe");
+        assert!(note.is_none(), "exact match should not produce a note");
+    }
+
+    #[test]
+    fn wrapper_line_trimmed_uses_typed_core() {
+        // Multiline: the content's first line has trailing spaces, so the exact
+        // two-line substring is NOT present, but line-trimmed matching finds it.
+        let content = "let x = 1;   \nlet y = 2;\n";
+        let (updated, note) = fuzzy_replace(
+            content,
+            "let x = 1;\nlet y = 2;",
+            "let x = 3;\nlet y = 4;",
+            Path::new("test.rs"),
+        )
+        .unwrap();
+        assert_eq!(updated, "let x = 3;\nlet y = 4;\n");
+        assert_eq!(
+            note.as_deref(),
+            Some("(matched after trimming trailing whitespace)")
+        );
+    }
+
+    #[test]
+    fn wrapper_reports_ambiguity_with_strategy_phrase() {
+        let content = "foo bar\nfoo bar\n";
+        let err = fuzzy_replace(content, "foo", "baz", Path::new("test.rs")).unwrap_err();
+        assert!(err.contains("appears 2 times in file"), "got: {err}");
+        assert!(err.contains("test.rs"), "got: {err}");
+    }
+
+    #[test]
+    fn wrapper_reports_no_match() {
+        let content = "hello\n";
+        let err = fuzzy_replace(content, "missing", "x", Path::new("f.rs")).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+        assert!(err.contains("f.rs"), "got: {err}");
     }
 }
