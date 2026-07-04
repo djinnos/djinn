@@ -8,6 +8,7 @@ use super::admission::{
     clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
 };
 use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
@@ -1571,8 +1572,18 @@ impl CoordinatorActor {
             // Final fallback list, precedence: creator's per-user selection →
             // project default-role preference → role base. All scoped to the
             // creator, so selection and runtime resolution stay consistent.
+            //
+            // Post-intervention worker retries (intervention_count >= 1) are
+            // routed to the plan lane when the default-on feature flag is set,
+            // while keeping the `worker` role and `ModelLane::for_role` mapping
+            // unchanged.
+            let effective_lane = post_intervention_lane::effective_dispatch_lane(
+                role,
+                task.intervention_count,
+                post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
+            );
             let user_model_ids = self
-                .resolve_user_model_priority(creator.as_deref(), role)
+                .resolve_user_model_priority_with_lane(creator.as_deref(), role, effective_lane)
                 .await;
             let model_preference_ids = self
                 .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
@@ -1588,6 +1599,34 @@ impl CoordinatorActor {
             {
                 if seen.insert(id.clone()) {
                     model_ids.push(id.clone());
+                }
+            }
+
+            // uv3p Part B: forced model rotation on the post-intervention retry
+            // path. When the human-park rung declined to park because no session
+            // has reached submit_work yet, it redispatches — but a redispatch to
+            // the SAME model that just terminated pre-submission (loop-guard trip,
+            // infra death) would loop identically (kibj went back to k2p7 twice).
+            // Drop the models whose post-intervention sessions terminated without
+            // submitting, derived from durable session history so no new state is
+            // needed. Degrades to the unfiltered list when exclusion would empty
+            // it (only one viable model → plan-lane retry, then park at the bound).
+            if role == "worker" && task.intervention_count >= 1 {
+                let history = self.post_intervention_history(&task).await;
+                if !history.non_attempt_models.is_empty() {
+                    let filtered: Vec<String> = model_ids
+                        .iter()
+                        .filter(|m| !history.non_attempt_models.contains(m))
+                        .cloned()
+                        .collect();
+                    if !filtered.is_empty() && filtered.len() < model_ids.len() {
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            excluded = ?history.non_attempt_models,
+                            "uv3p: forcing model rotation on post-intervention redispatch — excluding models that terminated pre-submission"
+                        );
+                        model_ids = filtered;
+                    }
                 }
             }
 

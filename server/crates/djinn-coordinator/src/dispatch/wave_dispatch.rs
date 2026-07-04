@@ -356,6 +356,21 @@ impl CoordinatorActor {
                         );
                     }
                 }
+                djinn_runtime::TaskRunOutcome::Escalated { reason } => {
+                    // A pre-PR gate (CI reproduction preflight, or the uv3p
+                    // pre-approval verification gate) blocked the PR-open. The
+                    // gate has already routed the task (held in remediation or
+                    // returned strike-free to a worker round), so there is no
+                    // push failure to surface — clear any stale PR-blocked
+                    // banner and move on.
+                    self.pr_errors.remove(&task.project_id);
+                    self.publish_status();
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        reason = %reason,
+                        "CoordinatorActor: approved task PR-open blocked by a pre-PR gate (re-routed, no PR opened)"
+                    );
+                }
                 other => {
                     tracing::warn!(
                         task_id = %task.short_id,

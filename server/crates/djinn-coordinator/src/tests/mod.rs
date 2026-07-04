@@ -1276,6 +1276,85 @@ async fn make_task_with_reopen_count(
     task
 }
 
+/// uv3p Part B test support: seed terminated post-intervention worker sessions,
+/// one per model in `models`, so the attempted-remediation park gate sees the
+/// remediation was tried (and, at `NON_ATTEMPT_PARK_THRESHOLD` distinct models,
+/// parks). Each session is `failed` with an `ended_at` — a genuine
+/// pre-submission termination with no `work_submitted` logged. A short real
+/// sleep before creation guarantees `started_at` sorts strictly after the
+/// `last_intervention_at`/`human_review_resolved_at` floor (millisecond-format
+/// timestamps), matching the production ordering where a post-intervention
+/// dispatch lands seconds after the intervention.
+#[allow(dead_code)]
+async fn seed_terminated_post_intervention_sessions(
+    db: &Database,
+    tx: &broadcast::Sender<DjinnEventEnvelope>,
+    task_id: &str,
+    models: &[&str],
+) {
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let project_id = repo
+        .get(task_id)
+        .await
+        .unwrap()
+        .expect("seed task must exist")
+        .project_id;
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    for model in models {
+        // Strictly after the intervention floor; the format truncates to
+        // milliseconds so a few ms of real time guarantees a greater string.
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        let session = session_repo
+            .create(CreateSessionParams {
+                project_id: &project_id,
+                task_id: Some(task_id),
+                model,
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .unwrap();
+        // Terminate it pre-submission (sets ended_at + a non-completed status);
+        // no work_submitted activity is logged for it.
+        session_repo
+            .update(
+                &session.id,
+                djinn_core::models::SessionStatus::Failed,
+                0,
+                0,
+                0,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+}
+
+/// uv3p Part B: the `park_attempted_remediation_redispatch` markers recorded
+/// when the park rung declined to park and redispatched.
+#[allow(dead_code)]
+async fn park_redispatch_markers(repo: &TaskRepository, task_id: &str) -> Vec<serde_json::Value> {
+    repo.query_activity(ActivityQuery {
+        task_id: Some(task_id.to_owned()),
+        event_type: Some(PARK_REDISPATCH_MARKER.to_string()),
+        actor_role: Some("system".to_string()),
+        project_id: None,
+        from_time: None,
+        to_time: None,
+        limit: 100,
+        offset: 0,
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|e| serde_json::from_str::<serde_json::Value>(&e.payload).unwrap())
+    .collect()
+}
+
 async fn planner_intervention_markers(
     repo: &TaskRepository,
     task_id: &str,
@@ -1308,3 +1387,4 @@ mod status_and_stuck;
 // Extracted to `boundary.rs` to stay under the server file-size guard.
 
 mod boundary;
+mod post_intervention_lane;

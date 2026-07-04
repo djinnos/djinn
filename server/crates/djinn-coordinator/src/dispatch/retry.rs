@@ -7,6 +7,25 @@ use djinn_core::models::ReopenClass;
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
+/// uv3p Part B: what the fleet actually did after the current intervention (or
+/// after a human released a prior hold), derived from durable sessions +
+/// activity. Drives the attempted-remediation park gate, the forced model
+/// rotation at dispatch, and the truthful park reason.
+#[derive(Debug, Default)]
+pub(crate) struct PostInterventionHistory {
+    /// At least one post-intervention session reached `submit_work` (logged a
+    /// `work_submitted` activity after the evidence floor). When true the
+    /// remediation was genuinely attempted, so a park is legitimate.
+    pub any_submitted: bool,
+    /// Distinct models of post-intervention worker sessions that terminated
+    /// pre-submission, in first-seen (chronological) order. Empty when a submit
+    /// occurred. Excluded from the redispatch model list (forced rotation) and
+    /// counted against [`NON_ATTEMPT_PARK_THRESHOLD`].
+    pub non_attempt_models: Vec<String>,
+    /// `sess <id8> (model)` labels for the truthful park reason.
+    pub non_attempt_session_labels: Vec<String>,
+}
+
 /// Which kind of remediation task to create for a stuck source task.
 ///
 /// Both kinds create a `Planner remediation [<short_id>]: <title>` review task
@@ -164,19 +183,23 @@ impl CoordinatorActor {
         false
     }
 
-    /// The creator's per-user model selection for the lane matching `base_role`
-    /// (plan / implement / review), filtered to providers they still have
-    /// connected. `base_role` selects the lane: planner/architect/chat → plan,
-    /// worker → implement, reviewer → review, lead/unknown → plan.
-    pub(crate) async fn resolve_user_model_priority(
+    /// Resolve a user model priority using an optional explicit lane override.
+    ///
+    /// When `effective_lane` is `Some`, the user's model selection for that lane
+    /// is used instead of the lane implied by `base_role`. This lets post-
+    /// intervention worker dispatches use the plan lane without altering the
+    /// `ModelLane::for_role` mapping.
+    pub(crate) async fn resolve_user_model_priority_with_lane(
         &self,
         created_by_user_id: Option<&str>,
         base_role: &str,
+        effective_lane: Option<djinn_core::models::ModelLane>,
     ) -> Vec<String> {
         #[cfg(test)]
         {
             let _ = created_by_user_id;
             let _ = base_role;
+            let _ = effective_lane;
             #[allow(clippy::needless_return)]
             return Vec::new();
         }
@@ -187,11 +210,10 @@ impl CoordinatorActor {
                 return Vec::new();
             };
             let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
+            let lane = effective_lane
+                .unwrap_or_else(|| djinn_core::models::ModelLane::for_role(base_role));
             let models = match us_repo.get(uid).await {
-                Ok(Some(s)) => s
-                    .lanes
-                    .map(|l| l.for_role(base_role).to_vec())
-                    .unwrap_or_default(),
+                Ok(Some(s)) => s.lanes.map(|l| l.lane(lane).to_vec()).unwrap_or_default(),
                 _ => return Vec::new(),
             };
             if models.is_empty() {
@@ -221,6 +243,24 @@ impl CoordinatorActor {
                 })
                 .collect()
         }
+    }
+
+    /// The creator's per-user model selection for the lane matching `base_role`
+    /// (plan / implement / review), filtered to providers they still have
+    /// connected. `base_role` selects the lane: planner/architect/chat → plan,
+    /// worker → implement, reviewer → review, lead/unknown → plan.
+    ///
+    /// Only consumed by the `#[cfg(not(test))]` dispatch-model fallback in
+    /// `resolve_dispatch_models_for_role`; the `#[cfg(test)]` harness stubs that
+    /// fallback out, so this wrapper is (correctly) unused in test builds.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) async fn resolve_user_model_priority(
+        &self,
+        created_by_user_id: Option<&str>,
+        base_role: &str,
+    ) -> Vec<String> {
+        self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None)
+            .await
     }
 
     /// Resolve a `provider/model` list for a DB role's `model_preference`.
@@ -544,6 +584,211 @@ impl CoordinatorActor {
             .await
     }
 
+    /// uv3p Part B: what the fleet actually did since the current intervention
+    /// (or since a human released a prior hold), computed from durable sessions
+    /// and activity — the source of both the park-vs-redispatch decision and the
+    /// truthful park reason. Never templated.
+    pub(crate) async fn post_intervention_history(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> PostInterventionHistory {
+        // Evidence floor: the later of the last intervention and the last
+        // human-review hold resolution. Sessions/strikes before this floor are
+        // pre-intervention (or already-adjudicated pre-release) noise, not
+        // evidence the CURRENT remediation was attempted.
+        let resolved_at = self
+            .task_repo()
+            .human_review_resolved_at(&task.id)
+            .await
+            .ok()
+            .flatten();
+        let floor = [task.last_intervention_at.clone(), resolved_at]
+            .into_iter()
+            .flatten()
+            .max();
+        let Some(floor) = floor else {
+            // No intervention has landed yet — nothing counts as post-intervention.
+            return PostInterventionHistory::default();
+        };
+
+        // Did any post-intervention session reach submit_work?
+        let any_submitted = match self
+            .task_repo()
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some("work_submitted".to_string()),
+                actor_role: None,
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 200,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(entries) => entries
+                .iter()
+                .any(|entry| entry.created_at.as_str() > floor.as_str()),
+            Err(e) => {
+                // Fail safe: without evidence, treat as "attempted" so the caller
+                // parks rather than looping — the conservative direction.
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "uv3p: post-intervention work_submitted lookup failed; treating as attempted"
+                );
+                return PostInterventionHistory {
+                    any_submitted: true,
+                    ..Default::default()
+                };
+            }
+        };
+
+        if any_submitted {
+            return PostInterventionHistory {
+                any_submitted: true,
+                ..Default::default()
+            };
+        }
+
+        // No submit: enumerate the TERMINATED post-intervention worker sessions
+        // and collect their distinct models (rotation exclusion + non-attempt
+        // bound). `list_for_task` is DESC by started_at; reverse for chronology.
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let sessions = session_repo
+            .list_for_task(&task.id)
+            .await
+            .unwrap_or_default();
+        let mut non_attempt_models: Vec<String> = Vec::new();
+        let mut non_attempt_session_labels: Vec<String> = Vec::new();
+        for session in sessions.iter().rev() {
+            if session.agent_type != "worker" {
+                continue;
+            }
+            if session.started_at.as_str() <= floor.as_str() {
+                continue;
+            }
+            // Still running → an in-flight attempt, not a termination.
+            if session.ended_at.is_none() {
+                continue;
+            }
+            let id8: String = session.id.chars().take(8).collect();
+            non_attempt_session_labels.push(format!("sess {id8} ({})", session.model_id));
+            if !non_attempt_models.contains(&session.model_id) {
+                non_attempt_models.push(session.model_id.clone());
+            }
+        }
+
+        PostInterventionHistory {
+            any_submitted: false,
+            non_attempt_models,
+            non_attempt_session_labels,
+        }
+    }
+
+    /// uv3p Part B: truthful park reason computed from `history`. Never contains
+    /// the templated "same acceptance criteria kept failing" phrasing that five
+    /// of five 2026-07-04 parks asserted falsely.
+    fn compute_park_reason(
+        &self,
+        task: &djinn_core::models::Task,
+        history: &PostInterventionHistory,
+    ) -> String {
+        let detail = if history.any_submitted {
+            "The post-intervention remediation WAS attempted — at least one session submitted \
+             work after the planner reshaped the scope — but the acceptance criteria still did \
+             not pass, so re-dispatching would only loop again."
+                .to_string()
+        } else {
+            format!(
+                "{} post-intervention session(s) terminated pre-submission across models {} — \
+                 the remediation never converged despite forced model rotation, so re-dispatching \
+                 would only loop again.",
+                history.non_attempt_session_labels.len(),
+                history.non_attempt_models.join(", "),
+            )
+        };
+        format!(
+            "Auto-parked for human review after {} planner intervention(s) \
+             (intervention_count={}, total_reopen_count={}). {detail} The task is held (open + \
+             blocked on a human-review remediation task) so it frees the dispatch slot for other \
+             ready tasks while its branch and prior work are preserved. A human must resolve the \
+             remediation task to release it, or close this task if the work is no longer wanted.",
+            MAX_PLANNER_INTERVENTIONS, task.intervention_count, task.total_reopen_count,
+        )
+    }
+
+    /// uv3p Part B: has a park-redispatch marker already recorded this CI
+    /// `fingerprint` as seen for this task? First-occurrence = no such marker.
+    async fn park_fingerprint_seen(
+        &self,
+        task: &djinn_core::models::Task,
+        fingerprint: &str,
+    ) -> djinn_db::Result<bool> {
+        let entries = self
+            .task_repo()
+            .query_activity(ActivityQuery {
+                task_id: Some(task.id.clone()),
+                event_type: Some(PARK_REDISPATCH_MARKER.to_string()),
+                actor_role: Some("system".to_string()),
+                project_id: None,
+                from_time: None,
+                to_time: None,
+                limit: 200,
+                offset: 0,
+            })
+            .await?;
+        Ok(entries.iter().any(|entry| {
+            serde_json::from_str::<serde_json::Value>(&entry.payload)
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("fingerprint")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|seen| seen == fingerprint)
+                })
+                .unwrap_or(false)
+        }))
+    }
+
+    /// uv3p Part B: record that the park rung declined to park and redispatched.
+    /// Non-fatal audit trail (and the durable first-occurrence-fingerprint record).
+    async fn record_park_redispatch_marker(
+        &self,
+        task: &djinn_core::models::Task,
+        kind: &str,
+        fingerprint: Option<&str>,
+        non_attempt_count: usize,
+    ) {
+        let payload = serde_json::json!({
+            "kind": kind,
+            "fingerprint": fingerprint,
+            "non_attempt_count": non_attempt_count,
+            "intervention_count": task.intervention_count,
+        })
+        .to_string();
+        if let Err(e) = self
+            .task_repo()
+            .log_activity(
+                Some(&task.id),
+                "coordinator",
+                "system",
+                PARK_REDISPATCH_MARKER,
+                &payload,
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "uv3p: failed to record park-redispatch marker"
+            );
+        }
+    }
+
     /// Shared intervention router behind triggers A and B: second-strike
     /// terminal park, idempotency marker keyed by the task's CURRENT
     /// quality strike count, backoff-state clearing, and the Planner escalation
@@ -567,17 +812,81 @@ impl CoordinatorActor {
         // re-escalating (which just resets and loops). Parked to `open`
         // so the dispatch slot is freed; human resolves the remediation.
         if task.intervention_count >= MAX_PLANNER_INTERVENTIONS {
-            let reason = format!(
-                "Auto-parked for human review: {} planner intervention(s) failed to break the \
-                 rework loop (intervention_count={}, total_reopen_count={}). The same acceptance \
-                 criteria kept failing across repeated rounds even after the planner reshaped the \
-                 scope, so re-dispatching would only loop again and hold the dispatch slot. The \
-                 task is held (open + blocked on a human-review remediation task) so it frees the \
-                 dispatch slot for other ready tasks while its branch and prior work are \
-                 preserved. A human must resolve the remediation task to release it, or close \
-                 this task if the work is no longer wanted.",
-                task.intervention_count, task.intervention_count, task.total_reopen_count,
-            );
+            // uv3p Part B: attempted-remediation requirement on the park rung.
+            // A park declares the current intervention's remediation a failure —
+            // but the audits (cgcl/7fj3/nlus) show parks landing 272ms–36s after
+            // a rescope, before ANY post-intervention session was ever dispatched.
+            // Compute what actually happened since the intervention/hold release
+            // and refuse to park on evidence the fleet never tried.
+            let history = self.post_intervention_history(task).await;
+
+            // First-occurrence CI fingerprint (8y3q): a park-triggering strike
+            // whose failure_fingerprint is brand new on this task deserves exactly
+            // one remediation before any park — "re-dispatching would only loop"
+            // is unfounded against a novel failure (8y3q's fix was one token).
+            if let Some(fingerprint) = task
+                .ci_failure_fingerprint
+                .as_deref()
+                .filter(|f| !f.is_empty())
+            {
+                match self.park_fingerprint_seen(task, fingerprint).await {
+                    Ok(false) => {
+                        self.record_park_redispatch_marker(
+                            task,
+                            "first_occurrence_fingerprint",
+                            Some(fingerprint),
+                            history.non_attempt_models.len(),
+                        )
+                        .await;
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            fingerprint,
+                            "uv3p: human-park rung declined to park — first-occurrence CI fingerprint; dispatching one remediation before any park"
+                        );
+                        return false;
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        // Fail safe toward the (unchanged) attempted-remediation
+                        // gate below rather than silently parking.
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "uv3p: park fingerprint-seen check failed; proceeding to attempted-remediation gate"
+                        );
+                    }
+                }
+            }
+
+            // Attempted-remediation gate: park only when the remediation was
+            // actually attempted (a post-intervention submit) OR enough distinct
+            // models have terminated pre-submission to prove rotation won't help.
+            // Below the bound, redispatch with forced model rotation instead of
+            // consuming the final strike (dispatch-time exclusion in
+            // task_dispatch.rs drops the models that just failed).
+            if !history.any_submitted
+                && history.non_attempt_models.len() < NON_ATTEMPT_PARK_THRESHOLD
+            {
+                self.record_park_redispatch_marker(
+                    task,
+                    "no_attempted_remediation",
+                    None,
+                    history.non_attempt_models.len(),
+                )
+                .await;
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    intervention_count = task.intervention_count,
+                    non_attempt_models = ?history.non_attempt_models,
+                    "uv3p: human-park rung declined to park — no post-intervention session reached submit_work yet; redispatching with forced model rotation instead of parking"
+                );
+                return false;
+            }
+
+            // Truthful park reason computed from actual post-intervention
+            // history — never the templated "same acceptance criteria kept
+            // failing" text when zero post-intervention rounds occurred.
+            let reason = self.compute_park_reason(task, &history);
             tracing::warn!(
                 task_id = %task.short_id,
                 intervention_count = task.intervention_count,
