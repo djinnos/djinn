@@ -49,6 +49,14 @@ capability = "git"
 
 [[entries]]
 capability = "git"
+	path = "server/crates/djinn-stack/src/detect.rs"
+	matcher = "git2::"
+	owner = "team/stack"
+	rationale = "djinn-stack is a leaf crate (boundary rule leaf-stack-imports-no-djinn-crate) and cannot depend on djinn-git. The git2 operations (HEAD tree walk + blob reads) are inlined locally as small helpers mirroring djinn-git's head_blob_list/head_blob_bodies."
+	cleanup_issue = "epic/fztz"
+
+[[entries]]
+capability = "git"
 	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/tests.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent"

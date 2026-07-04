@@ -10,7 +10,7 @@ doctest = false
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["now", "serde"] }
-djinn-git = { path = "../djinn-git" }
+git2 = "0.20"
 regex = "1"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

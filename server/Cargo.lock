@@ -1699,7 +1699,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "djinn-git",
+ "git2",
  "regex",
  "schemars 1.2.1",
  "serde",
