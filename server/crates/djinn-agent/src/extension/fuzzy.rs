@@ -3,8 +3,8 @@
 //! This module exposes a lower-level, typed matcher (`find_match`) that
 //! locates the single best candidate for `old_text` in file `content` using a
 //! strict→loose strategy chain, returning rich metadata (strategy, outcome,
-//! byte/line range, reindentation flag, and placeholder fields for future
-//! nearest-miss scoring, guard rejection, and Unicode-splice status). The
+//! byte/line range, reindentation flag, nearest-miss scoring, guard rejection
+//! reason, and placeholder fields for future Unicode-splice status). The
 //! matcher never writes files or performs the replacement — that is the job of
 //! the compatibility wrapper `fuzzy_replace`, which translates typed metadata
 //! into the existing `(String, Option<String>)` surface consumed by
@@ -75,10 +75,8 @@ pub(super) enum MatchOutcome {
     Ambiguous,
     /// No candidate found by this strategy (or by any strategy in the chain).
     NoMatch,
-    /// Candidate found but a safety guard rejected it. Reserved for future
-    /// guard work (UTF-8 boundary, CRLF preservation, escape balance, etc.);
-    /// Wave 1 strategies never produce this outcome.
-    #[allow(dead_code)]
+    /// Candidate found but a safety guard rejected it (UTF-8 boundary, CRLF
+    /// preservation, line-boundary, or escape balance guard).
     GuardRejected,
 }
 
@@ -115,10 +113,9 @@ pub(super) struct LineRange {
 /// into the existing string notes/errors so `call_edit` is unchanged until
 /// sibling handler/schema epics consume richer metadata.
 //
-// Several fields are intentional placeholders for future-wave strategies and
-// guards (nearest-miss scoring, guard rejection reason, Unicode splice
-// status). They are never read on the Wave 1 path; the `#[allow(dead_code)]`
-// silences the `-D warnings` gate until sibling tasks consume them.
+// The `unicode_splice` field is an intentional placeholder for future-wave
+// Unicode strategy work. The `#[allow(dead_code)]` silences the `-D warnings`
+// gate until the Unicode-normalized strategy consumes it.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct MatchMetadata {
@@ -135,14 +132,18 @@ pub(super) struct MatchMetadata {
     /// 1-based inclusive line range of the unique candidate.
     /// `None` unless `outcome == Success`.
     pub line_range: Option<LineRange>,
-    /// Nearest-miss score placeholder for future fuzzy scoring (0.0..=1.0).
-    /// Always `None` for Wave 1 strategies, which have no partial scoring.
+    /// Nearest-miss score for no-match outcomes (0.0..=1.0). `None` unless
+    /// `outcome == NoMatch`. Computed as the longest normalized substring of
+    /// `old_text` found in `content`, divided by the length of normalized
+    /// `old_text`.
     pub nearest_miss: Option<f64>,
     /// `true` when the replacement must be reindented to the matched block's
     /// base indentation (indentation_flexible strategy only).
     pub reindented: bool,
-    /// Guard-rejection reason placeholder. `None` unless a future guard
-    /// rejects a candidate. Wave 1 never rejects.
+    /// Guard-rejection reason. `None` unless `outcome == GuardRejected`.
+    /// Set when a safety guard (UTF-8 boundary, line-boundary, or CRLF
+    /// preservation) rejects a candidate that would silently corrupt the
+    /// file content.
     pub guard_rejected_reason: Option<&'static str>,
     /// Unicode splice status placeholder. `None` for Wave 1.
     pub unicode_splice: Option<UnicodeSpliceStatus>,
@@ -169,7 +170,7 @@ pub(super) fn find_match(content: &str, old_text: &str) -> MatchMetadata {
         }
     }
     // No strategy found any candidate.
-    no_match_metadata()
+    no_match_metadata(content, old_text)
 }
 
 /// Dispatch a single strategy. Returns `None` when the strategy found zero
@@ -238,14 +239,15 @@ fn ambiguous_metadata(strategy: MatchStrategy, count: usize) -> MatchMetadata {
 
 /// Metadata for when the entire strategy chain produced no candidate. The
 /// `strategy` field is set to the last strategy consulted (conventional).
-fn no_match_metadata() -> MatchMetadata {
+/// Computes a nearest-miss score indicating the best partial substring match.
+fn no_match_metadata(content: &str, old_text: &str) -> MatchMetadata {
     MatchMetadata {
         strategy: *STRATEGY_ORDER.last().expect("strategy chain is non-empty"),
         outcome: MatchOutcome::NoMatch,
         candidate_count: 0,
         byte_range: None,
         line_range: None,
-        nearest_miss: None,
+        nearest_miss: Some(nearest_miss_score(content, old_text)),
         reindented: false,
         guard_rejected_reason: None,
         unicode_splice: None,
@@ -272,6 +274,140 @@ fn line_range_for(content: &str, start: usize, end: usize) -> LineRange {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Shared safety guards & helpers
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Metadata constructor for guard-rejection outcomes.
+fn reject_metadata(strategy: MatchStrategy, reason: &'static str) -> MatchMetadata {
+    MatchMetadata {
+        strategy,
+        outcome: MatchOutcome::GuardRejected,
+        candidate_count: 1,
+        byte_range: None,
+        line_range: None,
+        nearest_miss: None,
+        reindented: false,
+        guard_rejected_reason: Some(reason),
+        unicode_splice: None,
+    }
+}
+
+/// Check whether a byte position falls on a line boundary in `content`.
+///
+/// A position is a line boundary when it is:
+/// - at the very start of `content` (byte 0),
+/// - immediately after a `\n` byte, or
+/// - immediately before a `\n` byte (the match includes it as its last byte),
+/// - at the very end of `content`.
+fn is_line_boundary(content: &str, pos: usize) -> bool {
+    if pos == 0 || pos >= content.len() {
+        return true;
+    }
+    let bytes = content.as_bytes();
+    // Just after a line ending.
+    if bytes[pos - 1] == b'\n' {
+        return true;
+    }
+    // Just before a line ending (match includes the \n as its last byte).
+    if bytes[pos] == b'\n' {
+        return true;
+    }
+    false
+}
+
+/// Reject a candidate whose byte range splits a CRLF pair.
+///
+/// When the original content uses `\r\n` line endings and a normalization
+/// strategy maps positions back to the original without accounting for the
+/// extra `\r` bytes, the resulting range boundaries may fall inside a `\r\n`
+/// pair. Replacing such a range would silently convert CRLF to LF or
+/// corrupt the file's line-ending style.
+fn guard_crlf_preservation(content: &str, start: usize, end: usize) -> Result<(), &'static str> {
+    let bytes = content.as_bytes();
+    // Check if start falls between \r and \n of a CRLF pair.
+    if start > 0 && start < bytes.len() && bytes[start - 1] == b'\r' && bytes[start] == b'\n' {
+        return Err("candidate splits a CRLF line ending at match start");
+    }
+    // Check if end falls between \r and \n of a CRLF pair.
+    if end > 0 && end < bytes.len() && bytes[end - 1] == b'\r' && bytes[end] == b'\n' {
+        return Err("candidate splits a CRLF line ending at match end");
+    }
+    Ok(())
+}
+
+/// Reject a candidate whose byte range would replace only part of a line
+/// for multi-line matches.
+///
+/// For a multi-line match (one containing `\n`), the start position must be
+/// at a line boundary (start of file or just after `\n`) and the end position
+/// must be at a line boundary (end of file or just after `\n`). Single-line
+/// matches are exempt — partial-line matches on a single line are safe
+/// (e.g. trailing-whitespace trimming).
+fn guard_line_boundary(
+    content: &str,
+    start: usize,
+    end: usize,
+    matched_text: &str,
+) -> Result<(), &'static str> {
+    if !matched_text.contains('\n') {
+        return Ok(());
+    }
+    if !is_line_boundary(content, start) {
+        return Err("multi-line candidate start is not at a line boundary");
+    }
+    if !is_line_boundary(content, end) {
+        return Err("multi-line candidate end is not at a line boundary");
+    }
+    Ok(())
+}
+
+/// Reject a candidate whose byte range is not valid UTF-8.
+///
+/// Normalization strategies map byte positions from a normalized string back
+/// to the original content. When the original contains multi-byte UTF-8
+/// characters, a naive mapping may land inside a multi-byte sequence,
+/// producing a byte range that would corrupt the replacement splice.
+fn guard_utf8_boundary(content: &str, start: usize, end: usize) -> Result<(), &'static str> {
+    if !content.is_char_boundary(start) {
+        return Err("candidate start splits a multi-byte UTF-8 character");
+    }
+    if !content.is_char_boundary(end) {
+        return Err("candidate end splits a multi-byte UTF-8 character");
+    }
+    Ok(())
+}
+
+/// Compute a nearest-miss score (0.0..=1.0) for a no-match outcome.
+///
+/// The score is the length of the longest normalized substring of `old_text`
+/// that also appears in `content`, divided by the length of normalized
+/// `old_text`. Uses whitespace normalization so the score is comparable
+/// across strategies.
+fn nearest_miss_score(content: &str, old_text: &str) -> f64 {
+    let (norm_content, _) = normalize_whitespace_with_map(content);
+    let (norm_old, _) = normalize_whitespace_with_map(old_text);
+
+    let old_len = norm_old.len();
+    if old_len == 0 {
+        return 0.0;
+    }
+
+    let old_bytes = norm_old.as_bytes();
+    let content_bytes = norm_content.as_bytes();
+
+    // Try substrings from longest to shortest.
+    for len in (1..=old_len).rev() {
+        for start in 0..=old_len - len {
+            let candidate = &old_bytes[start..start + len];
+            if content_bytes.windows(len).any(|window| window == candidate) {
+                return len as f64 / old_len as f64;
+            }
+        }
+    }
+    0.0
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Individual strategies
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -284,6 +420,16 @@ fn try_exact(content: &str, old_text: &str) -> Option<MatchMetadata> {
     if count == 1 {
         let start = content.find(old_text).unwrap_or(0);
         let end = start + old_text.len();
+        // Safety guards.
+        if let Err(reason) = guard_utf8_boundary(content, start, end) {
+            return Some(reject_metadata(MatchStrategy::Exact, reason));
+        }
+        if let Err(reason) = guard_crlf_preservation(content, start, end) {
+            return Some(reject_metadata(MatchStrategy::Exact, reason));
+        }
+        if let Err(reason) = guard_line_boundary(content, start, end, old_text) {
+            return Some(reject_metadata(MatchStrategy::Exact, reason));
+        }
         return Some(success_metadata(
             MatchStrategy::Exact,
             ByteRange { start, end },
@@ -319,6 +465,16 @@ fn try_line_trimmed(content: &str, old_text: &str) -> Option<MatchMetadata> {
     let end = start + trimmed_old.len();
 
     let (orig_start, orig_end) = map_trimmed_to_original(content, &trimmed_content, start, end);
+    // Safety guards on the mapped original byte range.
+    if let Err(reason) = guard_utf8_boundary(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::LineTrimmed, reason));
+    }
+    if let Err(reason) = guard_crlf_preservation(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::LineTrimmed, reason));
+    }
+    if let Err(reason) = guard_line_boundary(content, orig_start, orig_end, &trimmed_old) {
+        return Some(reject_metadata(MatchStrategy::LineTrimmed, reason));
+    }
     Some(success_metadata(
         MatchStrategy::LineTrimmed,
         ByteRange {
@@ -355,7 +511,16 @@ fn try_whitespace_normalized(content: &str, old_text: &str) -> Option<MatchMetad
     } else {
         content_map[norm_end]
     };
-
+    // Safety guards on the mapped original byte range.
+    if let Err(reason) = guard_utf8_boundary(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::WhitespaceNormalized, reason));
+    }
+    if let Err(reason) = guard_crlf_preservation(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::WhitespaceNormalized, reason));
+    }
+    if let Err(reason) = guard_line_boundary(content, orig_start, orig_end, &norm_old) {
+        return Some(reject_metadata(MatchStrategy::WhitespaceNormalized, reason));
+    }
     Some(success_metadata(
         MatchStrategy::WhitespaceNormalized,
         ByteRange {
@@ -422,7 +587,16 @@ fn try_indentation_flexible(content: &str, old_text: &str) -> Option<MatchMetada
         }
     }
     orig_end = orig_end.min(content.len());
-
+    // Safety guards on the mapped original byte range.
+    if let Err(reason) = guard_utf8_boundary(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::IndentationFlexible, reason));
+    }
+    if let Err(reason) = guard_crlf_preservation(content, orig_start, orig_end) {
+        return Some(reject_metadata(MatchStrategy::IndentationFlexible, reason));
+    }
+    if let Err(reason) = guard_line_boundary(content, orig_start, orig_end, &stripped_old) {
+        return Some(reject_metadata(MatchStrategy::IndentationFlexible, reason));
+    }
     Some(success_metadata_reindented(
         MatchStrategy::IndentationFlexible,
         ByteRange {
@@ -660,7 +834,7 @@ fn normalize_whitespace_with_map(s: &str) -> (String, Vec<usize>) {
 mod tests {
     use super::{
         MatchOutcome, MatchStrategy, ambiguity_phrase, find_match, fuzzy_replace, line_range_for,
-        match_note_for, reindent_replacement,
+        match_note_for, nearest_miss_score, reindent_replacement,
     };
     use std::path::Path;
 
@@ -828,6 +1002,14 @@ mod tests {
         assert_eq!(m.candidate_count, 0);
         assert!(m.byte_range.is_none());
         assert!(m.line_range.is_none());
+        // Nearest-miss score is now populated for no-match outcomes.
+        let score = m
+            .nearest_miss
+            .expect("no_match must carry nearest_miss score");
+        assert!(
+            (0.0..=1.0).contains(&score),
+            "score must be in [0, 1]: {score}"
+        );
     }
 
     #[test]
@@ -919,5 +1101,164 @@ mod tests {
         let err = fuzzy_replace(content, "missing", "x", Path::new("f.rs")).unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
         assert!(err.contains("f.rs"), "got: {err}");
+    }
+
+    // ── Guard rejection tests ──────────────────────────────────────────────
+
+    #[test]
+    fn guard_rejects_crlf_in_content() {
+        // Content uses CRLF line endings. Line-trimmed/whitespace-normalized
+        // strategies normalize away \r, but the guard catches the CRLF
+        // boundary mismatch when mapping back to original positions.
+        let content = "line one\r\nline two\r\n";
+        let old_text = "line one\nline two";
+        let m = find_match(content, old_text);
+        assert_eq!(
+            m.outcome,
+            MatchOutcome::GuardRejected,
+            "expected guard rejection for CRLF content, got {:?}",
+            m.outcome
+        );
+        assert!(m.guard_rejected_reason.is_some());
+    }
+
+    #[test]
+    fn guard_rejects_partial_line_multiline_match() {
+        // Multi-line old_text that starts/ends mid-line in the original.
+        let content = "hello world\nfoo bar\n";
+        let old_text = "world\nfoo";
+        let m = find_match(content, old_text);
+        // Exact match finds "world\nfoo" at byte 6..15.
+        // Start (6) is mid-line, so the line-boundary guard rejects it.
+        assert_eq!(
+            m.outcome,
+            MatchOutcome::GuardRejected,
+            "expected guard rejection for partial-line multi-line match"
+        );
+        let reason = m
+            .guard_rejected_reason
+            .expect("guard_rejected_reason must be set");
+        assert!(reason.contains("line boundary"), "reason: {reason}");
+    }
+
+    #[test]
+    fn guard_allows_multiline_at_line_boundaries() {
+        let content = "line1\nline2\nline3\n";
+        let old_text = "line2\n";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert!(m.guard_rejected_reason.is_none());
+    }
+
+    #[test]
+    fn guard_allows_single_line_partial_match() {
+        let content = "hello world goodbye\n";
+        let old_text = "world";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert!(m.guard_rejected_reason.is_none());
+    }
+
+    #[test]
+    fn no_match_nearest_miss_score_reflects_partial_overlap() {
+        let content = "function process_data(input) {";
+        let old_text = "function process_data(output) {";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::NoMatch);
+        let score = m
+            .nearest_miss
+            .expect("no_match must carry nearest_miss score");
+        assert!(score > 0.5, "expected high nearest-miss score, got {score}");
+    }
+
+    #[test]
+    fn no_match_nearest_miss_zero_for_completely_unrelated() {
+        let content = "aaaa\n";
+        let old_text = "zzzz";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::NoMatch);
+        let score = m
+            .nearest_miss
+            .expect("no_match must carry nearest_miss score");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn guard_rejection_wrapper_error_is_backward_compatible() {
+        let content = "line one\r\nline two\r\n";
+        let old_text = "line one\nline two";
+        let err = fuzzy_replace(content, old_text, "replacement", Path::new("f.rs")).unwrap_err();
+        assert!(
+            err.contains("safety guard"),
+            "error should mention safety guard: {err}"
+        );
+        assert!(err.contains("f.rs"), "error should mention path: {err}");
+    }
+
+    #[test]
+    fn guard_allows_crlf_with_exact_crlf_match() {
+        // When both old_text and content use CRLF, exact match works.
+        let content = "line one\r\nline two\r\n";
+        let old_text = "line one\r\nline two\r\n";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert!(m.guard_rejected_reason.is_none());
+    }
+
+    #[test]
+    fn nearest_miss_score_utility() {
+        // Exact substring should score 1.0.
+        let score = nearest_miss_score("hello world", "world");
+        assert_eq!(score, 1.0);
+        // No overlap should score 0.0.
+        let score = nearest_miss_score("aaaa", "zzzz");
+        assert_eq!(score, 0.0);
+        // Partial overlap.
+        let score = nearest_miss_score("hello world", "hello earth");
+        assert!(
+            score > 0.4,
+            "expected partial overlap score > 0.4, got {score}"
+        );
+    }
+
+    #[test]
+    fn guard_utf8_boundary_allows_valid_ranges() {
+        let content = "caf\u{e9} is nice\n";
+        let old_text = "caf\u{e9} is nice";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert!(m.guard_rejected_reason.is_none());
+    }
+
+    #[test]
+    fn guard_crlf_normalization_rejected_by_all_strategies() {
+        let content = "aaa\r\nbbb\r\n";
+        let old_text = "aaa\nbbb";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::GuardRejected);
+    }
+
+    #[test]
+    fn multiline_success_has_byte_and_line_ranges() {
+        let content = "line1\nline2\nline3\n";
+        let old_text = "line1\nline2\n";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        assert!(m.byte_range.is_some(), "success must have byte_range");
+        assert!(m.line_range.is_some(), "success must have line_range");
+        let lr = m.line_range.unwrap();
+        assert_eq!(lr.start, 1);
+        assert_eq!(lr.end, 2);
+    }
+
+    #[test]
+    fn ambiguous_match_still_reports_count_and_no_range() {
+        let content = "abc\ndef\nabc\n";
+        let old_text = "abc";
+        let m = find_match(content, old_text);
+        assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+        assert_eq!(m.candidate_count, 2);
+        assert!(m.byte_range.is_none());
+        assert!(m.line_range.is_none());
     }
 }
