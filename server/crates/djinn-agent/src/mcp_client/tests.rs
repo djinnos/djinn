@@ -112,14 +112,14 @@ fn make_routing(
     tool_to_server: HashMap<String, String>,
     namespaced_to_original: HashMap<String, String>,
 ) -> Arc<RwLock<RoutingState>> {
-            Arc::new(RwLock::new(RoutingState {
-                tool_to_server,
-                namespaced_to_original,
-                peers: HashMap::new(),
-                request_timeouts: HashMap::new(),
-                unavailable: HashSet::new(),
-                server_instructions: BTreeMap::new(),
-            }))
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+    }))
 }
 
 #[test]
@@ -127,6 +127,7 @@ fn empty_registry_has_no_tools() {
     let registry = McpToolRegistry {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
     assert!(!registry.has_tool("anything"));
@@ -144,6 +145,7 @@ fn registry_lookup() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
     assert!(registry.has_tool(&mcp_namespaced_name("search-server", "web_search")));
@@ -166,6 +168,7 @@ fn registry_schemas_default_to_concurrent_unsafe() {
             "inputSchema": {"type": "object"},
             "concurrent_safe": false
         })],
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
 
@@ -244,6 +247,7 @@ async fn dispatch_routes_to_original_tool_name() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
         test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
             let received = received_clone.clone();
             Box::pin(async move {
@@ -263,6 +267,7 @@ async fn dispatch_unknown_tool_returns_error() {
     let registry = McpToolRegistry {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
     let result = registry.call_tool("nonexistent", None).await;
@@ -551,6 +556,7 @@ async fn removed_advertised_tool_returns_deterministic_error() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
 
@@ -590,6 +596,7 @@ fn refresh_does_not_add_newly_discovered_tools_to_schemas() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
 
@@ -621,6 +628,7 @@ async fn unchanged_advertised_tool_remains_dispatchable_after_refresh() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"ok": true})) })
         })),
@@ -647,6 +655,7 @@ async fn routing_state_is_clone_safe() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
         test_dispatch: None,
     };
 
@@ -677,6 +686,7 @@ fn make_routing_with_timeouts(
         peers: HashMap::new(),
         request_timeouts,
         unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
     }))
 }
 
@@ -696,6 +706,7 @@ async fn call_tool_timeout_returns_deterministic_error() {
             request_timeouts,
         ),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
         test_dispatch: Some(Arc::new(move |_, _| {
             Box::pin(async {
                 // Simulate a slow server that takes longer than the timeout.
@@ -738,6 +749,7 @@ async fn call_tool_uses_default_timeout_when_server_not_in_map() {
             request_timeouts,
         ),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"fast": true})) })
         })),
@@ -757,6 +769,7 @@ async fn request_timeout_stored_per_server_at_discovery() {
         peers: HashMap::new(),
         request_timeouts: HashMap::new(),
         unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
     };
     routing_state
         .request_timeouts

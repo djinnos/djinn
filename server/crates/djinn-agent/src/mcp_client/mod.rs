@@ -139,6 +139,7 @@ struct RoutingState {
     /// Server instructions captured at initialization from each successfully
     /// connected server. Stored in deterministic server-name order; empty or
     /// whitespace-only instructions are omitted.
+    #[allow(dead_code)] // Mirrored on McpToolRegistry; stored here for future refresh use.
     server_instructions: BTreeMap<String, String>,
     /// Tools that were advertised at session start but have since been removed
     /// by a `tools/list_changed` refresh. These remain in the routing maps

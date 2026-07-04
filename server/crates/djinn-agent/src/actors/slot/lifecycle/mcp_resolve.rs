@@ -85,6 +85,7 @@ pub(crate) async fn resolve_mcp_and_skills(
         mcp_registry,
         resolved_skills,
         native_skill_names,
+        mcp_server_instructions,
     }
 }
 

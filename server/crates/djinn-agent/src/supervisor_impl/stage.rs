@@ -612,6 +612,7 @@ pub(crate) async fn execute_stage(
         mcp_registry,
         resolved_skills,
         native_skill_names: _native_skill_names,
+        mcp_server_instructions,
     } = resolve_mcp_and_skills(
         worktree_path,
         runtime_role.as_ref(),
@@ -703,6 +704,7 @@ pub(crate) async fn execute_stage(
         app_state: agent_context,
         read_sources: &read_sources,
         worker_resume_note: worker_resume_note.as_deref(),
+        mcp_server_instructions: &mcp_server_instructions,
     })
     .await;
 
