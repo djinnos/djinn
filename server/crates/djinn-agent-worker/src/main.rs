@@ -88,6 +88,7 @@ use djinn_agent::lsp::LspManager;
 use djinn_agent::roles::RoleRegistry;
 use djinn_core::events::EventBus;
 use djinn_db::{Database, DatabaseConnectConfig, PostgresDatabaseConfig};
+use djinn_git;
 use djinn_graph::graph_parity::{GraphArtifactBlobParityError, assert_graph_artifact_blob_parity};
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_runtime::{ResolvedCredentials, RoleKind, TaskRunSpec, WorkerEvent};
@@ -338,24 +339,20 @@ async fn configure_private_dep_access(spec: &TaskRunSpec) {
     // Global git credential rewrite. NOTE: never log `key` — it embeds the token.
     let key = format!("url.https://x-access-token:{token}@github.com/{owner}/.insteadOf");
     let value = format!("https://github.com/{owner}/");
-    match tokio::process::Command::new("git")
-        .args(["config", "--global", &key, &value])
-        .status()
-        .await
+    match djinn_git::run_git_command_in(
+        std::path::Path::new("/"),
+        vec!["config".into(), "--global".into(), key, value],
+    )
+    .await
     {
-        Ok(s) if s.success() => {
+        Ok(_) => {
             info!(
                 owner,
                 "configure_private_dep_access: git insteadOf set for private deps"
             )
         }
-        Ok(s) => warn!(
-            owner,
-            code = ?s.code(),
-            "configure_private_dep_access: git config failed; private deps may be inaccessible"
-        ),
         Err(e) => {
-            warn!(owner, error = %e, "configure_private_dep_access: git config errored")
+            warn!(owner, error = %e, "configure_private_dep_access: git config failed; private deps may be inaccessible")
         }
     }
 
@@ -1658,25 +1655,26 @@ fn push_needed(current: &str, last_pushed: Option<&str>) -> bool {
 /// Resolve the local SHA of `branch` in the workspace at `path` via
 /// `git rev-parse`. Returns `None` on any failure (branch not yet created, git
 /// busy mid-operation, etc.) — the periodic push loop treats that as "skip this
-/// tick" and retries on the next one. Mirrors the direct-`Command` idiom
-/// [`Workspace::is_up_to_date_with`] uses for git calls that need to
-/// discriminate outcomes rather than fail on every non-zero exit.
+/// tick" and retries on the next one.
+///
+/// Delegates to [`djinn_git::run_git_command_in`] which applies
+/// `safe.directory=*` and lowers process priority.
 async fn resolve_branch_sha(path: &Path, branch: &str) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--verify", "--quiet"])
-        // `<branch>^{commit}` resolves the local branch ref to its commit SHA
-        // and fails cleanly (non-zero, empty stdout under --quiet) if the ref
-        // doesn't exist yet.
-        .arg(format!("{branch}^{{commit}}"))
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let output = djinn_git::run_git_command_in(
+        path,
+        vec![
+            "rev-parse".into(),
+            "--verify".into(),
+            "--quiet".into(),
+            // `<branch>^{commit}` resolves the local branch ref to its commit SHA
+            // and fails cleanly (non-zero, empty stdout under --quiet) if the ref
+            // doesn't exist yet.
+            format!("{branch}^{{commit}}"),
+        ],
+    )
+    .await
+    .ok()?;
+    let sha = output.stdout.trim().to_string();
     if sha.is_empty() { None } else { Some(sha) }
 }
 

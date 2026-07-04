@@ -838,6 +838,67 @@ pub(crate) async fn execute_stage(
     };
     if let Some(ref registry) = mcp_registry {
         tools.extend_from_slice(registry.tool_schemas());
+        // Append native MCP resource tools only when at least one connected
+        // server advertised the `resources` capability.  These are ordinary
+        // native tools (not remote `mcp__...` server tools) and are
+        // read-only/non-destructive.
+        if registry.has_resource_servers() {
+            tools.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "list_mcp_resources",
+                    "description": "List MCP resources from connected servers. \
+                        Returns resource metadata (URI, name, description, MIME type). \
+                        Omit `server` to list from all resource-capable servers.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "server": {
+                                "type": "string",
+                                "description": "Optional server name to list resources from. \
+                                    Omit to list from all resource-capable servers."
+                            }
+                        },
+                        "required": [],
+                        "additionalProperties": false
+                    }
+                },
+                "readOnly": true,
+                "destructive": false,
+                "idempotent": true,
+                "openWorld": false,
+                "concurrent_safe": true
+            }));
+            tools.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "read_mcp_resource",
+                    "description": "Read a specific MCP resource by URI from a named server. \
+                        Returns the resource content as text; binary resources \
+                        produce an omission message.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "server": {
+                                "type": "string",
+                                "description": "The MCP server name that hosts the resource."
+                            },
+                            "uri": {
+                                "type": "string",
+                                "description": "The URI of the resource to read."
+                            }
+                        },
+                        "required": ["server", "uri"],
+                        "additionalProperties": false
+                    }
+                },
+                "readOnly": true,
+                "destructive": false,
+                "idempotent": true,
+                "openWorld": false,
+                "concurrent_safe": true
+            }));
+        }
     }
 
     let mut conversation = Conversation::new();

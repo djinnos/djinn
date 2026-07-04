@@ -42,26 +42,10 @@ capability = "git"
 # djinn-agent-worker
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-agent-worker/src/checkpoint.rs"
-	matcher = "tokio::process::Command::new(\"git\")"
-	owner = "team/agent-worker"
-	rationale = "Pre-existing git shell-out for checkpoint operations; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/mod.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/agent-worker"
-	rationale = "Pre-existing git shell-out for checkpoint safety checks; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-agent-worker/src/checkpoint_safety/tests.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent-worker"
-	rationale = "Pre-existing git shell-out in checkpoint safety tests; to be migrated to djinn-git."
+	rationale = "Test helper `git()` uses sync Command for test repo setup; production checkpoint/checkpoint-safety code uses djinn-git."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -69,15 +53,7 @@ capability = "git"
 	path = "server/crates/djinn-agent-worker/src/main.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent-worker"
-	rationale = "Pre-existing git shell-out in agent worker main; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-agent-worker/src/main.rs"
-	matcher = "tokio::process::Command::new(\"git\")"
-	owner = "team/agent-worker"
-	rationale = "Pre-existing async git shell-out in agent worker main; to be migrated to djinn-git."
+	rationale = "Test helper `git()` uses sync Command for test repo setup; production main.rs git operations use djinn-git."
 	cleanup_issue = "epic/fztz"
 
 # djinn-agent

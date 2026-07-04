@@ -88,6 +88,20 @@ impl SlotToolDispatcher for MockToolDispatcher {
     fn mcp_server_for_tool(&self, _tool_name: &str) -> Option<String> {
         None
     }
+    fn is_resource_tool(&self, _tool_name: &str) -> bool {
+        false
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(format!(
+                "MockToolDispatcher: resource tool '{tool_name}' not implemented in test"
+            ))
+        })
+    }
     fn clear_stash(&self) {}
 }
 
@@ -178,6 +192,20 @@ impl SlotToolDispatcher for ConfigurableToolDispatcher {
         } else {
             None
         }
+    }
+    fn is_resource_tool(&self, _tool_name: &str) -> bool {
+        false
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        _arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(format!(
+                "ConfigurableToolDispatcher: resource tool '{tool_name}' not configured"
+            ))
+        })
     }
     fn clear_stash(&self) {}
 }

@@ -149,6 +149,90 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
         self.mcp_registry
             .and_then(|registry| registry.server_for_tool(tool_name))
     }
+    fn is_resource_tool(&self, tool_name: &str) -> bool {
+        tool_name == "list_mcp_resources" || tool_name == "read_mcp_resource"
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        let registry = self.mcp_registry;
+        let tool = tool_name.to_string();
+        Box::pin(async move {
+            let Some(registry) = registry else {
+                return Err("MCP registry not available".to_string());
+            };
+            let args = arguments.unwrap_or_default();
+            match tool.as_str() {
+                "list_mcp_resources" => {
+                    let server = args
+                        .get("server")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let resources = registry.list_resources(server.as_deref()).await?;
+                    if resources.is_empty() {
+                        return Ok("No resources found.".to_string());
+                    }
+                    let mut out = String::new();
+                    for (server_name, resource) in &resources {
+                        out.push_str(&format!(
+                            "- server: {server_name}\n  uri: {}\n  name: {}\n",
+                            resource.uri, resource.name
+                        ));
+                        if let Some(desc) = &resource.description {
+                            out.push_str(&format!("  description: {desc}\n"));
+                        }
+                        if let Some(mime) = &resource.mime_type {
+                            out.push_str(&format!("  mime_type: {mime}\n"));
+                        }
+                    }
+                    Ok(out)
+                }
+                "read_mcp_resource" => {
+                    let server = args
+                        .get("server")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing required argument `server` (string)")?;
+                    let uri = args
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing required argument `uri` (string)")?;
+                    let contents = registry.read_resource(server, uri).await?;
+                    let mut out = String::new();
+                    for content in &contents {
+                        match content {
+                            rmcp::model::ResourceContents::TextResourceContents {
+                                uri,
+                                mime_type,
+                                text,
+                                ..
+                            } => {
+                                out.push_str(&format!("Resource: {uri}\n"));
+                                if let Some(mime) = mime_type {
+                                    out.push_str(&format!("MIME: {mime}\n"));
+                                }
+                                out.push_str(text);
+                            }
+                            rmcp::model::ResourceContents::BlobResourceContents {
+                                uri,
+                                mime_type,
+                                ..
+                            } => {
+                                out.push_str(&format!(
+                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted]",
+                                    mime_type.as_deref().unwrap_or("application/octet-stream")
+                                ));
+                            }
+                        }
+                    }
+                    Ok(out)
+                }
+                _ => Err(format!("unknown resource tool: {tool}")),
+            }
+        })
+    }
     fn clear_stash(&self) {
         self.output_stash
             .lock()

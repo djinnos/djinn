@@ -212,6 +212,19 @@ pub trait SlotToolDispatcher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>;
     /// Return the MCP server name for a tool, if known.
     fn mcp_server_for_tool(&self, tool_name: &str) -> Option<String>;
+    /// Check if a tool name is a native MCP resource tool
+    /// (`list_mcp_resources` or `read_mcp_resource`).
+    fn is_resource_tool(&self, tool_name: &str) -> bool;
+    /// Dispatch a native MCP resource tool call.
+    ///
+    /// The host routes `list_mcp_resources` and `read_mcp_resource` through
+    /// the MCP tool registry's resource methods.  Returns `Ok(json)` on
+    /// success or `Err(message)` on failure.
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
     /// Clear the session's stash (used during compaction resets).
     fn clear_stash(&self);
 }
