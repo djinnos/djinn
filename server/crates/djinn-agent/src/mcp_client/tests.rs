@@ -909,3 +909,92 @@ fn resolved_config_startup_and_request_timeouts_from_duration_helpers() {
     assert_eq!(config.startup_timeout(), Duration::from_millis(5_000));
     assert_eq!(config.request_timeout(), Duration::from_millis(30_000));
 }
+
+// ── Server instructions accessor tests ─────────────────────────────
+
+#[test]
+fn server_instructions_accessor_returns_empty_by_default() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        test_dispatch: None,
+    };
+    assert!(
+        registry.server_instructions().is_empty(),
+        "registry with no instructions should return empty map"
+    );
+}
+
+#[test]
+fn server_instructions_accessor_returns_populated_map() {
+    let mut instructions = BTreeMap::new();
+    instructions.insert(
+        "search-server".to_string(),
+        "Use web_search for live information.".to_string(),
+    );
+    instructions.insert(
+        "code-server".to_string(),
+        "Use code_search for repository lookup.".to_string(),
+    );
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        test_dispatch: None,
+    };
+    let result = registry.server_instructions();
+    assert_eq!(result.len(), 2);
+    assert_eq!(
+        result.get("search-server").map(String::as_str),
+        Some("Use web_search for live information.")
+    );
+    assert_eq!(
+        result.get("code-server").map(String::as_str),
+        Some("Use code_search for repository lookup.")
+    );
+}
+
+#[test]
+fn server_instructions_accessor_returns_btree_sorted_keys() {
+    // Insert in reverse-alphabetical order; BTreeMap sorts by key.
+    let mut instructions = BTreeMap::new();
+    instructions.insert("zebra".to_string(), "Zebra instr.".to_string());
+    instructions.insert("alpha".to_string(), "Alpha instr.".to_string());
+    instructions.insert("middle".to_string(), "Middle instr.".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        test_dispatch: None,
+    };
+    let keys: Vec<&str> = registry
+        .server_instructions()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["alpha", "middle", "zebra"]);
+}
+
+#[test]
+fn server_instructions_clone_shares_same_data() {
+    let mut instructions = BTreeMap::new();
+    instructions.insert(
+        "shared-server".to_string(),
+        "Shared instructions.".to_string(),
+    );
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        test_dispatch: None,
+    };
+    let clone = registry.clone();
+    assert_eq!(
+        clone
+            .server_instructions()
+            .get("shared-server")
+            .map(String::as_str),
+        Some("Shared instructions.")
+    );
+}
