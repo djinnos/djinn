@@ -1174,6 +1174,7 @@ dependencies = [
  "djinn-git",
  "djinn-memory",
  "djinn-provider",
+ "djinn-slot",
  "djinn-stack",
  "futures",
  "globset",

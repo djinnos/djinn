@@ -95,6 +95,7 @@ fn test_agent_context(db: Database) -> AgentContext {
         rpc_registry: None,
         default_project_id: None,
         reconciliation_sweep: ReconciliationSweepConfig::default(),
+        compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
     }
 }
 

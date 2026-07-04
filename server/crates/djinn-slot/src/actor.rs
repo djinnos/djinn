@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::host::SlotContext;
+use crate::reply_loop::compaction_guard::CompactionCriticalSection;
 
 use super::supervisor_runner::run_supervisor_dispatch;
 use super::{SlotCommand, SlotError, SlotEvent};
@@ -40,6 +41,7 @@ struct ActiveLifecycle {
     pause: CancellationToken,
     span: tracing::Span,
     killed: bool,
+    compaction_cs: CompactionCriticalSection,
 }
 
 pub struct SlotActor {
@@ -50,6 +52,7 @@ pub struct SlotActor {
     app_state: SlotContext,
     cancel: CancellationToken,
     runner: LifecycleRunner,
+    compaction_cs: CompactionCriticalSection,
 }
 
 impl SlotActor {
@@ -205,6 +208,7 @@ impl SlotActor {
             pause,
             span,
             killed: false,
+            compaction_cs: self.compaction_cs.clone(),
         }
     }
     async fn emit_completion_event(&self, running: &ActiveLifecycle) {
@@ -291,6 +295,9 @@ impl SlotHandle {
         runner: LifecycleRunner,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
+        let compaction_cs = CompactionCriticalSection::new();
+        let mut app_state = app_state;
+        app_state.compaction_cs = compaction_cs.clone();
         let actor = SlotActor {
             id,
             model_id: model_id.clone(),
@@ -299,6 +306,7 @@ impl SlotHandle {
             app_state,
             cancel,
             runner,
+            compaction_cs,
         };
         tokio::spawn(actor.run());
         Self {
