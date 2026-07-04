@@ -29,6 +29,7 @@ use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_orchestration_types::coordinator::BackgroundWorkTracker;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
+use djinn_slot::reply_loop::CompactionCriticalSection;
 
 /// Shared tracker for per-task last-activity timestamps (unix seconds).
 /// Used by stall detection to kill sessions that stop producing tokens.
@@ -189,6 +190,12 @@ pub struct AgentContext {
     /// variables at `AgentContext` construction time via
     /// [`ReconciliationSweepConfig::from_env`].
     pub reconciliation_sweep: ReconciliationSweepConfig,
+    /// Shared compaction critical section for the active slot lifecycle/run.
+    ///
+    /// This is normally owned by the slot actor and threaded into the reply
+    /// loop via `SlotContext`. `AgentContext` carries a clone for the legacy
+    /// agent-side helper that builds `SlotContext` from `AgentContext`.
+    pub compaction_cs: CompactionCriticalSection,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

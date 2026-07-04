@@ -12,6 +12,9 @@ pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
 }
 
+#[cfg(test)]
+mod resource_tests;
+
 pub(crate) mod loop_guard {
     pub(crate) use djinn_slot::reply_loop::loop_guard::*;
 }
@@ -40,6 +43,56 @@ pub(crate) struct ReplyLoopContext<'a> {
     /// profile.  The dispatcher enforces allowed_schemas at dispatch time
     /// as defense-in-depth beyond the stage-time schema restriction.
     pub is_evidence_spike: bool,
+}
+
+/// Format MCP resource contents into deterministic inline text for tool results.
+///
+/// Text resources render with URI, MIME type, and text content. Binary/blob
+/// resources produce a descriptive omission message. Text resources exceeding
+/// [`crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES`] are omitted with size
+/// context.
+pub(crate) fn format_resource_contents(contents: &[rmcp::model::ResourceContents]) -> String {
+    use crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES;
+
+    let mut out = String::new();
+    for content in contents {
+        match content {
+            rmcp::model::ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            } => {
+                let rendered_len = text.len();
+                if rendered_len > MAX_MCP_RESOURCE_TEXT_BYTES {
+                    out.push_str(&format!(
+                        "Resource: {uri}\nMIME: {}\n[resource omitted: {rendered_len} bytes exceeds {} MiB limit]",
+                        mime_type.as_deref().unwrap_or("text/plain"),
+                        MAX_MCP_RESOURCE_TEXT_BYTES / (1024 * 1024)
+                    ));
+                } else {
+                    out.push_str(&format!("Resource: {uri}\n"));
+                    if let Some(mime) = mime_type {
+                        out.push_str(&format!("MIME: {mime}\n"));
+                    }
+                    out.push_str(text);
+                }
+            }
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                let size = blob.len();
+                out.push_str(&format!(
+                    "Resource: {uri}\nMIME: {}\n[binary resource omitted: {size} bytes]",
+                    mime_type.as_deref().unwrap_or("application/octet-stream")
+                ));
+            }
+        }
+    }
+    out
 }
 
 struct AgentToolDispatcher {
@@ -200,34 +253,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
                         .and_then(|v| v.as_str())
                         .ok_or("missing required argument `uri` (string)")?;
                     let contents = registry.read_resource(server, uri).await?;
-                    let mut out = String::new();
-                    for content in &contents {
-                        match content {
-                            rmcp::model::ResourceContents::TextResourceContents {
-                                uri,
-                                mime_type,
-                                text,
-                                ..
-                            } => {
-                                out.push_str(&format!("Resource: {uri}\n"));
-                                if let Some(mime) = mime_type {
-                                    out.push_str(&format!("MIME: {mime}\n"));
-                                }
-                                out.push_str(text);
-                            }
-                            rmcp::model::ResourceContents::BlobResourceContents {
-                                uri,
-                                mime_type,
-                                ..
-                            } => {
-                                out.push_str(&format!(
-                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted]",
-                                    mime_type.as_deref().unwrap_or("application/octet-stream")
-                                ));
-                            }
-                        }
-                    }
-                    Ok(out)
+                    Ok(format_resource_contents(&contents))
                 }
                 _ => Err(format!("unknown resource tool: {tool}")),
             }
@@ -269,6 +295,10 @@ pub(crate) async fn run_reply_loop(
         is_evidence_spike,
     } = ctx;
     let mut slot_ctx = super::host_callbacks::agent_to_reply_loop_slot_context(app_state, services);
+    // Use the compaction critical section already threaded into SlotContext by
+    // the slot actor; do not create a separate local instance so the reply loop
+    // and actor observe the same active/release transitions.
+    let compaction_cs = &slot_ctx.compaction_cs;
     // Evidence-spike sessions get the restricted tool set as allowed_schemas
     // for defense-in-depth dispatch-time enforcement.  For normal sessions
     // this is None (no dispatch-time gate — the full role schema applies).
@@ -283,10 +313,6 @@ pub(crate) async fn run_reply_loop(
         mcp_registry,
         allowed_for_dispatch,
     )));
-    // Shared compaction critical section for this reply-loop session; the slot
-    // reply loop enters it around every context rotation and releases it on
-    // every exit path.
-    let compaction_cs = djinn_slot::reply_loop::CompactionCriticalSection::new();
     let (result, output, tokens_in, tokens_out, cache_read, cache_write) =
         djinn_slot::reply_loop::run_reply_loop(
             djinn_slot::reply_loop::ReplyLoopContext {
@@ -307,7 +333,7 @@ pub(crate) async fn run_reply_loop(
                 active_skill_names,
                 active_mcp_server_names,
                 max_turns_override,
-                compaction_cs: &compaction_cs,
+                compaction_cs,
             },
             conversation,
             is_resumed_session,

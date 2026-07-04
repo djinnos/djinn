@@ -100,7 +100,7 @@ pub fn strip_compaction_markers(text: &str) -> String {
 /// Returns `(summary_text, summary_idx, continuation_idx)` where
 /// `summary_text` has all compaction boundary markers stripped via
 /// [`strip_compaction_markers`]. At most one such pair exists.
-pub(super) fn extract_prior_summary(messages: &[Message]) -> Option<(String, usize, usize)> {
+pub fn extract_prior_summary(messages: &[Message]) -> Option<(String, usize, usize)> {
     for i in 1..messages.len() {
         if messages[i].role == Role::Assistant
             && messages[i - 1].role == Role::User
@@ -119,7 +119,7 @@ pub(super) fn extract_prior_summary(messages: &[Message]) -> Option<(String, usi
 
 /// Render the `<previous-summary>` block that asks the summariser to merge an
 /// earlier summary into the new one instead of re-summarising it verbatim.
-pub(super) fn previous_summary_block(prior: &str) -> String {
+pub fn previous_summary_block(prior: &str) -> String {
     format!(
         "A summary from an earlier point in this session is provided below. UPDATE and MERGE it \
          with the newer messages that follow — keep what is still true, prune what is now \

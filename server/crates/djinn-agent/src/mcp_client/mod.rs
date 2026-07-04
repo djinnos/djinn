@@ -36,6 +36,11 @@ use config::{McpTransportKind, resolve_server_config};
 /// including the `mcp__` prefix and both `__` separators.
 pub const MCP_NAMESPACED_NAME_MAX_LEN: usize = 64;
 
+/// Maximum size of a text MCP resource that will be rendered inline in the
+/// tool result. Larger text resources and all binary resources are omitted with
+/// a descriptive message to keep context bounded.
+pub const MAX_MCP_RESOURCE_TEXT_BYTES: usize = 10 * 1024 * 1024;
+
 /// Format a provider-facing MCP-namespaced tool name: `mcp__{server}__{tool}`.
 ///
 /// Sanitizes both `server_name` and `tool_name` to `[A-Za-z0-9_-]` and bounds the

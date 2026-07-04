@@ -208,23 +208,26 @@ struct Inner {
     pub rpc_registry: Arc<ConnectionRegistry>,
     /// Phase 3 PR 5 — per-project devcontainer image controller.
     ///
-    /// Populated during [`AppState::initialize`] when a `kube::Client` can
-    /// be constructed from the ambient environment (in-cluster SA token or
-    /// local `$KUBECONFIG`). Remains `None` on dev boxes without a cluster
-    /// — the mirror-fetcher reads this via [`AppState::image_controller`]
-    /// and silently skips the enqueue step when absent.
+    /// Populated during [`AppState::initialize`] when a
+    /// [`djinn_k8s::KubeClient`] can be constructed from the ambient
+    /// environment (in-cluster SA token or local `$KUBECONFIG`). Remains
+    /// `None` on dev boxes without a cluster — the mirror-fetcher reads
+    /// this via [`AppState::image_controller`] and silently skips the
+    /// enqueue step when absent.
     pub image_controller: tokio::sync::RwLock<Option<Arc<ImageController>>>,
     /// Phase 3 PR 5.5 — background task that watches build `Job`s to
     /// terminal state and flips `projects.image_status`.  Spawned
-    /// alongside the controller when a `kube::Client` is available;
-    /// `None` on dev boxes without a cluster. `shutdown_image_watcher`
-    /// aborts + awaits the task on graceful shutdown.
+    /// alongside the controller when a [`djinn_k8s::KubeClient`] is
+    /// available; `None` on dev boxes without a cluster.
+    /// `shutdown_image_watcher` aborts + awaits the task on graceful
+    /// shutdown.
     pub image_build_watcher: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Phase 3 PR 8 — production canonical-graph warmer.  Populated during
     /// [`AppState::initialize`]: prefers [`K8sGraphWarmer`] when running
-    /// under `DJINN_RUNTIME=kubernetes` with a reachable `kube::Client`;
-    /// falls back to [`build_in_process_graph_warmer`] otherwise so dev
-    /// boxes and `TestRuntime` stay operational.  Read via
+    /// under `DJINN_RUNTIME=kubernetes` with a reachable
+    /// [`djinn_k8s::KubeClient`]; falls back to
+    /// [`build_in_process_graph_warmer`] otherwise so dev boxes and
+    /// `TestRuntime` stay operational.  Read via
     /// [`AppState::graph_warmer`]; mirror-fetcher + agent dispatch paths
     /// dispatch through this handle rather than constructing a warmer
     /// per-call.
@@ -311,7 +314,8 @@ impl AppState {
         self.inner.image_controller.read().await.clone()
     }
 
-    /// Construct the image controller once a `kube::Client` is available.
+    /// Construct the image controller once a [`djinn_k8s::KubeClient`] is
+    /// available.
     ///
     /// Called from [`Self::initialize`]. Idempotent — a second call that
     /// finds an existing controller is a no-op.
@@ -330,12 +334,12 @@ impl AppState {
             return;
         }
 
-        let client = match kube::Client::try_default().await {
+        let client = match djinn_k8s::try_default_client().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::info!(
                     error = %e,
-                    "image_controller: no kube::Client available; controller disabled \
+                    "image_controller: no Kubernetes client available; controller disabled \
                      (dev/local mode — per-project builds skipped)"
                 );
                 return;
@@ -378,7 +382,7 @@ impl AppState {
 
         // Phase 3 PR 5.5: spawn the companion Job-completion watcher so
         // `projects.image_status` flips from `building` → `ready`/`failed`
-        // without operator intervention. Uses the same `kube::Client`
+        // without operator intervention. Uses the same Kubernetes client
         // and config; observes `self.cancel()` for graceful shutdown.
         //
         // Inject the graph warmer so a successful build transition kicks
@@ -437,7 +441,7 @@ impl AppState {
     ///
     /// Policy:
     /// * If `DJINN_RUNTIME=kubernetes` (or unset — default) AND a
-    ///   `kube::Client` can be constructed → [`K8sGraphWarmer`].
+    ///   [`djinn_k8s::KubeClient`] can be constructed → [`K8sGraphWarmer`].
     /// * Otherwise (explicit `DJINN_RUNTIME=test`, local dev without a
     ///   cluster) → in-process warmer via [`build_in_process_graph_warmer`].
     async fn initialize_graph_warmer(&self) {
@@ -450,7 +454,7 @@ impl AppState {
 
         let prefer_k8s = matches!(runtime_kind(), RuntimeKind::Kubernetes);
         let warmer: Arc<dyn GraphWarmerService> = if prefer_k8s {
-            match kube::Client::try_default().await {
+            match djinn_k8s::try_default_client().await {
                 Ok(client) => {
                     let config = KubernetesConfig::from_env();
                     tracing::info!(
@@ -463,7 +467,7 @@ impl AppState {
                 Err(e) => {
                     tracing::info!(
                         error = %e,
-                        "graph_warmer: no kube::Client available; falling back to in-process warmer"
+                        "graph_warmer: no Kubernetes client available; falling back to in-process warmer"
                     );
                     Arc::new(build_in_process_graph_warmer(self.clone()))
                         as Arc<dyn GraphWarmerService>
@@ -966,6 +970,7 @@ impl AppState {
             // this in build_worker_agent_context.
             default_project_id: None,
             reconciliation_sweep: djinn_agent::context::ReconciliationSweepConfig::from_env(),
+            compaction_cs: djinn_slot::reply_loop::CompactionCriticalSection::default(),
         }
     }
 
@@ -1352,8 +1357,8 @@ impl AppState {
 
         // Validator: prefer the real TokenReview path via djinn-k8s owner-crate
         // wrapper; fall back to AllowAllValidator if no kubeconfig is available
-        // (dev / CI).  This listener deliberately no longer constructs a raw
-        // kube::Client here — the client is now owned and configured inside
+        // (dev / CI).  This listener deliberately does not construct a raw
+        // Kubernetes client — the client is owned and configured inside
         // djinn_k8s::token_review::TokenReviewer.
         //
         // Threads the process-wide `ConnectionRegistry` into the accept

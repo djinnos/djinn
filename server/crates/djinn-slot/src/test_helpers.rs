@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::host::{SlotContext, SlotToolDispatcher};
+use crate::reply_loop::CompactionCriticalSection;
 
 /// Minimal `SlotToolDispatcher` for tests that exercise the reply loop.
 /// Stash tools (`output_view`/`output_grep`) return stub text; extension
@@ -432,6 +433,7 @@ pub fn agent_context_from_db_with_dispatcher(
         clock: std::sync::Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: std::sync::Arc::new(NoopCallbacks),
         tool_dispatcher,
+        compaction_cs: CompactionCriticalSection::new(),
     }
 }
 

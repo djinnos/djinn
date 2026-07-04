@@ -13,6 +13,7 @@ use djinn_core::events::EventBus;
 use djinn_db::Database;
 use djinn_provider::catalog::{CatalogService, HealthTracker};
 use djinn_slot::host::SlotContext;
+use djinn_slot::reply_loop::CompactionCriticalSection;
 
 pub fn test_tempdir(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -164,6 +165,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         clock: Arc::new(djinn_core::clock::SystemClock::new()),
         callbacks: Arc::new(NoopCallbacks),
         tool_dispatcher: None,
+        compaction_cs: CompactionCriticalSection::new(),
     }
 }
 

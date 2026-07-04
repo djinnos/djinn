@@ -26,15 +26,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use reqwest::Client;
+use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
+use djinn_provider::github_server::GitHubServerClient;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use djinn_db::{NewOrgConfig, OrgConfigRepository};
-use djinn_provider::github_app::jwt::mint_app_jwt_anyhow;
-
-const GITHUB_API: &str = "https://api.github.com";
-const USER_AGENT: &str = "djinn-server";
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -181,68 +178,24 @@ async fn select_installation(
 
 /// Fetch `GET /app/installations` and project to the UI shape.
 ///
-/// We re-implement the call rather than reusing
-/// `djinn_provider::github_app::installations::list_installations_for_app`
-/// because the picker needs `repository_selection` and `html_url`, which the
-/// provider crate's `Installation` struct intentionally omits to keep the
-/// public surface small. Keeping the picker-specific shape in this module
-/// avoids leaking UI-only fields into the lower layers.
+/// Uses `djinn_provider::github_server::GitHubServerClient` so the server
+/// module does not directly construct an outbound HTTP client.
 async fn fetch_app_installations() -> Result<Vec<InstallationSummary>, String> {
-    #[derive(Deserialize)]
-    struct RawInstallation {
-        id: u64,
-        account: Option<RawAccount>,
-        #[serde(default)]
-        repository_selection: Option<String>,
-        #[serde(default)]
-        html_url: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct RawAccount {
-        id: u64,
-        #[serde(default)]
-        login: Option<String>,
-        #[serde(rename = "type", default)]
-        account_type: Option<String>,
-    }
-
     let jwt = mint_app_jwt_anyhow().map_err(|e| e.to_string())?;
-    let client = Client::new();
-    let resp = client
-        .get(format!("{GITHUB_API}/app/installations"))
-        .bearer_auth(&jwt)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("{status}: {body}"));
-    }
-
-    let raws: Vec<RawInstallation> = resp.json().await.map_err(|e| e.to_string())?;
+    let raws = GitHubServerClient::new()
+        .fetch_app_installations(&jwt)
+        .await?;
     Ok(raws
         .into_iter()
         .map(|raw| {
-            let (account_id, account_login, account_type) = match raw.account {
-                Some(a) => (
-                    a.id,
-                    a.login.unwrap_or_default(),
-                    a.account_type.unwrap_or_else(|| "User".into()),
-                ),
-                None => (0, String::new(), "User".into()),
-            };
+            let account = raw.account();
             InstallationSummary {
                 installation_id: raw.id,
-                account_login,
-                account_id,
-                account_type,
-                repository_selection: raw.repository_selection.unwrap_or_else(|| "all".into()),
-                html_url: raw.html_url.unwrap_or_default(),
+                account_login: account.login,
+                account_id: account.id,
+                account_type: account.account_type,
+                repository_selection: raw.repository_selection().to_string(),
+                html_url: raw.html_url().to_string(),
             }
         })
         .collect())
