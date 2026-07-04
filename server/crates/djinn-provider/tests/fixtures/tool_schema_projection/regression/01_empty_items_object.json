@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_empty_items_object",
+  "description": "Regression shape: items is an empty object {} (permissive array). OpenAI strict mode requires items to have a concrete schema; Moonshot and Gemini also choke on an untyped items.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "tags": {
+        "type": "array",
+        "items": {}
+      }
+    },
+    "required": ["tags"]
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}
