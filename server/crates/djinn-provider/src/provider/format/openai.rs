@@ -276,6 +276,7 @@ fn is_fireworks_base_url(base_url: &str) -> bool {
 /// existing `openai_responses.rs` call site keeps compiling.  The full
 /// OpenAI-family rewrite (deep properties enforcement and top-level anyOf
 /// flattening) lives in `tool_projection.rs`.
+#[allow(dead_code)]
 pub(super) fn ensure_object_properties(schema: Value) -> Value {
     crate::provider::format::tool_projection::project(
         schema,
