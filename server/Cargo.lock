@@ -1612,7 +1612,6 @@ dependencies = [
  "globset",
  "http-body-util",
  "insta",
- "kube",
  "landlock",
  "libc",
  "opentelemetry",

@@ -52,7 +52,6 @@ djinn-runtime = { path = "crates/djinn-runtime" }
 djinn-stack = { path = "crates/djinn-stack" }
 djinn-supervisor = { path = "crates/djinn-supervisor" }
 djinn-workspace = { path = "crates/djinn-workspace" }
-kube = { version = "0.95", features = ["runtime"] }
 async-trait = "0.1"
 anyhow = "1"
 bincode = "1.3"
