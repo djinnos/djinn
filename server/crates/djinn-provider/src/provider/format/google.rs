@@ -6,7 +6,8 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
+use crate::provider::{FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
+use crate::provider::format::tool_projection::project;
 
 pub struct GoogleProvider {
     config: ProviderConfig,
@@ -49,7 +50,36 @@ impl GoogleProvider {
         }
 
         if !tools.is_empty() {
-            body["tools"] = json!([{"functionDeclarations": tools}]);
+            let declarations: Vec<Value> = tools
+                .iter()
+                .map(|tool| {
+                    let name = tool
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    let description = tool
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    let input_schema = tool
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| json!({"type": "object"}));
+                    let projected = project(
+                        input_schema,
+                        self.config.tool_schema_compat,
+                        FormatFamily::Google,
+                    );
+                    json!({
+                        "name": name,
+                        "description": description,
+                        "parameters": projected,
+                    })
+                })
+                .collect();
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
 
             match tool_choice.unwrap_or(ToolChoice::Auto) {
                 ToolChoice::Auto => {}
@@ -263,7 +293,9 @@ impl LlmProvider for GoogleProvider {
 mod tests {
     use super::*;
     use crate::message::{Conversation, Message};
-    use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
+    use crate::provider::{
+        AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ToolSchemaCompat,
+    };
     use axum::{Router, routing::post};
     use futures::TryStreamExt;
     use std::sync::{Arc, Mutex};
@@ -427,7 +459,7 @@ mod tests {
         let tools = vec![json!({
             "name": "shell",
             "description": "Run shell",
-            "parameters": {"type": "object"}
+            "inputSchema": {"type": "object"}
         })];
 
         let req = provider.build_request(&conv, &tools, Some(ToolChoice::Required));
@@ -442,6 +474,20 @@ mod tests {
 
         let req = provider.build_request(&conv, &[], Some(ToolChoice::Required));
         assert!(req.get("toolConfig").is_none());
+    }
+
+    #[test]
+    fn test_build_request_tool_choice_none_still_emits_tool_config() {
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "noop",
+            "description": "Noop",
+            "inputSchema": {"type": "object"}
+        })];
+        let req = provider.build_request(&conv, &tools, Some(ToolChoice::None));
+        assert_eq!(req["toolConfig"]["functionCallingConfig"]["mode"], "NONE");
     }
 
     // ─── B5: reasoning-effort -> thinkingConfig ─────────────────────────────
@@ -462,6 +508,57 @@ mod tests {
     #[test]
     fn test_reasoning_effort_high_sets_thinking_budget() {
         use crate::provider::ReasoningEffort;
+        // Native/no-quirk: schema is forwarded as-is through `inputSchema`.
+        let provider = GoogleProvider::new(test_google_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd"]
+            },
+            "readOnly": false,
+            "destructive": true,
+            "idempotent": true,
+            "openWorld": true
+        })];
+        let req = provider.build_request(&conv, &tools, None);
+        let decl = &req["tools"][0]["functionDeclarations"][0];
+        assert_eq!(decl["name"], "shell");
+        assert_eq!(decl["description"], "Run shell");
+        assert_eq!(decl["parameters"]["type"], "object");
+        assert_eq!(decl["parameters"]["properties"]["cmd"]["type"], "string");
+        assert!(decl.get("inputSchema").is_none());
+        assert!(decl.get("readOnly").is_none());
+        assert!(decl.get("destructive").is_none());
+        assert!(decl.get("idempotent").is_none());
+        assert!(decl.get("openWorld").is_none());
+
+        // Gemini quirk: apply keyword whitelist and required filtering.
+        let mut gemini_config = test_google_config();
+        gemini_config.tool_schema_compat = Some(ToolSchemaCompat::Gemini);
+        let gemini_provider = GoogleProvider::new(gemini_config);
+        let gemini_tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"cmd": {"type": "string"}},
+                "required": ["cmd", "missing"],
+                "unevaluatedProperties": false
+            }
+        })];
+        let gemini_req = gemini_provider.build_request(&conv, &gemini_tools, None);
+        let gemini_decl = &gemini_req["tools"][0]["functionDeclarations"][0];
+        assert!(gemini_decl.get("inputSchema").is_none());
+        let required = gemini_decl["parameters"]["required"].as_array().unwrap();
+        assert_eq!(required, &["cmd"]);
+        assert!(gemini_decl["parameters"].get("unevaluatedProperties").is_none());
+
+        // Reasoning effort high sets the thinking budget.
         let mut config = test_google_config();
         config.reasoning_effort = Some(ReasoningEffort::High);
         let provider = GoogleProvider::new(config);

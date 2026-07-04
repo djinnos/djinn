@@ -8,7 +8,10 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation, Role};
 use crate::provider::client::ApiClient;
-use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
+use crate::provider::{
+    FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
+    ToolSchemaCompat,
+};
 
 pub struct OpenAIProvider {
     config: ProviderConfig,
@@ -50,7 +53,10 @@ impl OpenAIProvider {
         });
 
         if !tools.is_empty() {
-            body["tools"] = json!(convert_tools_to_openai(tools));
+            body["tools"] = json!(convert_tools_to_openai(
+                tools,
+                self.config.tool_schema_compat,
+            ));
             apply_tool_choice(&mut body, tool_choice);
         }
 
@@ -210,20 +216,35 @@ fn append_openai_messages(role: &'static str, acc: BlockAccumulator, messages: &
 
 // ─── Tool conversion ────────────────────────────────────────────────────────────
 
-fn convert_tools_to_openai(tools: &[Value]) -> Vec<Value> {
+fn convert_tools_to_openai(tools: &[Value], compat: Option<ToolSchemaCompat>) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
             if t.get("type").is_some() && t.get("function").is_some() {
                 // Already in OpenAI format.
-                t.clone()
+                let mut out = t.clone();
+                if let Some(params) = out.pointer_mut("/function/parameters") {
+                    *params = crate::provider::format::tool_projection::project(
+                        params.clone(),
+                        compat,
+                        FormatFamily::OpenAI,
+                    );
+                }
+                out
             } else {
+                let schema = crate::provider::format::tool_projection::project(
+                    t.get("inputSchema")
+                        .cloned()
+                        .unwrap_or(json!({"type": "object"})),
+                    compat,
+                    FormatFamily::OpenAI,
+                );
                 json!({
                     "type": "function",
                     "function": {
                         "name": t.get("name").cloned().unwrap_or(json!("")),
                         "description": t.get("description").cloned().unwrap_or(json!("")),
-                        "parameters": t.get("inputSchema").cloned().unwrap_or(json!({"type": "object"})),
+                        "parameters": schema,
                     }
                 })
             }
@@ -255,6 +276,7 @@ fn is_fireworks_base_url(base_url: &str) -> bool {
 /// existing `openai_responses.rs` call site keeps compiling.  The full
 /// OpenAI-family rewrite (deep properties enforcement and top-level anyOf
 /// flattening) lives in `tool_projection.rs`.
+#[allow(dead_code)]
 pub(super) fn ensure_object_properties(schema: Value) -> Value {
     crate::provider::format::tool_projection::project(
         schema,
@@ -1082,5 +1104,186 @@ mod tests {
         let texts: Vec<&str> = content.iter().filter_map(|b| b["text"].as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("helpful assistant")));
         assert!(texts.iter().any(|t| t.contains("Repository Map")));
+    }
+
+    // ─── Tool-schema projection at serialization seam ────────────────────
+
+    /// A config with `tool_schema_compat: Some(OpenAi)` to exercise the
+    /// shared projection path.
+    fn openai_compat_config() -> ProviderConfig {
+        ProviderConfig {
+            tool_schema_compat: Some(ToolSchemaCompat::OpenAi),
+            ..test_openai_config()
+        }
+    }
+
+    /// A config with `tool_schema_compat: Some(Moonshot)` for
+    /// Moonshot-via-OpenAI-format provider.
+    fn moonshot_compat_config() -> ProviderConfig {
+        ProviderConfig {
+            tool_schema_compat: Some(ToolSchemaCompat::Moonshot),
+            ..test_openai_config()
+        }
+    }
+
+    /// When `tool_schema_compat` is `None`, the RMCP inputSchema is forwarded
+    /// verbatim — no `properties` key is injected.
+    #[test]
+    fn native_none_compat_preserves_rmcp_schema_verbatim() {
+        let provider = OpenAIProvider::new(test_openai_config()); // compat = None
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hi"));
+
+        // An RMCP-shaped tool whose inputSchema is a bare object without `properties`.
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let tool = &req["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], "shell");
+
+        // No `properties` key should be added under None compat.
+        let params = &tool["function"]["parameters"];
+        assert!(
+            params.get("properties").is_none(),
+            "None compat must not inject properties: {params}"
+        );
+    }
+
+    /// When `tool_schema_compat` is `None`, an already-OpenAI-shaped tool is
+    /// forwarded verbatim (no projection changes).
+    #[test]
+    fn native_none_compat_preserves_already_openai_tool_verbatim() {
+        let provider = OpenAIProvider::new(test_openai_config()); // compat = None
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hi"));
+
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let params = &req["tools"][0]["function"]["parameters"];
+        // Must be exactly what was passed in.
+        assert_eq!(
+            params,
+            &json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            })
+        );
+    }
+
+    /// With `tool_schema_compat: Some(OpenAi)`, the shared projection
+    /// enforces `properties` on object schemas for RMCP-shaped tools.
+    #[test]
+    fn openai_compat_projects_rmcp_input_schema() {
+        let provider = OpenAIProvider::new(openai_compat_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hi"));
+
+        let tools = vec![json!({
+            "name": "shell",
+            "description": "Run shell",
+            "inputSchema": {"type": "object"}
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let params = &req["tools"][0]["function"]["parameters"];
+        // OpenAI compat injects `properties: {}` on bare object schemas.
+        assert_eq!(
+            params,
+            &json!({"type": "object", "properties": {}}),
+            "OpenAI compat must enforce properties on object schemas"
+        );
+    }
+
+    /// With `tool_schema_compat: Some(OpenAi)`, the shared projection
+    /// enforces `properties` on already-OpenAI-shaped tool parameters.
+    #[test]
+    fn openai_compat_projects_already_openai_tool_parameters() {
+        let provider = OpenAIProvider::new(openai_compat_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hi"));
+
+        // Already-OpenAI tool with a nested object missing properties.
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filter": {
+                            "type": "object"
+                            // Missing `properties` — should be injected.
+                        }
+                    }
+                }
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let params = &req["tools"][0]["function"]["parameters"];
+        let filter = &params["properties"]["filter"];
+        assert!(
+            filter.get("properties").is_some(),
+            "Deep object must gain properties: {filter}"
+        );
+    }
+
+    /// A non-OpenAI compat (Moonshot) is also threaded through the
+    /// projection path for RMCP tools via the same seam.
+    #[test]
+    fn moonshot_compat_applied_via_openai_seam() {
+        let provider = OpenAIProvider::new(moonshot_compat_config());
+        let mut conv = Conversation::new();
+        conv.push(Message::user("hi"));
+
+        // An RMCP tool with prefixItems (Moonshot collapses these).
+        let tools = vec![json!({
+            "name": "pick",
+            "description": "Pick items",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "coords": {
+                        "type": "array",
+                        "prefixItems": [
+                            {"type": "number"},
+                            {"type": "number"}
+                        ]
+                    }
+                }
+            }
+        })];
+
+        let req = provider.build_request(&conv, &tools, None);
+        let params = &req["tools"][0]["function"]["parameters"];
+        let coords = &params["properties"]["coords"];
+        // Moonshot compat collapses prefixItems → items.
+        assert!(
+            coords.get("prefixItems").is_none(),
+            "Moonshot must collapse prefixItems: {coords}"
+        );
+        assert!(
+            coords.get("items").is_some(),
+            "Moonshot must produce items: {coords}"
+        );
     }
 }

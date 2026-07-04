@@ -243,26 +243,24 @@ pub fn is_chat_stash_tool(name: &str) -> bool {
 }
 
 /// Curated allowlist of server-wide `DjinnMcpServer` tools the chat may
-/// call. Shipping the full `DjinnMcpServer::all_tool_schemas()` to the
-/// model leaks every admin/write surface (credential_set,
-/// project_environment_config_set, settings_set, provider_*, agent_*, …) —
-/// also trips OpenAI/Codex's strict schema validator on a few tools whose
-/// `object` parameters accept arbitrary JSON with no `properties` field
-/// (the provider 400s on the offending tool index). Every tool added here
-/// must therefore produce a schema in which every `object`-typed (sub)schema
-/// carries a `properties` field and no parameter is an open-ended JSON map.
+/// call. This is an authorization / security surface control, not a
+/// strict-schema compatibility gate. Shipping the full
+/// `DjinnMcpServer::all_tool_schemas()` to the model would leak every
+/// admin/write surface (credential_set, project_environment_config_set,
+/// settings_set, provider_*, agent_*, runtime_*, kill, …), so the list
+/// remains intentionally narrow: read-oriented tools from chat's
+/// perspective, plus the ADR-050 "board management" writes the chat retains
+/// (the user-approved set: task create/update/transition/comment/claim and
+/// epic create/update/close/reopen) and the GitHub file fetch. Admin,
+/// secrets, config, provider, agent, runtime, and kill tools remain
+/// excluded.
 ///
-/// Entries here are read-oriented from chat's perspective, plus the
-/// ADR-050 "board management" writes the chat retains (the user-approved
-/// set: task create/update/transition/comment/claim and epic
-/// create/update/close/reopen) and the GitHub file fetch. Admin, secrets,
-/// config, provider, agent, runtime, and kill tools remain excluded.
-///
-/// The 8 board-management writes below are all flat string/scalar/string-array
-/// params (`task_create`/`task_update` additionally take
-/// `acceptance_criteria`, an `anyOf` of a string and a fully-`properties`'d
-/// `AcceptanceCriterionStatus` object) — none accept an arbitrary JSON map,
-/// so they pass the strict validator without a sanitizer change.
+/// Strict schema compatibility for provider-specific formats is enforced by
+/// the `djinn-provider` projection layer and its corpus/golden tests (see
+/// `server/crates/djinn-provider/tests/tool_schema_projection_corpus.rs`
+/// and related fixtures). Adding a tool here still requires that the tool is
+/// appropriate to expose to the chat security surface, but it no longer
+/// requires a manual OpenAI/Codex strict-schema audit for every tool.
 const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     // Read-only memory
     "memory_read",
@@ -313,8 +311,8 @@ const CHAT_ALLOWED_MCP_TOOLS: &[&str] = &[
     // `project_environment_config_set`. Aligns chat with the ADR-050 §2
     // posture (chat is the interactive Architect, with board/memory writes).
     // Param schema is `project` + two optional `string[]` lists — no
-    // free-form object, so it doesn't hit the OpenAI-400 that kept
-    // `project_environment_config_set` off the surface.
+    // free-form object, so it does not trigger the provider strict-schema
+    // rejection that kept `project_environment_config_set` off the surface.
     "project_graph_exclusions_get",
     "project_graph_exclusions_set",
     // GitHub read
@@ -333,8 +331,12 @@ pub fn is_chat_allowed_mcp_tool(name: &str) -> bool {
 /// [`CHAT_ALLOWED_MCP_TOOLS`] so a plain chat can't reach into proposals — they
 /// are added per-request only when the handler resolves a `proposal_id`, and
 /// the requesting user must be authenticated (the proposal edit gate runs as
-/// that user). All four have flat scalar/string-array params, so they pass the
-/// strict OpenAI schema validator like the board-management writes above.
+/// that user). This is an authenticated proposal scoping control; schema
+/// compatibility for the underlying provider formats is owned by the
+/// `djinn-provider` projection layer and its corpus/golden tests (see
+/// `server/crates/djinn-provider/tests/tool_schema_projection_corpus.rs`
+/// and related fixtures), not by manual OpenAI/Codex strict-schema audits
+/// of each tool added here.
 pub const PROPOSAL_SCOPED_MCP_TOOLS: &[&str] = &[
     "proposal_show",
     "proposal_update",
