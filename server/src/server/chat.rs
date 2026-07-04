@@ -5,9 +5,14 @@ use axum::response::sse::Sse;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+mod compaction_boundary;
 mod handler;
 mod project_resolver;
 mod prompt;
+
+pub(super) use compaction_boundary::{
+    complete_chat_compaction_boundary, record_chat_compaction_started,
+};
 pub(super) mod sessions;
 
 use djinn_provider::message::Message;

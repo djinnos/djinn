@@ -56,6 +56,7 @@ pub mod events;
 pub mod file_time;
 pub mod github_error_render;
 pub mod output_stash;
+pub(crate) mod preapproval_gate;
 pub mod resource_monitor;
 pub mod roles;
 pub mod supervisor_impl;

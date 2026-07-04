@@ -71,15 +71,25 @@ pub async fn seed_task_row(db: &Database, seed: UsageTestTaskSeed<'_>) -> String
 /// Seed raw session rows directly into the database for integration-level
 /// contract tests that need actual query results.
 pub async fn seed_session_row(db: &Database, seed: UsageTestSessionSeed<'_>) {
-    db.ensure_initialized().await.unwrap();
     let id = uuid::Uuid::now_v7().to_string();
+    seed_session_row_with_id(db, &id, seed).await;
+}
+
+/// Like [`seed_session_row`] but accepts an explicit session id so callers
+/// can control the id (e.g. for boundary tests that need a known session id).
+pub async fn seed_session_row_with_id(
+    db: &Database,
+    session_id: &str,
+    seed: UsageTestSessionSeed<'_>,
+) {
+    db.ensure_initialized().await.unwrap();
     sqlx::query(
         "INSERT INTO sessions \
          (id, project_id, task_id, model_id, agent_type, status, \
           started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
          VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12)",
     )
-    .bind(&id)
+    .bind(session_id)
     .bind(seed.project_id)
     .bind(seed.task_id)
     .bind(seed.model_id)
@@ -94,6 +104,29 @@ pub async fn seed_session_row(db: &Database, seed: UsageTestSessionSeed<'_>) {
     .execute(db.pool())
     .await
     .expect("failed to seed session row");
+}
+
+/// Seed a projectless global-chat session row for boundary/compaction tests.
+///
+/// Global chat sessions (`agent_type = 'chat'`) are user-scoped and exist
+/// outside any project, so migration 15's `sessions_project_scope_by_agent_type`
+/// CHECK requires `project_id IS NULL`. The `UsageTestSessionSeed` helper can
+/// only express a non-null project id, so chat-session tests use this dedicated
+/// seed instead. `cost_basis` is `'unpriced'` to satisfy migration 83's
+/// `sessions_cost_basis_check`.
+pub async fn seed_chat_session_row(db: &Database, session_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, project_id, task_id, model_id, agent_type, status, \
+          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, NULL, NULL, 'test-model', 'chat', 'completed', \
+                 '2025-01-01T00:00:00Z', 0, 0, 0, 0, NULL, 'unpriced')",
+    )
+    .bind(session_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed chat session row");
 }
 
 /// Seed a project so that `project_id` FK constraints pass.

@@ -30,6 +30,7 @@ use super::{
     ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
     ErrorPayload, PROPOSAL_ADDRESS_SYSTEM_PROMPT, ProjectResolver, ProjectResolverError,
     SessionTitlePayload, ToolCallPayload, ToolResultPayload, apply_chat_skills,
+    complete_chat_compaction_boundary, record_chat_compaction_started,
 };
 use crate::server::AppState;
 use crate::server::auth::authenticate;
@@ -40,7 +41,10 @@ use djinn_agent::actors::slot::{
 use djinn_agent::chat_tools::ChatResolvedProject;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
-use djinn_db::{ProposalRepository, SessionMessageRepository, SessionRepository};
+use djinn_db::{
+    ProposalRepository, SessionCompactionBoundaryRepository, SessionMessageRepository,
+    SessionRepository,
+};
 use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
@@ -79,6 +83,7 @@ enum StreamInitOutcome {
 
 /// Proactively compact the conversation if it exceeds the compaction threshold.
 async fn maybe_compact_proactively(
+    state: &AppState,
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
     session_id: &str,
@@ -88,7 +93,10 @@ async fn maybe_compact_proactively(
         conversation.token_estimate() as u32,
         context_window,
     ) {
-        djinn_agent::compaction::compact_conversation(
+        let boundary_repo = SessionCompactionBoundaryRepository::new(state.db().clone());
+        let boundary_id =
+            record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
+        let compacted = djinn_agent::compaction::compact_conversation(
             provider,
             conversation,
             session_id,
@@ -97,6 +105,10 @@ async fn maybe_compact_proactively(
             context_window,
         )
         .await;
+        if compacted {
+            complete_chat_compaction_boundary(&boundary_repo, boundary_id.as_deref(), conversation)
+                .await;
+        }
     }
 }
 
@@ -106,7 +118,9 @@ async fn maybe_compact_proactively(
 /// `Err(StreamInitOutcome::CompactedAndContinue)` so the caller retries. On
 /// unrecoverable failure, sends an SSE error event and returns
 /// `Err(StreamInitOutcome::UnrecoverableBreak)` so the caller breaks the loop.
+#[allow(clippy::too_many_arguments)]
 async fn init_provider_stream(
+    state: &AppState,
     provider: &dyn LlmProvider,
     conversation: &mut Conversation,
     tool_schemas: &[serde_json::Value],
@@ -140,7 +154,10 @@ async fn init_provider_stream(
                     attempt = *compaction_attempts,
                     "chat: recoverable stream-init failure; compacting and retrying"
                 );
-                if djinn_agent::compaction::compact_conversation(
+                let boundary_repo = SessionCompactionBoundaryRepository::new(state.db().clone());
+                let boundary_id =
+                    record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
+                let compacted = djinn_agent::compaction::compact_conversation(
                     provider,
                     conversation,
                     session_id,
@@ -148,8 +165,16 @@ async fn init_provider_stream(
                     djinn_agent::compaction::CompactionContext::ChatSession,
                     context_window,
                 )
-                .await
-                {
+                .await;
+                if compacted {
+                    complete_chat_compaction_boundary(
+                        &boundary_repo,
+                        boundary_id.as_deref(),
+                        conversation,
+                    )
+                    .await;
+                }
+                if compacted {
                     return Err(StreamInitOutcome::CompactedAndContinue);
                 }
             }
@@ -1089,6 +1114,7 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         // the in-memory estimate falls back below threshold, so this no-ops on
         // subsequent iterations within the same request.
         maybe_compact_proactively(
+            &state,
             provider.as_ref(),
             &mut conversation,
             &session_id,
@@ -1097,6 +1123,7 @@ async fn run_chat_loop(ctx: ChatLoopContext) {
         .await;
 
         let stream = match init_provider_stream(
+            &state,
             provider.as_ref(),
             &mut conversation,
             &tool_schemas,

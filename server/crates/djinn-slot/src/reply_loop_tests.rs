@@ -82,6 +82,7 @@ async fn run_with_provider(
     let worktree_path = worktree.as_path();
     run_reply_loop(
         ReplyLoopContext {
+            compaction_cs: &crate::reply_loop::CompactionCriticalSection::new(),
             provider,
             tools,
             task_id,

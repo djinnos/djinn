@@ -714,6 +714,17 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
     harness.seed_same_role_redispatch_state("worker", 2).await;
     harness.assert_same_role_backoff_seeded("worker", 2).await;
     harness.seed_running_capacity_occupancy().await;
+    // uv3p Part B: the park rung now requires an attempted remediation. Seed two
+    // post-intervention sessions that terminated pre-submission across distinct
+    // models so the non-attempt bound is reached and the second strike parks
+    // (rather than redispatching with forced rotation).
+    seed_terminated_post_intervention_sessions(
+        &harness.db,
+        &harness.tx,
+        &harness.task_id,
+        &["chaos-model-a", "chaos-model-b"],
+    )
+    .await;
 
     let (second_handled, parked) = harness.route_reopen_intervention().await;
     assert!(
@@ -1005,6 +1016,10 @@ async fn loop_guard_second_strike_parks_task() {
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // uv3p Part B: seed two distinct-model pre-submission terminations so the
+    // attempted-remediation park gate reaches its non-attempt bound and parks.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
         .route_loop_guard_planner_intervention(
@@ -1472,6 +1487,10 @@ async fn second_strike_parks_task_after_prior_intervention() {
     assert_eq!(task.intervention_count, 1, "one prior planner intervention");
     assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
 
+    // uv3p Part B: the second strike parks only once the remediation was
+    // actually attempted; seed two distinct-model pre-submission terminations.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
     let handled = actor.maybe_intervene_on_stuck_task(&task).await;
     assert!(
         handled,
@@ -1511,6 +1530,272 @@ async fn second_strike_parks_task_after_prior_intervention() {
         remediation.title.starts_with("Planner remediation ["),
         "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
         remediation.title
+    );
+}
+
+/// uv3p Part B (AC #2 / cgcl-7fj3-nlus shape): a task at the second-strike
+/// condition (`intervention_count == 1`, quality strikes at threshold) with
+/// ZERO sessions dispatched since the intervention must NOT park — the
+/// remediation was never attempted. The audits showed parks landing 272ms–36s
+/// after a rescope with zero dispatches; the guard now redispatches instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_rung_redispatches_when_no_post_intervention_submission() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // One prior intervention (bumps intervention_count, sets last_intervention_at),
+    // then climb back to the reopen threshold — the second-strike condition.
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, 1);
+    assert_eq!(task.reopen_count, REOPEN_INTERVENTION_THRESHOLD);
+    // No sessions were dispatched after the intervention — the cgcl/7fj3/nlus
+    // shape (park within seconds of a rescope, zero dispatches).
+
+    let handled = actor.maybe_intervene_on_stuck_task(&task).await;
+    assert!(
+        !handled,
+        "park rung must NOT handle (park) the task when no post-intervention session was ever dispatched — it must fall through to the redispatch path"
+    );
+
+    // The observable of the redispatch decision: no human-review hold was
+    // created, so the task stays dispatchable, and a park-redispatch marker
+    // documents the decision.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.is_empty(),
+        "declining to park must NOT create a remediation hold; the task stays dispatchable"
+    );
+    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(parked.status, "open", "task stays open and dispatchable");
+    let markers = park_redispatch_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "the redispatch decision records exactly one park-redispatch marker"
+    );
+    assert_eq!(markers[0]["kind"], "no_attempted_remediation");
+}
+
+/// uv3p Part B (AC #2 / 8y3q shape): a park-triggering strike whose CI
+/// `failure_fingerprint` is first-occurrence for the task must dispatch one
+/// remediation session before any park. 8y3q parked on a brand-new merge-queue
+/// failure whose fix was one token. A subsequent strike on the SAME (now-seen)
+/// fingerprint no longer earns a free shot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let mut task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, 1);
+    // Attach a brand-new CI failure fingerprint (the merge-queue signature 8y3q
+    // parked on). The Task field is read directly by the park rung.
+    task.ci_failure_fingerprint = Some("abc123:Merge Queue".to_string());
+
+    // Even WITH two distinct-model pre-submission terminations already on record
+    // (which would otherwise clear the non-attempt bound and park), a novel
+    // fingerprint takes precedence and buys exactly one remediation.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    let handled = actor
+        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .await;
+    assert!(
+        !handled,
+        "a first-occurrence CI fingerprint must dispatch one remediation before any park"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.is_empty(),
+        "the first-occurrence remediation must not create a human-review hold"
+    );
+    let markers = park_redispatch_markers(&repo, &task.id).await;
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["kind"], "first_occurrence_fingerprint");
+    assert_eq!(markers[0]["fingerprint"], "abc123:Merge Queue");
+
+    // The fingerprint is now SEEN. A repeat strike on it falls through to the
+    // attempted-remediation gate, which — with two non-attempt models on record
+    // — parks.
+    let handled_again = actor
+        .route_planner_intervention(&task, "worker", "second strike", None, 5)
+        .await;
+    assert!(
+        handled_again,
+        "a repeat strike on the now-seen fingerprint no longer earns a free shot; it parks on the non-attempt bound"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "the repeat strike parks on a single human-review hold"
+    );
+}
+
+/// uv3p Part B (AC #3): after two consecutive non-attempt terminations across
+/// DIFFERENT models the task parks, and the reason names the terminated
+/// sessions/models — never the templated "same acceptance criteria kept
+/// failing" text that five of five 2026-07-04 parks asserted falsely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // Two post-intervention sessions terminated pre-submission across DIFFERENT
+    // models — the non-attempt bound (default 2) is reached.
+    seed_terminated_post_intervention_sessions(
+        &db,
+        &tx,
+        &task.id,
+        &["anthropic/claude-x", "openai/gpt-y"],
+    )
+    .await;
+
+    let handled = actor.maybe_intervene_on_stuck_task(&task).await;
+    assert!(
+        handled,
+        "two non-attempt terminations reach the bound and park"
+    );
+
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "park holds the source on one remediation"
+    );
+    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+
+    // The park reason (carried in the remediation description) names the models
+    // and never uses the templated phrasing.
+    assert!(
+        remediation.description.contains("anthropic/claude-x")
+            && remediation.description.contains("openai/gpt-y"),
+        "park reason must name the terminated models; got: {}",
+        remediation.description
+    );
+    assert!(
+        remediation
+            .description
+            .contains("terminated pre-submission"),
+        "park reason must describe the pre-submission terminations; got: {}",
+        remediation.description
+    );
+    assert!(
+        !remediation
+            .description
+            .contains("same acceptance criteria kept failing"),
+        "park reason must NEVER contain the templated phrasing when zero submissions occurred; got: {}",
+        remediation.description
+    );
+}
+
+/// uv3p Part C (AC #4 / ygj0 shape): closing a human-review hold records a
+/// consumed-hold marker; the park evaluator ignores pre-release evidence, so
+/// re-running it on UNCHANGED counters does not spawn a duplicate hold. The
+/// original incident spawned a duplicate hold within ~150ms of releasing the
+/// source on the still-stale `intervention_count=1, total_reopen_count=6`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_hold_records_consumed_marker_and_prevents_duplicate_hold() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Park the task (second strike with two attempted-then-failed remediations).
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+    assert!(
+        actor.maybe_intervene_on_stuck_task(&task).await,
+        "task parks"
+    );
+
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(blockers.len(), 1, "one hold blocker after park");
+    let hold_id = blockers[0].task_id.clone();
+
+    let quality_before = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert!(
+        quality_before >= REOPEN_INTERVENTION_THRESHOLD,
+        "pre-release quality strikes are at/above threshold"
+    );
+
+    // A human closes the hold — releases the source and stamps the consumed-hold
+    // marker on it.
+    repo.transition(
+        &hold_id,
+        djinn_core::models::TransitionAction::Close,
+        "human",
+        "user",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // The marker makes the pre-release strike ledger read as consumed.
+    let resolved_at = repo.human_review_resolved_at(&task.id).await.unwrap();
+    assert!(
+        resolved_at.is_some(),
+        "closing the hold must stamp human_review_resolved_at on the source"
+    );
+    let quality_after = repo.quality_reopen_count(&task.id).await.unwrap();
+    assert_eq!(
+        quality_after, 0,
+        "the park evaluator must ignore pre-release strikes after the hold is consumed"
+    );
+
+    // Re-run the park evaluator on the UNCHANGED counters — it must NOT re-park
+    // or spawn a duplicate hold (the ygj0 fix).
+    let released = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(released.intervention_count, 1, "counters are unchanged");
+    let re_handled = actor.maybe_intervene_on_stuck_task(&released).await;
+    assert!(
+        !re_handled,
+        "the released source must not be re-parked on the pre-release evidence"
+    );
+    let blockers_after = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers_after.iter().all(|b| b.status == "closed"),
+        "closing the hold must not spawn a duplicate hold on unchanged counters"
+    );
+    let open_reviews: Vec<_> = repo
+        .list_by_status("open")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.issue_type == "review" && t.project_id == released.project_id)
+        .collect();
+    assert!(
+        open_reviews.is_empty(),
+        "no new open human-review remediation must exist after the hold is consumed"
     );
 }
 
@@ -1817,6 +2102,11 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
 
+    // uv3p Part B: seed two distinct-model pre-submission terminations so the
+    // attempted-remediation gate reaches its bound and the loop-guard second
+    // strike parks (the behavior the rest of this lifecycle test exercises).
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
     // Route to the loop guard second-strike path (the actual pdn6 hold mechanism).
     let handled = actor
         .route_loop_guard_planner_intervention(
@@ -2116,6 +2406,11 @@ async fn third_provider_failure_without_progress_routes_to_planner() {
     repo.reset_intervention_counters(&task.id).await.unwrap();
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // uv3p Part B: the three provider-error failures are pre-submission
+    // terminations; seed two of them as distinct-model sessions so the park
+    // rung's attempted-remediation bound is reached and the task parks.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // Seed stale backoff state to prove the escalation clears it.
     actor
@@ -2836,6 +3131,10 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         superseded_in_ledger, 1,
         "ledger contains one superseded row"
     );
+
+    // uv3p Part B: park requires an attempted remediation; seed two
+    // distinct-model pre-submission terminations so the bound is reached.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     // The park guard uses the DB-backed quality count, not the in-memory raw
     // counter, so it fires even though the raw count is strictly above the
