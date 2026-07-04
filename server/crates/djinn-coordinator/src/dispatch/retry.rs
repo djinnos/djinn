@@ -164,19 +164,23 @@ impl CoordinatorActor {
         false
     }
 
-    /// The creator's per-user model selection for the lane matching `base_role`
-    /// (plan / implement / review), filtered to providers they still have
-    /// connected. `base_role` selects the lane: planner/architect/chat → plan,
-    /// worker → implement, reviewer → review, lead/unknown → plan.
-    pub(crate) async fn resolve_user_model_priority(
+    /// Resolve a user model priority using an optional explicit lane override.
+    ///
+    /// When `effective_lane` is `Some`, the user's model selection for that lane
+    /// is used instead of the lane implied by `base_role`. This lets post-
+    /// intervention worker dispatches use the plan lane without altering the
+    /// `ModelLane::for_role` mapping.
+    pub(crate) async fn resolve_user_model_priority_with_lane(
         &self,
         created_by_user_id: Option<&str>,
         base_role: &str,
+        effective_lane: Option<djinn_core::models::ModelLane>,
     ) -> Vec<String> {
         #[cfg(test)]
         {
             let _ = created_by_user_id;
             let _ = base_role;
+            let _ = effective_lane;
             #[allow(clippy::needless_return)]
             return Vec::new();
         }
@@ -187,11 +191,10 @@ impl CoordinatorActor {
                 return Vec::new();
             };
             let us_repo = djinn_db::UserSettingsRepository::new(self.db.clone());
+            let lane = effective_lane
+                .unwrap_or_else(|| djinn_core::models::ModelLane::for_role(base_role));
             let models = match us_repo.get(uid).await {
-                Ok(Some(s)) => s
-                    .lanes
-                    .map(|l| l.for_role(base_role).to_vec())
-                    .unwrap_or_default(),
+                Ok(Some(s)) => s.lanes.map(|l| l.lane(lane).to_vec()).unwrap_or_default(),
                 _ => return Vec::new(),
             };
             if models.is_empty() {
@@ -221,6 +224,24 @@ impl CoordinatorActor {
                 })
                 .collect()
         }
+    }
+
+    /// The creator's per-user model selection for the lane matching `base_role`
+    /// (plan / implement / review), filtered to providers they still have
+    /// connected. `base_role` selects the lane: planner/architect/chat → plan,
+    /// worker → implement, reviewer → review, lead/unknown → plan.
+    ///
+    /// Only consumed by the `#[cfg(not(test))]` dispatch-model fallback in
+    /// `resolve_dispatch_models_for_role`; the `#[cfg(test)]` harness stubs that
+    /// fallback out, so this wrapper is (correctly) unused in test builds.
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) async fn resolve_user_model_priority(
+        &self,
+        created_by_user_id: Option<&str>,
+        base_role: &str,
+    ) -> Vec<String> {
+        self.resolve_user_model_priority_with_lane(created_by_user_id, base_role, None)
+            .await
     }
 
     /// Resolve a `provider/model` list for a DB role's `model_preference`.

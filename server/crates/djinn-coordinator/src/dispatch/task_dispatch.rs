@@ -8,6 +8,7 @@ use super::admission::{
     clear_dispatch_cap_observations, observe_dispatch_cap_count, take_dispatch_cap_observations,
 };
 use super::admission::{model_under_user_cap, overlay_inflight_ledger};
+use super::post_intervention_lane;
 use crate::dispatch_pause::{load_dispatch_pause_state, matching_task_dispatch_pause};
 use crate::roles::DispatchContext;
 use djinn_core::clock::{Clock, SystemClock};
@@ -1571,8 +1572,18 @@ impl CoordinatorActor {
             // Final fallback list, precedence: creator's per-user selection →
             // project default-role preference → role base. All scoped to the
             // creator, so selection and runtime resolution stay consistent.
+            //
+            // Post-intervention worker retries (intervention_count >= 1) are
+            // routed to the plan lane when the default-on feature flag is set,
+            // while keeping the `worker` role and `ModelLane::for_role` mapping
+            // unchanged.
+            let effective_lane = post_intervention_lane::effective_dispatch_lane(
+                role,
+                task.intervention_count,
+                post_intervention_lane::use_plan_lane_for_post_intervention_workers(),
+            );
             let user_model_ids = self
-                .resolve_user_model_priority(creator.as_deref(), role)
+                .resolve_user_model_priority_with_lane(creator.as_deref(), role, effective_lane)
                 .await;
             let model_preference_ids = self
                 .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
