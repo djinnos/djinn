@@ -122,6 +122,10 @@ pub use repositories::{
         ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
+    task_arbitration::{
+        ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
+        TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,
+    },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     task_attempt::{
         CreateTaskAttemptParams, FillTaskAttemptParams, GuardDeferTaskAttemptParams,

@@ -3,6 +3,7 @@ use djinn_core::models::task_attempt::{
     TaskAttemptPromptSummary, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN,
 };
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::Result;
@@ -1185,7 +1186,7 @@ mod tests {
             .await;
         assert!(err.is_err());
 
-        let big_tail = "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN +  1);
+        let big_tail = "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN + 1);
         let err = repo
             .fill_nullable_fields(FillTaskAttemptParams {
                 id: &attempt.id,
