@@ -5,16 +5,17 @@
 //! to a list of `(file, start_line, end_line)` hunks, which the bridge
 //! then resolves to symbols via `RepoDependencyGraph::symbols_enclosing`.
 //!
-//! Why shell-out instead of `git2`: this crate already shells out for the
-//! coupling-index pipeline (see [`crate::coupling_index`]) and adding a
-//! `git2` dep would balloon the worker binary. Match the same error /
-//! timeout / process style.
+//! Why owner-crate indirection: this module historically inlined its own
+//! `tokio::process::Command::new("git")` shell-out. To keep the
+//! capability-boundary guard (fztz) clean, the actual git invocation now
+//! goes through `djinn_git::run_git_command_in`, which owns the
+//! safe.directory injection, process-priority lowering, and timeout
+//! machinery — keeping this module focused on parsing.
 
 use std::path::Path;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::process::Command;
 
 const GIT_DIFF_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -73,27 +74,45 @@ pub async fn diff_changed_ranges(
 
 async fn run_git_diff(repo_root: &Path, from: &str, to: &str) -> Result<String, GitDiffError> {
     let range = format!("{from}..{to}");
-    let mut cmd = Command::new("git");
-    cmd.current_dir(repo_root);
-    cmd.arg("diff");
-    cmd.arg("--unified=0");
     // `--no-color`: defensive — colour codes blow up the regex parser.
-    cmd.arg("--no-color");
     // `--no-ext-diff`: side-step user-configured external diff tools.
-    cmd.arg("--no-ext-diff");
-    cmd.arg(&range);
+    let args: Vec<String> = vec![
+        "diff".into(),
+        "--unified=0".into(),
+        "--no-color".into(),
+        "--no-ext-diff".into(),
+        range,
+    ];
 
-    let output = tokio::time::timeout(GIT_DIFF_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| GitDiffError::Timeout(GIT_DIFF_TIMEOUT))??;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        return Err(GitDiffError::GitFailed {
-            status: format!("{}", output.status),
-            stderr,
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let outcome = tokio::time::timeout(
+        GIT_DIFF_TIMEOUT,
+        djinn_git::run_git_command_in(repo_root, args),
+    )
+    .await;
+
+    let out = match outcome {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(match e {
+                djinn_git::GitError::Io(io_err) => GitDiffError::Spawn(io_err),
+                // Convert CommandFailed into the module-local `GitFailed`
+                // variant so callers still see the same shape they always
+                // did (status, stderr), without depending on djinn_git
+                // directly.
+                djinn_git::GitError::CommandFailed { code, stderr, .. } => {
+                    GitDiffError::GitFailed {
+                        status: code.to_string(),
+                        stderr,
+                    }
+                }
+                other => {
+                    return Err(GitDiffError::Parse(format!("git diff failed: {other}")));
+                }
+            });
+        }
+        Err(_elapsed) => return Err(GitDiffError::Timeout(GIT_DIFF_TIMEOUT)),
+    };
+    Ok(out.stdout)
 }
 
 /// Parse a `git diff --unified=0` blob into per-hunk [`ChangedRange`]s.
@@ -341,17 +360,11 @@ diff --git a/src/y.rs b/src/y.rs
         let root = tmp.path().to_path_buf();
 
         async fn run(root: &std::path::Path, args: &[&str]) {
-            let out = Command::new("git")
-                .current_dir(root)
-                .args(args)
-                .output()
+            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let out = djinn_git::run_git_command_in(root, owned)
                 .await
                 .expect("git");
-            assert!(
-                out.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            assert!(out.code == 0, "git {args:?} failed: {}", out.stderr);
         }
         run(&root, &["init", "-q", "-b", "main"]).await;
         run(&root, &["config", "user.email", "t@t"]).await;
@@ -366,13 +379,7 @@ diff --git a/src/y.rs b/src/y.rs
         run(&root, &["commit", "-q", "-m", "seed"]).await;
 
         // Capture base sha.
-        let base_out = Command::new("git")
-            .current_dir(&root)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .await
-            .expect("rev-parse");
-        let base_sha = String::from_utf8_lossy(&base_out.stdout).trim().to_string();
+        let base_sha = djinn_git::head_commit_sha(&root).await.expect("rev-parse");
 
         // Modify line 2 → produce a hunk at line 2.
         tokio::fs::write(
@@ -384,13 +391,7 @@ diff --git a/src/y.rs b/src/y.rs
         run(&root, &["add", "a.rs"]).await;
         run(&root, &["commit", "-q", "-m", "rename two"]).await;
 
-        let head_out = Command::new("git")
-            .current_dir(&root)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .await
-            .expect("rev-parse");
-        let head_sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+        let head_sha = djinn_git::head_commit_sha(&root).await.expect("rev-parse");
 
         let ranges = diff_changed_ranges(&root, &base_sha, &head_sha)
             .await

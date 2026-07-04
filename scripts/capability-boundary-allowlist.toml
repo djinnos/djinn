@@ -140,37 +140,11 @@ capability = "git"
 	cleanup_issue = "epic/fztz"
 
 # djinn-graph
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-graph/src/canonical_graph.rs"
-	matcher = "tokio::process::Command::new(\"git\")"
-	owner = "team/graph"
-	rationale = "Pre-existing async git shell-out for canonical graph; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-graph/src/coupling_index.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/graph"
-	rationale = "Pre-existing git shell-out for coupling index; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-graph/src/git_diff.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/graph"
-	rationale = "Pre-existing git shell-out for git diff operations; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-graph/src/index_tree.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/graph"
-	rationale = "Pre-existing git shell-out for index tree; to be migrated to djinn-git."
-	cleanup_issue = "epic/fztz"
+# All four previously-baseline git shell-outs in `djinn-graph` were migrated
+# behind `djinn-git` owner-crate helpers (run_git_command_in / head_commit_sha
+# / rev_list_count) by cgcl. The detectors no longer match these files, so
+# the corresponding allowlist entries were removed to keep the allowlist in
+# sync with the actual source-call baseline.
 
 # djinn-k8s
 [[entries]]

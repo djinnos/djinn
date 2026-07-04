@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use djinn_core::clock::{Clock, SystemClock};
-use tokio::process::Command;
+use djinn_git::CommandOutput;
 
 /// Reserved file-name prefix for server-managed entries under
 /// `.djinn/worktrees/`.  Task-worktree enumeration paths must skip any entry
@@ -251,21 +251,15 @@ impl IndexTree {
 }
 
 async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
+    let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    // `run_git_command_in` returns `Err(GitError::CommandFailed { .. })`
+    // on non-zero exit, so a successful `Ok` here means git exited 0 — we
+    // surface its trimmed stdout regardless of stderr (git often emits
+    // advisory hints to stderr on a successful run).
+    let CommandOutput { stdout, .. } = djinn_git::run_git_command_in(cwd, owned_args)
         .await
         .with_context(|| format!("spawn git {} in {}", args.join(" "), cwd.display()))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git {} failed in {}: {}",
-            args.join(" "),
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(stdout.trim().to_string())
 }
 
 async fn read_head_sha(path: &Path) -> Result<String> {

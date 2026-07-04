@@ -11,9 +11,10 @@ use std::time::Duration;
 
 use crate::test_support::{checkout_branch, init_repo_with_main_commit, write_and_commit};
 use crate::{
-    GitError, delete_branch, is_non_fast_forward_error, is_retryable_git_command_error,
-    is_transient_network_error, rebase_with_retry, retry_delay, run_git_command,
-    run_git_command_with_timeout, unmerged_files,
+    GitError, delete_branch, head_commit_sha, is_non_fast_forward_error,
+    is_retryable_git_command_error, is_transient_network_error, rebase_with_retry, retry_delay,
+    rev_list_count, run_git_command, run_git_command_in, run_git_command_with_timeout,
+    run_git_command_with_timeout_in, unmerged_files,
 };
 
 // ── Helper ──────────────────────────────────────────────────────────────────
@@ -571,4 +572,142 @@ async fn delete_branch_removes_local_even_when_remote_delete_fails() {
         "local branch should be deleted; list output: {}",
         String::from_utf8_lossy(&list_after.stdout)
     );
+}
+
+// ── Borrowed-cwd helpers (added by cgcl / Wave 1 of fztz) ──────────────────
+//
+// The borrowed-cwd variants were added so call sites that already hold a
+// `&Path` (e.g. an `IndexTreeHandle::path()` borrow, a tempdir project root)
+// don't have to clone a `PathBuf` just to satisfy the original signatures.
+// They exist specifically to keep djinn-graph (and future migrations) on the
+// owner crate.
+
+/// `run_git_command_in(&Path, …)` must produce the same `CommandOutput` as
+/// `run_git_command(PathBuf, …)` for an equivalent invocation — both wrap
+/// the same underlying helper and should agree on stdout, stderr, and code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_git_command_in_matches_run_git_command() {
+    let fixture = init_repo_with_main_commit();
+    let repo_path = fixture.path();
+    let args = vec!["status".into(), "--short".into()];
+
+    let owned = run_git_command(repo_path.to_path_buf(), args.clone()).await;
+    let borrowed = run_git_command_in(repo_path, args).await;
+    assert!(owned.is_ok(), "owned variant should succeed: {owned:?}");
+    assert!(
+        borrowed.is_ok(),
+        "borrowed variant should succeed: {borrowed:?}"
+    );
+    let owned = owned.unwrap();
+    let borrowed = borrowed.unwrap();
+    assert_eq!(owned.code, borrowed.code, "exit codes must agree");
+    assert_eq!(
+        owned.stdout, borrowed.stdout,
+        "stdout must agree between owned/borrowed variants"
+    );
+    assert_eq!(
+        owned.stderr, borrowed.stderr,
+        "stderr must agree between owned/borrowed variants"
+    );
+}
+
+/// `run_git_command_with_timeout_in(&Path, …)` should map a deliberate
+/// failure into the same `CommandFailed` error as the owned variant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_git_command_with_timeout_in_returns_command_failed() {
+    let fixture = init_repo_with_main_commit();
+    let repo_path = fixture.path();
+    let args = vec!["fetch".into(), "nonexistent-remote".into(), "main".into()];
+    let timeout = Duration::from_secs(5);
+
+    let err = run_git_command_with_timeout_in(repo_path, args, timeout)
+        .await
+        .expect_err("fetch from missing remote should fail");
+    match err {
+        GitError::CommandFailed { code, stderr, .. } => {
+            assert_ne!(code, 0, "exit code must be non-zero");
+            assert!(
+                !stderr.is_empty(),
+                "stderr should contain the git error message"
+            );
+        }
+        other => panic!("expected CommandFailed, got: {other:?}"),
+    }
+}
+
+/// `head_commit_sha` should return the SHA of the lone commit in a freshly
+/// initialised repo. We don't compare the value verbatim because the temp
+/// fixture's commit timestamp + author affect only the message — the SHA is
+/// otherwise deterministic for an empty commit graph.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn head_commit_sha_returns_single_commit_sha() {
+    let fixture = init_repo_with_main_commit();
+    let sha = head_commit_sha(fixture.path())
+        .await
+        .expect("head_commit_sha should succeed on a 1-commit repo");
+    assert_eq!(sha.len(), 40, "git SHA should be 40 hex chars, got {sha:?}");
+    assert!(
+        sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "SHA must be hex, got {sha:?}"
+    );
+
+    // The committed README should be present in HEAD's tree.
+    let tree_out = run_git_command(
+        fixture.path().to_path_buf(),
+        vec!["ls-tree".into(), sha, "--".into(), "README.md".into()],
+    )
+    .await
+    .expect("git ls-tree should succeed");
+    assert!(
+        tree_out.stdout.contains("README.md"),
+        "ls-tree stdout should mention README.md, got: {}",
+        tree_out.stdout
+    );
+}
+
+/// `rev_list_count` should return 0 for a single-commit repo and 1 after a
+/// second commit is appended on top of HEAD.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rev_list_count_grows_with_history() {
+    let fixture = init_repo_with_main_commit();
+    let initial = rev_list_count(fixture.path(), "HEAD")
+        .await
+        .expect("rev_list_count on a 1-commit repo");
+    assert_eq!(initial, 1, "fresh repo should have exactly 1 commit");
+
+    write_and_commit(fixture.path(), "CHANGELOG.md", "v0.1.0\n", "second");
+
+    let after = rev_list_count(fixture.path(), "HEAD")
+        .await
+        .expect("rev_list_count after second commit");
+    assert_eq!(after, 2, "after one extra commit, count should be 2");
+
+    // The original commit should be reachable from HEAD so HEAD..HEAD is
+    // empty and HEAD~1..HEAD is exactly one.
+    let head_minus_one = rev_list_count(fixture.path(), "HEAD~1..HEAD")
+        .await
+        .expect("rev_list_count on a one-commit range");
+    assert_eq!(
+        head_minus_one, 1,
+        "HEAD~1..HEAD should walk exactly 1 commit"
+    );
+}
+
+/// `rev_list_count` should surface an error for an unparseable / bogus range
+/// rather than silently returning 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rev_list_count_errors_on_bogus_range() {
+    let fixture = init_repo_with_main_commit();
+    let err = rev_list_count(fixture.path(), "this-ref-does-not-exist..HEAD")
+        .await
+        .expect_err("bogus range should error");
+    // The specific error variant depends on git's exit-code path; we just
+    // assert it's a `GitError` (not a panic), which the type system already
+    // guarantees, plus that the underlying git process actually exited
+    // non-zero (the `code` field of `CommandFailed`).
+    match err {
+        GitError::CommandFailed { code, .. } => assert_ne!(code, 0),
+        GitError::Other(_) | GitError::Io(_) => { /* also acceptable */ }
+        other => panic!("unexpected GitError variant: {other:?}"),
+    }
 }
