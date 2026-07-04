@@ -129,6 +129,12 @@ imagePipeline:
   # anonymous pulls 401 inside kind. Override to the in-cluster registry.
   builderImage: "localhost:5001/djinn-image-builder:dev"
   buildkitd:
+    # The chart default (ghcr.io/djinnos/djinn-buildkitd:latest) only
+    # publishes linux/amd64 — on Apple Silicon the kind node is arm64 and
+    # the pull fails with "no match for platform in manifest". The baked-in
+    # cloud credential helpers are unused locally (Zot auths via htpasswd),
+    # so plain multi-arch moby/buildkit:rootless is the supported fallback.
+    image: docker.io/moby/buildkit:v0.15.2-rootless
     # Local Zot serves plaintext HTTP over ClusterIP — tell buildkitd to
     # not expect TLS. Prod environments that front Zot with an Ingress +
     # TLS should leave this at its chart default (false).
