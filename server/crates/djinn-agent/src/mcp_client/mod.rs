@@ -17,7 +17,10 @@ use std::pin::Pin;
 use regex::Regex;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, CallToolResult, Tool as RmcpTool};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ReadResourceRequestParams, ResourceContents,
+    Tool as RmcpTool,
+};
 use rmcp::service::{Peer, RoleClient};
 use rmcp::transport::{
     StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -358,6 +361,10 @@ struct RoutingState {
     /// Schema fingerprints for each registered tool (namespaced_name → hash).
     /// Used for rename detection during `tools/list_changed` refreshes.
     tool_fingerprints: HashMap<String, u64>,
+    /// Server names that advertised the MCP `resources` capability during
+    /// initialization. Used to gate `list_mcp_resources` / `read_mcp_resource`
+    /// dispatch and schema exposure.
+    resource_capable_servers: HashSet<String>,
 }
 
 impl RoutingState {
@@ -473,6 +480,9 @@ pub struct McpToolRegistry {
     /// Mirrors the `RoutingState` value so consumers can read it without
     /// acquiring the lock.
     server_instructions: BTreeMap<String, String>,
+    /// Snapshot of resource-capable server names for lock-free reads.
+    /// Empty when no connected server advertised the `resources` capability.
+    resource_capable_servers: HashSet<String>,
     #[cfg(test)]
     test_dispatch: Option<Arc<TestDispatchFn>>,
 }
@@ -578,6 +588,186 @@ impl McpToolRegistry {
     /// instructions are omitted.
     pub fn server_instructions(&self) -> &BTreeMap<String, String> {
         &self.server_instructions
+    }
+
+    /// Returns `true` when at least one connected MCP server advertised the
+    /// `resources` capability during initialization.
+    pub fn has_resource_capable_servers(&self) -> bool {
+        !self.resource_capable_servers.is_empty()
+    }
+
+    /// List MCP resources from the given server, or all resource-capable
+    /// servers when `server` is `None`.
+    ///
+    /// Returns a JSON array of resource summary objects or an error string.
+    pub async fn list_resources(&self, server: Option<&str>) -> Result<serde_json::Value, String> {
+        let capable = &self.resource_capable_servers;
+        let (peers_snapshot, timeouts_snapshot) = {
+            let routing = self.routing.read().unwrap();
+            (routing.peers.clone(), routing.request_timeouts.clone())
+        };
+
+        let servers: Vec<String> = match server {
+            Some(s) => {
+                if !capable.contains(s) {
+                    return Err(format!(
+                        "MCP server `{s}` does not support resources (or is not connected)"
+                    ));
+                }
+                vec![s.to_string()]
+            }
+            None => capable.iter().cloned().collect(),
+        };
+
+        if servers.is_empty() {
+            return Ok(serde_json::json!([]));
+        }
+
+        let mut all_resources: Vec<serde_json::Value> = Vec::new();
+        for server_name in &servers {
+            // In test mode with a dispatch function, use a simple stub.
+            #[cfg(test)]
+            if self.test_dispatch.is_some() {
+                all_resources.push(serde_json::json!({
+                    "uri": "test://resource",
+                    "name": "test",
+                    "server": server_name
+                }));
+                continue;
+            }
+
+            let peer = match peers_snapshot.get(server_name) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let timeout_ms = timeouts_snapshot
+                .get(server_name.as_str())
+                .copied()
+                .unwrap_or(McpServerConfig::default_request_timeout_ms());
+            let timeout_duration = Duration::from_millis(timeout_ms);
+
+            match tokio::time::timeout(timeout_duration, peer.list_all_resources()).await {
+                Ok(Ok(resources)) => {
+                    for r in &resources {
+                        let mut entry = serde_json::json!({
+                            "uri": r.uri,
+                            "name": r.name,
+                            "server": server_name,
+                        });
+                        if let Some(ref title) = r.title {
+                            entry["title"] = serde_json::Value::String(title.clone());
+                        }
+                        if let Some(ref desc) = r.description {
+                            entry["description"] = serde_json::Value::String(desc.clone());
+                        }
+                        if let Some(ref mime) = r.mime_type {
+                            entry["mimeType"] = serde_json::Value::String(mime.clone());
+                        }
+                        all_resources.push(entry);
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        error = %e,
+                        "MCP list_resources failed; skipping server"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        server = %server_name,
+                        timeout_ms,
+                        "MCP list_resources timed out; skipping server"
+                    );
+                }
+            }
+        }
+
+        Ok(serde_json::Value::Array(all_resources))
+    }
+
+    /// Read a specific MCP resource by URI from the given server.
+    ///
+    /// Returns the resource content as a text string. Binary or oversized
+    /// (>10 MiB) resources are returned as descriptive omission text rather
+    /// than raw data.
+    pub async fn read_resource(&self, server: &str, uri: &str) -> Result<String, String> {
+        if !self.resource_capable_servers.contains(server) {
+            return Err(format!(
+                "MCP server `{server}` does not support resources (or is not connected)"
+            ));
+        }
+
+        // In test mode with a dispatch function, return a stub.
+        #[cfg(test)]
+        if self.test_dispatch.is_some() {
+            return Ok(format!("test content for {uri} from {server}"));
+        }
+
+        let (peer, timeout_ms) = {
+            let routing = self.routing.read().unwrap();
+            let peer = routing.peers.get(server).cloned();
+            let timeout_ms = routing
+                .request_timeouts
+                .get(server)
+                .copied()
+                .unwrap_or(McpServerConfig::default_request_timeout_ms());
+            (peer, timeout_ms)
+        };
+
+        let peer = peer.ok_or_else(|| format!("MCP server `{server}` peer not found"))?;
+
+        let timeout_duration = Duration::from_millis(timeout_ms);
+
+        // In test mode with a dispatch function, return a stub.
+        #[cfg(test)]
+        if self.test_dispatch.is_some() {
+            return Ok(format!("test content for {uri} from {server}"));
+        }
+
+        let params = ReadResourceRequestParams::new(uri);
+
+        match tokio::time::timeout(timeout_duration, peer.read_resource(params)).await {
+            Ok(Ok(result)) => {
+                let mut text_parts: Vec<String> = Vec::new();
+                for content in &result.contents {
+                    match content {
+                        ResourceContents::TextResourceContents {
+                            uri: content_uri,
+                            mime_type,
+                            text,
+                            ..
+                        } => {
+                            let mime = mime_type.as_deref().unwrap_or("text/plain");
+                            text_parts.push(format!("[{content_uri}] (mime: {mime})\n{text}"));
+                        }
+                        ResourceContents::BlobResourceContents {
+                            uri: content_uri,
+                            mime_type,
+                            ..
+                        } => {
+                            let mime = mime_type.as_deref().unwrap_or("application/octet-stream");
+                            text_parts.push(format!(
+                                "[{content_uri}] (mime: {mime}) \
+                                 <binary content omitted — resource is not text>"
+                            ));
+                        }
+                    }
+                }
+                if text_parts.is_empty() {
+                    Ok(format!("Resource `{uri}` returned no content"))
+                } else {
+                    Ok(text_parts.join("\n\n"))
+                }
+            }
+            Ok(Err(e)) => Err(format!(
+                "MCP read_resource for `{uri}` on server `{server}` failed: {e}"
+            )),
+            Err(_elapsed) => Err(format!(
+                "MCP read_resource for `{uri}` on server `{server}` timed out \
+                 after {timeout_ms}ms"
+            )),
+        }
     }
 
     /// Dispatch a tool call to the MCP server that owns the given tool name.
@@ -779,6 +969,7 @@ pub async fn connect_and_discover(
         server_instructions: BTreeMap::new(),
         unavailable: HashSet::new(),
         tool_fingerprints: HashMap::new(),
+        resource_capable_servers: HashSet::new(),
     }));
 
     let mut tool_to_server: HashMap<String, String> = HashMap::new();
@@ -788,6 +979,7 @@ pub async fn connect_and_discover(
     let mut request_timeouts: HashMap<String, u64> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
     let mut server_instructions: BTreeMap<String, String> = BTreeMap::new();
+    let mut resource_capable_servers_set: HashSet<String> = HashSet::new();
 
     for (name, config) in servers {
         let resolved = match resolve_server_config(name, config, app_state).await {
@@ -899,6 +1091,9 @@ pub async fn connect_and_discover(
                 has_logging_capability = info.capabilities.logging.is_some(),
                 "MCP server initialize capabilities"
             );
+            if info.capabilities.resources.is_some() {
+                resource_capable_servers_set.insert(name.clone());
+            }
             if let Some(instr) = info.instructions.as_deref() {
                 let trimmed = instr.trim();
                 if !trimmed.is_empty() {
@@ -974,12 +1169,14 @@ pub async fn connect_and_discover(
         r.request_timeouts = request_timeouts;
         r.tool_fingerprints = tool_fingerprints;
         r.server_instructions = server_instructions.clone();
+        r.resource_capable_servers = resource_capable_servers_set.clone();
     }
 
     Some(McpToolRegistry {
         routing,
         tool_schemas,
         server_instructions,
+        resource_capable_servers: resource_capable_servers_set,
         #[cfg(test)]
         test_dispatch: None,
     })

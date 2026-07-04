@@ -149,6 +149,47 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
         self.mcp_registry
             .and_then(|registry| registry.server_for_tool(tool_name))
     }
+    fn is_resource_tool(&self, tool_name: &str) -> bool {
+        tool_name == "list_mcp_resources" || tool_name == "read_mcp_resource"
+    }
+    fn dispatch_resource_tool<'a>(
+        &'a self,
+        tool_name: &'a str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
+    {
+        let registry = self.mcp_registry;
+        let tool = tool_name.to_string();
+        Box::pin(async move {
+            let Some(registry) = registry else {
+                return Err("MCP registry not available".to_string());
+            };
+            let args = arguments.unwrap_or_default();
+            match tool.as_str() {
+                "list_mcp_resources" => {
+                    let server = args
+                        .get("server")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let result = registry.list_resources(server.as_deref()).await?;
+                    serde_json::to_string_pretty(&result)
+                        .map_err(|e| format!("failed to serialize resource list: {e}"))
+                }
+                "read_mcp_resource" => {
+                    let server = args
+                        .get("server")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing required argument `server` (string)")?;
+                    let uri = args
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .ok_or("missing required argument `uri` (string)")?;
+                    registry.read_resource(server, uri).await
+                }
+                _ => Err(format!("unknown resource tool: {tool}")),
+            }
+        })
+    }
     fn clear_stash(&self) {
         self.output_stash
             .lock()

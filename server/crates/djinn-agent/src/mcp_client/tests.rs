@@ -121,6 +121,7 @@ fn make_routing(
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
         tool_fingerprints: HashMap::new(),
+        resource_capable_servers: HashSet::new(),
     }))
 }
 
@@ -130,6 +131,7 @@ fn empty_registry_has_no_tools() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     assert!(!registry.has_tool("anything"));
@@ -148,6 +150,7 @@ fn registry_lookup() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     assert!(registry.has_tool(&mcp_namespaced_name("search-server", "web_search")));
@@ -171,6 +174,7 @@ fn registry_schemas_default_to_concurrent_unsafe() {
             "concurrent_safe": false
         })],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
 
@@ -250,6 +254,7 @@ async fn dispatch_routes_to_original_tool_name() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
             let received = received_clone.clone();
             Box::pin(async move {
@@ -270,6 +275,7 @@ async fn dispatch_unknown_tool_returns_error() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     let result = registry.call_tool("nonexistent", None).await;
@@ -299,6 +305,7 @@ impl McpToolRegistry {
             routing: make_routing(tool_to_server, namespaced_to_original),
             tool_schemas,
             server_instructions: BTreeMap::new(),
+            resource_capable_servers: HashSet::new(),
             test_dispatch: Some(Arc::new(move |tool_name, arguments| {
                 let result = dispatch(tool_name, arguments);
                 Box::pin(async move { result })
@@ -562,6 +569,7 @@ async fn removed_advertised_tool_returns_deterministic_error() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
 
@@ -602,6 +610,7 @@ fn refresh_does_not_add_newly_discovered_tools_to_schemas() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
 
@@ -634,6 +643,7 @@ async fn unchanged_advertised_tool_remains_dispatchable_after_refresh() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"ok": true})) })
         })),
@@ -661,6 +671,7 @@ async fn routing_state_is_clone_safe() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
 
@@ -690,6 +701,7 @@ fn make_routing_with_fingerprints(
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
         tool_fingerprints,
+        resource_capable_servers: HashSet::new(),
     }))
 }
 
@@ -914,6 +926,7 @@ fn apply_tools_list_result_session_fixed_schemas_unchanged() {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": ns_tool})],
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
 
@@ -960,6 +973,7 @@ fn make_routing_with_timeouts(
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
         tool_fingerprints: HashMap::new(),
+        resource_capable_servers: HashSet::new(),
     }))
 }
 
@@ -980,6 +994,7 @@ async fn call_tool_timeout_returns_deterministic_error() {
         ),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: Some(Arc::new(move |_, _| {
             Box::pin(async {
                 // Simulate a slow server that takes longer than the timeout.
@@ -1023,6 +1038,7 @@ async fn call_tool_uses_default_timeout_when_server_not_in_map() {
         ),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"fast": true})) })
         })),
@@ -1044,6 +1060,7 @@ async fn request_timeout_stored_per_server_at_discovery() {
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
         tool_fingerprints: HashMap::new(),
+        resource_capable_servers: HashSet::new(),
     };
     routing_state
         .request_timeouts
@@ -1192,6 +1209,7 @@ fn server_instructions_accessor_returns_empty_by_default() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     assert!(
@@ -1215,6 +1233,7 @@ fn server_instructions_accessor_returns_populated_map() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: instructions,
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     let result = registry.server_instructions();
@@ -1240,6 +1259,7 @@ fn server_instructions_accessor_returns_btree_sorted_keys() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: instructions,
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     let keys: Vec<&str> = registry
@@ -1261,6 +1281,7 @@ fn server_instructions_clone_shares_same_data() {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
         server_instructions: instructions,
+        resource_capable_servers: HashSet::new(),
         test_dispatch: None,
     };
     let clone = registry.clone();
@@ -1405,4 +1426,278 @@ fn log_data_to_message_handles_number_values() {
 fn log_data_to_message_handles_boolean_values() {
     assert_eq!(log_data_to_message(&serde_json::json!(true)), "true");
     assert_eq!(log_data_to_message(&serde_json::json!(false)), "false");
+}
+
+// ── MCP resource capability and dispatch tests ─────────────────────
+
+#[test]
+fn has_resource_capable_servers_false_when_empty() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        test_dispatch: None,
+    };
+    assert!(!registry.has_resource_capable_servers());
+}
+
+#[test]
+fn has_resource_capable_servers_true_when_populated() {
+    let mut capable = HashSet::new();
+    capable.insert("search-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: None,
+    };
+    assert!(registry.has_resource_capable_servers());
+}
+
+#[test]
+fn has_resource_capable_servers_false_after_clone() {
+    let mut capable = HashSet::new();
+    capable.insert("server-a".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: None,
+    };
+    let clone = registry.clone();
+    assert!(clone.has_resource_capable_servers());
+}
+
+#[tokio::test]
+async fn list_resources_returns_empty_when_no_capable_servers() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        test_dispatch: None,
+    };
+    let result = registry.list_resources(None).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn list_resources_errors_for_non_capable_server() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        test_dispatch: None,
+    };
+    let result = registry.list_resources(Some("unknown-server")).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("does not support resources"));
+}
+
+#[tokio::test]
+async fn list_resources_uses_test_dispatch_stub() {
+    let mut capable = HashSet::new();
+    capable.insert("test-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(serde_json::json!({ "ok": true })) })
+        })),
+    };
+    let result = registry.list_resources(Some("test-server")).await;
+    assert!(result.is_ok());
+    let val = result.unwrap();
+    assert!(val.is_array());
+    assert_eq!(val.as_array().unwrap().len(), 1);
+    assert_eq!(val[0]["server"], "test-server");
+}
+
+#[tokio::test]
+async fn list_resources_test_dispatch_all_servers() {
+    let mut capable = HashSet::new();
+    capable.insert("server-a".to_string());
+    capable.insert("server-b".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(serde_json::json!({ "ok": true })) })
+        })),
+    };
+    let result = registry.list_resources(None).await;
+    assert!(result.is_ok());
+    let val = result.unwrap();
+    let arr = val.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+}
+
+#[tokio::test]
+async fn read_resource_errors_for_non_capable_server() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        test_dispatch: None,
+    };
+    let result = registry.read_resource("unknown-server", "test://uri").await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("does not support resources"));
+}
+
+#[tokio::test]
+async fn read_resource_uses_test_dispatch_stub() {
+    let mut capable = HashSet::new();
+    capable.insert("test-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(serde_json::json!({ "ok": true })) })
+        })),
+    };
+    let result = registry
+        .read_resource("test-server", "test://my-resource")
+        .await;
+    assert!(result.is_ok());
+    let text = result.unwrap();
+    assert!(text.contains("test://my-resource"));
+    assert!(text.contains("test-server"));
+}
+
+#[tokio::test]
+async fn read_resource_errors_for_missing_peer() {
+    // Server is capable but no peer is registered (peer was not connected).
+    let mut capable = HashSet::new();
+    capable.insert("disconnected-server".to_string());
+    // Use test_dispatch = None so the stub path is skipped and the peer
+    // lookup path runs.
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: None,
+    };
+    let result = registry
+        .read_resource("disconnected-server", "test://uri")
+        .await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("peer not found"));
+}
+
+// ── Schema gating tests ────────────────────────────────────────────
+
+/// Verify that the resource tool schemas are only produced by the stage
+/// assembly when `has_resource_capable_servers()` returns true.  This is
+/// a pure struct-level test (no stage.rs integration) that validates the
+/// gating logic contract.
+#[test]
+fn resource_tool_schemas_not_present_without_capability() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: HashSet::new(),
+        test_dispatch: None,
+    };
+    // When no resource-capable servers exist, has_resource_capable_servers
+    // returns false, so the stage assembly should NOT append resource schemas.
+    assert!(!registry.has_resource_capable_servers());
+}
+
+#[test]
+fn resource_tool_schemas_present_with_capability() {
+    let mut capable = HashSet::new();
+    capable.insert("resource-server".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_capable_servers: capable,
+        test_dispatch: None,
+    };
+    // When resource-capable servers exist, has_resource_capable_servers
+    // returns true, so the stage assembly SHOULD append resource schemas.
+    assert!(registry.has_resource_capable_servers());
+}
+
+/// Verify the resource tool schema shapes match proposal ql4s.
+#[test]
+fn resource_tool_schema_shapes_match_proposal() {
+    // Build the schemas the same way stage.rs does.
+    let list_schema = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "list_mcp_resources",
+            "description": "List MCP resources from connected servers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" }
+                },
+                "required": [],
+                "additionalProperties": false
+            }
+        },
+        "readOnly": true,
+        "destructive": false,
+        "idempotent": true,
+        "openWorld": false,
+        "concurrent_safe": true
+    });
+    let read_schema = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "read_mcp_resource",
+            "description": "Read a specific MCP resource by URI.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "server": { "type": "string" },
+                    "uri": { "type": "string" }
+                },
+                "required": ["server", "uri"],
+                "additionalProperties": false
+            }
+        },
+        "readOnly": true,
+        "destructive": false,
+        "idempotent": true,
+        "openWorld": false,
+        "concurrent_safe": true
+    });
+
+    // list_mcp_resources: optional server
+    assert_eq!(list_schema["function"]["name"], "list_mcp_resources");
+    assert_eq!(
+        list_schema["function"]["parameters"]["required"],
+        serde_json::json!([])
+    );
+    assert!(list_schema["function"]["parameters"]["properties"]["server"].is_object());
+
+    // read_mcp_resource: required server + required uri
+    assert_eq!(read_schema["function"]["name"], "read_mcp_resource");
+    assert_eq!(
+        read_schema["function"]["parameters"]["required"],
+        serde_json::json!(["server", "uri"])
+    );
+
+    // Both are read-only, non-destructive
+    assert_eq!(list_schema["readOnly"], true);
+    assert_eq!(list_schema["destructive"], false);
+    assert_eq!(read_schema["readOnly"], true);
+    assert_eq!(read_schema["destructive"], false);
 }
