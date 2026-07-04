@@ -1,0 +1,201 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::error::{DbError, DbResult};
+
+/// Process-wide semaphore guarding `djinn_test_template` bootstrap.
+///
+/// Multiple worker pods or test processes may hit the bare sidecar at the same
+/// time. `CREATE DATABASE` and sqlx migrate both conflict if run concurrently
+/// against the same template DB. A single-process semaphore stops intra-process
+/// races; across pods, the Postgres advisory lock (below) serializes.
+static TEMPLATE_BOOTSTRAP_SEMAPHORE: std::sync::OnceLock<Arc<Semaphore>> =
+    std::sync::OnceLock::new();
+
+fn bootstrap_semaphore() -> Arc<Semaphore> {
+    TEMPLATE_BOOTSTRAP_SEMAPHORE
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+}
+
+/// Advisory lock id used while creating/migrating `djinn_test_template`.
+///
+/// Chosen as a deterministic 64-bit hash of the string "djinn_test_template".
+const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
+
+/// Ensure the `djinn_test_template` database exists and is migrated.
+///
+/// Idempotent: if the template already exists and is marked as a template, this
+/// is a no-op. If it exists but is not marked as a template, it is marked and
+/// migrations are verified. If it does not exist, it is created and migrated.
+///
+/// Uses both a local semaphore (per-process) and a Postgres advisory lock
+/// (cross-process) so parallel tests / worker pods don't collide.
+pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
+    let _permit = acquire_bootstrap_permit().await;
+
+    let admin_url = format!("{server_prefix}/postgres");
+    let opts =
+        sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
+    let mut conn = opts.connect().await.map_err(DbError::from)?;
+
+    // Cross-process serialization: take an advisory lock for the duration of
+    // our maintenance work on the template. This makes multi-pod races safe.
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(TEMPLATE_ADVISORY_LOCK_ID)
+        .execute(&mut conn)
+        .await
+        .map_err(DbError::from)?;
+
+    // Ensure the lock is released even if we error out.
+    struct AdvisoryUnlock<'a>(&'a mut sqlx::postgres::PgConnection);
+    impl Drop for AdvisoryUnlock<'_> {
+        fn drop(&mut self) {
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(TEMPLATE_ADVISORY_LOCK_ID)
+                .execute(&mut *self.0);
+        }
+    }
+    let _unlock = AdvisoryUnlock(&mut conn);
+
+    // Does the template exist?
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_database WHERE datname = 'djinn_test_template'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .map_err(DbError::from)?;
+
+    if exists == 0 {
+        create_and_migrate_template(server_prefix, &mut conn).await?;
+        return Ok(());
+    }
+
+    // Template exists: ensure it is marked as a template and migrations are up
+    // to date. This covers the "someone created the DB but didn't run sqlx" case.
+    sqlx::query(
+        "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'",
+    )
+    .execute(&mut conn)
+    .await
+    .map_err(DbError::from)?;
+
+    drop(conn);
+    verify_template_migrations(server_prefix).await?;
+
+    Ok(())
+}
+
+async fn acquire_bootstrap_permit() -> Option<OwnedSemaphorePermit> {
+    let sem = bootstrap_semaphore();
+    // Don't block forever: if the lock is held for an unexpectedly long time,
+    // fail loudly rather than hang silently. Postgres advisory lock + migrations
+    // take seconds, so a 60s budget is generous.
+    match tokio::time::timeout(Duration::from_secs(60), sem.acquire_owned()).await {
+        Ok(Ok(permit)) => Some(permit),
+        Ok(Err(_)) => None, // semaphore closed; shouldn't happen
+        Err(_) => {
+            tracing::error!("timeout waiting for local template bootstrap permit");
+            None
+        }
+    }
+}
+
+async fn create_and_migrate_template(
+    server_prefix: &str,
+    conn: &mut sqlx::postgres::PgConnection,
+) -> DbResult<()> {
+    sqlx::query("CREATE DATABASE \"djinn_test_template\"")
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
+
+    sqlx::query(
+        "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(DbError::from)?;
+
+    drop(conn);
+
+    run_template_migrations(server_prefix).await
+}
+
+async fn run_template_migrations(server_prefix: &str) -> DbResult<()> {
+    let template_url = format!("{server_prefix}/djinn_test_template");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&template_url)
+        .await
+        .map_err(DbError::from)?;
+    sqlx::migrate!("./migrations_postgres")
+        .run(&pool)
+        .await
+        .map_err(|e: sqlx::migrate::MigrateError| DbError::InvalidData(e.to_string()))?;
+    pool.close().await;
+
+    Ok(())
+}
+
+async fn verify_template_migrations(server_prefix: &str) -> DbResult<()> {
+    let template_url = format!("{server_prefix}/djinn_test_template");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&template_url)
+        .await
+        .map_err(DbError::from)?;
+
+    let migrator = sqlx::migrate!("./migrations_postgres");
+    let expected_versions: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
+    if expected_versions.is_empty() {
+        pool.close().await;
+        return Ok(());
+    }
+
+    let table_exists: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!: i64"
+         FROM information_schema.tables
+         WHERE table_schema = current_schema()
+           AND table_name   = '_sqlx_migrations'"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(DbError::from)?;
+
+    if table_exists == 0 {
+        pool.close().await;
+        return Err(DbError::InvalidData(
+            "djinn_test_template exists but _sqlx_migrations table is missing".to_owned(),
+        ));
+    }
+
+    let applied: Vec<i64> =
+        sqlx::query_as::<_, (i64,)>("SELECT version FROM _sqlx_migrations WHERE success = TRUE")
+            .fetch_all(&pool)
+            .await
+            .map_err(DbError::from)?
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+    let applied_ok: std::collections::HashSet<i64> = applied.into_iter().collect();
+
+    let mut missing: Vec<i64> = expected_versions
+        .iter()
+        .copied()
+        .filter(|v| !applied_ok.contains(v))
+        .collect();
+    missing.sort_unstable();
+
+    pool.close().await;
+
+    if !missing.is_empty() {
+        return Err(DbError::InvalidData(format!(
+            "djinn_test_template is behind the binary — missing migrations: {missing:?}"
+        )));
+    }
+
+    Ok(())
+}

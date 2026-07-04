@@ -8,6 +8,7 @@ use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
 use crate::migrations;
+use crate::template_bootstrap;
 
 /// Default number of concurrent background full-text "fan-out" searches
 /// (post-session knowledge extraction novelty checks + note consolidation
@@ -498,6 +499,12 @@ impl Database {
                         // already — if it hasn't, the clone fails with a
                         // clear "template database does not exist" error
                         // and the operator knows what to do.
+                        //
+                        // In a worker Pod with a Postgres native sidecar, the
+                        // template is bootstrapped automatically (idempotent,
+                        // advisory-locked) so DB-backed tests can run without
+                        // a CI-only provisioning step.
+                        template_bootstrap::ensure_test_template(&init.server_prefix).await?;
                         clone_postgres_test_template(&init.server_prefix, &init.test_db).await?;
                     }
                     None => {
