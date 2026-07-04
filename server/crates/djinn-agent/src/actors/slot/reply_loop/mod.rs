@@ -12,6 +12,9 @@ pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
 }
 
+#[cfg(test)]
+mod resource_tests;
+
 pub(crate) mod loop_guard {
     pub(crate) use djinn_slot::reply_loop::loop_guard::*;
 }
@@ -209,19 +212,30 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
                                 text,
                                 ..
                             } => {
-                                out.push_str(&format!("Resource: {uri}\n"));
-                                if let Some(mime) = mime_type {
-                                    out.push_str(&format!("MIME: {mime}\n"));
+                                let rendered_len = text.len();
+                                if rendered_len > crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES {
+                                    out.push_str(&format!(
+                                        "Resource: {uri}\nMIME: {}\n[resource omitted: {rendered_len} bytes exceeds {} MiB limit]",
+                                        mime_type.as_deref().unwrap_or("text/plain"),
+                                        crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES / (1024 * 1024)
+                                    ));
+                                } else {
+                                    out.push_str(&format!("Resource: {uri}\n"));
+                                    if let Some(mime) = mime_type {
+                                        out.push_str(&format!("MIME: {mime}\n"));
+                                    }
+                                    out.push_str(text);
                                 }
-                                out.push_str(text);
                             }
                             rmcp::model::ResourceContents::BlobResourceContents {
                                 uri,
                                 mime_type,
+                                blob,
                                 ..
                             } => {
+                                let size = blob.len();
                                 out.push_str(&format!(
-                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted]",
+                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted: {size} bytes]",
                                     mime_type.as_deref().unwrap_or("application/octet-stream")
                                 ));
                             }
