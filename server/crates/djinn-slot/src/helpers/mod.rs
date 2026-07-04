@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::host::SlotContext;
-use djinn_core::models::Task;
+use djinn_core::models::{ReopenLedgerEntry, Task};
 use djinn_db::ActivityQuery;
 use djinn_db::ProjectRepository;
 use djinn_db::TaskRepository;
@@ -64,11 +64,11 @@ pub use code_context::{
 pub(crate) use feedback::log_snippet;
 #[allow(unused_imports)]
 pub use feedback::{
-    COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, budget_combined_sections,
-    conflict_context_for_dispatch, default_target_branch, extract_worker_context,
-    format_command_details, initial_user_message_for_task, load_task, parse_conflict_metadata,
-    pr_review_feedback_context, raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics,
-    runtime_fs_diagnostics,
+    COMBINED_BRIEF_SECTION_FLOOR_CHARS, COMBINED_BRIEF_TOTAL_CHARS, LEDGER_BUDGET_CHARS,
+    budget_combined_sections, conflict_context_for_dispatch, default_target_branch,
+    extract_worker_context, format_command_details, format_reopen_ledger,
+    initial_user_message_for_task, load_task, parse_conflict_metadata, pr_review_feedback_context,
+    raw_ci_feedback_in_cycle, recent_feedback, runtime_env_diagnostics, runtime_fs_diagnostics,
 };
 pub use provider_resolution::{
     ProviderCredential, auth_method_for_provider, capabilities_for_provider, default_base_url,
