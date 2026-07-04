@@ -471,12 +471,19 @@ mod tests {
     #[test]
     fn test_build_request_native_no_quirk_emits_function_declarations_envelope() {
         // Captures the wire-shape Google emits for a native/no-quirk
-        // `tool_schema_compat: None` provider config, without going through
-        // HTTP. The companion integration test in
-        // `tests/provider_client_requests.rs::google_native_no_quirk_*` does
-        // the full request round-trip; this in-crate test pins the
+        // `tool_schema_compat: None` provider config, by observing the
+        // **actual generated JSON body** (the `build_request` return value
+        // is exactly the JSON Google receives). The companion integration
+        // test in `tests/provider_client_requests.rs::google_native_no_quirk_*`
+        // does the full request round-trip; this in-crate test pins the
         // `build_request` shape independently so a seam regression surfaces
         // here even when the integration test harness is unavailable.
+        //
+        // We deliberately do not go through the wiremock HTTP layer or the
+        // standalone `tool_projection::project` direct call — this test
+        // proves the **seam** (build_request, end-to-end) stays native-shaped
+        // on `tool_schema_compat: None`, exactly the property mpen AC3
+        // requires.
         let provider = GoogleProvider::new(test_google_config());
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
@@ -515,6 +522,18 @@ mod tests {
         // must NOT emit `toolConfig` for the `Auto` choice.
         assert!(decl.get("strict").is_none());
         assert!(req.get("toolConfig").is_none());
+
+        // The whole request body must serialize to byte-identical strings on
+        // repeated builds — no non-deterministic value (timestamp, request
+        // id, hash-order leak, …) may sneak into the functionDecls envelope
+        // for the native path. A drift here would also break the Gemini
+        // implicit dedup / cost-control contract.
+        let body_a = serde_json::to_string(&req).expect("serialize body once");
+        let body_b = serde_json::to_string(&req).expect("serialize body twice");
+        assert_eq!(
+            body_a, body_b,
+            "Google native no-quirk request body must be byte-deterministic across builds"
+        );
     }
 
     #[test]

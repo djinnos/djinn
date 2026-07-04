@@ -342,3 +342,92 @@ fn test_cache_control_under_cap_is_unchanged() {
     );
     assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
 }
+
+// ─── mpen: native no-quirk (`tool_schema_compat: None`) Anthropic wire shape ──
+//
+// The companion tests for the Moonshot-compat path and the snake-case
+// `input_schema` shape live in `tests/cache.rs` and `tests/streaming.rs`.
+// What was missing in the e2e layer was an explicit **request-body** check
+// that the RMCP camelCase `inputSchema` source shape (the one djinn's tool
+// registry actually hands to providers) survives the Anthropic seam
+// unmodified when `tool_schema_compat` is `None`: the field conversion to
+// `input_schema` must run, the schema body itself must be forwarded
+// verbatim, and the entire serialized request must be byte-deterministic
+// across two builds so any non-deterministic leak (a timestamp, a hash-order
+// leak, etc.) surfaces here.
+//
+// This test observes the actual `build_request` JSON value — not the
+// `tool_projection::project` direct output — so it proves the seam as a
+// whole, not just the shared projection core.
+#[test]
+fn mpen_native_no_quirk_anthropic_input_schema_envelope() {
+    let provider = test_provider();
+    let mut conv = Conversation::default();
+    conv.push(crate::message::Message::user("hello"));
+
+    // Compact RMCP-shaped fixture: every keyword a Moonshot rewrite would
+    // touch at the Anthropic seam is included so an accidental `Some(...)`
+    // slipping through and triggering a Moonshot strip is obvious in the
+    // failure message.
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "point": {
+                "$ref": "#/$defs/point",
+                "description": "should be preserved verbatim for native Anthropic",
+                "prefixItems": [{"type": "number"}, {"type": "number"}],
+                "unevaluatedItems": false
+            }
+        },
+        "$defs": {
+            "point": {"type": "object"}
+        }
+    });
+
+    // RMCP source shape only — `inputSchema`, no `input_schema` alias.
+    let tools = vec![json!({
+        "name": "annotate",
+        "description": "Annotate something",
+        "inputSchema": schema.clone(),
+    })];
+
+    let req = provider.build_request(&conv, &tools, None);
+    let tool = &req["tools"][0];
+
+    // Anthropic envelope: NO top-level `type`, just `name`/`description`/`input_schema`.
+    assert!(tool.get("type").is_none());
+    assert_eq!(tool["name"], "annotate");
+    assert_eq!(tool["description"], "Annotate something");
+    // RMCP camelCase key was converted; no stray `inputSchema` on the wire.
+    assert!(
+        tool.get("inputSchema").is_none(),
+        "Anthropic wire format must not leak the RMCP `inputSchema` key"
+    );
+    let input_schema = &tool["input_schema"];
+    assert_eq!(input_schema["type"], "object");
+    // Schema body forwarded verbatim — no compat rewrites applied on the
+    // native path, every Moonshot-stripped keyword survives.
+    assert_eq!(input_schema["$defs"]["point"]["type"], "object");
+    assert!(input_schema["properties"]["point"].get("$ref").is_some());
+    assert!(
+        input_schema["properties"]["point"]
+            .get("prefixItems")
+            .is_some()
+    );
+    assert!(
+        input_schema["properties"]["point"]
+            .get("unevaluatedItems")
+            .is_some()
+    );
+
+    // The whole request body must serialize to byte-identical strings on
+    // repeated builds — no non-deterministic value (timestamp,
+    // HashMap-iteration-order leak, ID, …) may sneak into the cached
+    // prefix that the Anthropic `cache_control` marker seals.
+    let body_a = serde_json::to_string(&req).expect("serialize body once");
+    let body_b = serde_json::to_string(&req).expect("serialize body twice");
+    assert_eq!(
+        body_a, body_b,
+        "Anthropic native no-quirk request must be byte-deterministic across builds"
+    );
+}
