@@ -465,6 +465,77 @@ pub async fn create_test_task(
     .expect("create task")
 }
 
+/// Pre-built test fixture: DB + project + epic + task.
+/// Returns `(db, project, epic, task)` to reduce the 4-call setup pattern
+/// repeated across nearly every test module.
+pub struct FullFixture {
+    pub db: Database,
+    pub project: djinn_core::models::Project,
+    pub epic: djinn_core::models::Epic,
+    pub task: djinn_core::models::Task,
+}
+
+/// Pre-built test fixture: DB + SlotContext + project + epic + task.
+/// Returns the complete fixture including the SlotContext so tests don't
+/// need to construct it separately.
+pub struct ContextFixture {
+    pub db: Database,
+    pub ctx: SlotContext,
+    pub project: djinn_core::models::Project,
+    pub epic: djinn_core::models::Epic,
+    pub task: djinn_core::models::Task,
+}
+
+pub async fn seed_context_fixture() -> ContextFixture {
+    let db = create_test_db();
+    let ctx = agent_context_from_db(db.clone(), CancellationToken::new());
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    }
+}
+
+pub async fn seed_full_fixture() -> FullFixture {
+    let db = create_test_db();
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let task = create_test_task(&db, &project.id, &epic.id).await;
+    FullFixture {
+        db,
+        project,
+        epic,
+        task,
+    }
+}
+
+/// Generic tool schema with `concurrent_safe: false` (default for most tests).
+pub fn dummy_tool_schema(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": { "name": name, "description": "test", "parameters": {"type": "object"} },
+        "concurrent_safe": false
+    })
+}
+
+/// Tool schema with explicit `concurrent_safe` flag.
+pub fn dummy_tool_schema_with_safety(name: &str, concurrent_safe: bool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": { "name": name, "description": "test", "parameters": {"type": "object"} },
+        "readOnly": concurrent_safe,
+        "destructive": false,
+        "idempotent": concurrent_safe,
+        "openWorld": false,
+        "concurrent_safe": concurrent_safe
+    })
+}
+
 /// Pre-scripted `LlmProvider` for tests. Each "turn" is a list of
 /// `StreamEvent`s that will be returned in order.
 pub struct FakeProvider {

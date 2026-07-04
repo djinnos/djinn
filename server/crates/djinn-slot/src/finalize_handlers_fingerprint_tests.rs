@@ -63,12 +63,13 @@ async fn create_run_with_workspace(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
     let _run_id = create_run_with_workspace(
         &db,
@@ -100,12 +101,13 @@ async fn rejected_review_records_fingerprint_when_worktree_has_diff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // Create a clean git repo with no dirty changes.
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-nodiff-")
@@ -157,12 +159,13 @@ async fn rejected_review_skips_persistence_when_worktree_is_nodiff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_review_skips_persistence_when_no_worktree() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     // Task run with no workspace_path.
     let _run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
     let payload = Some(serde_json::json!({
@@ -182,12 +185,13 @@ async fn rejected_review_skips_persistence_when_no_worktree() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_review_does_not_record_rejected_fingerprint() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
     let _run_id = create_run_with_workspace(
         &db,
@@ -216,12 +220,13 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
     // Simulate: task run 1 records a rejected fingerprint, then a new
     // task run 2 is created (redispatch). The latest_for_task query
     // must still see the rejection from run 1.
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let worktree = init_git_repo_with_dirty_file();
     let run1_id = create_run_with_workspace(
         &db,
@@ -275,12 +280,13 @@ async fn rejected_fingerprint_persists_across_task_run_boundaries() {
 async fn record_rejected_integrity_entry_direct_call_increments_streak() {
     // Test the shared helper directly: two consecutive rejections should
     // increment the streak from 0→1→2.
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
     // First rejection.
     record_rejected_integrity_entry(
@@ -342,15 +348,15 @@ async fn record_rejected_integrity_entry_direct_call_increments_streak() {
 /// deterministic digests for identical worktree state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_helper() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let ctx =
         test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
     // Create a single shared worktree with dirty changes.
     let worktree = init_git_repo_with_dirty_file();
     let worktree_path = worktree.path().to_str().unwrap().to_string();
-    let task_accepted = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task_accepted = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let run_accepted =
         create_run_with_workspace(&db, &project.id, &task_accepted.id, Some(&worktree_path)).await;
     // Compute the expected fingerprint directly from the shared helper.
@@ -403,7 +409,7 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
         accepted_fingerprint, &expected_digest,
         "accepted fingerprint must match the shared helper digest"
     );
-    let task_rejected = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task_rejected = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let _run_rejected =
         create_run_with_workspace(&db, &project.id, &task_rejected.id, Some(&worktree_path)).await;
     let rejected_payload = Some(serde_json::json!({
@@ -441,12 +447,13 @@ async fn accepted_and_rejected_paths_store_comparable_fingerprints_from_shared_h
 /// to compare the new submission against the stored rejected fingerprint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
-    let db = test_helpers::create_test_db();
-    let ctx =
-        test_helpers::agent_context_from_db(db.clone(), tokio_util::sync::CancellationToken::new());
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let crate::test_helpers::ContextFixture {
+        db,
+        ctx,
+        project,
+        epic,
+        task,
+    } = crate::test_helpers::seed_context_fixture().await;
     let worktree_run1 = init_git_repo_with_dirty_file();
     let run1_id = create_run_with_workspace(
         &db,
@@ -560,7 +567,7 @@ async fn reject_then_redispatch_reloads_latest_fingerprint_by_task_id() {
 /// absent, and a structured event is emitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let events = Arc::new(Mutex::new(
         Vec::<djinn_core::events::DjinnEventEnvelope>::new(),
     ));
@@ -572,9 +579,9 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
             events.lock().expect("events mutex").push(event);
         });
     }
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     // Task run with NO workspace_path (historical case).
     let _run_id = create_run_with_workspace(&db, &project.id, &task.id, None).await;
     let payload = Some(serde_json::json!({
@@ -622,7 +629,7 @@ async fn historical_no_worktree_skips_rejected_fingerprint_and_emits_event() {
 /// structured event is emitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let events = Arc::new(Mutex::new(
         Vec::<djinn_core::events::DjinnEventEnvelope>::new(),
     ));
@@ -634,9 +641,9 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
             events.lock().expect("events mutex").push(event);
         });
     }
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     // Task run with a workspace_path that does not exist on disk.
     let _run_id = create_run_with_workspace(
         &db,
@@ -677,7 +684,7 @@ async fn nonexistent_worktree_path_skips_rejected_fingerprint_and_emits_event() 
 /// remains absent, and a structured event with reason "no_diff" is emitted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let events = Arc::new(Mutex::new(
         Vec::<djinn_core::events::DjinnEventEnvelope>::new(),
     ));
@@ -689,9 +696,9 @@ async fn clean_worktree_skips_rejected_fingerprint_with_nodiff_event() {
             events.lock().expect("events mutex").push(event);
         });
     }
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     // Create a clean git repo with no dirty changes.
     let dir = tempfile::Builder::new()
         .prefix("djinn-test-nodiff-event-")
@@ -840,12 +847,12 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
             remaining_concerns: vec![],
         }
     }
-    let db = test_helpers::create_test_db();
+    let db = crate::test_helpers::create_test_db();
     let events_a = Arc::new(Mutex::new(Vec::new()));
     let ctx_a = ctx_with_events(db.clone(), Arc::clone(&events_a));
-    let project = test_helpers::create_test_project(&db).await;
-    let epic = test_helpers::create_test_epic(&db, &project.id).await;
-    let task_a = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let project = crate::test_helpers::create_test_project(&db).await;
+    let epic = crate::test_helpers::create_test_epic(&db, &project.id).await;
+    let task_a = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let run_a = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
         .create(CreateTaskRunParams {
@@ -878,7 +885,7 @@ async fn settlement_accepted_and_rejected_paths_store_same_review_fingerprint() 
     assert_eq!(review_records[0].diff_fingerprint, shared_fingerprint);
     let events_r = Arc::new(Mutex::new(Vec::new()));
     let ctx_r = ctx_with_events(db.clone(), Arc::clone(&events_r));
-    let task_r = test_helpers::create_test_task(&db, &project.id, &epic.id).await;
+    let task_r = crate::test_helpers::create_test_task(&db, &project.id, &epic.id).await;
     let run_r = uuid::Uuid::now_v7().to_string();
     TaskRunRepository::new(db.clone())
         .create(CreateTaskRunParams {
