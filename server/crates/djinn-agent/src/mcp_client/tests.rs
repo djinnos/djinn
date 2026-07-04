@@ -1,0 +1,896 @@
+use super::*;
+use crate::test_helpers::{agent_context_from_db, create_test_db};
+use djinn_core::events::EventBus;
+use djinn_provider::repos::CredentialRepository;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
+
+fn test_context() -> AgentContext {
+    agent_context_from_db(create_test_db(), CancellationToken::new())
+}
+
+#[test]
+fn namespaced_name_matches_expected_format() {
+    let name = mcp_namespaced_name("My Server", "tool.name!");
+    assert!(name.starts_with("mcp__"));
+    assert!(name.len() <= MCP_NAMESPACED_NAME_MAX_LEN);
+    assert_regex_match(&name);
+}
+
+#[test]
+fn namespaced_name_sanitizes_invalid_characters() {
+    assert_eq!(
+        mcp_namespaced_name("server@foo", "tool/bar.baz"),
+        "mcp__server_foo__tool_bar_baz"
+    );
+    assert_eq!(mcp_namespaced_name("a b", "c"), "mcp__a_b__c");
+    assert_eq!(mcp_namespaced_name("a", "b c"), "mcp__a__b_c");
+}
+
+#[test]
+fn namespaced_name_preserves_alphanumeric_underscore_dash() {
+    assert_eq!(
+        mcp_namespaced_name("A-z_0-9", "tool-1_2"),
+        "mcp__A-z_0-9__tool-1_2"
+    );
+}
+
+#[test]
+fn namespaced_name_handles_empty_segments() {
+    assert_eq!(mcp_namespaced_name("", "tool"), "mcp_____tool");
+    assert_eq!(mcp_namespaced_name("server", ""), "mcp__server___");
+}
+
+#[test]
+fn namespaced_name_truncates_overlong_names() {
+    let server = "a".repeat(100);
+    let tool = "b".repeat(100);
+    let name = mcp_namespaced_name(&server, &tool);
+    assert!(name.starts_with("mcp__"));
+    assert!(name.ends_with("__b"));
+    assert_eq!(name.len(), MCP_NAMESPACED_NAME_MAX_LEN);
+    assert_regex_match(&name);
+}
+
+#[test]
+fn namespaced_name_truncation_is_deterministic() {
+    let server = "x".repeat(200);
+    let tool = "y".repeat(200);
+    let first = mcp_namespaced_name(&server, &tool);
+    let second = mcp_namespaced_name(&server, &tool);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn namespaced_name_truncation_preserves_both_segments() {
+    let server = "server".repeat(20);
+    let tool = "tool".repeat(30);
+    let name = mcp_namespaced_name(&server, &tool);
+    assert!(name.starts_with("mcp__serverserver"));
+    assert!(name.contains("__t"));
+    assert_eq!(name.len(), MCP_NAMESPACED_NAME_MAX_LEN);
+}
+
+fn assert_regex_match(name: &str) {
+    let re = regex::Regex::new("^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$").expect("valid regex");
+    assert!(
+        re.is_match(name),
+        "name `{name}` does not match the expected pattern"
+    );
+}
+
+#[test]
+fn call_tool_result_text_content() {
+    use rmcp::model::Content;
+
+    let result = CallToolResult::success(vec![Content::text("hello world")]);
+    let json = call_tool_result_to_json(result).unwrap();
+    assert_eq!(json, serde_json::json!({ "result": "hello world" }));
+}
+
+#[test]
+fn call_tool_result_json_content() {
+    use rmcp::model::Content;
+
+    let result = CallToolResult::success(vec![Content::text(r#"{"key": "value"}"#)]);
+    let json = call_tool_result_to_json(result).unwrap();
+    assert_eq!(json, serde_json::json!({ "key": "value" }));
+}
+
+#[test]
+fn call_tool_result_error() {
+    use rmcp::model::Content;
+
+    let result = CallToolResult::error(vec![Content::text("something went wrong")]);
+    let err = call_tool_result_to_json(result).unwrap_err();
+    assert_eq!(err, "something went wrong");
+}
+
+/// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps.
+fn make_routing(
+    tool_to_server: HashMap<String, String>,
+    namespaced_to_original: HashMap<String, String>,
+) -> Arc<RwLock<RoutingState>> {
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+    }))
+}
+
+#[test]
+fn empty_registry_has_no_tools() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        test_dispatch: None,
+    };
+    assert!(!registry.has_tool("anything"));
+    assert!(registry.tool_schemas().is_empty());
+}
+
+#[test]
+fn registry_lookup() {
+    let namespaced = mcp_namespaced_name("search-server", "web_search");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "search-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(namespaced.clone(), "web_search".to_string());
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        test_dispatch: None,
+    };
+    assert!(registry.has_tool(&mcp_namespaced_name("search-server", "web_search")));
+    assert!(!registry.has_tool("web_search")); // raw name no longer works
+    assert!(!registry.has_tool("unknown_tool"));
+    assert_eq!(registry.tool_schemas().len(), 1);
+}
+
+#[test]
+fn registry_schemas_default_to_concurrent_unsafe() {
+    let namespaced = mcp_namespaced_name("search-server", "web_search");
+    let registry = McpToolRegistry {
+        routing: make_routing(
+            HashMap::from([(namespaced.clone(), "search-server".to_string())]),
+            HashMap::from([(namespaced.clone(), "web_search".to_string())]),
+        ),
+        tool_schemas: vec![serde_json::json!({
+            "name": namespaced,
+            "description": "search",
+            "inputSchema": {"type": "object"},
+            "concurrent_safe": false
+        })],
+        test_dispatch: None,
+    };
+
+    assert_eq!(
+        registry.tool_schemas()[0]["concurrent_safe"],
+        serde_json::Value::Bool(false)
+    );
+}
+
+#[test]
+fn external_tool_schema_preserves_supplied_safety_annotations() {
+    use rmcp::model::ToolAnnotations;
+    use rmcp::object;
+
+    let namespaced = mcp_namespaced_name("search-server", "web_search");
+    let tool = RmcpTool::new(
+        "web_search".to_string(),
+        "search".to_string(),
+        object!({"type": "object"}),
+    )
+    .annotate(
+        ToolAnnotations::new()
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(true),
+    );
+
+    let schema = external_tool_schema_json(&tool, &namespaced).expect("serialize tool schema");
+
+    assert_eq!(schema["name"], serde_json::Value::String(namespaced));
+    assert_eq!(schema["annotations"]["readOnlyHint"], true);
+    assert_eq!(schema["annotations"]["destructiveHint"], false);
+    assert_eq!(schema["annotations"]["idempotentHint"], true);
+    assert_eq!(schema["annotations"]["openWorldHint"], true);
+    assert_eq!(schema["readOnly"], true);
+    assert_eq!(schema["destructive"], false);
+    assert_eq!(schema["idempotent"], true);
+    assert_eq!(schema["openWorld"], true);
+    assert_eq!(schema["concurrent_safe"], false);
+}
+
+#[test]
+fn external_tool_schema_without_annotations_defaults_fail_closed() {
+    use rmcp::object;
+
+    let namespaced = mcp_namespaced_name("unknown-server", "mutate");
+    let tool = RmcpTool::new(
+        "mutate".to_string(),
+        "unknown third-party tool".to_string(),
+        object!({"type": "object"}),
+    );
+
+    let schema = external_tool_schema_json(&tool, &namespaced).expect("serialize tool schema");
+
+    assert_eq!(schema["name"], serde_json::Value::String(namespaced));
+    assert!(schema.get("annotations").is_none());
+    assert_eq!(schema["readOnly"], false);
+    assert_eq!(schema["destructive"], true);
+    assert_eq!(schema["idempotent"], false);
+    assert_eq!(schema["openWorld"], false);
+    assert_eq!(schema["concurrent_safe"], false);
+}
+
+#[tokio::test]
+async fn dispatch_routes_to_original_tool_name() {
+    let original_tool = "remote/tool.name";
+    let advertised = mcp_namespaced_name("my-server", original_tool);
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(advertised.clone(), "my-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(advertised.clone(), original_tool.to_string());
+
+    let received = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let received_clone = received.clone();
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: Vec::new(),
+        test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
+            let received = received_clone.clone();
+            Box::pin(async move {
+                *received.lock().unwrap() = Some(original_tool.to_string());
+                Ok(serde_json::json!({ "tool": original_tool }))
+            })
+        })),
+    };
+
+    let result = registry.call_tool(&advertised, None).await;
+    assert!(result.is_ok());
+    assert_eq!(received.lock().unwrap().as_deref(), Some(original_tool));
+}
+
+#[tokio::test]
+async fn dispatch_unknown_tool_returns_error() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        test_dispatch: None,
+    };
+    let result = registry.call_tool("nonexistent", None).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not found in registry"));
+}
+
+impl McpToolRegistry {
+    pub(crate) fn with_dispatch<I, F>(
+        mappings: I,
+        tool_schemas: Vec<serde_json::Value>,
+        dispatch: F,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (String, String)>,
+        F: Fn(
+                &str,
+                Option<serde_json::Map<String, serde_json::Value>>,
+            ) -> Result<serde_json::Value, String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let tool_to_server: HashMap<String, String> = mappings.into_iter().collect();
+        let namespaced_to_original = HashMap::new(); // test dispatch handles names directly
+        Self {
+            routing: make_routing(tool_to_server, namespaced_to_original),
+            tool_schemas,
+            test_dispatch: Some(Arc::new(move |tool_name, arguments| {
+                let result = dispatch(tool_name, arguments);
+                Box::pin(async move { result })
+            })),
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolve_server_config_substitutes_env_and_credentials() {
+    let app_state = test_context();
+    let cred_repo = CredentialRepository::new(app_state.db.clone(), EventBus::noop());
+    cred_repo
+        .set("test", "TEST_TOKEN", "credential-secret")
+        .await
+        .expect("seed test credential");
+
+    let unique = format!("DJINN_MCP_TEST_{}", uuid::Uuid::now_v7().simple());
+    unsafe { std::env::set_var(&unique, "from-env") };
+
+    let config = McpServerConfig {
+        url: Some(format!("https://example.com/${{{unique}}}/mcp")),
+        command: Some("ignored-command".to_string()),
+        args: vec!["--flag".to_string()],
+        env: HashMap::from([("API_KEY".to_string(), "${TEST_TOKEN}".to_string())]),
+        headers: HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer ${TEST_TOKEN}".to_string(),
+        )]),
+        ..Default::default()
+    };
+
+    let resolved = resolve_server_config("example", &config, &app_state)
+        .await
+        .expect("resolve server config");
+
+    assert_eq!(
+        resolved.url.as_deref(),
+        Some("https://example.com/from-env/mcp")
+    );
+    assert_eq!(resolved.command.as_deref(), Some("ignored-command"));
+    assert_eq!(resolved.args, vec!["--flag"]);
+    assert_eq!(
+        resolved.env.get("API_KEY").map(String::as_str),
+        Some("credential-secret")
+    );
+    assert_eq!(
+        resolved.headers.get("Authorization").map(String::as_str),
+        Some("Bearer credential-secret")
+    );
+    assert_eq!(resolved.startup_timeout_ms, 30_000);
+    assert_eq!(resolved.request_timeout_ms, 120_000);
+
+    unsafe { std::env::remove_var(&unique) };
+}
+
+#[tokio::test]
+async fn resolve_server_config_errors_on_missing_placeholder() {
+    let app_state = test_context();
+    let config = McpServerConfig {
+        url: Some("https://example.com/${MISSING_TOKEN}/mcp".to_string()),
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        headers: HashMap::new(),
+        ..Default::default()
+    };
+
+    let error = resolve_server_config("example", &config, &app_state)
+        .await
+        .expect_err("missing placeholder should error");
+
+    assert_eq!(error.variable, "MISSING_TOKEN");
+    assert_eq!(error.field, "server `example` url");
+}
+
+#[tokio::test]
+async fn resolve_server_config_reports_missing_header_placeholder() {
+    let app_state = test_context();
+    let config = McpServerConfig {
+        url: Some("https://example.com/mcp".to_string()),
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        headers: HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer ${MISSING_HEADER_TOKEN}".to_string(),
+        )]),
+        ..Default::default()
+    };
+
+    let error = resolve_server_config("example", &config, &app_state)
+        .await
+        .expect_err("missing header placeholder should error");
+
+    assert_eq!(error.variable, "MISSING_HEADER_TOKEN");
+    assert_eq!(error.field, "server `example` header `Authorization`");
+}
+
+#[test]
+fn resolved_transport_kind_is_explicit() {
+    let http = ResolvedMcpServerConfig {
+        url: Some("https://example.com/mcp".to_string()),
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        headers: HashMap::new(),
+        startup_timeout_ms: 30_000,
+        request_timeout_ms: 120_000,
+    };
+    let stdio = ResolvedMcpServerConfig {
+        url: None,
+        command: Some("server".to_string()),
+        args: vec!["--stdio".to_string()],
+        env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
+        headers: HashMap::new(),
+        startup_timeout_ms: 30_000,
+        request_timeout_ms: 120_000,
+    };
+    let unsupported = ResolvedMcpServerConfig {
+        url: None,
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        headers: HashMap::new(),
+        startup_timeout_ms: 30_000,
+        request_timeout_ms: 120_000,
+    };
+
+    assert_eq!(http.transport_kind(), McpTransportKind::Http);
+    assert_eq!(stdio.transport_kind(), McpTransportKind::Stdio);
+    assert_eq!(unsupported.transport_kind(), McpTransportKind::Unsupported);
+}
+
+#[tokio::test]
+async fn connect_to_server_sends_resolved_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept connection");
+        let mut buffer = vec![0_u8; 8192];
+        let size = stream.read(&mut buffer).await.expect("read request");
+        let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+        let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n";
+        stream.write_all(response).await.expect("write response");
+        request
+    });
+
+    let result = connect_to_server(
+        &format!("http://{addr}/mcp"),
+        &HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer resolved-secret".to_string(),
+        )]),
+    )
+    .await;
+
+    assert!(result.is_err());
+    let request = server.await.expect("server task result");
+    assert!(request.contains("authorization: Bearer resolved-secret"));
+}
+
+#[tokio::test]
+async fn connect_and_discover_empty_servers() {
+    let app_state = test_context();
+    let result = connect_and_discover("test", "worker", &[], &app_state).await;
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn connect_and_discover_skips_stdio_only() {
+    let app_state = test_context();
+    let servers = vec![(
+        "stdio-server".to_string(),
+        McpServerConfig {
+            url: None,
+            command: Some("my-server".to_string()),
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+            ..Default::default()
+        },
+    )];
+    let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn connect_and_discover_skips_unsupported_transport() {
+    let app_state = test_context();
+    let servers = vec![(
+        "unsupported-server".to_string(),
+        McpServerConfig {
+            url: None,
+            command: None,
+            args: vec!["--unused".to_string()],
+            env: HashMap::from([("TOKEN".to_string(), "value".to_string())]),
+            headers: HashMap::from([("Authorization".to_string(), "Bearer token".to_string())]),
+            ..Default::default()
+        },
+    )];
+
+    let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn connect_and_discover_skips_unreachable() {
+    let app_state = test_context();
+    let servers = vec![(
+        "bad-server".to_string(),
+        McpServerConfig {
+            url: Some("http://127.0.0.1:1/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+            ..Default::default()
+        },
+    )];
+    let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn connect_and_discover_skips_missing_placeholder_server() {
+    let app_state = test_context();
+    let servers = vec![(
+        "missing-placeholder".to_string(),
+        McpServerConfig {
+            url: Some("https://example.com/${MISSING_VALUE}/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+            ..Default::default()
+        },
+    )];
+
+    let result = connect_and_discover("test", "worker", &servers, &app_state).await;
+    assert!(result.is_none());
+}
+
+// ── Refresh / mutability tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn removed_advertised_tool_returns_deterministic_error() {
+    let namespaced = mcp_namespaced_name("my-server", "web_search");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(namespaced.clone(), "web_search".to_string());
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        test_dispatch: None,
+    };
+
+    // Tool is available initially.
+    assert!(registry.has_tool(&namespaced));
+    assert!(!registry.is_unavailable(&namespaced));
+
+    // Simulate server refresh that no longer advertises web_search.
+    let removed = registry.apply_tools_refresh("my-server", &[]);
+    assert_eq!(removed, vec![namespaced.clone()]);
+    assert!(registry.is_unavailable(&namespaced));
+    // has_tool still returns true — the name is known.
+    assert!(registry.has_tool(&namespaced));
+
+    // call_tool returns a deterministic error.
+    let result = registry.call_tool(&namespaced, None).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("no longer available"),
+        "expected deterministic unavailable error, got: {err}"
+    );
+    assert!(
+        err.contains("removed by server refresh"),
+        "error should mention server refresh, got: {err}"
+    );
+}
+
+#[test]
+fn refresh_does_not_add_newly_discovered_tools_to_schemas() {
+    let namespaced = mcp_namespaced_name("my-server", "existing_tool");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(namespaced.clone(), "existing_tool".to_string());
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        test_dispatch: None,
+    };
+
+    let schemas_before = registry.tool_schemas().len();
+
+    // Apply refresh — the server now advertises a brand new tool as well.
+    registry.apply_tools_refresh(
+        "my-server",
+        &["existing_tool".to_string(), "new_tool".to_string()],
+    );
+
+    // tool_schemas is session-fixed: still the same length.
+    assert_eq!(
+        registry.tool_schemas().len(),
+        schemas_before,
+        "tool_schemas must not grow after a refresh"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_advertised_tool_remains_dispatchable_after_refresh() {
+    let namespaced = mcp_namespaced_name("my-server", "stable_tool");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(namespaced.clone(), "stable_tool".to_string());
+
+    // Use test_dispatch to verify the tool is still callable.
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        test_dispatch: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(serde_json::json!({"ok": true})) })
+        })),
+    };
+
+    // Refresh: stable_tool is still advertised.
+    let removed = registry.apply_tools_refresh("my-server", &["stable_tool".to_string()]);
+    assert!(removed.is_empty(), "no tools should be removed");
+    assert!(!registry.is_unavailable(&namespaced));
+
+    // Tool is still dispatchable.
+    let result = registry.call_tool(&namespaced, None).await;
+    assert!(result.is_ok(), "unchanged tool should still dispatch");
+}
+
+#[tokio::test]
+async fn routing_state_is_clone_safe() {
+    let namespaced = mcp_namespaced_name("my-server", "shared_tool");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "my-server".to_string());
+    let mut namespaced_to_original = HashMap::new();
+    namespaced_to_original.insert(namespaced.clone(), "shared_tool".to_string());
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        test_dispatch: None,
+    };
+
+    // Clone shares the same routing state.
+    let clone = registry.clone();
+    assert!(clone.has_tool(&namespaced));
+
+    // Mutating via the original is visible to the clone.
+    registry.apply_tools_refresh("my-server", &[]);
+    assert!(
+        clone.is_unavailable(&namespaced),
+        "clone must see unavailability set on original"
+    );
+}
+
+// ── Timeout enforcement tests ──────────────────────────────────────
+
+/// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps with
+/// explicit per-server request timeouts.
+fn make_routing_with_timeouts(
+    tool_to_server: HashMap<String, String>,
+    namespaced_to_original: HashMap<String, String>,
+    request_timeouts: HashMap<String, u64>,
+) -> Arc<RwLock<RoutingState>> {
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts,
+        unavailable: HashSet::new(),
+    }))
+}
+
+#[tokio::test]
+async fn call_tool_timeout_returns_deterministic_error() {
+    let namespaced = mcp_namespaced_name("slow-server", "slow_tool");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "slow-server".to_string());
+    let namespaced_to_original = HashMap::from([(namespaced.clone(), "slow_tool".to_string())]);
+    // 50ms timeout — the test dispatch will hang longer.
+    let request_timeouts = HashMap::from([("slow-server".to_string(), 50u64)]);
+
+    let registry = McpToolRegistry {
+        routing: make_routing_with_timeouts(
+            tool_to_server,
+            namespaced_to_original,
+            request_timeouts,
+        ),
+        tool_schemas: Vec::new(),
+        test_dispatch: Some(Arc::new(move |_, _| {
+            Box::pin(async {
+                // Simulate a slow server that takes longer than the timeout.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(serde_json::json!({"ok": true}))
+            })
+        })),
+    };
+
+    let result = registry.call_tool(&namespaced, None).await;
+    assert!(result.is_err(), "call_tool should return Err on timeout");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("timed out"),
+        "error should mention timeout, got: {err}"
+    );
+    assert!(
+        err.contains(&namespaced),
+        "error should include tool name, got: {err}"
+    );
+    assert!(
+        err.contains("slow-server"),
+        "error should include server name, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn call_tool_uses_default_timeout_when_server_not_in_map() {
+    let namespaced = mcp_namespaced_name("default-server", "fast_tool");
+    let mut tool_to_server = HashMap::new();
+    tool_to_server.insert(namespaced.clone(), "default-server".to_string());
+    let namespaced_to_original = HashMap::from([(namespaced.clone(), "fast_tool".to_string())]);
+    // Empty request_timeouts map — should fall back to default (120_000ms).
+    let request_timeouts = HashMap::new();
+
+    let registry = McpToolRegistry {
+        routing: make_routing_with_timeouts(
+            tool_to_server,
+            namespaced_to_original,
+            request_timeouts,
+        ),
+        tool_schemas: Vec::new(),
+        test_dispatch: Some(Arc::new(|_, _| {
+            Box::pin(async { Ok(serde_json::json!({"fast": true})) })
+        })),
+    };
+
+    // Should succeed quickly — the default timeout (120s) is not reached.
+    let result = registry.call_tool(&namespaced, None).await;
+    assert!(result.is_ok(), "fast dispatch should not timeout");
+    assert_eq!(result.unwrap(), serde_json::json!({"fast": true}));
+}
+
+#[tokio::test]
+async fn request_timeout_stored_per_server_at_discovery() {
+    let mut routing_state = RoutingState {
+        tool_to_server: HashMap::new(),
+        namespaced_to_original: HashMap::new(),
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+    };
+    routing_state
+        .request_timeouts
+        .insert("server-a".to_string(), 5_000);
+    routing_state
+        .request_timeouts
+        .insert("server-b".to_string(), 60_000);
+
+    assert_eq!(routing_state.request_timeouts.get("server-a"), Some(&5_000));
+    assert_eq!(
+        routing_state.request_timeouts.get("server-b"),
+        Some(&60_000)
+    );
+    // Unknown server should not be present.
+    assert!(!routing_state.request_timeouts.contains_key("server-c"));
+}
+
+// ── rmcp capability access / adapter validation ────────────────────
+//
+// These compile-time probes verify that the rmcp API touchpoints
+// needed by sibling epics (yjc6, hyeu) are accessible through the
+// types already used in mcp_client.rs.  If a future rmcp upgrade
+// removes or renames any of these fields, these tests will fail to
+// compile — giving early warning before the sibling epics attempt
+// to use them.
+//
+// NOT exposed to the model:
+// - `InitializeResult.instructions` → yjc6 (prompt instructions block)
+// - resource tools → hyeu (resources-as-tools)
+//
+// Validated access points:
+// - `ServerCapabilities.tools` / `.resources` / `.logging` / `.prompts`
+// - `ToolsCapability.list_changed`
+// - `LoggingMessageNotification` type exists (notification handler shape)
+// - `ServerNotification` enum variants for handler dispatch
+
+#[test]
+fn rmcp_initialize_result_instructions_field_is_accessible() {
+    // Compile-time probe: InitializeResult has an `instructions` field.
+    // Used by yjc6 to extract server prompt instructions.
+    let result = rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default());
+    // instructions defaults to None
+    assert!(result.instructions.is_none());
+    // Can set instructions
+    let with_inst = result.with_instructions("test instructions");
+    assert_eq!(with_inst.instructions.as_deref(), Some("test instructions"));
+}
+
+#[test]
+fn rmcp_server_capabilities_fields_are_accessible() {
+    // Compile-time probe: ServerCapabilities exposes tools, resources,
+    // prompts, and logging fields.
+    let caps = rmcp::model::ServerCapabilities::default();
+    assert!(caps.tools.is_none());
+    assert!(caps.resources.is_none());
+    assert!(caps.prompts.is_none());
+    assert!(caps.logging.is_none());
+}
+
+#[test]
+fn rmcp_tools_capability_list_changed_is_accessible() {
+    // Compile-time probe: ToolsCapability.list_changed indicates whether
+    // the server supports tools/list_changed notifications.
+    let tc = rmcp::model::ToolsCapability {
+        list_changed: Some(true),
+    };
+    assert_eq!(tc.list_changed, Some(true));
+}
+
+#[test]
+fn rmcp_logging_notification_type_is_accessible() {
+    // Compile-time probe: LoggingMessageNotification exists and can be
+    // pattern-matched from ServerNotification. This is the type that a
+    // notification handler/channel adapter would need to receive.
+    use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam, ServerNotification};
+
+    // Construct a minimal logging notification.
+    let logging =
+        LoggingMessageNotificationParam::new(LoggingLevel::Info, serde_json::json!("test message"));
+
+    // Verify the param fields are accessible.
+    assert_eq!(logging.level, LoggingLevel::Info);
+    assert_eq!(logging.data, serde_json::json!("test message"));
+
+    // Wrap in ServerNotification to confirm the variant exists and is matchable.
+    let notif =
+        ServerNotification::LoggingMessageNotification(rmcp::model::Notification::new(logging));
+
+    // Pattern-match to verify the handler dispatch shape.
+    match notif {
+        ServerNotification::LoggingMessageNotification(inner) => {
+            assert_eq!(inner.params.level, LoggingLevel::Info);
+        }
+        _ => panic!("expected LoggingMessageNotification variant"),
+    }
+}
+
+#[test]
+fn rmcp_tool_list_changed_notification_type_is_accessible() {
+    // Compile-time probe: ToolListChangedNotification exists and can be
+    // constructed/matched. This is the type that a notification handler
+    // for tools/list_changed would receive.
+    use rmcp::model::ServerNotification;
+
+    // ToolListChangedNotification is NotificationNoParam<Method>, which
+    // derives Default since the Method is a unit struct.
+    let changed: rmcp::model::ToolListChangedNotification = Default::default();
+    let notif = ServerNotification::ToolListChangedNotification(changed);
+
+    match notif {
+        ServerNotification::ToolListChangedNotification(_) => {
+            // Successfully matched — the variant and type are accessible.
+        }
+        _ => panic!("expected ToolListChangedNotification variant"),
+    }
+}
+
+#[test]
+fn startup_timeout_defaults_match_config() {
+    // Verify the startup/request timeout defaults from McpServerConfig
+    // match the expected values.
+    assert_eq!(McpServerConfig::default_startup_timeout_ms(), 30_000);
+    assert_eq!(McpServerConfig::default_request_timeout_ms(), 120_000);
+}
+
+#[test]
+fn resolved_config_startup_and_request_timeouts_from_duration_helpers() {
+    let config = ResolvedMcpServerConfig {
+        url: Some("https://example.com/mcp".to_string()),
+        command: None,
+        args: Vec::new(),
+        env: HashMap::new(),
+        headers: HashMap::new(),
+        startup_timeout_ms: 5_000,
+        request_timeout_ms: 30_000,
+    };
+    assert_eq!(config.startup_timeout(), Duration::from_millis(5_000));
+    assert_eq!(config.request_timeout(), Duration::from_millis(30_000));
+}
