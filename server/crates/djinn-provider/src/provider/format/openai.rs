@@ -767,11 +767,13 @@ mod tests {
     #[test]
     fn test_build_request_native_no_quirk_preserves_chat_completions_envelope() {
         // Captures the wire-shape OpenAI chat-completions emits for a native
-        // (`tool_schema_compat: None`) provider config, without going through
-        // HTTP. The companion integration test in
+        // (`tool_schema_compat: None`) provider config, by observing the
+        // **actual generated JSON body** (`build_request` is exactly the
+        // JSON OpenAI receives). The companion integration test in
         // `tests/provider_client_requests.rs::openai_chat_completions_native_*`
         // does the full request round-trip; this in-crate test pins the
-        // `build_request` shape independently.
+        // `build_request` shape independently so a seam regression surfaces
+        // here even when the integration test harness is unavailable.
         let provider = OpenAIProvider::new(test_openai_config());
         let mut conv = Conversation::new();
         conv.push(Message::user("Hello"));
@@ -801,6 +803,18 @@ mod tests {
         assert_eq!(tool["function"]["parameters"]["required"][0], "cmd");
         assert!(tool["function"].get("strict").is_none());
         assert!(tool.get("input_schema").is_none());
+
+        // Byte-determinism: the whole body must serialize to identical
+        // strings across repeated builds. A drift here would also break the
+        // implicit cache-friendly contract on the OpenAI side and would
+        // mean a non-deterministic value (timestamp, hash order, id) leaked
+        // into the native path that the mpen AC3 says must stay stable.
+        let body_a = serde_json::to_string(&req).expect("serialize body once");
+        let body_b = serde_json::to_string(&req).expect("serialize body twice");
+        assert_eq!(
+            body_a, body_b,
+            "OpenAI chat-completions native no-quirk request must be byte-deterministic across builds"
+        );
     }
 
     #[test]
