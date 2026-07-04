@@ -5,6 +5,7 @@
 //! to those servers during the reply loop.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
@@ -124,6 +125,26 @@ fn annotate_external_tool_schema_safety(value: &mut serde_json::Value) {
 
 // ── MCP notification handler ─────────────────────────────────────────
 
+/// Compute a deterministic fingerprint for an MCP tool based on its
+/// description and input schema.
+///
+/// The tool *name* is intentionally excluded so that a renamed tool
+/// (same description + schema, different name) produces the same
+/// fingerprint.  The fingerprint is used for rename detection during
+/// `tools/list_changed` refreshes: if exactly one newly-advertised
+/// tool shares a removed tool's fingerprint, the old wire alias is
+/// re-routed to the new tool name.
+fn compute_tool_fingerprint(tool: &RmcpTool) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Hash the description (Option<Cow<str>>).
+    tool.description.hash(&mut hasher);
+    // Hash the input schema as canonical JSON bytes.
+    serde_json::to_string(&*tool.input_schema)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Maps an MCP [`LoggingLevel`] to the corresponding [`tracing::Level`].
 ///
 /// The mapping follows syslog-to-tracing conventions:
@@ -157,13 +178,18 @@ fn log_data_to_message(data: &serde_json::Value) -> String {
     }
 }
 
-/// An rmcp `ClientHandler` that observes MCP `notifications/message`
-/// from connected servers and emits them through host `tracing` with
-/// structured fields.
+/// An rmcp `ClientHandler` that observes MCP notifications from connected
+/// servers:
+/// - `notifications/message` (logging) — emitted through host `tracing` with
+///   structured `{server, logger, level, task_short_id}` fields.
+/// - `notifications/tools/list_changed` — triggers a request-timeout-bounded
+///   `tools/list` refresh for the notifying server without holding registry
+///   write locks across the network await.
 #[derive(Clone)]
 struct McpNotificationHandler {
     server_name: String,
     task_short_id: String,
+    routing: Arc<RwLock<RoutingState>>,
 }
 
 impl rmcp::ClientHandler for McpNotificationHandler {
@@ -227,6 +253,82 @@ impl rmcp::ClientHandler for McpNotificationHandler {
 
         std::future::ready(())
     }
+
+    fn on_tool_list_changed(
+        &self,
+        context: rmcp::service::NotificationContext<rmcp::service::RoleClient>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        let server_name = self.server_name.clone();
+        let task_short_id = self.task_short_id.clone();
+        let routing = self.routing.clone();
+        let peer = context.peer.clone();
+
+        async move {
+            tracing::info!(
+                server = %server_name,
+                task_short_id = %task_short_id,
+                "Received tools/list_changed notification; refreshing tool list"
+            );
+
+            // Snapshot the request timeout under a read lock, then release.
+            let timeout_ms = {
+                let r = routing.read().unwrap();
+                r.request_timeouts
+                    .get(&server_name)
+                    .copied()
+                    .unwrap_or(McpServerConfig::default_request_timeout_ms())
+            };
+            let timeout = Duration::from_millis(timeout_ms);
+
+            // Issue tools/list with request timeout — no lock held.
+            let result = match tokio::time::timeout(timeout, peer.list_tools(None)).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    tracing::error!(
+                        server = %server_name,
+                        task_short_id = %task_short_id,
+                        error = %e,
+                        "tools/list refresh failed during tools/list_changed"
+                    );
+                    return;
+                }
+                Err(_elapsed) => {
+                    tracing::error!(
+                        server = %server_name,
+                        task_short_id = %task_short_id,
+                        timeout_ms = timeout_ms,
+                        "tools/list refresh timed out during tools/list_changed"
+                    );
+                    return;
+                }
+            };
+
+            // Apply the refresh under a write lock (brief — no network I/O).
+            let (unavailable, renamed) = {
+                let mut r = routing.write().unwrap();
+                r.apply_tools_list_result(&server_name, &result.tools)
+            };
+
+            if !unavailable.is_empty() {
+                tracing::warn!(
+                    server = %server_name,
+                    task_short_id = %task_short_id,
+                    removed_count = unavailable.len(),
+                    tools = ?unavailable,
+                    "tools/list_changed: marked tools as no longer available"
+                );
+            }
+            if !renamed.is_empty() {
+                tracing::info!(
+                    server = %server_name,
+                    task_short_id = %task_short_id,
+                    renamed_count = renamed.len(),
+                    tools = ?renamed,
+                    "tools/list_changed: detected tool renames"
+                );
+            }
+        }
+    }
 }
 
 /// Interior-mutable routing state for [`McpToolRegistry`].
@@ -253,6 +355,101 @@ struct RoutingState {
     /// (so `has_tool` returns `true`) but `call_tool` returns a deterministic
     /// error instead of dispatching.
     unavailable: HashSet<String>,
+    /// Schema fingerprints for each registered tool (namespaced_name → hash).
+    /// Used for rename detection during `tools/list_changed` refreshes.
+    tool_fingerprints: HashMap<String, u64>,
+}
+
+impl RoutingState {
+    /// Apply a `tools/list_changed` refresh using the full tool list from
+    /// the MCP server.
+    ///
+    /// Performs rename detection: if exactly one newly-advertised tool shares
+    /// a removed tool's schema fingerprint (hash of description + input_schema),
+    /// the old namespaced alias is re-routed to the new original tool name.
+    /// Otherwise the removed tool is marked unavailable.
+    ///
+    /// Newly discovered tools are NOT registered (session-fixed schemas).
+    ///
+    /// Returns `(newly_unavailable, renamed)` where each vector contains the
+    /// namespaced tool names affected.
+    fn apply_tools_list_result(
+        &mut self,
+        server_name: &str,
+        new_tools: &[RmcpTool],
+    ) -> (Vec<String>, Vec<String>) {
+        // Build the set of original names currently advertised.
+        let current_names: HashSet<&str> = new_tools.iter().map(|t| t.name.as_ref()).collect();
+
+        // Collect tools belonging to this server.
+        let server_tools: Vec<(String, String)> = self
+            .tool_to_server
+            .iter()
+            .filter_map(|(namespaced, srv)| {
+                if srv != server_name {
+                    return None;
+                }
+                let original = self
+                    .namespaced_to_original
+                    .get(namespaced)
+                    .cloned()
+                    .unwrap_or_else(|| namespaced.clone());
+                Some((namespaced.clone(), original))
+            })
+            .collect();
+
+        // Partition into unchanged vs. potentially-removed.
+        let mut removed: Vec<(String, String, u64)> = Vec::new();
+        let mut newly_unavailable = Vec::new();
+
+        for (namespaced, original) in &server_tools {
+            if current_names.contains(original.as_str()) {
+                // Still advertised under the same name — unchanged.
+                continue;
+            }
+            // Tool name is gone.  Check for rename by fingerprint.
+            if let Some(&fp) = self.tool_fingerprints.get(namespaced) {
+                removed.push((namespaced.clone(), original.clone(), fp));
+            } else {
+                // No fingerprint on record — treat as removed.
+                self.unavailable.insert(namespaced.clone());
+                newly_unavailable.push(namespaced.clone());
+            }
+        }
+
+        // Build fingerprint → new tool names map for rename candidates.
+        // Only consider tools that are genuinely *new* (not already registered).
+        let mut fp_to_new: HashMap<u64, Vec<&str>> = HashMap::new();
+        for tool in new_tools {
+            let namespaced = mcp_namespaced_name(server_name, &tool.name);
+            if !self.tool_to_server.contains_key(&namespaced) {
+                let fp = compute_tool_fingerprint(tool);
+                fp_to_new.entry(fp).or_default().push(tool.name.as_ref());
+            }
+        }
+
+        let mut renamed = Vec::new();
+
+        for (namespaced, _original, fp) in &removed {
+            match fp_to_new.get(fp) {
+                Some(candidates) if candidates.len() == 1 => {
+                    // Unique fingerprint match — treat as rename.
+                    let new_original = candidates[0];
+                    self.namespaced_to_original
+                        .insert(namespaced.clone(), new_original.to_string());
+                    self.tool_fingerprints.insert(namespaced.clone(), *fp);
+                    renamed.push(namespaced.clone());
+                }
+                _ => {
+                    // Zero or ambiguous matches — treat as removed.
+                    self.unavailable.insert(namespaced.clone());
+                    newly_unavailable.push(namespaced.clone());
+                }
+            }
+        }
+
+        (newly_unavailable, renamed)
+    }
 }
 
 /// Registry of MCP tool names → server connections built at session start.
@@ -572,8 +769,21 @@ pub async fn connect_and_discover(
         return None;
     }
 
+    // Create the shared routing state early so notification handlers
+    // (spawned during connect_to_server) can hold a reference to it.
+    let routing = Arc::new(RwLock::new(RoutingState {
+        tool_to_server: HashMap::new(),
+        namespaced_to_original: HashMap::new(),
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        server_instructions: BTreeMap::new(),
+        unavailable: HashSet::new(),
+        tool_fingerprints: HashMap::new(),
+    }));
+
     let mut tool_to_server: HashMap<String, String> = HashMap::new();
     let mut namespaced_to_original: HashMap<String, String> = HashMap::new();
+    let mut tool_fingerprints: HashMap<String, u64> = HashMap::new();
     let mut peers: HashMap<String, Arc<Peer<RoleClient>>> = HashMap::new();
     let mut request_timeouts: HashMap<String, u64> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
@@ -627,7 +837,13 @@ pub async fn connect_and_discover(
         let startup_duration = resolved.startup_timeout();
         let startup_result = tokio::time::timeout(
             startup_duration,
-            startup_and_list(&url, &resolved.headers, name, task_short_id),
+            startup_and_list(
+                &url,
+                &resolved.headers,
+                name,
+                task_short_id,
+                routing.clone(),
+            ),
         )
         .await;
 
@@ -729,7 +945,8 @@ pub async fn connect_and_discover(
                 }
 
                 tool_to_server.insert(namespaced.clone(), name.clone());
-                namespaced_to_original.insert(namespaced, original_name);
+                namespaced_to_original.insert(namespaced.clone(), original_name);
+                tool_fingerprints.insert(namespaced, compute_tool_fingerprint(&tool));
                 tool_schemas.push(schema);
             }
             peers.insert(name.clone(), peer);
@@ -748,15 +965,19 @@ pub async fn connect_and_discover(
         return None;
     }
 
+    // Populate the shared routing state with all discovered data.
+    {
+        let mut r = routing.write().unwrap();
+        r.tool_to_server = tool_to_server;
+        r.namespaced_to_original = namespaced_to_original;
+        r.peers = peers;
+        r.request_timeouts = request_timeouts;
+        r.tool_fingerprints = tool_fingerprints;
+        r.server_instructions = server_instructions.clone();
+    }
+
     Some(McpToolRegistry {
-        routing: Arc::new(RwLock::new(RoutingState {
-            tool_to_server,
-            namespaced_to_original,
-            peers,
-            request_timeouts,
-            unavailable: HashSet::new(),
-            server_instructions: server_instructions.clone(),
-        })),
+        routing,
         tool_schemas,
         server_instructions,
         #[cfg(test)]
@@ -873,11 +1094,15 @@ async fn lookup_placeholder_value(app_state: &AgentContext, variable: &str) -> P
 /// The returned peer uses a [`McpNotificationHandler`] that observes
 /// `LoggingMessageNotification`s from the server and emits them through
 /// host `tracing` with structured `{server, logger, level, task_short_id}` fields.
+///
+/// The handler also holds a reference to the shared `routing` state so it can
+/// process `tools/list_changed` notifications by issuing a refresh.
 async fn connect_to_server(
     url: &str,
     headers: &HashMap<String, String>,
     server_name: &str,
     task_short_id: &str,
+    routing: Arc<RwLock<RoutingState>>,
 ) -> Result<Peer<RoleClient>, String> {
     let mut custom_headers = HashMap::new();
     for (name, value) in headers {
@@ -895,6 +1120,7 @@ async fn connect_to_server(
     let handler = McpNotificationHandler {
         server_name: server_name.to_string(),
         task_short_id: task_short_id.to_string(),
+        routing,
     };
     let service = handler
         .serve(transport)
@@ -923,8 +1149,9 @@ async fn startup_and_list(
     headers: &HashMap<String, String>,
     server_name: &str,
     task_short_id: &str,
+    routing: Arc<RwLock<RoutingState>>,
 ) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), String> {
-    let peer = connect_to_server(url, headers, server_name, task_short_id).await?;
+    let peer = connect_to_server(url, headers, server_name, task_short_id, routing).await?;
     let result = peer
         .list_tools(None)
         .await

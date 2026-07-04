@@ -2,6 +2,7 @@ use super::*;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
 use djinn_core::events::EventBus;
 use djinn_provider::repos::CredentialRepository;
+use rmcp::object;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -119,6 +120,7 @@ fn make_routing(
         request_timeouts: HashMap::new(),
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
     }))
 }
 
@@ -456,6 +458,7 @@ async fn connect_to_server_sends_resolved_headers() {
         )]),
         "test-server",
         "test-task",
+        make_routing(HashMap::new(), HashMap::new()),
     )
     .await;
 
@@ -673,6 +676,273 @@ async fn routing_state_is_clone_safe() {
     );
 }
 
+/// Helper: build an `Arc<RwLock<RoutingState>>` with explicit fingerprints.
+fn make_routing_with_fingerprints(
+    tool_to_server: HashMap<String, String>,
+    namespaced_to_original: HashMap<String, String>,
+    tool_fingerprints: HashMap<String, u64>,
+) -> Arc<RwLock<RoutingState>> {
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints,
+    }))
+}
+
+// ── tools/list_changed rename-routing tests ──────────────────────────
+
+#[test]
+fn apply_tools_list_result_unchanged_tools_remain() {
+    // Setup: one tool registered for "my-server".
+    let ns_stable = mcp_namespaced_name("my-server", "stable_tool");
+    let tool_to_server = HashMap::from([(ns_stable.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_stable.clone(), "stable_tool".to_string())]);
+    let fp = 12345u64;
+    let tool_fingerprints = HashMap::from([(ns_stable.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server still advertises stable_tool with the same fingerprint.
+    let new_tool = RmcpTool::new(
+        "stable_tool".to_string(),
+        "does something".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[new_tool]);
+
+    assert!(unavailable.is_empty(), "no tools should be removed");
+    assert!(renamed.is_empty(), "no tools should be renamed");
+    assert!(!routing.read().unwrap().unavailable.contains(&ns_stable));
+}
+
+#[test]
+fn apply_tools_list_result_removed_tool_marked_unavailable() {
+    let ns_gone = mcp_namespaced_name("my-server", "gone_tool");
+    let tool_to_server = HashMap::from([(ns_gone.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_gone.clone(), "gone_tool".to_string())]);
+    let fp = 99999u64;
+    let tool_fingerprints = HashMap::from([(ns_gone.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server no longer advertises gone_tool, and no new tool shares
+    // its fingerprint.
+    let new_tool = RmcpTool::new(
+        "completely_different".to_string(),
+        "something unrelated".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[new_tool]);
+
+    assert_eq!(unavailable, vec![ns_gone.clone()]);
+    assert!(renamed.is_empty());
+    assert!(routing.read().unwrap().unavailable.contains(&ns_gone));
+}
+
+#[test]
+fn apply_tools_list_result_new_tools_not_registered() {
+    // Setup: one existing tool.
+    let ns_existing = mcp_namespaced_name("my-server", "existing");
+    let tool_to_server = HashMap::from([(ns_existing.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_existing.clone(), "existing".to_string())]);
+    let tool_fingerprints = HashMap::from([(ns_existing.clone(), 111u64)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server advertises existing + a brand new tool.
+    let existing = RmcpTool::new(
+        "existing".to_string(),
+        "still here".to_string(),
+        object!({"type": "object"}),
+    );
+    let new_tool = RmcpTool::new(
+        "brand_new".to_string(),
+        "freshly added".to_string(),
+        object!({"type": "string"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[existing, new_tool]);
+
+    assert!(unavailable.is_empty());
+    assert!(renamed.is_empty());
+    // brand_new should NOT be in the routing maps.
+    let ns_new = mcp_namespaced_name("my-server", "brand_new");
+    assert!(
+        !routing.read().unwrap().tool_to_server.contains_key(&ns_new),
+        "newly discovered tools must not be registered"
+    );
+}
+
+#[test]
+fn apply_tools_list_result_provably_renamed_tool_routes_through_old_alias() {
+    // Setup: "old_name" tool with a known fingerprint.
+    let ns_old = mcp_namespaced_name("my-server", "old_name");
+    let tool_to_server = HashMap::from([(ns_old.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_old.clone(), "old_name".to_string())]);
+
+    // Compute the fingerprint from the original tool definition.
+    let original_tool = RmcpTool::new(
+        "old_name".to_string(),
+        "does the thing".to_string(),
+        object!({"type": "object", "properties": {"x": {"type": "number"}}}),
+    );
+    let fp = compute_tool_fingerprint(&original_tool);
+    let tool_fingerprints = HashMap::from([(ns_old.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server now advertises "new_name" with the same description and
+    // input_schema (same fingerprint).  old_name is gone.
+    let renamed_tool = RmcpTool::new(
+        "new_name".to_string(),
+        "does the thing".to_string(),
+        object!({"type": "object", "properties": {"x": {"type": "number"}}}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[renamed_tool]);
+
+    assert!(
+        unavailable.is_empty(),
+        "renamed tool should not be unavailable"
+    );
+    assert_eq!(renamed, vec![ns_old.clone()], "should detect the rename");
+
+    // The old namespaced alias now routes to the new original name.
+    let r = routing.read().unwrap();
+    assert_eq!(
+        r.namespaced_to_original.get(&ns_old).map(String::as_str),
+        Some("new_name"),
+        "old alias should route to the new tool name"
+    );
+    assert!(!r.unavailable.contains(&ns_old));
+}
+
+#[test]
+fn apply_tools_list_result_ambiguous_rename_marks_unavailable() {
+    // Setup: "original_tool" with a fingerprint.
+    let ns_orig = mcp_namespaced_name("my-server", "original_tool");
+    let tool_to_server = HashMap::from([(ns_orig.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_orig.clone(), "original_tool".to_string())]);
+
+    let original_tool = RmcpTool::new(
+        "original_tool".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let fp = compute_tool_fingerprint(&original_tool);
+    let tool_fingerprints = HashMap::from([(ns_orig.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: two new tools share the same fingerprint (ambiguous).
+    let candidate_a = RmcpTool::new(
+        "helper_v2".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let candidate_b = RmcpTool::new(
+        "helper_v3".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[candidate_a, candidate_b]);
+
+    assert_eq!(
+        unavailable,
+        vec![ns_orig.clone()],
+        "ambiguous rename should mark as unavailable"
+    );
+    assert!(renamed.is_empty(), "ambiguous match should not rename");
+    assert!(routing.read().unwrap().unavailable.contains(&ns_orig));
+}
+
+#[test]
+fn apply_tools_list_result_no_fingerprint_marks_removed() {
+    // If a tool was registered without a fingerprint (edge case), it is
+    // treated as removed when its name disappears.
+    let ns_legacy = mcp_namespaced_name("my-server", "legacy_tool");
+    let tool_to_server = HashMap::from([(ns_legacy.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_legacy.clone(), "legacy_tool".to_string())]);
+    // Empty fingerprints map — no fingerprint stored.
+    let tool_fingerprints = HashMap::new();
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[]);
+
+    assert_eq!(unavailable, vec![ns_legacy.clone()]);
+    assert!(renamed.is_empty());
+}
+
+#[test]
+fn apply_tools_list_result_session_fixed_schemas_unchanged() {
+    // tool_schemas is on McpToolRegistry, not RoutingState.  Verify that
+    // the McpToolRegistry-level apply_tools_refresh (name-only) does not
+    // modify tool_schemas, and that apply_tools_list_result on RoutingState
+    // has no way to modify them either.
+    let ns_tool = mcp_namespaced_name("my-server", "my_tool");
+    let tool_to_server = HashMap::from([(ns_tool.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_tool.clone(), "my_tool".to_string())]);
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": ns_tool})],
+        server_instructions: BTreeMap::new(),
+        test_dispatch: None,
+    };
+
+    let schemas_before = registry.tool_schemas().len();
+
+    // apply_tools_refresh (name-only path)
+    registry.apply_tools_refresh("my-server", &["brand_new".to_string()]);
+    assert_eq!(registry.tool_schemas().len(), schemas_before);
+
+    // apply_tools_list_result (full path) on the shared routing state
+    {
+        let new_tool = RmcpTool::new(
+            "brand_new".to_string(),
+            "freshly added".to_string(),
+            object!({"type": "string"}),
+        );
+        registry
+            .routing
+            .write()
+            .unwrap()
+            .apply_tools_list_result("my-server", &[new_tool]);
+    }
+    assert_eq!(
+        registry.tool_schemas().len(),
+        schemas_before,
+        "tool_schemas must remain session-fixed after any refresh path"
+    );
+}
+
 // ── Timeout enforcement tests ──────────────────────────────────────
 
 /// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps with
@@ -689,6 +959,7 @@ fn make_routing_with_timeouts(
         request_timeouts,
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
     }))
 }
 
@@ -772,6 +1043,7 @@ async fn request_timeout_stored_per_server_at_discovery() {
         request_timeouts: HashMap::new(),
         unavailable: HashSet::new(),
         server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
     };
     routing_state
         .request_timeouts
@@ -1065,6 +1337,7 @@ fn notification_handler_structures() {
     let handler = McpNotificationHandler {
         server_name: "test-server".to_string(),
         task_short_id: "abc123".to_string(),
+        routing: make_routing(HashMap::new(), HashMap::new()),
     };
     let clone = handler.clone();
     assert_eq!(clone.server_name, "test-server");
