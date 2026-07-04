@@ -43,6 +43,11 @@ pub(super) struct StreamTurnState {
     pub needs_reactive_compaction: bool,
     pub streaming_results: Vec<(usize, ContentBlock)>,
     pub streaming_dispatched: HashSet<usize>,
+    /// True when the provider stream ended without a `StreamEvent::Done`
+    /// (i.e., the stream returned `None` early).  This is distinct from
+    /// cancellation/interruption and from normal completion; it tells the
+    /// reply loop to flush any observed in-flight content before returning.
+    pub early_stream_end: bool,
     /// Idempotency guard: `true` once this turn's observed assistant/tool
     /// rows have been persisted (either through the normal finalize path or
     /// via [`persistence::flush_in_flight_turn`]).  Repeated flush calls
@@ -67,6 +72,7 @@ impl StreamTurnState {
             needs_reactive_compaction: false,
             streaming_results: Vec::new(),
             streaming_dispatched: HashSet::new(),
+            early_stream_end: false,
             turn_flushed: false,
         }
     }
@@ -124,7 +130,10 @@ pub(super) async fn consume_provider_stream(
                 state.streaming_results.push(result);
             }
             evt = ctx.stream.next() => {
-                let Some(evt) = evt else { break; };
+                let Some(evt) = evt else {
+                    state.early_stream_end = true;
+                    break;
+                };
                 let evt = match evt {
                     Ok(e) => e,
                     Err(e) if (is_context_length_error(&e) || is_orphaned_tool_call_error(&e))

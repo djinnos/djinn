@@ -815,14 +815,30 @@ pub async fn run_reply_loop(
             })
             .await?;
             // Flush any observed assistant/tool content before returning on
-            // interrupt.  This persists the in-flight turn so it survives
-            // session release and is visible on resume/timeline.
-            if stream_state.interrupted.is_some() {
+            // interrupt, cancellation, or early stream end.  This persists the
+            // in-flight turn so it survives session release and is visible on
+            // resume/timeline.  The flush is idempotent: repeated calls within the
+            // same turn are no-ops once the turn is marked flushed.
+            let has_in_flight_content =
+                !stream_state.turn_text.is_empty()
+                || !stream_state.turn_thinking.is_empty()
+                || !stream_state.turn_provider_state.is_empty()
+                || !stream_state.turn_tool_calls.is_empty()
+                || !stream_state.streaming_results.is_empty();
+            let should_flush = stream_state.interrupted.is_some()
+                || (stream_state.early_stream_end && has_in_flight_content);
+            if should_flush {
                 let now_ts = slot_ctx.clock.now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
                 flush_in_flight_turn(&msg_repo, session_id, task_id, now_ts, &mut stream_state).await;
+            }
+            // Normal completion: the turn will be finalized below.  Mark it
+            // flushed so any future caller cannot accidentally re-persist the
+            // same rows.
+            if stream_state.interrupted.is_none() && !stream_state.early_stream_end {
+                stream_state.turn_flushed = true;
             }
             let StreamTurnState {
                 turn_text,
@@ -839,6 +855,7 @@ pub async fn run_reply_loop(
                 needs_reactive_compaction,
                 streaming_results,
                 streaming_dispatched,
+                early_stream_end: _,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
@@ -1886,31 +1903,92 @@ mod tests {
         );
     }
 
-    /// Flush with only text (no tool calls or streaming results) should
-    /// persist a single assistant message.
+    /// `consume_provider_stream` records `early_stream_end` when the provider
+    /// stream ends without `StreamEvent::Done`, preserving observed text so the
+    /// reply loop can flush it before session release.
     #[tokio::test]
-    async fn flush_in_flight_turn_text_only() {
+    async fn consume_provider_stream_early_end_records_flush_signal() {
+        use super::super::streaming::StreamLoopContext;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+        use tokio_util::sync::CancellationToken;
+
         let db = create_test_db();
         db.ensure_initialized().await.expect("db init");
-        let (session_id, task_id) = create_flush_test_session(&db).await;
-        let msg_repo =
-            SessionMessageRepository::new(db.clone(), djinn_core::events::EventBus::noop());
-        let mut state = StreamTurnState::new();
-        state.turn_text = "Just some text output.".to_string();
-
-        flush_in_flight_turn(&msg_repo, &session_id, &task_id, 0, &mut state).await;
-        assert!(state.turn_flushed);
-
-        let conversation = msg_repo
-            .load_raw_conversation(&session_id)
+        let slot_ctx = agent_context_from_db(db, CancellationToken::new());
+        let provider = FakeProvider::script(vec![vec![
+            StreamEvent::Delta(ContentBlock::Text {
+                text: "partial output".to_string(),
+            }),
+            // No StreamEvent::Done — simulate early stream end.
+        ]]);
+        let tool_metadata = super::super::tool_dispatch::tool_runtime_metadata(&[]);
+        let conversation = Conversation::new();
+        let stream = provider
+            .stream(&conversation, &[], None)
             .await
-            .expect("load_raw_conversation should succeed");
-        assert_eq!(conversation.messages.len(), 1);
-        assert_eq!(conversation.messages[0].role, Role::Assistant);
+            .expect("stream");
+        let cancel = CancellationToken::new();
+        let global_cancel = CancellationToken::new();
+        let activity_ts = Arc::new(AtomicU64::new(0));
+        let last_rpc_touch = Arc::new(AtomicU64::new(0));
+        let last_token_flush = Arc::new(AtomicU64::new(0));
+        let mut current_context_tokens = 0u32;
+        let mut total_tokens_in = 0u32;
+        let mut total_tokens_out = 0u32;
+        let mut total_cache_read = 0u32;
+        let mut total_cache_write = 0u32;
+        let mut total_reasoning_out = 0u32;
+        let dispatcher = slot_ctx
+            .tool_dispatcher
+            .as_deref()
+            .expect("test SlotContext has a tool dispatcher");
+        let dispatch_ctx = super::super::tool_dispatch::ToolDispatchContext {
+            ctx: &slot_ctx,
+            task_id: "task",
+            worktree_path: std::path::Path::new("/tmp"),
+            role_name: "worker",
+            tool_metadata: &tool_metadata,
+            tool_dispatcher: dispatcher,
+            otel_session: None,
+        };
+
+        let state = consume_provider_stream(StreamLoopContext {
+            provider: &provider,
+            stream,
+            tool_metadata: &tool_metadata,
+            dispatch: &dispatch_ctx,
+            task_id: "task",
+            session_id: "session",
+            role_name: "worker",
+            project_path: "/tmp",
+            worktree_path: std::path::Path::new("/tmp"),
+            context_window: 100_000,
+            ctx: &slot_ctx,
+            cancel: &cancel,
+            global_cancel: &global_cancel,
+            activity_ts: &activity_ts,
+            last_rpc_touch: &last_rpc_touch,
+            last_token_flush: &last_token_flush,
+            compaction_attempts: 0,
+            current_context_tokens: &mut current_context_tokens,
+            total_tokens_in: &mut total_tokens_in,
+            total_tokens_out: &mut total_tokens_out,
+            total_cache_read: &mut total_cache_read,
+            total_cache_write: &mut total_cache_write,
+            total_reasoning_out: &mut total_reasoning_out,
+        })
+        .await
+        .expect("consume_provider_stream");
+
         assert!(
-            conversation.messages[0]
-                .text_content()
-                .contains("Just some text output.")
+            state.early_stream_end,
+            "early stream end must be recorded when stream ends without Done"
+        );
+        assert_eq!(state.turn_text, "partial output");
+        assert!(
+            state.interrupted.is_none(),
+            "early stream end is not an interruption"
         );
     }
 }
