@@ -222,6 +222,88 @@ fn regression_fixture_names_are_unique() {
     }
 }
 
+/// Load only the `builtin/djinn_mcp_server.json` fixture and return its
+/// parsed JSON array.
+fn load_djinn_mcp_server_fixture() -> Vec<Value> {
+    let val = load_fixture("builtin/djinn_mcp_server.json");
+    val.as_array()
+        .expect("djinn_mcp_server.json must be a JSON array of tool objects")
+        .clone()
+}
+
+#[test]
+fn manifest_includes_djinn_mcp_server_fixture() {
+    let manifest = load_fixture("manifest.json");
+    let files = manifest["groups"]["builtin"]["files"]
+        .as_array()
+        .expect("builtin group has files array");
+    let file_strs: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        file_strs.contains(&"builtin/djinn_mcp_server.json"),
+        "builtin manifest must include builtin/djinn_mcp_server.json — the \
+         DjinnMcpServer::all_tool_schemas() snapshot should be listed alongside \
+         role-based builtin fixtures"
+    );
+}
+
+#[test]
+fn djinn_mcp_server_fixture_is_full_size_corpus() {
+    let tools = load_djinn_mcp_server_fixture();
+    assert!(
+        !tools.is_empty(),
+        "djinn_mcp_server.json must contain at least one tool"
+    );
+    // The DjinnMcpServer corpus is expected to be a substantial full-server
+    // tool set.  Use a robust lower bound (>= 140) rather than a brittle
+    // exact count so minor tool additions/removals don't flake the test.
+    assert!(
+        tools.len() >= 140,
+        "djinn_mcp_server.json has only {} tools — expected a full-size \
+         DjinnMcpServer corpus (>= 140 tools). If tools were intentionally \
+         removed, update this bound.",
+        tools.len()
+    );
+}
+
+#[test]
+fn djinn_mcp_server_fixture_has_quality_input_schemas() {
+    let tools = load_djinn_mcp_server_fixture();
+    for tool in &tools {
+        let name = tool_name(tool);
+        // Every tool must have a non-empty object inputSchema.
+        let schema = tool
+            .get("inputSchema")
+            .unwrap_or_else(|| panic!("DjinnMcpServer tool '{name}' is missing 'inputSchema'"));
+        assert!(
+            schema.is_object(),
+            "DjinnMcpServer tool '{name}' inputSchema must be a JSON object, got {}",
+            if schema.is_null() {
+                "null"
+            } else {
+                schema.as_str().unwrap_or("non-object")
+            }
+        );
+        assert!(
+            !schema.as_object().unwrap().is_empty(),
+            "DjinnMcpServer tool '{name}' inputSchema must not be an empty object"
+        );
+    }
+}
+
+#[test]
+fn djinn_mcp_server_fixture_tool_names_are_unique() {
+    let tools = load_djinn_mcp_server_fixture();
+    let mut seen = std::collections::HashSet::new();
+    for tool in &tools {
+        let name = tool_name(tool);
+        assert!(
+            seen.insert(name),
+            "duplicate DjinnMcpServer tool name '{name}' — \
+             DjinnMcpServer::all_tool_schemas() should produce unique names"
+        );
+    }
+}
+
 #[test]
 fn builtin_corpus_input_schemas_are_valid_json_schema_objects() {
     let corpus = load_group("builtin");
