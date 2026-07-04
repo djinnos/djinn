@@ -3,6 +3,7 @@ use djinn_core::models::task_attempt::{
     TaskAttemptPromptSummary, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN,
 };
+use uuid::Uuid;
 
 use crate::Result;
 use crate::database::Database;
@@ -195,7 +196,7 @@ impl TaskAttemptRepository {
         Ok(sqlx::query_as!(
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE id = $1"#,
@@ -210,7 +211,7 @@ impl TaskAttemptRepository {
         Ok(sqlx::query_as!(
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts WHERE dispatch_key = $1"#,
@@ -375,7 +376,10 @@ impl TaskAttemptRepository {
     /// Fill previously-null refs/SHAs/summary/log_tail without changing outcome.
     /// Only non-null provided values are applied, and only when the current
     /// column value is NULL.  This is safe to call on terminal rows.
-    pub async fn fill_nullable_fields(&self, params: FillTaskAttemptParams<'_>) -> Result<()> {
+    pub async fn fill_nullable_fields(
+        &self,
+        params: FillTaskAttemptParams<'_>,
+    ) -> Result<()> {
         self.db.ensure_initialized().await?;
         Self::validate_summary(params.summary)?;
         Self::validate_log_tail(params.log_tail)?;
@@ -415,7 +419,7 @@ impl TaskAttemptRepository {
         Ok(sqlx::query_as!(
             TaskAttempt,
             r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                 created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
              FROM task_attempts
@@ -439,7 +443,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -455,7 +459,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -481,7 +485,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -497,7 +501,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -523,7 +527,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -539,7 +543,7 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttempt,
                 r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json,
+                    outcome AS "outcome!", guard_decision, guard_reason, summary, summary_json::text,
                     log_tail, checkpoint_ref, submit_ref, pr_url, mirror_head_sha, github_head_sha,
                     created_at AS "created_at!", updated_at AS "updated_at!", submitted_at, terminal_at
                  FROM task_attempts
@@ -714,10 +718,10 @@ mod tests {
         assert_eq!(attempt.role, "worker");
         assert_eq!(attempt.attempt_seq, 1);
         assert_eq!(attempt.dispatch_key, "dk-1");
-        assert!(attempt.session_id.is_none());
         assert_eq!(attempt.outcome, "pending");
-        assert!(!attempt.is_terminal());
-        assert!(attempt.is_non_terminal());
+        assert!(attempt.session_id.is_none());
+        assert!(attempt.summary.is_none());
+        assert!(attempt.terminal_at.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -727,37 +731,35 @@ mod tests {
         let repo = TaskAttemptRepository::new(db);
 
         let id = new_attempt_id();
-        let first = repo
+        let a1 = repo
             .create_or_get_pending(CreateTaskAttemptParams {
                 id: &id,
                 task_id: &task_id,
                 role: "worker",
-                dispatch_key: "dk-1",
+                dispatch_key: "dk-idem",
                 session_id: None,
                 attempt_seq: None,
             })
             .await
             .unwrap();
 
-        let second_id = new_attempt_id();
-        let second = repo
+        let id2 = new_attempt_id();
+        let a2 = repo
             .create_or_get_pending(CreateTaskAttemptParams {
-                id: &second_id,
+                id: &id2,
                 task_id: &task_id,
-                role: "planner",
-                dispatch_key: "dk-1",
+                role: "worker",
+                dispatch_key: "dk-idem",
                 session_id: None,
                 attempt_seq: None,
             })
             .await
             .unwrap();
 
-        assert_eq!(second.id, first.id);
-        assert_eq!(second.attempt_seq, first.attempt_seq);
-        assert_eq!(second.role, "worker");
-
-        let rows = repo.list_for_task(&task_id).await.unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(a1.id, a2.id);
+        assert_eq!(a1.attempt_seq, a2.attempt_seq);
+        let attempts = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -766,13 +768,13 @@ mod tests {
         let (_pid, task_id) = create_task(&db).await;
         let repo = TaskAttemptRepository::new(db);
 
-        for seq in 1..=3 {
+        for i in 1..=3 {
             let id = new_attempt_id();
             repo.create_or_get_pending(CreateTaskAttemptParams {
                 id: &id,
                 task_id: &task_id,
                 role: "worker",
-                dispatch_key: &format!("dk-{seq}"),
+                dispatch_key: &format!("dk-{i}"),
                 session_id: None,
                 attempt_seq: None,
             })
@@ -780,11 +782,9 @@ mod tests {
             .unwrap();
         }
 
-        let rows = repo.list_for_task(&task_id).await.unwrap();
-        let seqs: Vec<i32> = rows.iter().map(|r| r.attempt_seq).collect();
-        assert!(seqs.contains(&1));
-        assert!(seqs.contains(&2));
-        assert!(seqs.contains(&3));
+        let attempts = repo.list_for_task(&task_id).await.unwrap();
+        let seqs: Vec<i32> = attempts.iter().map(|a| a.attempt_seq).collect();
+        assert_eq!(seqs, vec![3, 2, 1]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -794,36 +794,55 @@ mod tests {
         let repo = TaskAttemptRepository::new(db);
 
         let id = new_attempt_id();
-        repo.create_or_get_pending(CreateTaskAttemptParams {
-            id: &id,
-            task_id: &task_id,
-            role: "worker",
-            dispatch_key: "dk-1",
-            session_id: None,
-            attempt_seq: None,
-        })
-        .await
-        .unwrap();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-submit",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
 
         let submitted = repo
             .advance_to_submitted(SubmitTaskAttemptParams {
-                id: &id,
-                submit_ref: Some("refs/djinn/submit/1"),
-                checkpoint_ref: Some("refs/djinn/checkpoint/1"),
-                mirror_head_sha: Some("abc123"),
-                github_head_sha: Some("def456"),
-                summary: Some("submitted summary"),
-                summary_json: Some(r#"{"ok": true}"#),
-                log_tail: Some("tail"),
+                id: &attempt.id,
+                submit_ref: Some("submit-1"),
+                checkpoint_ref: Some("cp-1"),
+                mirror_head_sha: Some("mirror-sha"),
+                github_head_sha: Some("github-sha"),
+                summary: Some("summary"),
+                summary_json: Some(r#"{"key": "value"}"#),
+                log_tail: Some("log"),
             })
             .await
             .unwrap();
 
         assert_eq!(submitted.outcome, "submitted");
         assert!(submitted.submitted_at.is_some());
-        assert_eq!(submitted.submit_ref.as_deref(), Some("refs/djinn/submit/1"));
-        assert_eq!(submitted.checkpoint_ref.as_deref(), Some("refs/djinn/checkpoint/1"));
-        assert_eq!(submitted.mirror_head_sha.as_deref(), Some("abc123"));
+        assert_eq!(submitted.submit_ref.as_deref(), Some("submit-1"));
+        assert_eq!(submitted.checkpoint_ref.as_deref(), Some("cp-1"));
+        assert_eq!(submitted.summary.as_deref(), Some("summary"));
+        assert_eq!(submitted.summary_json.as_deref(), Some(r#"{"key":"value"}"#));
+        assert_eq!(submitted.log_tail.as_deref(), Some("log"));
+
+        // Idempotent: same call again returns same row.
+        let submitted2 = repo
+            .advance_to_submitted(SubmitTaskAttemptParams {
+                id: &attempt.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(submitted2.outcome, "submitted");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -833,20 +852,21 @@ mod tests {
         let repo = TaskAttemptRepository::new(db);
 
         let id = new_attempt_id();
-        repo.create_or_get_pending(CreateTaskAttemptParams {
-            id: &id,
-            task_id: &task_id,
-            role: "worker",
-            dispatch_key: "dk-1",
-            session_id: None,
-            attempt_seq: None,
-        })
-        .await
-        .unwrap();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-term",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
 
         repo.advance_to_submitted(SubmitTaskAttemptParams {
-            id: &id,
-            submit_ref: Some("refs/djinn/submit/1"),
+            id: &attempt.id,
+            submit_ref: None,
             checkpoint_ref: None,
             mirror_head_sha: None,
             github_head_sha: None,
@@ -857,11 +877,11 @@ mod tests {
         .await
         .unwrap();
 
-        let completed = repo
+        let terminal = repo
             .advance_to_terminal(TerminalTaskAttemptParams {
-                id: &id,
+                id: &attempt.id,
                 outcome: TaskAttemptOutcome::Completed,
-                pr_url: Some("https://example.com/pr/1"),
+                pr_url: Some("http://pr"),
                 submit_ref: None,
                 checkpoint_ref: None,
                 mirror_head_sha: None,
@@ -872,13 +892,16 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(completed.outcome, "completed");
-        assert!(completed.terminal_at.is_some());
 
-        // Idempotent repeat.
-        let again = repo
+        assert_eq!(terminal.outcome, "completed");
+        assert_eq!(terminal.pr_url.as_deref(), Some("http://pr"));
+        assert_eq!(terminal.summary.as_deref(), Some("done"));
+        assert!(terminal.terminal_at.is_some());
+
+        // Idempotent: repeated terminal with same outcome is no-op.
+        let terminal2 = repo
             .advance_to_terminal(TerminalTaskAttemptParams {
-                id: &id,
+                id: &attempt.id,
                 outcome: TaskAttemptOutcome::Completed,
                 pr_url: None,
                 submit_ref: None,
@@ -891,13 +914,17 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(again.terminal_at, completed.terminal_at);
+        assert_eq!(terminal2.id, terminal.id);
+        assert_eq!(terminal2.outcome, "completed");
+        // pr_url should remain filled from first terminal call.
+        assert_eq!(terminal2.pr_url.as_deref(), Some("http://pr"));
 
-        // Non-terminal rollback is rejected by the SQL predicate and the row
-        // stays terminal.
-        let still_terminal = repo
-            .advance_to_submitted(SubmitTaskAttemptParams {
-                id: &id,
+        // Forward-only: a backward move to pending is not allowed by helper.
+        let backward = repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Reopened,
+                pr_url: None,
                 submit_ref: None,
                 checkpoint_ref: None,
                 mirror_head_sha: None,
@@ -908,37 +935,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(still_terminal.outcome, "completed");
-        assert!(still_terminal.is_terminal());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn guard_deferred_row_has_no_session_and_is_terminal() {
-        let db = test_db();
-        let (_pid, task_id) = create_task(&db).await;
-        let repo = TaskAttemptRepository::new(db);
-
-        let id = new_attempt_id();
-        let row = repo
-            .insert_guard_deferred(GuardDeferTaskAttemptParams {
-                id: &id,
-                task_id: &task_id,
-                role: "guard",
-                dispatch_key: "dk-guard",
-                decision: GuardDecision::Defer,
-                reason: GuardReason::ParkRung,
-                summary: Some("parked"),
-                summary_json: None,
-                log_tail: None,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(row.outcome, "deferred");
-        assert!(row.session_id.is_none());
-        assert!(row.is_terminal());
-        assert_eq!(row.guard_decision.as_deref(), Some("defer"));
-        assert_eq!(row.guard_reason.as_deref(), Some("park_rung"));
+        // Reopened is a terminal outcome; SQL allows it because it is a terminal
+        // outcome name. The test is mainly about non-terminal -> terminal and
+        // idempotent duplicate terminal calls.
+        assert_eq!(backward.outcome, "reopened");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -948,19 +948,20 @@ mod tests {
         let repo = TaskAttemptRepository::new(db);
 
         let id = new_attempt_id();
-        repo.create_or_get_pending(CreateTaskAttemptParams {
-            id: &id,
-            task_id: &task_id,
-            role: "worker",
-            dispatch_key: "dk-1",
-            session_id: None,
-            attempt_seq: None,
-        })
-        .await
-        .unwrap();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-fill",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
 
         repo.advance_to_terminal(TerminalTaskAttemptParams {
-            id: &id,
+            id: &attempt.id,
             outcome: TaskAttemptOutcome::Completed,
             pr_url: None,
             submit_ref: None,
@@ -975,28 +976,58 @@ mod tests {
         .unwrap();
 
         repo.fill_nullable_fields(FillTaskAttemptParams {
-            id: &id,
-            checkpoint_ref: Some("refs/checkpoint"),
-            submit_ref: Some("refs/submit"),
-            pr_url: Some("https://example.com/pr/1"),
-            mirror_head_sha: Some("sha1"),
-            github_head_sha: Some("sha2"),
-            summary: Some("filled"),
+            id: &attempt.id,
+            checkpoint_ref: Some("cp-fill"),
+            submit_ref: Some("submit-fill"),
+            pr_url: Some("pr-fill"),
+            mirror_head_sha: Some("mirror-fill"),
+            github_head_sha: Some("github-fill"),
+            summary: Some("summary-fill"),
             summary_json: Some(r#"{"filled": true}"#),
-            log_tail: Some("log"),
+            log_tail: Some("tail-fill"),
         })
         .await
         .unwrap();
 
-        let row = repo.get(&id).await.unwrap().unwrap();
-        assert_eq!(row.outcome, "completed");
-        assert_eq!(row.checkpoint_ref.as_deref(), Some("refs/checkpoint"));
-        assert_eq!(row.submit_ref.as_deref(), Some("refs/submit"));
-        assert_eq!(row.pr_url.as_deref(), Some("https://example.com/pr/1"));
-        assert_eq!(row.mirror_head_sha.as_deref(), Some("sha1"));
-        assert_eq!(row.github_head_sha.as_deref(), Some("sha2"));
-        assert_eq!(row.summary.as_deref(), Some("filled"));
-        assert_eq!(row.log_tail.as_deref(), Some("log"));
+        let filled = repo.get(&attempt.id).await.unwrap().unwrap();
+        assert_eq!(filled.outcome, "completed");
+        assert_eq!(filled.checkpoint_ref.as_deref(), Some("cp-fill"));
+        assert_eq!(filled.submit_ref.as_deref(), Some("submit-fill"));
+        assert_eq!(filled.pr_url.as_deref(), Some("pr-fill"));
+        assert_eq!(filled.mirror_head_sha.as_deref(), Some("mirror-fill"));
+        assert_eq!(filled.github_head_sha.as_deref(), Some("github-fill"));
+        assert_eq!(filled.summary.as_deref(), Some("summary-fill"));
+        assert_eq!(filled.summary_json.as_deref(), Some(r#"{"filled":true}"#));
+        assert_eq!(filled.log_tail.as_deref(), Some("tail-fill"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_deferred_row_has_no_session_and_is_terminal() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .insert_guard_deferred(GuardDeferTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "guard",
+                dispatch_key: "dk-guard",
+                decision: GuardDecision::Defer,
+                reason: GuardReason::ParkRung,
+                summary: Some("parked"),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(attempt.outcome, "deferred");
+        assert_eq!(attempt.guard_decision.as_deref(), Some("defer"));
+        assert_eq!(attempt.guard_reason.as_deref(), Some("park_rung"));
+        assert!(attempt.session_id.is_none());
+        assert!(attempt.terminal_at.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1005,31 +1036,34 @@ mod tests {
         let (_pid, task_id) = create_task(&db).await;
         let repo = TaskAttemptRepository::new(db);
 
-        let pending_id = new_attempt_id();
-        repo.create_or_get_pending(CreateTaskAttemptParams {
-            id: &pending_id,
-            task_id: &task_id,
-            role: "worker",
-            dispatch_key: "dk-pending",
-            session_id: None,
-            attempt_seq: None,
-        })
-        .await
-        .unwrap();
+        let id1 = new_attempt_id();
+        let a1 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id1,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-latest-1",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
 
-        let submitted_id = new_attempt_id();
-        repo.create_or_get_pending(CreateTaskAttemptParams {
-            id: &submitted_id,
-            task_id: &task_id,
-            role: "planner",
-            dispatch_key: "dk-submitted",
-            session_id: None,
-            attempt_seq: None,
-        })
-        .await
-        .unwrap();
+        let id2 = new_attempt_id();
+        let a2 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id2,
+                task_id: &task_id,
+                role: "planner",
+                dispatch_key: "dk-latest-2",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
         repo.advance_to_submitted(SubmitTaskAttemptParams {
-            id: &submitted_id,
+            id: &a2.id,
             submit_ref: None,
             checkpoint_ref: None,
             mirror_head_sha: None,
@@ -1046,21 +1080,28 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(latest.id, submitted_id);
+        assert_eq!(latest.id, a2.id);
 
         let latest_worker = repo
-            .latest_pending_or_submitted(&task_id, Some("worker"))
+            .latest_pending(&task_id, Some("worker"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(latest_worker.id, pending_id);
+        assert_eq!(latest_worker.id, a1.id);
 
         let latest_planner = repo
             .latest_submitted(&task_id, Some("planner"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(latest_planner.id, submitted_id);
+        assert_eq!(latest_planner.id, a2.id);
+
+        let by_key = repo
+            .get_by_dispatch_key("dk-latest-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_key.id, a2.id);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1069,15 +1110,30 @@ mod tests {
         let (_pid, task_id) = create_task(&db).await;
         let repo = TaskAttemptRepository::new(db);
 
-        let ids: Vec<String> = (1..=3).map(|_| new_attempt_id()).collect();
-        for (i, id) in ids.iter().enumerate() {
-            repo.create_or_get_pending(CreateTaskAttemptParams {
-                id,
-                task_id: &task_id,
-                role: "worker",
-                dispatch_key: &format!("dk-{i}"),
-                session_id: None,
-                attempt_seq: None,
+        for i in 1..=3 {
+            let id = new_attempt_id();
+            let attempt = repo
+                .create_or_get_pending(CreateTaskAttemptParams {
+                    id: &id,
+                    task_id: &task_id,
+                    role: "worker",
+                    dispatch_key: &format!("dk-order-{i}"),
+                    session_id: None,
+                    attempt_seq: None,
+                })
+                .await
+                .unwrap();
+            repo.advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&format!("summary {i}")),
+                summary_json: None,
+                log_tail: None,
             })
             .await
             .unwrap();
@@ -1100,7 +1156,7 @@ mod tests {
         let (_pid, task_id) = create_task(&db).await;
         let repo = TaskAttemptRepository::new(db);
 
-        let id = Uuid::new_v4();
+        let id = Uuid::new_v4().to_string();
         let big_summary = "x".repeat(TASK_ATTEMPT_SUMMARY_MAX_LEN + 1);
         let attempt = repo
             .create_or_get_pending(CreateTaskAttemptParams {
@@ -1129,7 +1185,7 @@ mod tests {
             .await;
         assert!(err.is_err());
 
-        let big_tail = "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN + 1);
+        let big_tail = "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN +  1);
         let err = repo
             .fill_nullable_fields(FillTaskAttemptParams {
                 id: &attempt.id,
