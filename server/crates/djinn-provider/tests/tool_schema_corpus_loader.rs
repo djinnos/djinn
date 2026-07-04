@@ -4,11 +4,13 @@
 //! `tests/fixtures/tool_schema_projection/` and validates that every
 //! fixture is well-formed JSON in the expected RMCP tool shape.
 //!
-//! The follow-up corpus invariant test (task `azmt`) will extend this
-//! loader to run every fixture's `inputSchema` through every relevant
-//! `(ToolSchemaCompat, FormatFamily)` projection combination and assert
+//! The companion invariant test
+//! `tool_schema_projection_corpus.rs` loads the same fixtures and runs
+//! every fixture's `inputSchema` through every relevant
+//! `(ToolSchemaCompat, FormatFamily)` projection combination, asserting
 //! strict-validator invariants.  This file supplies the fixture layout
-//! and loading scaffolding so that task only needs to add assertions.
+//! and loading scaffolding; the invariant test owns the projection
+//! assertions.
 //!
 //! See `tests/fixtures/tool_schema_projection/README.md` for the
 //! dependency-cycle rationale (why we use committed snapshots instead of
