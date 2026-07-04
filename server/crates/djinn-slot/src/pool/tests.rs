@@ -2045,3 +2045,280 @@ async fn terminate_session_does_not_return_non_draining_slot_to_free_list() {
         "stale Killed event from the terminated slot must not remove the redispatched task mapping"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Compaction-aware teardown deferral tests (task t9iy)
+// ---------------------------------------------------------------------------
+
+/// Slot factory that captures the `CompactionCriticalSection` from each slot
+/// handle into a shared map so tests can externally enter the compaction guard
+/// and simulate an active compaction window.
+fn compaction_capturing_slot_factory(
+    runtime: Duration,
+    signal_tx: mpsc::UnboundedSender<RunnerSignal>,
+    captured_cses: std::sync::Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    >,
+) -> SlotFactory {
+    Arc::new(move |slot_id, model_id, event_tx, app_state, cancel| {
+        let signal_tx = signal_tx.clone();
+        let runner: super::super::actor::TestLifecycleRunner = Arc::new(
+            move |task_id,
+                  _project_path,
+                  _model_id,
+                  _app_state,
+                  kill,
+                  pause,
+                  _resume_lifecycle_metadata| {
+                let signal_tx = signal_tx.clone();
+                Box::pin(async move {
+                    let _ = signal_tx.send(RunnerSignal::Started(task_id.clone()));
+                    tokio::select! {
+                        _ = tokio::time::sleep(runtime) => {
+                            let _ = signal_tx.send(RunnerSignal::Completed(task_id));
+                        }
+                        _ = kill.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Killed(task_id));
+                        }
+                        _ = pause.cancelled() => {
+                            let _ = signal_tx.send(RunnerSignal::Paused(task_id));
+                        }
+                    }
+                    Ok(())
+                })
+            },
+        );
+        let handle = super::super::actor::SlotHandle::spawn_with_test_runner(
+            slot_id, model_id, event_tx, app_state, cancel, runner,
+        );
+        captured_cses
+            .lock()
+            .unwrap()
+            .insert(slot_id, handle.test_compaction_cs().clone());
+        handle
+    })
+}
+
+/// White-box: `kill_session` for a compacting slot defers settlement and
+/// mapping removal.  The task remains in `pending_teardown_tasks` until the
+/// `SlotEvent::Killed` arrives.
+#[tokio::test]
+async fn kill_session_during_compaction_defers_settlement_and_mapping_release() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let cses: std::sync::Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = std::sync::Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    // Simulate dispatch: mark slot 0 busy with a task.
+    pool.test_set_task_slot("task-1", 0);
+    pool.test_assign_busy("task-1", 0);
+    // Enter the compaction guard on the slot's CS — simulates the reply loop
+    // being mid-compaction.
+    let cs = cses.lock().unwrap().get(&0).unwrap().clone();
+    let _guard = cs.guard();
+    assert!(
+        pool.test_slot_is_compacting(0),
+        "slot should report compacting while guard is held"
+    );
+    // kill_session should defer: the task stays mapped, no settlement.
+    pool.test_kill_session("task-1")
+        .await
+        .expect("kill_session should succeed even during compaction");
+    assert!(
+        pool.test_pending_teardown_tasks().contains("task-1"),
+        "task should be in pending_teardown_tasks after deferred kill"
+    );
+    assert_eq!(
+        pool.test_slot_of("task-1"),
+        Some(0),
+        "task mapping must NOT be removed during deferred teardown"
+    );
+    // Release compaction and simulate the eventual Killed event.
+    drop(_guard);
+    assert!(
+        !pool.test_slot_is_compacting(0),
+        "slot should no longer be compacting after guard is dropped"
+    );
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_string(),
+        task_id: "task-1".to_string(),
+    })
+    .await;
+    assert!(
+        pool.test_pending_teardown_tasks().is_empty(),
+        "pending_teardown_tasks should be cleared after Killed event"
+    );
+    assert_eq!(
+        pool.test_slot_of("task-1"),
+        None,
+        "task mapping should be removed after Killed event settles"
+    );
+}
+
+/// White-box: `kill_session` for a non-compacting slot settles eagerly
+/// (backwards-compatible behaviour).
+#[tokio::test]
+async fn kill_session_without_compaction_settles_eagerly() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let cses: std::sync::Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = std::sync::Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_set_task_slot("task-1", 0);
+    pool.test_assign_busy("task-1", 0);
+    // No compaction guard held — normal path.
+    assert!(
+        !pool.test_slot_is_compacting(0),
+        "slot should not be compacting"
+    );
+    pool.test_kill_session("task-1")
+        .await
+        .expect("kill_session should succeed");
+    // Eager path: pending_teardown_tasks should NOT contain the task.
+    assert!(
+        !pool.test_pending_teardown_tasks().contains("task-1"),
+        "non-compacting kill should NOT defer to pending_teardown_tasks"
+    );
+    // Mapping is still present (removed only when Killed event arrives).
+    assert_eq!(
+        pool.test_slot_of("task-1"),
+        Some(0),
+        "task mapping stays until the Killed event"
+    );
+    // Simulate the Killed event — mapping is removed.
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_string(),
+        task_id: "task-1".to_string(),
+    })
+    .await;
+    assert_eq!(pool.test_slot_of("task-1"), None);
+}
+
+/// White-box: repeated `kill_session` during compaction is idempotent — no
+/// double-settle, no leaked pending entries.
+#[tokio::test]
+async fn kill_session_during_compaction_is_idempotent() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let cses: std::sync::Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = std::sync::Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_set_task_slot("task-1", 0);
+    pool.test_assign_busy("task-1", 0);
+    let cs = cses.lock().unwrap().get(&0).unwrap().clone();
+    let _guard = cs.guard();
+    // First kill — defers.
+    pool.test_kill_session("task-1")
+        .await
+        .expect("first kill_session should succeed");
+    assert_eq!(pool.test_pending_teardown_tasks().len(), 1);
+    // Second kill — idempotent no-op.
+    pool.test_kill_session("task-1")
+        .await
+        .expect("second kill_session should succeed (idempotent)");
+    assert_eq!(
+        pool.test_pending_teardown_tasks().len(),
+        1,
+        "repeated kill must not add duplicate pending entries"
+    );
+    // Mapping still present.
+    assert_eq!(pool.test_slot_of("task-1"), Some(0));
+    // Release compaction, emit Killed, verify clean settlement.
+    drop(_guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_string(),
+        task_id: "task-1".to_string(),
+    })
+    .await;
+    assert!(pool.test_pending_teardown_tasks().is_empty());
+    assert_eq!(pool.test_slot_of("task-1"), None);
+}
+
+/// White-box: `terminate_session` (reclaim) during compaction defers
+/// settlement and mapping removal.
+#[tokio::test]
+async fn reclaim_session_during_compaction_defers_settlement() {
+    let (app_state, cancel, _temp) = test_app_state();
+    let cses: std::sync::Arc<
+        Mutex<HashMap<usize, crate::reply_loop::compaction_guard::CompactionCriticalSection>>,
+    > = std::sync::Arc::new(Mutex::new(HashMap::new()));
+    let (signal_tx, _signal_rx) = mpsc::unbounded_channel();
+    let config = make_config(
+        vec![model("model-a", 1, &["worker"])],
+        &[("worker", vec!["model-a"])],
+    );
+    let (_pool_tx, pool_rx) = mpsc::channel(8);
+    let mut pool = SlotPool::new_with_factory(
+        pool_rx,
+        app_state,
+        cancel,
+        config,
+        compaction_capturing_slot_factory(Duration::from_secs(3600), signal_tx, cses.clone()),
+    );
+    pool.test_set_task_slot("task-1", 0);
+    pool.test_assign_busy("task-1", 0);
+    let cs = cses.lock().unwrap().get(&0).unwrap().clone();
+    let _guard = cs.guard();
+    // terminate_session goes through reclaim_session.
+    pool.test_terminate_session("task-1")
+        .await
+        .expect("terminate_session should succeed during compaction");
+    assert!(
+        pool.test_pending_teardown_tasks().contains("task-1"),
+        "reclaim during compaction should defer"
+    );
+    assert_eq!(
+        pool.test_slot_of("task-1"),
+        Some(0),
+        "mapping must NOT be removed during deferred reclaim"
+    );
+    // Release compaction and emit Killed.
+    drop(_guard);
+    pool.test_handle_slot_event(SlotEvent::Killed {
+        slot_id: 0,
+        model_id: "model-a".to_string(),
+        task_id: "task-1".to_string(),
+    })
+    .await;
+    assert!(pool.test_pending_teardown_tasks().is_empty());
+    assert_eq!(pool.test_slot_of("task-1"), None);
+}

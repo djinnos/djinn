@@ -7,6 +7,7 @@ pub mod note_hash;
 pub mod repositories;
 pub mod retry;
 pub mod short_id;
+mod template_bootstrap;
 
 pub mod test_support {
     pub use crate::repositories::test_support::{
