@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "regression_tuple_prefix_items",
+  "description": "Regression shape: tuple items via prefixItems (Draft 2020-12) plus unevaluatedItems. OpenAI and Anthropic pre-2020 expect items as a single schema or array; Gemini does not support prefixItems. Moonshot collapses prefixItems into items array and removes unevaluatedItems.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "coordinates": {
+        "type": "array",
+        "prefixItems": [
+          { "type": "number", "description": "latitude" },
+          { "type": "number", "description": "longitude" }
+        ],
+        "unevaluatedItems": false
+      },
+      "mixed_tuple": {
+        "type": "array",
+        "prefixItems": [
+          { "type": "string" },
+          { "type": "integer" }
+        ],
+        "items": { "type": "boolean" },
+        "unevaluatedItems": false
+      }
+    },
+    "required": ["coordinates"]
+  },
+  "readOnly": true,
+  "destructive": false,
+  "idempotent": true,
+  "openWorld": false,
+  "concurrent_safe": true
+}
