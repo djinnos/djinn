@@ -496,26 +496,8 @@ async fn run_git_log_once(project_root: &Path, range: &str) -> Result<String, In
     args.push(format!("--pretty=format:{pretty}"));
     args.push(range.to_string());
 
-    let outcome = tokio::time::timeout(
-        GIT_LOG_TIMEOUT,
-        djinn_git::run_git_command_in(project_root, args),
-    )
-    .await;
-
-    let CommandOutput { stdout, .. } = match outcome {
-        Ok(Ok(out)) => out,
-        Ok(Err(djinn_git::GitError::Io(io_err))) => return Err(IngestError::Spawn(io_err)),
-        Ok(Err(djinn_git::GitError::CommandFailed { code, stderr, .. })) => {
-            return Err(IngestError::GitFailed {
-                status: code.to_string(),
-                stderr,
-            });
-        }
-        Ok(Err(other)) => {
-            return Err(IngestError::Parse(format!("git log failed: {other}")));
-        }
-        Err(_elapsed) => return Err(IngestError::Timeout(GIT_LOG_TIMEOUT)),
-    };
+    let out = git_command_in(project_root, args).await?;
+    let stdout = out.stdout;
     Ok(stdout)
 }
 
