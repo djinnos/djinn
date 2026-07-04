@@ -8,6 +8,8 @@ use crate::server::AppState;
 mod handler;
 mod project_resolver;
 mod prompt;
+#[cfg(test)]
+mod compaction_boundary;
 pub(super) mod sessions;
 
 use djinn_provider::message::Message;
