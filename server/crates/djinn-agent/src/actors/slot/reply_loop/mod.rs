@@ -12,6 +12,9 @@ pub(crate) mod error_handling {
     pub(crate) use djinn_slot::reply_loop::error_handling::*;
 }
 
+#[cfg(test)]
+mod resource_tests;
+
 pub(crate) mod loop_guard {
     pub(crate) use djinn_slot::reply_loop::loop_guard::*;
 }
@@ -40,6 +43,56 @@ pub(crate) struct ReplyLoopContext<'a> {
     /// profile.  The dispatcher enforces allowed_schemas at dispatch time
     /// as defense-in-depth beyond the stage-time schema restriction.
     pub is_evidence_spike: bool,
+}
+
+/// Format MCP resource contents into deterministic inline text for tool results.
+///
+/// Text resources render with URI, MIME type, and text content. Binary/blob
+/// resources produce a descriptive omission message. Text resources exceeding
+/// [`crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES`] are omitted with size
+/// context.
+pub(crate) fn format_resource_contents(contents: &[rmcp::model::ResourceContents]) -> String {
+    use crate::mcp_client::MAX_MCP_RESOURCE_TEXT_BYTES;
+
+    let mut out = String::new();
+    for content in contents {
+        match content {
+            rmcp::model::ResourceContents::TextResourceContents {
+                uri,
+                mime_type,
+                text,
+                ..
+            } => {
+                let rendered_len = text.len();
+                if rendered_len > MAX_MCP_RESOURCE_TEXT_BYTES {
+                    out.push_str(&format!(
+                        "Resource: {uri}\nMIME: {}\n[resource omitted: {rendered_len} bytes exceeds {} MiB limit]",
+                        mime_type.as_deref().unwrap_or("text/plain"),
+                        MAX_MCP_RESOURCE_TEXT_BYTES / (1024 * 1024)
+                    ));
+                } else {
+                    out.push_str(&format!("Resource: {uri}\n"));
+                    if let Some(mime) = mime_type {
+                        out.push_str(&format!("MIME: {mime}\n"));
+                    }
+                    out.push_str(text);
+                }
+            }
+            rmcp::model::ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                let size = blob.len();
+                out.push_str(&format!(
+                    "Resource: {uri}\nMIME: {}\n[binary resource omitted: {size} bytes]",
+                    mime_type.as_deref().unwrap_or("application/octet-stream")
+                ));
+            }
+        }
+    }
+    out
 }
 
 struct AgentToolDispatcher {
@@ -200,34 +253,7 @@ impl djinn_slot::host::SlotToolDispatcher for AgentToolDispatcher {
                         .and_then(|v| v.as_str())
                         .ok_or("missing required argument `uri` (string)")?;
                     let contents = registry.read_resource(server, uri).await?;
-                    let mut out = String::new();
-                    for content in &contents {
-                        match content {
-                            rmcp::model::ResourceContents::TextResourceContents {
-                                uri,
-                                mime_type,
-                                text,
-                                ..
-                            } => {
-                                out.push_str(&format!("Resource: {uri}\n"));
-                                if let Some(mime) = mime_type {
-                                    out.push_str(&format!("MIME: {mime}\n"));
-                                }
-                                out.push_str(text);
-                            }
-                            rmcp::model::ResourceContents::BlobResourceContents {
-                                uri,
-                                mime_type,
-                                ..
-                            } => {
-                                out.push_str(&format!(
-                                    "Resource: {uri}\nMIME: {}\n[binary resource omitted]",
-                                    mime_type.as_deref().unwrap_or("application/octet-stream")
-                                ));
-                            }
-                        }
-                    }
-                    Ok(out)
+                    Ok(format_resource_contents(&contents))
                 }
                 _ => Err(format!("unknown resource tool: {tool}")),
             }
