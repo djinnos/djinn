@@ -43,6 +43,11 @@ pub(super) struct StreamTurnState {
     pub needs_reactive_compaction: bool,
     pub streaming_results: Vec<(usize, ContentBlock)>,
     pub streaming_dispatched: HashSet<usize>,
+    /// Idempotency guard: `true` once this turn's observed assistant/tool
+    /// rows have been persisted (either through the normal finalize path or
+    /// via [`persistence::flush_in_flight_turn`]).  Repeated flush calls
+    /// within the same turn are no-ops.
+    pub turn_flushed: bool,
 }
 
 impl StreamTurnState {
@@ -62,6 +67,7 @@ impl StreamTurnState {
             needs_reactive_compaction: false,
             streaming_results: Vec::new(),
             streaming_dispatched: HashSet::new(),
+            turn_flushed: false,
         }
     }
 }
