@@ -4,19 +4,24 @@ use djinn_orchestration_types::slot::{MERGE_CONFLICT_PREFIX, MergeConflictMetada
 
 /// Return the most recent N high-signal comments (lead, reviewer, verification)
 /// from the activity log, in chronological order (oldest first).
+/// Includes structured rejected `review_submitted` payloads even when there is no
+/// matching `comment`-typed twin.
 /// Each entry is formatted as "**Label:** body".
 pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usize) -> Vec<String> {
     let high_signal: Vec<&djinn_core::models::ActivityEntry> = activity
         .iter()
         .rev()
         .filter(|e| {
-            e.event_type == "comment"
+            (e.event_type == "comment"
                 && (e.actor_role == "lead"
                     || e.actor_role == "pm"
                     || e.actor_role == "architect"
                     || e.actor_role == "reviewer"
                     || e.actor_role == "task_reviewer"
-                    || e.actor_role == "verification")
+                    || e.actor_role == "verification"))
+                || (e.event_type == "review_submitted"
+                    && e.actor_role == "reviewer"
+                    && is_rejected_review(e))
         })
         .take(max)
         .collect();
@@ -25,6 +30,14 @@ pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usiz
         .into_iter()
         .rev()
         .filter_map(|e| {
+            if e.event_type == "review_submitted" {
+                let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
+                let body = payload.get("feedback").and_then(|v| v.as_str())?;
+                if body.is_empty() {
+                    return None;
+                }
+                return Some(format!("**Reviewer rejection:**\n{body}"));
+            }
             let payload = serde_json::from_str::<serde_json::Value>(&e.payload).ok()?;
             let body = payload.get("body").and_then(|v| v.as_str())?;
             let label = match e.actor_role.as_str() {
@@ -42,6 +55,15 @@ pub fn recent_feedback(activity: &[djinn_core::models::ActivityEntry], max: usiz
             Some(format!("**{label}:**\n{trimmed}"))
         })
         .collect()
+}
+
+/// Return true when the activity entry is a structured rejected review submission.
+/// The `review_submitted` event is logged by `submit_review` with a `verdict` field.
+fn is_rejected_review(entry: &djinn_core::models::ActivityEntry) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&entry.payload) else {
+        return false;
+    };
+    payload.get("verdict").and_then(|v| v.as_str()) == Some("rejected")
 }
 
 /// Extract worker submission summary/concerns from the activity log so the
