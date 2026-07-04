@@ -15,6 +15,12 @@ KIND_IMAGE_VERSION="${KIND_IMAGE_VERSION:-1.31.0}"
 REG_NAME="${REG_NAME:-kind-registry}"
 REG_PORT="${REG_PORT:-5001}"
 
+# Every kubectl call below pins --context: if the cluster already exists,
+# `kind create cluster` never runs and never switches the active context,
+# so an unpinned apply would land in whatever context the caller happens
+# to be on (staging/prod).
+KUBECTL=(kubectl --context "kind-${CLUSTER_NAME}")
+
 # --- 1. Ensure local registry is running ------------------------------------
 if [ "$(docker inspect -f '{{.State.Running}}' "${REG_NAME}" 2>/dev/null || echo false)" != 'true' ]; then
   echo ">>> starting local registry ${REG_NAME} at 127.0.0.1:${REG_PORT}"
@@ -67,7 +73,7 @@ done
 ZOT_NS="${ZOT_NAMESPACE:-djinn}"
 ZOT_SVC="${ZOT_SERVICE:-djinn-zot}"
 ZOT_HOST="${ZOT_HOST:-${ZOT_SVC}.${ZOT_NS}.svc.cluster.local:5000}"
-ZOT_IP="$(kubectl -n "${ZOT_NS}" get svc "${ZOT_SVC}" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+ZOT_IP="$("${KUBECTL[@]}" -n "${ZOT_NS}" get svc "${ZOT_SVC}" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
 if [ -n "${ZOT_IP}" ]; then
   echo ">>> wiring kubelet → Zot mirror: ${ZOT_HOST} → http://${ZOT_IP}:5000"
   ZOT_DIR="/etc/containerd/certs.d/${ZOT_HOST}"
@@ -90,7 +96,7 @@ fi
 
 # --- 5. Document the local registry in-cluster -----------------------------
 # See https://github.com/kubernetes/enhancements/tree/master/keps/sig-cluster-lifecycle/generic/1755-communicating-a-local-registry
-cat <<EOF | kubectl apply -f -
+cat <<EOF | "${KUBECTL[@]}" apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:

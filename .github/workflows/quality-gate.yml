@@ -270,6 +270,56 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --features qdrant -- -D warnings
 
+  # Cross-check the Linux sandbox layer for aarch64. Everything else in CI
+  # compiles x86_64-only, which let an aarch64-breaking seccomp deny list
+  # (x86_64-only legacy syscall constants in djinn-sandbox) ship to main —
+  # local dev on Apple Silicon (kind node = linux/arm64) then failed to
+  # build. Check-only (no link), scoped to the crate that owns the
+  # arch-conditional syscall/landlock code.
+  server-aarch64-check:
+    name: Server aarch64 Check
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      SQLX_OFFLINE: "true"
+      # Cross C compiler for any cc-built dep reached through the crate's
+      # tree (e.g. via workspace-hack); `check` doesn't link, but build
+      # scripts still compile target-arch C.
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      # workspace-hack activates openssl-sys's `vendored` feature for the whole
+      # workspace, but server/.cargo/config.toml pins OPENSSL_NO_VENDOR=1 to
+      # link the *host* system OpenSSL (there is no aarch64 system libssl here,
+      # and pkg-config isn't set up for cross). Override it back to 0 so
+      # openssl-sys compiles the vendored copy from source with the cross C
+      # toolchain installed below. (config.toml's [env] isn't force=true, so a
+      # real env var wins.)
+      OPENSSL_NO_VENDOR: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup toolchain install
+        working-directory: server
+      - run: rustup target add aarch64-unknown-linux-gnu
+        working-directory: server
+
+      - name: Install cross C toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+          shared-key: server-aarch64-check
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo check (aarch64)
+        run: cargo check -p djinn-sandbox --all-targets --target aarch64-unknown-linux-gnu
+
   # Pure-shell PR-time guard for Rust source file size; independent from clippy.
   # Runs in changed-file mode (--files-from-stdin) so the job enforces the
   # "new or edited Rust file" regression guard and does not fail on the
@@ -653,6 +703,7 @@ jobs:
     needs:
       - server-cargo-deny
       - server-clippy
+      - server-aarch64-check
       - server-size-guard
       - server-migrations-guard
       - server-raw-sql-boundary
@@ -666,6 +717,7 @@ jobs:
           results=(
             "${{ needs.server-cargo-deny.result }}"
             "${{ needs.server-clippy.result }}"
+            "${{ needs.server-aarch64-check.result }}"
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
             "${{ needs.server-raw-sql-boundary.result }}"

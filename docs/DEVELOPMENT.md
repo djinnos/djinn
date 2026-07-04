@@ -15,10 +15,12 @@ Langfuse for tracing — built from your working tree.
 
 **Prerequisites:** Docker, [kind](https://kind.sigs.k8s.io), `kubectl`,
 [Helm](https://helm.sh), [Tilt](https://tilt.dev), [pnpm](https://pnpm.io)
-(Node), and `openssl`.
+(Node **≥ 22.13** — pnpm 11 needs `node:sqlite`; older Nodes die mid-install
+with `ERR_UNKNOWN_BUILTIN_MODULE`), and `openssl`.
 
-The image pipeline runs BuildKit rootless via user namespaces. On the host
-(kind inherits host sysctls):
+**Linux only:** the image pipeline runs BuildKit rootless via user
+namespaces, which needs host sysctls (kind inherits them). On macOS, Docker
+Desktop's VM already provides this — skip these:
 
 ```sh
 sudo sysctl -w kernel.unprivileged_userns_clone=1
@@ -30,6 +32,14 @@ Then, from the repo root:
 ```bash
 tilt up
 ```
+
+> **First run with a non-kind kubectl context active** (e.g. `staging`):
+> Tilt's production-context guard fires at Tiltfile parse time, *before* the
+> bootstrap gets a chance to create the kind cluster and switch contexts, so
+> `tilt up` aborts with "Refusing to run 'local'…". Bootstrap once by hand —
+> `bash scripts/kind/setup-kind.sh` — which creates the cluster and switches
+> the current context to `kind-djinn`; then `tilt up` works. (Switch back
+> later with `kubectl config use-context <your-context>`.)
 
 Tilt bootstraps the kind cluster (`djinn`) + a local registry, builds
 `djinn-server` and `djinn-agent-worker`, embeds the freshly built UI, installs
