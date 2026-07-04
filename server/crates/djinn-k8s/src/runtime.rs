@@ -1252,6 +1252,49 @@ mod tests {
         assert_object_safe::<dyn SessionRuntime>();
     }
 
+    #[test]
+    fn service_resolution_activity_payload_records_requested_injected_and_skipped() {
+        let resolution = ImageServiceResolution {
+            image: Some(crate::sidecar::ResolvedImageMetadata {
+                id: "image-djinn".into(),
+                name: "djinn".into(),
+                tag: Some("registry.local/djinn:task".into()),
+            }),
+            requested_preset_ids: vec!["preset-postgres-18".into(), "preset-does-not-exist".into()],
+            injected: vec![crate::sidecar::InjectedServiceMetadata {
+                preset_id: "preset-postgres-18".into(),
+                service_type: "postgres".into(),
+                port: 5432,
+                conn_env_var: "DATABASE_URL,TEST_POSTGRES_URL".into(),
+            }],
+            skipped: vec![crate::sidecar::SkippedServicePreset {
+                preset_id: "preset-does-not-exist".into(),
+                reason: "unknown service preset".into(),
+            }],
+            lookup_error: Some("image_service_presets lookup failed".into()),
+            services: Vec::new(),
+        };
+
+        let payload = service_resolution_activity_payload("run-123", "project-123", &resolution);
+
+        assert_eq!(payload["task_run_id"], "run-123");
+        assert_eq!(payload["project_id"], "project-123");
+        assert_eq!(payload["image"]["id"], "image-djinn");
+        assert_eq!(
+            payload["requested"],
+            serde_json::json!(["preset-postgres-18", "preset-does-not-exist"])
+        );
+        assert_eq!(payload["injected"][0]["preset_id"], "preset-postgres-18");
+        assert_eq!(payload["injected"][0]["service_type"], "postgres");
+        assert_eq!(payload["injected"][0]["port"], 5432);
+        assert_eq!(payload["skipped"][0]["preset_id"], "preset-does-not-exist");
+        assert_eq!(payload["skipped"][0]["reason"], "unknown service preset");
+        assert_eq!(
+            payload["errors"],
+            serde_json::json!(["image_service_presets lookup failed"])
+        );
+    }
+
     // ── ld18 "kill actually kills" teardown coverage ─────────────────────
     //
     // The slot-pool / coordinator lifecycle code calls
