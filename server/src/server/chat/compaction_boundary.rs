@@ -1,8 +1,8 @@
-use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
+use djinn_compaction::{COMPACTION_SUMMARY_END_MARKER, bounded_message_identity};
 use djinn_db::{
     BeginCompactionParams, CompleteCompactionParams, SessionCompactionBoundaryRepository,
 };
-use djinn_provider::message::{Conversation, Message, Role};
+use djinn_provider::message::{Conversation, Role};
 
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
@@ -41,8 +41,8 @@ fn gather_chat_boundary_identity(
         .messages
         .iter()
         .find(|m| m.role != Role::System)
-        .map(message_identity);
-    let last_compacted_message_id = conversation.messages.last().map(message_identity);
+        .map(bounded_message_identity);
+    let last_compacted_message_id = conversation.messages.last().map(bounded_message_identity);
 
     let mut first_retained_message_id: Option<String> = None;
     let mut found_summary = false;
@@ -55,7 +55,7 @@ fn gather_chat_boundary_identity(
                 .text_content()
                 .starts_with("Part of your context was compacted.")
         {
-            first_retained_message_id = Some(message_identity(msg));
+            first_retained_message_id = Some(bounded_message_identity(msg));
             break;
         }
         if msg.role == Role::User && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER) {
@@ -79,27 +79,6 @@ fn gather_chat_boundary_identity(
         first_retained_message_id,
         retained_tail_hash,
     )
-}
-
-/// Stable per-message identity that fits the boundary table's `VARCHAR(36)`
-/// id columns (`first_message_id`, `last_compacted_message_id`,
-/// `first_retained_message_id` — see migration 92). Prefers the
-/// provider-assigned message id when present and short enough; otherwise falls
-/// back to a content hash truncated to 36 characters. 34 hex chars (136 bits)
-/// is far beyond any collision risk across the messages of one conversation.
-fn message_identity(msg: &Message) -> String {
-    use sha2::{Digest, Sha256};
-    const MAX_LEN: usize = 36;
-
-    if let Some(serde_json::Value::Object(provider_data)) =
-        msg.metadata.as_ref().and_then(|m| m.provider_data.as_ref())
-        && let Some(serde_json::Value::String(id)) = provider_data.get("id")
-        && id.len() <= MAX_LEN
-    {
-        return id.clone();
-    }
-    let digest = hex_encode(&Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()));
-    format!("h:{}", &digest[..MAX_LEN - 2])
 }
 
 /// Extract the accepted summary text from an already compacted chat conversation.
@@ -277,7 +256,7 @@ mod tests {
         let (_, _, first_retained, tail_hash) = gather_chat_boundary_identity(&conv);
         assert_eq!(
             first_retained,
-            Some(message_identity(conv.messages.last().unwrap()))
+            Some(bounded_message_identity(conv.messages.last().unwrap()))
         );
         assert!(tail_hash.unwrap().starts_with("sha256:"));
     }
