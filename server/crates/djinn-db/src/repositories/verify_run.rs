@@ -112,6 +112,46 @@ impl VerifyRunRepository {
         .await?)
     }
 
+    /// Return the most recent **passing** verify run for a task (across all of
+    /// its task runs) that matches the exact submission `diff_fingerprint`.
+    ///
+    /// This is the `(task, fingerprint)` cache lookup for the pre-approval
+    /// CI-grade verification gate (proposal `uv3p`): an unchanged resubmission
+    /// with a fingerprint that already passed must NOT recompile. Because
+    /// `verify_runs` is keyed by `task_run_id`, this joins through `task_runs`
+    /// to resolve the durable task identity, so a fresh task run can still hit a
+    /// green result recorded by an earlier run for the same diff.
+    ///
+    /// Returns `None` when no passing run exists for the pair — the explicit
+    /// cache-miss path the gate re-runs the check set for.
+    pub async fn latest_pass_for_task_and_fingerprint(
+        &self,
+        task_id: &str,
+        diff_fingerprint: &str,
+    ) -> Result<Option<VerifyRunRecord>> {
+        self.db.ensure_initialized().await?;
+
+        Ok(sqlx::query_as!(
+            VerifyRunRecord,
+            r#"SELECT vr.id, vr.task_run_id, vr.verify_source, vr.verify_run_id,
+                vr.command_version, vr.profile_version, vr.completed_at,
+                vr.result, vr.diff_fingerprint,
+                vr.check_coverage AS "check_coverage: serde_json::Value",
+                vr.created_at
+             FROM verify_runs vr
+             JOIN task_runs tr ON tr.id = vr.task_run_id
+             WHERE tr.task_id = $1
+               AND vr.diff_fingerprint = $2
+               AND vr.result = 'pass'
+             ORDER BY vr.created_at DESC
+             LIMIT 1"#,
+            task_id,
+            diff_fingerprint
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
     /// Return all verify runs for a task_run, newest first.
     pub async fn list_for_task_run(&self, task_run_id: &str) -> Result<Vec<VerifyRunRecord>> {
         self.db.ensure_initialized().await?;
@@ -623,6 +663,73 @@ mod tests {
             .expect("must exist");
         assert_eq!(latest.id, second_id, "latest must be the most recent");
         assert_eq!(latest.result, VerifyResult::Pass.as_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verify_run_latest_pass_for_task_and_fingerprint_cache_lookup() {
+        let db = test_db();
+        let (project_id, task_id) = create_task(&db, EventBus::noop()).await;
+        let first_run = create_run(&db, &project_id, &task_id).await;
+        let repo = VerifyRunRepository::new(db.clone());
+
+        // A FAIL for the fingerprint must not count as a cache hit.
+        repo.create(CreateVerifyRunParams {
+            id: &new_id(),
+            task_run_id: &first_run,
+            verify_source: VerifySource::Local.as_str(),
+            verify_run_id: "gate",
+            command_version: None,
+            profile_version: None,
+            completed_at: "2025-01-15T09:00:00.000Z",
+            result: VerifyResult::Fail.as_str(),
+            diff_fingerprint: "fp-abc",
+            check_coverage: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            repo.latest_pass_for_task_and_fingerprint(&task_id, "fp-abc")
+                .await
+                .unwrap()
+                .is_none(),
+            "a failing run is not a cache hit"
+        );
+
+        // A PASS recorded on a DIFFERENT task run for the same task+fingerprint
+        // must be reloadable by task_id (cross-run cache).
+        let second_run = create_run(&db, &project_id, &task_id).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let pass_id = new_id();
+        repo.create(CreateVerifyRunParams {
+            id: &pass_id,
+            task_run_id: &second_run,
+            verify_source: VerifySource::Local.as_str(),
+            verify_run_id: "gate",
+            command_version: None,
+            profile_version: None,
+            completed_at: "2025-01-15T10:00:00.000Z",
+            result: VerifyResult::Pass.as_str(),
+            diff_fingerprint: "fp-abc",
+            check_coverage: Some(&serde_json::json!({"clippy_all_targets": true})),
+        })
+        .await
+        .unwrap();
+
+        let hit = repo
+            .latest_pass_for_task_and_fingerprint(&task_id, "fp-abc")
+            .await
+            .unwrap()
+            .expect("green run must be a cache hit");
+        assert_eq!(hit.id, pass_id);
+        assert_eq!(hit.result, VerifyResult::Pass.as_str());
+
+        // A different fingerprint is a cache miss.
+        assert!(
+            repo.latest_pass_for_task_and_fingerprint(&task_id, "fp-other")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
