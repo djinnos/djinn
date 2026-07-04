@@ -1571,8 +1571,22 @@ impl CoordinatorActor {
             // Final fallback list, precedence: creator's per-user selection →
             // project default-role preference → role base. All scoped to the
             // creator, so selection and runtime resolution stay consistent.
+            //
+            // Post-intervention worker retries (intervention_count >= 1) are
+            // routed to the plan lane when the default-on feature flag is set,
+            // while keeping the `worker` role and `ModelLane::for_role` mapping
+            // unchanged.
+            let effective_lane = if role == "worker" && task.intervention_count >= 1 {
+                if post_intervention_lane::use_plan_lane_for_post_intervention_workers() {
+                    Some(djinn_core::models::ModelLane::Plan)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let user_model_ids = self
-                .resolve_user_model_priority(creator.as_deref(), role)
+                .resolve_user_model_priority_with_lane(creator.as_deref(), role, effective_lane)
                 .await;
             let model_preference_ids = self
                 .resolve_role_model_preference(&task.project_id, role, creator.as_deref())
