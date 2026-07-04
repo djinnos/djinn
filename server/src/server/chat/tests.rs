@@ -1,5 +1,7 @@
 #[path = "tests/adversarial.rs"]
 mod adversarial;
+#[path = "tests/compaction.rs"]
+mod compaction;
 #[path = "tests/defaults.rs"]
 mod defaults;
 #[path = "tests/handler.rs"]

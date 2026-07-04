@@ -120,7 +120,11 @@ local_resource(
     'djinn-ui-dist',
     cmd=' && '.join([
         'cd ui',
-        '[ -d node_modules ] || pnpm install --frozen-lockfile',
+        # Unconditional: a `[ -d node_modules ] ||` guard poisons every
+        # later run after a half-failed install (dir exists, postinstalls
+        # never ran). With a warm store + up-to-date lockfile this is a
+        # ~1s no-op.
+        'pnpm install --frozen-lockfile',
         'pnpm build',
     ]),
     deps=[

@@ -351,6 +351,13 @@ spec:
             - secretRef:
                 name: langfuse-init
           env:
+            # Next.js standalone binds to $HOSTNAME, which Kubernetes sets to
+            # the pod name (resolving to the pod IP). That leaves nothing
+            # listening on 127.0.0.1 inside the pod, so `kubectl port-forward`
+            # (and Tilt's :5000 forward) gets connection refused. Pin the
+            # bind address explicitly.
+            - name: HOSTNAME
+              value: "0.0.0.0"
             - name: NODE_ENV
               value: production
             - name: NEXTAUTH_URL

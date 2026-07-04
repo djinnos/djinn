@@ -506,8 +506,11 @@ fn apply_seccomp() -> io::Result<()> {
     // SYS_create_module is marked deprecated in libc but kernels still
     // reserve the number and a rogue LKM could still call it; keep it on
     // the deny list as defense-in-depth. Same for _sysctl.
-    #[allow(deprecated)]
-    let deny: &[i64] = &[
+    // `mut` is used only on x86_64, where the arch-specific `deny.extend(...)`
+    // below runs; on other arches (e.g. aarch64) that block is cfg'd out and
+    // the binding is never mutated, so silence unused_mut there.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
+    let mut deny: Vec<i64> = vec![
         libc::SYS_ptrace,
         libc::SYS_mount,
         libc::SYS_umount2,
@@ -516,21 +519,28 @@ fn apply_seccomp() -> io::Result<()> {
         libc::SYS_kexec_file_load,
         libc::SYS_init_module,
         libc::SYS_finit_module,
-        libc::SYS_create_module,
         libc::SYS_delete_module,
         libc::SYS_pivot_root,
         libc::SYS_setns,
         libc::SYS_unshare,
         libc::SYS_perf_event_open,
         libc::SYS_bpf,
+        libc::SYS_swapon,
+        libc::SYS_swapoff,
+    ];
+    // Legacy syscalls that only ever existed in the x86_64 table; aarch64
+    // never allocated numbers for them, so libc has no constants there and
+    // denying them is a no-op anyway.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(deprecated)]
+    deny.extend([
+        libc::SYS_create_module,
         libc::SYS_ioperm,
         libc::SYS_iopl,
         libc::SYS_uselib,
-        libc::SYS_swapon,
-        libc::SYS_swapoff,
         libc::SYS_sysfs,
         libc::SYS__sysctl,
-    ];
+    ]);
 
     let rules = deny.iter().map(|n| (*n, Vec::new())).collect();
 

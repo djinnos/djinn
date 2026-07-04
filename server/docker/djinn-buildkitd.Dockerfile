@@ -22,16 +22,20 @@ FROM alpine:3.20 AS helpers
 ARG ECR_CRED_HELPER_VERSION=0.9.0
 ARG GCR_CRED_HELPER_VERSION=2.1.22
 ARG ACR_CRED_HELPER_VERSION=0.7.0
+# amd64 | arm64 — set by BuildKit from --platform; all three helpers publish
+# both. Keeps the image installable on arm64 nodes (e.g. kind on Apple
+# Silicon, Graviton), matching moby/buildkit's own multi-arch manifest.
+ARG TARGETARCH
 
 RUN apk add --no-cache curl ca-certificates tar && mkdir -p /helpers
 
 RUN curl -fsSL -o /helpers/docker-credential-ecr-login \
-      "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-amd64/docker-credential-ecr-login"
+      "https://amazon-ecr-credential-helper-releases.s3.amazonaws.com/${ECR_CRED_HELPER_VERSION}/linux-${TARGETARCH}/docker-credential-ecr-login"
 
-RUN curl -fsSL "https://github.com/GoogleCloudPlatform/docker-credential-gcr/releases/download/v${GCR_CRED_HELPER_VERSION}/docker-credential-gcr_linux_amd64-${GCR_CRED_HELPER_VERSION}.tar.gz" \
+RUN curl -fsSL "https://github.com/GoogleCloudPlatform/docker-credential-gcr/releases/download/v${GCR_CRED_HELPER_VERSION}/docker-credential-gcr_linux_${TARGETARCH}-${GCR_CRED_HELPER_VERSION}.tar.gz" \
     | tar -xz -C /helpers docker-credential-gcr
 
-RUN curl -fsSL "https://github.com/chrismellard/docker-credential-acr-env/releases/download/${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_linux_amd64.tar.gz" \
+RUN curl -fsSL "https://github.com/chrismellard/docker-credential-acr-env/releases/download/${ACR_CRED_HELPER_VERSION}/docker-credential-acr-env_${ACR_CRED_HELPER_VERSION}_linux_${TARGETARCH}.tar.gz" \
     | tar -xz -C /helpers docker-credential-acr-env
 
 RUN chmod 0755 /helpers/*
