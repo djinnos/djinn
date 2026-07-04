@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, RwLock};
+use std::time::Duration;
 
 #[cfg(test)]
 use std::future::Future;
@@ -132,6 +133,9 @@ struct RoutingState {
     namespaced_to_original: HashMap<String, String>,
     /// server_name → live peer handle
     peers: HashMap<String, Arc<Peer<RoleClient>>>,
+    /// Per-server request timeout in milliseconds, populated at discovery time
+    /// from each server's `McpServerConfig::request_timeout_ms`.
+    request_timeouts: HashMap<String, u64>,
     /// Tools that were advertised at session start but have since been removed
     /// by a `tools/list_changed` refresh. These remain in the routing maps
     /// (so `has_tool` returns `true`) but `call_tool` returns a deterministic
@@ -269,15 +273,10 @@ impl McpToolRegistry {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<serde_json::Value, String> {
-        #[cfg(test)]
-        if let Some(dispatch) = &self.test_dispatch {
-            return dispatch(tool_name, arguments).await;
-        }
-
         // Snapshot the routing state under the read lock, then release before
         // the async peer.call_tool() so we never hold a std::sync::RwLock
         // across an await point.
-        let (server_name, original_name, peer) = {
+        let (server_name, original_name, peer, timeout_ms) = {
             let routing = self.routing.read().unwrap();
 
             if routing.unavailable.contains(tool_name) {
@@ -299,26 +298,53 @@ impl McpToolRegistry {
                 .cloned()
                 .unwrap_or_else(|| tool_name.to_string());
 
-            let peer = routing
-                .peers
+            let timeout_ms = routing
+                .request_timeouts
                 .get(server_name.as_str())
-                .ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?
-                .clone();
+                .copied()
+                .unwrap_or(McpServerConfig::default_request_timeout_ms());
 
-            (server_name, original_name, peer)
+            let peer = routing.peers.get(server_name.as_str()).cloned();
+
+            (server_name, original_name, peer, timeout_ms)
         };
         // Lock released — safe to await.
+
+        let timeout_duration = Duration::from_millis(timeout_ms);
+
+        // In test mode with a dispatch function, use the callback directly
+        // wrapped in the request timeout.
+        #[cfg(test)]
+        if let Some(dispatch) = &self.test_dispatch {
+            let dispatch = dispatch.clone();
+            let tool = tool_name.to_string();
+            let tn = server_name.clone();
+            return match tokio::time::timeout(timeout_duration, dispatch(&tool, arguments)).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(format!(
+                    "MCP tool call `{tool_name}` on server `{tn}` timed out \
+                     after {timeout_ms}ms"
+                )),
+            };
+        }
+
+        let peer = peer.ok_or_else(|| format!("MCP server `{server_name}` peer not found"))?;
 
         // CallToolRequestParams is #[non_exhaustive] in rmcp 1.x; build via
         // new() + field assignment (meta/task default to None).
         let mut params = CallToolRequestParams::new(original_name);
         params.arguments = arguments.map(|m| m.into_iter().collect());
 
-        let result = peer.call_tool(params).await.map_err(|e| {
-            format!("MCP tool call `{tool_name}` on server `{server_name}` failed: {e}")
-        })?;
-
-        call_tool_result_to_json(result)
+        match tokio::time::timeout(timeout_duration, peer.call_tool(params)).await {
+            Ok(Ok(result)) => call_tool_result_to_json(result),
+            Ok(Err(e)) => Err(format!(
+                "MCP tool call `{tool_name}` on server `{server_name}` failed: {e}"
+            )),
+            Err(_elapsed) => Err(format!(
+                "MCP tool call `{tool_name}` on server `{server_name}` timed out \
+                     after {timeout_ms}ms"
+            )),
+        }
     }
 
     /// Apply a `tools/list_changed` refresh for a single server.
@@ -426,6 +452,7 @@ pub async fn connect_and_discover(
     let mut tool_to_server: HashMap<String, String> = HashMap::new();
     let mut namespaced_to_original: HashMap<String, String> = HashMap::new();
     let mut peers: HashMap<String, Arc<Peer<RoleClient>>> = HashMap::new();
+    let mut request_timeouts: HashMap<String, u64> = HashMap::new();
     let mut tool_schemas: Vec<serde_json::Value> = Vec::new();
 
     for (name, config) in servers {
@@ -469,9 +496,16 @@ pub async fn connect_and_discover(
             }
         };
 
-        // Connect to the MCP server.
-        let peer = match connect_to_server(&url, &resolved.headers).await {
-            Ok(peer) => {
+        // Connect to the MCP server and discover tools within the startup timeout.
+        // The combined connect + initialize + initial tools/list must complete
+        // within `startup_timeout_ms`; nonresponsive servers are logged and
+        // skipped without failing the whole discovery.
+        let startup_duration = resolved.startup_timeout();
+        let startup_result =
+            tokio::time::timeout(startup_duration, startup_and_list(&url, &resolved.headers)).await;
+
+        let (peer, list_result) = match startup_result {
+            Ok(Ok((peer, list_result))) => {
                 tracing::info!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -480,9 +514,9 @@ pub async fn connect_and_discover(
                     header_count = resolved.headers.len(),
                     "Connected to MCP server"
                 );
-                Arc::new(peer)
+                (Arc::new(peer), list_result)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
@@ -493,64 +527,87 @@ pub async fn connect_and_discover(
                 );
                 continue;
             }
-        };
-
-        // Discover tools from this server.
-        match peer.list_tools(None).await {
-            Ok(result) => {
-                let tool_count = result.tools.len();
-                for tool in result.tools {
-                    let original_name = tool.name.to_string();
-                    let namespaced = mcp_namespaced_name(name, &original_name);
-
-                    // Convert rmcp Tool to provider-compatible JSON schema.
-                    let schema = match external_tool_schema_json(&tool, &namespaced) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(
-                                task_id = %task_short_id,
-                                server = %name,
-                                tool = %original_name,
-                                error = %e,
-                                "Failed to serialize MCP tool schema; skipping tool"
-                            );
-                            continue;
-                        }
-                    };
-
-                    if tool_to_server.contains_key(&namespaced) {
-                        tracing::warn!(
-                            task_id = %task_short_id,
-                            server = %name,
-                            namespaced_tool = %namespaced,
-                            original_tool = %original_name,
-                            prior_server = %tool_to_server.get(&namespaced).unwrap_or(&"unknown".to_string()),
-                            "Sanitized MCP tool name collides with an existing name; later server wins"
-                        );
-                    }
-
-                    tool_to_server.insert(namespaced.clone(), name.clone());
-                    namespaced_to_original.insert(namespaced, original_name);
-                    tool_schemas.push(schema);
-                }
-                peers.insert(name.clone(), peer);
-                tracing::info!(
-                    task_id = %task_short_id,
-                    role = %role_name,
-                    server = %name,
-                    tool_count,
-                    "Discovered MCP tools"
-                );
-            }
-            Err(e) => {
+            Err(_elapsed) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     role = %role_name,
                     server = %name,
-                    error = %e,
-                    "Failed to list tools from MCP server; skipping"
+                    url = %url,
+                    startup_timeout_ms = resolved.startup_timeout_ms,
+                    "MCP server startup timed out (connect + initialize + tools/list); skipping"
                 );
+                continue;
             }
+        };
+
+        // Log server capabilities captured during initialization, if available.
+        // `Peer<RoleClient>::peer_info()` returns the `InitializeResult`
+        // which carries `instructions`, `capabilities`, and server metadata.
+        // Instructions and resource tools are NOT exposed here — those are
+        // owned by sibling epics (yjc6 / hyeu).
+        if let Some(info) = peer.peer_info() {
+            tracing::debug!(
+                task_id = %task_short_id,
+                server = %name,
+                has_instructions = info.instructions.is_some(),
+                has_tools_capability = info.capabilities.tools.is_some(),
+                has_resources_capability = info.capabilities.resources.is_some(),
+                has_prompts_capability = info.capabilities.prompts.is_some(),
+                has_logging_capability = info.capabilities.logging.is_some(),
+                "MCP server initialize capabilities"
+            );
+        }
+
+        // Discover tools from this server.
+        // The list_result is already a ListToolsResult — errors were handled
+        // in the startup_and_list call above (mapped to Err which was caught
+        // by the Ok(Err(e)) arm of the startup timeout match).
+        {
+            let result = list_result;
+            let tool_count = result.tools.len();
+            for tool in result.tools {
+                let original_name = tool.name.to_string();
+                let namespaced = mcp_namespaced_name(name, &original_name);
+
+                // Convert rmcp Tool to provider-compatible JSON schema.
+                let schema = match external_tool_schema_json(&tool, &namespaced) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_short_id,
+                            server = %name,
+                            tool = %original_name,
+                            error = %e,
+                            "Failed to serialize MCP tool schema; skipping tool"
+                        );
+                        continue;
+                    }
+                };
+
+                if tool_to_server.contains_key(&namespaced) {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        server = %name,
+                        namespaced_tool = %namespaced,
+                        original_tool = %original_name,
+                        prior_server = %tool_to_server.get(&namespaced).unwrap_or(&"unknown".to_string()),
+                        "Sanitized MCP tool name collides with an existing name; later server wins"
+                    );
+                }
+
+                tool_to_server.insert(namespaced.clone(), name.clone());
+                namespaced_to_original.insert(namespaced, original_name);
+                tool_schemas.push(schema);
+            }
+            peers.insert(name.clone(), peer);
+            request_timeouts.insert(name.clone(), resolved.request_timeout_ms);
+            tracing::info!(
+                task_id = %task_short_id,
+                role = %role_name,
+                server = %name,
+                tool_count,
+                "Discovered MCP tools"
+            );
         }
     }
 
@@ -563,6 +620,7 @@ pub async fn connect_and_discover(
             tool_to_server,
             namespaced_to_original,
             peers,
+            request_timeouts,
             unavailable: HashSet::new(),
         })),
         tool_schemas,
@@ -704,6 +762,27 @@ async fn connect_to_server(
     Ok(peer)
 }
 
+/// Combined connect + initialize + initial `tools/list` in a single future.
+///
+/// This is the unit that [`connect_and_discover`] wraps with
+/// `startup_timeout_ms`.  Breaking it out lets `tokio::time::timeout` cancel
+/// the whole operation if either the transport handshake or the initial
+/// tool enumeration stalls.
+///
+/// Returns the connected peer *and* the raw `ListToolsResult` so the caller
+/// can inspect tool definitions without a second round-trip.
+async fn startup_and_list(
+    url: &str,
+    headers: &HashMap<String, String>,
+) -> Result<(Peer<RoleClient>, rmcp::model::ListToolsResult), String> {
+    let peer = connect_to_server(url, headers).await?;
+    let result = peer
+        .list_tools(None)
+        .await
+        .map_err(|e| format!("MCP tools/list failed: {e}"))?;
+    Ok((peer, result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,6 +903,7 @@ mod tests {
             tool_to_server,
             namespaced_to_original,
             peers: HashMap::new(),
+            request_timeouts: HashMap::new(),
             unavailable: HashSet::new(),
         }))
     }
@@ -1365,5 +1445,242 @@ mod tests {
             clone.is_unavailable(&namespaced),
             "clone must see unavailability set on original"
         );
+    }
+
+    // ── Timeout enforcement tests ──────────────────────────────────────
+
+    /// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps with
+    /// explicit per-server request timeouts.
+    fn make_routing_with_timeouts(
+        tool_to_server: HashMap<String, String>,
+        namespaced_to_original: HashMap<String, String>,
+        request_timeouts: HashMap<String, u64>,
+    ) -> Arc<RwLock<RoutingState>> {
+        Arc::new(RwLock::new(RoutingState {
+            tool_to_server,
+            namespaced_to_original,
+            peers: HashMap::new(),
+            request_timeouts,
+            unavailable: HashSet::new(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn call_tool_timeout_returns_deterministic_error() {
+        let namespaced = mcp_namespaced_name("slow-server", "slow_tool");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "slow-server".to_string());
+        let namespaced_to_original = HashMap::from([(namespaced.clone(), "slow_tool".to_string())]);
+        // 50ms timeout — the test dispatch will hang longer.
+        let request_timeouts = HashMap::from([("slow-server".to_string(), 50u64)]);
+
+        let registry = McpToolRegistry {
+            routing: make_routing_with_timeouts(
+                tool_to_server,
+                namespaced_to_original,
+                request_timeouts,
+            ),
+            tool_schemas: Vec::new(),
+            test_dispatch: Some(Arc::new(move |_, _| {
+                Box::pin(async {
+                    // Simulate a slow server that takes longer than the timeout.
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok(serde_json::json!({"ok": true}))
+                })
+            })),
+        };
+
+        let result = registry.call_tool(&namespaced, None).await;
+        assert!(result.is_err(), "call_tool should return Err on timeout");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out"),
+            "error should mention timeout, got: {err}"
+        );
+        assert!(
+            err.contains(&namespaced),
+            "error should include tool name, got: {err}"
+        );
+        assert!(
+            err.contains("slow-server"),
+            "error should include server name, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_uses_default_timeout_when_server_not_in_map() {
+        let namespaced = mcp_namespaced_name("default-server", "fast_tool");
+        let mut tool_to_server = HashMap::new();
+        tool_to_server.insert(namespaced.clone(), "default-server".to_string());
+        let namespaced_to_original = HashMap::from([(namespaced.clone(), "fast_tool".to_string())]);
+        // Empty request_timeouts map — should fall back to default (120_000ms).
+        let request_timeouts = HashMap::new();
+
+        let registry = McpToolRegistry {
+            routing: make_routing_with_timeouts(
+                tool_to_server,
+                namespaced_to_original,
+                request_timeouts,
+            ),
+            tool_schemas: Vec::new(),
+            test_dispatch: Some(Arc::new(|_, _| {
+                Box::pin(async { Ok(serde_json::json!({"fast": true})) })
+            })),
+        };
+
+        // Should succeed quickly — the default timeout (120s) is not reached.
+        let result = registry.call_tool(&namespaced, None).await;
+        assert!(result.is_ok(), "fast dispatch should not timeout");
+        assert_eq!(result.unwrap(), serde_json::json!({"fast": true}));
+    }
+
+    #[tokio::test]
+    async fn request_timeout_stored_per_server_at_discovery() {
+        let mut routing_state = RoutingState {
+            tool_to_server: HashMap::new(),
+            namespaced_to_original: HashMap::new(),
+            peers: HashMap::new(),
+            request_timeouts: HashMap::new(),
+            unavailable: HashSet::new(),
+        };
+        routing_state
+            .request_timeouts
+            .insert("server-a".to_string(), 5_000);
+        routing_state
+            .request_timeouts
+            .insert("server-b".to_string(), 60_000);
+
+        assert_eq!(routing_state.request_timeouts.get("server-a"), Some(&5_000));
+        assert_eq!(
+            routing_state.request_timeouts.get("server-b"),
+            Some(&60_000)
+        );
+        // Unknown server should not be present.
+        assert!(!routing_state.request_timeouts.contains_key("server-c"));
+    }
+
+    // ── rmcp capability access / adapter validation ────────────────────
+    //
+    // These compile-time probes verify that the rmcp API touchpoints
+    // needed by sibling epics (yjc6, hyeu) are accessible through the
+    // types already used in mcp_client.rs.  If a future rmcp upgrade
+    // removes or renames any of these fields, these tests will fail to
+    // compile — giving early warning before the sibling epics attempt
+    // to use them.
+    //
+    // NOT exposed to the model:
+    // - `InitializeResult.instructions` → yjc6 (prompt instructions block)
+    // - resource tools → hyeu (resources-as-tools)
+    //
+    // Validated access points:
+    // - `ServerCapabilities.tools` / `.resources` / `.logging` / `.prompts`
+    // - `ToolsCapability.list_changed`
+    // - `LoggingMessageNotification` type exists (notification handler shape)
+    // - `ServerNotification` enum variants for handler dispatch
+
+    #[test]
+    fn rmcp_initialize_result_instructions_field_is_accessible() {
+        // Compile-time probe: InitializeResult has an `instructions` field.
+        // Used by yjc6 to extract server prompt instructions.
+        let result = rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default());
+        // instructions defaults to None
+        assert!(result.instructions.is_none());
+        // Can set instructions
+        let with_inst = result.with_instructions("test instructions");
+        assert_eq!(with_inst.instructions.as_deref(), Some("test instructions"));
+    }
+
+    #[test]
+    fn rmcp_server_capabilities_fields_are_accessible() {
+        // Compile-time probe: ServerCapabilities exposes tools, resources,
+        // prompts, and logging fields.
+        let caps = rmcp::model::ServerCapabilities::default();
+        assert!(caps.tools.is_none());
+        assert!(caps.resources.is_none());
+        assert!(caps.prompts.is_none());
+        assert!(caps.logging.is_none());
+    }
+
+    #[test]
+    fn rmcp_tools_capability_list_changed_is_accessible() {
+        // Compile-time probe: ToolsCapability.list_changed indicates whether
+        // the server supports tools/list_changed notifications.
+        let tc = rmcp::model::ToolsCapability {
+            list_changed: Some(true),
+        };
+        assert_eq!(tc.list_changed, Some(true));
+    }
+
+    #[test]
+    fn rmcp_logging_notification_type_is_accessible() {
+        // Compile-time probe: LoggingMessageNotification exists and can be
+        // pattern-matched from ServerNotification. This is the type that a
+        // notification handler/channel adapter would need to receive.
+        use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam, ServerNotification};
+
+        // Construct a minimal logging notification.
+        let logging = LoggingMessageNotificationParam::new(
+            LoggingLevel::Info,
+            serde_json::json!("test message"),
+        );
+
+        // Verify the param fields are accessible.
+        assert_eq!(logging.level, LoggingLevel::Info);
+        assert_eq!(logging.data, serde_json::json!("test message"));
+
+        // Wrap in ServerNotification to confirm the variant exists and is matchable.
+        let notif =
+            ServerNotification::LoggingMessageNotification(rmcp::model::Notification::new(logging));
+
+        // Pattern-match to verify the handler dispatch shape.
+        match notif {
+            ServerNotification::LoggingMessageNotification(inner) => {
+                assert_eq!(inner.params.level, LoggingLevel::Info);
+            }
+            _ => panic!("expected LoggingMessageNotification variant"),
+        }
+    }
+
+    #[test]
+    fn rmcp_tool_list_changed_notification_type_is_accessible() {
+        // Compile-time probe: ToolListChangedNotification exists and can be
+        // constructed/matched. This is the type that a notification handler
+        // for tools/list_changed would receive.
+        use rmcp::model::ServerNotification;
+
+        // ToolListChangedNotification is NotificationNoParam<Method>, which
+        // derives Default since the Method is a unit struct.
+        let changed: rmcp::model::ToolListChangedNotification = Default::default();
+        let notif = ServerNotification::ToolListChangedNotification(changed);
+
+        match notif {
+            ServerNotification::ToolListChangedNotification(_) => {
+                // Successfully matched — the variant and type are accessible.
+            }
+            _ => panic!("expected ToolListChangedNotification variant"),
+        }
+    }
+
+    #[test]
+    fn startup_timeout_defaults_match_config() {
+        // Verify the startup/request timeout defaults from McpServerConfig
+        // match the expected values.
+        assert_eq!(McpServerConfig::default_startup_timeout_ms(), 30_000);
+        assert_eq!(McpServerConfig::default_request_timeout_ms(), 120_000);
+    }
+
+    #[test]
+    fn resolved_config_startup_and_request_timeouts_from_duration_helpers() {
+        let config = ResolvedMcpServerConfig {
+            url: Some("https://example.com/mcp".to_string()),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            headers: HashMap::new(),
+            startup_timeout_ms: 5_000,
+            request_timeout_ms: 30_000,
+        };
+        assert_eq!(config.startup_timeout(), Duration::from_millis(5_000));
+        assert_eq!(config.request_timeout(), Duration::from_millis(30_000));
     }
 }
