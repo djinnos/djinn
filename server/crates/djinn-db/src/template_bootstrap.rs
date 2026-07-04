@@ -1,6 +1,8 @@
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sqlx::ConnectOptions;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{DbError, DbResult};
@@ -37,8 +39,7 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
     let _permit = acquire_bootstrap_permit().await;
 
     let admin_url = format!("{server_prefix}/postgres");
-    let opts =
-        sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
+    let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
 
     // Cross-process serialization: take an advisory lock for the duration of
@@ -48,17 +49,6 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
         .execute(&mut conn)
         .await
         .map_err(DbError::from)?;
-
-    // Ensure the lock is released even if we error out.
-    struct AdvisoryUnlock<'a>(&'a mut sqlx::postgres::PgConnection);
-    impl Drop for AdvisoryUnlock<'_> {
-        fn drop(&mut self) {
-            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-                .bind(TEMPLATE_ADVISORY_LOCK_ID)
-                .execute(&mut *self.0);
-        }
-    }
-    let _unlock = AdvisoryUnlock(&mut conn);
 
     // Does the template exist?
     let exists: i64 = sqlx::query_scalar(
@@ -70,6 +60,7 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
 
     if exists == 0 {
         create_and_migrate_template(server_prefix, &mut conn).await?;
+        unlock_template_bootstrap(&mut conn).await?;
         return Ok(());
     }
 
@@ -82,9 +73,19 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
     .await
     .map_err(DbError::from)?;
 
+    unlock_template_bootstrap(&mut conn).await?;
     drop(conn);
     verify_template_migrations(server_prefix).await?;
 
+    Ok(())
+}
+
+async fn unlock_template_bootstrap(conn: &mut sqlx::postgres::PgConnection) -> DbResult<()> {
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(TEMPLATE_ADVISORY_LOCK_ID)
+        .execute(conn)
+        .await
+        .map_err(DbError::from)?;
     Ok(())
 }
 
@@ -118,8 +119,6 @@ async fn create_and_migrate_template(
     .execute(&mut *conn)
     .await
     .map_err(DbError::from)?;
-
-    drop(conn);
 
     run_template_migrations(server_prefix).await
 }
@@ -155,8 +154,8 @@ async fn verify_template_migrations(server_prefix: &str) -> DbResult<()> {
         return Ok(());
     }
 
-    let table_exists: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "count!: i64"
+    let table_exists: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
          FROM information_schema.tables
          WHERE table_schema = current_schema()
            AND table_name   = '_sqlx_migrations'"#,
