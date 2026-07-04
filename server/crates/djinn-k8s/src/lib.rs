@@ -28,3 +28,20 @@ pub use graph_warmer::{
 pub use runtime::KubernetesRuntime;
 pub use token_review::TokenReviewer;
 pub use warm_job::build_warm_job;
+
+/// Re-exported `kube::Client` type so non-owner callers can name the
+/// Kubernetes client type without adding a direct `kube` dependency.
+///
+/// This is the standard kube-rs client — use [`try_default_client`] to
+/// construct one from the ambient environment.
+pub type KubeClient = kube::Client;
+
+/// Construct a [`KubeClient`] from the ambient Kubernetes environment
+/// (in-cluster service-account token or `$KUBECONFIG`).
+///
+/// Returns `Err` when no cluster is reachable (dev boxes, CI without a
+/// kind cluster, etc.).  Callers should treat the error as a signal to
+/// fall back gracefully rather than propagate.
+pub async fn try_default_client() -> Result<KubeClient, kube::Error> {
+    kube::Client::try_default().await
+}
