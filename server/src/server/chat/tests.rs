@@ -1,5 +1,3 @@
-mod compaction_boundary;
-
 #[path = "tests/adversarial.rs"]
 mod adversarial;
 #[path = "tests/defaults.rs"]

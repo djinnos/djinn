@@ -26,5 +26,5 @@ pub use graph_warmer::{
     NoopJobWatcher, NoopWarmJobLister, WarmJobDispatcher, WarmJobLister, WarmJobWatcher,
 };
 pub use runtime::KubernetesRuntime;
-pub use warm_job::build_warm_job;
 pub use token_review::TokenReviewer;
+pub use warm_job::build_warm_job;

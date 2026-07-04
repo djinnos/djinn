@@ -27,10 +27,10 @@ use futures::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    complete_chat_compaction_boundary, record_chat_compaction_started,
     ChatCompletionRequest, ChatContent, ChatContentBlock, DJINN_CHAT_SYSTEM_PROMPT, DeltaPayload,
     ErrorPayload, PROPOSAL_ADDRESS_SYSTEM_PROMPT, ProjectResolver, ProjectResolverError,
     SessionTitlePayload, ToolCallPayload, ToolResultPayload, apply_chat_skills,
+    complete_chat_compaction_boundary, record_chat_compaction_started,
 };
 use crate::server::AppState;
 use crate::server::auth::authenticate;
@@ -93,8 +93,7 @@ async fn maybe_compact_proactively(
         conversation.token_estimate() as u32,
         context_window,
     ) {
-        let boundary_repo =
-            SessionCompactionBoundaryRepository::new(state.db().clone());
+        let boundary_repo = SessionCompactionBoundaryRepository::new(state.db().clone());
         let boundary_id =
             record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
         let compacted = djinn_agent::compaction::compact_conversation(
@@ -107,10 +106,8 @@ async fn maybe_compact_proactively(
         )
         .await;
         if compacted {
-            complete_chat_compaction_boundary(
-                &boundary_repo, boundary_id.as_deref(), conversation,
-            )
-            .await;
+            complete_chat_compaction_boundary(&boundary_repo, boundary_id.as_deref(), conversation)
+                .await;
         }
     }
 }
@@ -121,6 +118,7 @@ async fn maybe_compact_proactively(
 /// `Err(StreamInitOutcome::CompactedAndContinue)` so the caller retries. On
 /// unrecoverable failure, sends an SSE error event and returns
 /// `Err(StreamInitOutcome::UnrecoverableBreak)` so the caller breaks the loop.
+#[allow(clippy::too_many_arguments)]
 async fn init_provider_stream(
     state: &AppState,
     provider: &dyn LlmProvider,
@@ -156,8 +154,7 @@ async fn init_provider_stream(
                     attempt = *compaction_attempts,
                     "chat: recoverable stream-init failure; compacting and retrying"
                 );
-                let boundary_repo =
-                    SessionCompactionBoundaryRepository::new(state.db().clone());
+                let boundary_repo = SessionCompactionBoundaryRepository::new(state.db().clone());
                 let boundary_id =
                     record_chat_compaction_started(&boundary_repo, session_id, conversation).await;
                 let compacted = djinn_agent::compaction::compact_conversation(
@@ -171,7 +168,9 @@ async fn init_provider_stream(
                 .await;
                 if compacted {
                     complete_chat_compaction_boundary(
-                        &boundary_repo, boundary_id.as_deref(), conversation,
+                        &boundary_repo,
+                        boundary_id.as_deref(),
+                        conversation,
                     )
                     .await;
                 }

@@ -5,10 +5,10 @@ use axum::response::sse::Sse;
 use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
+mod compaction_boundary;
 mod handler;
 mod project_resolver;
 mod prompt;
-mod compaction_boundary;
 
 pub(super) use compaction_boundary::{
     complete_chat_compaction_boundary, record_chat_compaction_started,

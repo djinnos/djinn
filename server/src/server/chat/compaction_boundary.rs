@@ -178,8 +178,12 @@ pub(crate) async fn complete_chat_compaction_boundary(
     boundary_id: Option<&str>,
     compacted_conversation: &Conversation,
 ) {
-    let Some(boundary_id) = boundary_id else { return };
-    let Some(summary_text) = accepted_summary_text(compacted_conversation) else { return };
+    let Some(boundary_id) = boundary_id else {
+        return;
+    };
+    let Some(summary_text) = accepted_summary_text(compacted_conversation) else {
+        return;
+    };
     let (
         first_message_id,
         last_compacted_message_id,
@@ -212,7 +216,8 @@ pub(crate) async fn complete_chat_compaction_boundary(
 mod tests {
     use super::*;
     use djinn_core::events::EventBus;
-    use djinn_db::test_support::{seed_project, seed_session_row, UsageTestSessionSeed};
+    use djinn_db::CompactionPhase;
+    use djinn_db::test_support::seed_project;
     use djinn_provider::message::Message;
 
     fn test_db() -> djinn_db::Database {
@@ -221,23 +226,18 @@ mod tests {
 
     async fn seed_chat_session(db: &djinn_db::Database, session_id: &str) {
         seed_project(db, "project-test", "test project").await;
-        seed_session_row(
-            db,
-            UsageTestSessionSeed {
-                project_id: "project-test",
-                model_id: "test-model",
-                agent_type: "chat",
-                started_at: "2025-01-01T00:00:00Z",
-                tokens_in: 0,
-                tokens_out: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                cost_usd: None,
-                cost_basis: "",
-                task_id: None,
-            },
+        db.ensure_initialized().await.unwrap();
+        sqlx::query(
+            "INSERT INTO sessions \
+             (id, project_id, task_id, model_id, agent_type, status, \
+              started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+             VALUES ($1, 'project-test', NULL, 'test-model', 'chat', 'completed', \
+                     '2025-01-01T00:00:00Z', 0, 0, 0, 0, NULL, '')",
         )
-        .await;
+        .bind(session_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed session row");
     }
 
     fn compacted_conversation() -> Conversation {
