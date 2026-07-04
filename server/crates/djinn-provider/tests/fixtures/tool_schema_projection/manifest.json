@@ -3,13 +3,14 @@
   "version": 1,
   "groups": {
     "builtin": {
-      "$comment": "Snapshots of real built-in worker/planner/lead/reviewer/architect tool schemas. Refreshed from djinn-agent insta snapshots — see README.md.",
+      "$comment": "Snapshots of real built-in tool schemas: role-based (worker/planner/lead/reviewer/architect from djinn-agent insta snapshots) plus the full DjinnMcpServer::all_tool_schemas() corpus (generated from djinn-control-plane). See README.md.",
       "files": [
         "builtin/worker.json",
         "builtin/planner.json",
         "builtin/lead.json",
         "builtin/reviewer.json",
-        "builtin/architect.json"
+        "builtin/architect.json",
+        "builtin/djinn_mcp_server.json"
       ]
     },
     "regression": {
