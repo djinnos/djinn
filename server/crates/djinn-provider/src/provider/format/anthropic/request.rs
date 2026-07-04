@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::message::{CacheBreakpoint, ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
-use crate::provider::{ProviderConfig, ToolChoice};
+use crate::provider::{ProviderConfig, ToolChoice, ToolSchemaCompat};
 
 use super::cache::{ANTHROPIC_CACHE_BREAKPOINT_KEY, MAX_CACHE_CONTROL_MARKERS};
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +142,7 @@ impl AnthropicProvider {
     fn serialize_tools_for_request(
         tools: &[Value],
         cache_control: Option<&Value>,
+        compat: Option<ToolSchemaCompat>,
     ) -> Option<Value> {
         if tools.is_empty() {
             return None;
@@ -156,7 +157,7 @@ impl AnthropicProvider {
                 .iter()
                 .enumerate()
                 .map(|(index, tool)| {
-                    let mut tool_obj = super::convert_tool(tool);
+                    let mut tool_obj = super::convert_tool(tool, compat);
                     if index == last
                         && let Some(cache_control) = cache_control
                         && let Some(obj) = tool_obj.as_object_mut()
@@ -468,9 +469,11 @@ impl AnthropicProvider {
 
         let tool_cache_control = Self::tool_definition_cache_control(conversation)
             .or_else(|| default_cache.then(|| json!({"type": "ephemeral"})));
-        if let Some(serialized_tools) =
-            Self::serialize_tools_for_request(tools, tool_cache_control.as_ref())
-        {
+        if let Some(serialized_tools) = Self::serialize_tools_for_request(
+            tools,
+            tool_cache_control.as_ref(),
+            self.config.tool_schema_compat,
+        ) {
             body["tools"] = serialized_tools;
 
             let thinking_enabled = body
