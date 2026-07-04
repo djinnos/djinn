@@ -3,7 +3,10 @@ use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::ReopenClass;
+use djinn_core::models::{ReopenClass, TaskStatus, TransitionAction};
+use djinn_db::repositories::task_arbitration::{
+    ArbitrationState, CreateArbitrationParams, TaskArbitrationRepository, TryCreateResult,
+};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 
@@ -906,53 +909,194 @@ impl CoordinatorActor {
             // history — never the templated "same acceptance criteria kept
             // failing" text when zero post-intervention rounds occurred.
             let reason = self.compute_park_reason(task, &history);
-            tracing::warn!(
-                task_id = %task.short_id,
-                intervention_count = task.intervention_count,
-                total_reopen_count = task.total_reopen_count,
-                reopen_count = task.reopen_count,
-                quality_strikes,
-                "CoordinatorActor: second-strike — holding unconvergeable task on human review after repeated planner interventions"
-            );
-            // Clear streak/cooldown so the hold isn't shadowed by stale backoff
-            // state.
-            self.dispatch_failure_streak.remove(&task.id);
-            self.dispatch_cooldowns.remove(&task.id);
-            self.last_dispatched.remove(&task.id);
-            self.inflight_dispatches.remove(&task.id);
-            self.clear_durable_dispatch_backoff_state(
-                &task.id,
-                Some(&task.short_id),
-                "planner_second_strike_human_hold_clear",
-            )
-            .await;
-            // Interrupt any running session for this task so parking it actually
-            // frees the dispatch slot (a parked task must not keep burning one).
-            let session_repo = djinn_db::SessionRepository::new(
-                self.db.clone(),
-                crate::events::event_bus_for(&self.events_tx),
-            );
-            if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
-                tracing::warn!(
-                    task_id = %task.short_id,
-                    error = %e,
-                    "CoordinatorActor: failed to interrupt running sessions while parking second-strike task"
-                );
+
+            // Arbiter-first routing for the current hold cycle. If the cycle is
+            // already unconsumed, the Lead arbiter is already in flight; if a
+            // new unconsumed row can be created, dispatch the source to the
+            // Lead arbiter.  On any arbitration/hold-cycle DB uncertainty or
+            // a consumed/failed cycle, fail closed to the human-review hold
+            // path.
+            let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
+            let hold_cycle = match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
+                Ok((cycle, Some(_existing))) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        hold_cycle = cycle,
+                        "CoordinatorActor: second-strike — current hold cycle already has an unconsumed arbiter; holding"
+                    );
+                    return true;
+                }
+                Ok((cycle, None)) => cycle,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: second-strike — failed to resolve current hold cycle; failing closed to human review"
+                    );
+                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                }
+            };
+
+            let failing_ci_job_ids = self.parse_failing_ci_job_ids(ci_failure_sections);
+            let excluded_models = serde_json::json!(history.non_attempt_models);
+            let dossier = serde_json::json!({
+                "reason": reason,
+                "role": role,
+                "intervention_count": task.intervention_count,
+                "total_reopen_count": task.total_reopen_count,
+                "reopen_count": task.reopen_count,
+                "quality_strikes": quality_strikes,
+                "post_intervention_history": {
+                    "any_submitted": history.any_submitted,
+                    "non_attempt_models": history.non_attempt_models,
+                    "non_attempt_session_labels": history.non_attempt_session_labels,
+                    "submission_pending_review": history.submission_pending_review,
+                    "latest_submission_at": history.latest_submission_at,
+                },
+            });
+            let directive = serde_json::json!({
+                "kind": "lead_arbiter",
+                "goal": "Forensic review of the current hold cycle after repeated planner interventions",
+            });
+            let deadline = SystemClock::new()
+                .now()
+                .checked_add(std::time::Duration::from_secs(24 * 60 * 60))
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| {
+                    let dt = std::time::SystemTime::UNIX_EPOCH + d;
+                    chrono::DateTime::<chrono::Utc>::from(dt).to_rfc3339()
+                });
+
+            let create_result = match arbiter_repo
+                .try_create(CreateArbitrationParams {
+                    task_id: &task.id,
+                    hold_cycle,
+                    deadline_at: deadline.as_deref(),
+                    mirror_head_sha: None,
+                    github_head_sha: task.ci_head_sha.as_deref(),
+                    pr_url: task.pr_url.as_deref(),
+                    failing_ci_job_ids: &failing_ci_job_ids,
+                    dossier: Some(&dossier),
+                    directive: Some(&directive),
+                    verification_command: None,
+                    excluded_models: &excluded_models,
+                })
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: second-strike — failed to create arbitration row; failing closed to human review"
+                    );
+                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                }
+            };
+
+            match create_result {
+                TryCreateResult::Created(_)
+                | TryCreateResult::AlreadyExistsUnconsumed(_) => {
+                    // Arbiter dispatch path.
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        hold_cycle,
+                        intervention_count = task.intervention_count,
+                        total_reopen_count = task.total_reopen_count,
+                        reopen_count = task.reopen_count,
+                        quality_strikes,
+                        "CoordinatorActor: second-strike — dispatching Lead arbiter for current hold cycle"
+                    );
+                    // Clear streak/cooldown so the hold isn't shadowed by stale
+                    // backoff state.
+                    self.dispatch_failure_streak.remove(&task.id);
+                    self.dispatch_cooldowns.remove(&task.id);
+                    self.last_dispatched.remove(&task.id);
+                    self.inflight_dispatches.remove(&task.id);
+                    self.clear_durable_dispatch_backoff_state(
+                        &task.id,
+                        Some(&task.short_id),
+                        "planner_second_strike_arbiter_dispatch",
+                    )
+                    .await;
+                    // Interrupt any running session for this task so parking it
+                    // actually frees the dispatch slot.
+                    let session_repo = djinn_db::SessionRepository::new(
+                        self.db.clone(),
+                        crate::events::event_bus_for(&self.events_tx),
+                    );
+                    if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
+                        );
+                    }
+                    // Transition to needs_lead_intervention if not already in a
+                    // Lead status.
+                    if !matches!(
+                        task.status,
+                        TaskStatus::NeedsLeadIntervention | TaskStatus::InLeadIntervention
+                    ) {
+                        let task_repo = self.task_repo();
+                        if let Err(e) = task_repo
+                            .transition(
+                                &task.id,
+                                TransitionAction::Escalate,
+                                "system",
+                                "coordinator",
+                                Some(&reason),
+                                None,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                task_id = %task.short_id,
+                                error = %e,
+                                status = %task.status,
+                                "CoordinatorActor: failed to transition source to needs_lead_intervention; will still hold dispatch"
+                            );
+                        }
+                    }
+                    // Log the arbiter_dispatched outbox payload.
+                    let payload = serde_json::json!({
+                        "hold_cycle": hold_cycle,
+                        "mirror_head_sha": null,
+                        "github_head_sha": task.ci_head_sha,
+                        "pr_url": task.pr_url,
+                        "failing_ci_job_ids": failing_ci_job_ids,
+                        "reason": reason,
+                        "role": role,
+                    });
+                    let task_repo = self.task_repo();
+                    if let Err(e) = task_repo
+                        .log_activity(
+                            Some(&task.id),
+                            "system",
+                            "coordinator",
+                            "arbiter_dispatched",
+                            &payload.to_string(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            task_id = %task.short_id,
+                            error = %e,
+                            "CoordinatorActor: failed to log arbiter_dispatched activity"
+                        );
+                    }
+                    return true;
+                }
+                TryCreateResult::AlreadyExistsConsumed(_)
+                | TryCreateResult::AlreadyExistsFailed(_) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        hold_cycle,
+                        "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
+                    );
+                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                }
             }
-            // Ensure a HUMAN-review remediation task blocks the source (creating
-            // one only if it isn't already held), THEN park the source to `open`.
-            // The blocker is added before the park, so the open task is never
-            // dispatchable without its blocker in place.
-            self.create_remediation_task(
-                &task.id,
-                &reason,
-                &task.project_id,
-                RemediationKind::HumanReview,
-            )
-            .await;
-            self.park_source_open(&task.id, &reason).await;
-            self.record_task_parked_metric(task, quality_strikes).await;
-            return true;
         }
 
         // Idempotency: keyed by raw reopen_count for re-arm after reset.
@@ -1128,6 +1272,84 @@ impl CoordinatorActor {
             superseded,
             task.reopen_count,
         );
+    }
+
+    /// Fail-closed human-review park path for the second-strike rung.
+    ///
+    /// Clears in-memory and durable backoff, interrupts running sessions, creates
+    /// a human-review remediation task, parks the source `open`, and records
+    /// the park metric. This is exactly the same cleanup as the old
+    /// second-strike path so that any arbiter failure mode behaves identically
+    /// to a human hold.
+    async fn park_source_human_review(
+        &mut self,
+        task: &djinn_core::models::Task,
+        reason: &str,
+        quality_strikes: i64,
+    ) -> bool {
+        tracing::warn!(
+            task_id = %task.short_id,
+            intervention_count = task.intervention_count,
+            total_reopen_count = task.total_reopen_count,
+            reopen_count = task.reopen_count,
+            quality_strikes,
+            "CoordinatorActor: second-strike — holding unconvergeable task on human review after repeated planner interventions"
+        );
+        // Clear streak/cooldown so the hold isn't shadowed by stale backoff
+        // state.
+        self.dispatch_failure_streak.remove(&task.id);
+        self.dispatch_cooldowns.remove(&task.id);
+        self.last_dispatched.remove(&task.id);
+        self.inflight_dispatches.remove(&task.id);
+        self.clear_durable_dispatch_backoff_state(
+            &task.id,
+            Some(&task.short_id),
+            "planner_second_strike_human_hold_clear",
+        )
+        .await;
+        // Interrupt any running session for this task so parking it actually
+        // frees the dispatch slot (a parked task must not keep burning one).
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        if let Err(e) = session_repo.interrupt_running_for_task(&task.id).await {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "CoordinatorActor: failed to interrupt running sessions while parking second-strike task"
+            );
+        }
+        // Ensure a HUMAN-review remediation task blocks the source (creating
+        // one only if it isn't already held), THEN park the source to `open`.
+        // The blocker is added before the park, so the open task is never
+        // dispatchable without its blocker in place.
+        self.create_remediation_task(
+            &task.id,
+            reason,
+            &task.project_id,
+            RemediationKind::HumanReview,
+        )
+        .await;
+        self.park_source_open(&task.id, reason).await;
+        self.record_task_parked_metric(task, quality_strikes).await;
+        true
+    }
+
+    /// Parse failing CI job ids from the `ci_failure_sections` text when the
+    /// coordinator embedded `ci_job_log(job_id=...)` hints.
+    fn parse_failing_ci_job_ids(&self, ci_failure_sections: Option<&str>) -> serde_json::Value {
+        let mut ids = Vec::new();
+        if let Some(text) = ci_failure_sections {
+            for chunk in text.split("job_id=") {
+                if let Some(num_part) = chunk.split_once(')') {
+                    if let Ok(job_id) = num_part.0.parse::<i64>() {
+                        ids.push(job_id);
+                    }
+                }
+            }
+        }
+        serde_json::json!(ids)
     }
 
     /// Dispatch a Planner escalation: create a review task, add a comment linking it
