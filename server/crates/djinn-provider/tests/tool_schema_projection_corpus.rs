@@ -126,6 +126,12 @@ fn load_fixture_file(rel: &str) -> Value {
         .unwrap_or_else(|e| panic!("failed to parse fixture {full} as JSON: {e}"))
 }
 
+/// DjinnMcpServer fixture path and the minimum number of tools it must
+/// contribute. The fixture is generated from `DjinnMcpServer::all_tool_schemas()`
+/// and committed as JSON to avoid a provider -> control-plane dependency cycle.
+const DJINN_MCP_SERVER_FIXTURE: &str = "builtin/djinn_mcp_server.json";
+const DJINN_MCP_SERVER_MIN_TOOLS: usize = 140;
+
 /// Load the full corpus (builtin + regression) into a flat list of fixtures.
 fn load_corpus() -> Vec<Fixture> {
     let manifest = load_fixture_file("manifest.json");
@@ -168,6 +174,55 @@ fn load_corpus() -> Vec<Fixture> {
         }
     }
     out
+}
+
+/// Assert that the DjinnMcpServer full-server fixture is present in the builtin
+/// manifest and contributes a substantial corpus. This protects against
+/// refactors that silently drop the expanded corpus from the projection test.
+fn assert_djinn_mcp_server_fixture_included(manifest: &Value) {
+    let files = manifest["groups"]["builtin"]["files"]
+        .as_array()
+        .expect("manifest builtin group has no 'files' array");
+    let file_strings: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        file_strings.contains(&DJINN_MCP_SERVER_FIXTURE),
+        "builtin manifest must include '{DJINN_MCP_SERVER_FIXTURE}'"
+    );
+}
+
+#[test]
+fn djinn_mcp_server_fixture_is_present_and_substantial() {
+    let manifest = load_fixture_file("manifest.json");
+    assert_djinn_mcp_server_fixture_included(&manifest);
+
+    let tools = load_fixture_file(DJINN_MCP_SERVER_FIXTURE)
+        .as_array()
+        .unwrap_or_else(|| panic!("{DJINN_MCP_SERVER_FIXTURE} must be a JSON array of tools"))
+        .clone();
+    assert!(
+        tools.len() >= DJINN_MCP_SERVER_MIN_TOOLS,
+        "{DJINN_MCP_SERVER_FIXTURE} has only {} tools; expected at least {DJINN_MCP_SERVER_MIN_TOOLS}",
+        tools.len()
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for tool in &tools {
+        let name = tool
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("tool in {DJINN_MCP_SERVER_FIXTURE} missing 'name'"));
+        assert!(
+            seen.insert(name),
+            "duplicate tool name '{name}' in {DJINN_MCP_SERVER_FIXTURE}"
+        );
+        let schema = tool.get("inputSchema").unwrap_or_else(|| {
+            panic!("tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} missing 'inputSchema'")
+        });
+        assert!(
+            schema.is_object(),
+            "tool '{name}' in {DJINN_MCP_SERVER_FIXTURE} has a non-object 'inputSchema'"
+        );
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
