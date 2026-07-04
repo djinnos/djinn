@@ -1,5 +1,6 @@
 mod admission;
 mod outcome;
+pub(crate) mod post_intervention_lane;
 /// Pure resume-source selector and candidate builder. Wired into the dispatch
 /// path for re-dispatch after controlled terminations; returns `None` when
 /// resume selection is disabled so default/off dispatch behavior is unchanged.

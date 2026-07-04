@@ -1,7 +1,9 @@
+use super::config::ResolvedMcpServerConfig;
 use super::*;
 use crate::test_helpers::{agent_context_from_db, create_test_db};
 use djinn_core::events::EventBus;
 use djinn_provider::repos::CredentialRepository;
+use rmcp::object;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -108,7 +110,7 @@ fn call_tool_result_error() {
 }
 
 /// Helper: build an `Arc<RwLock<RoutingState>>` from raw maps.
-fn make_routing(
+pub(super) fn make_routing(
     tool_to_server: HashMap<String, String>,
     namespaced_to_original: HashMap<String, String>,
 ) -> Arc<RwLock<RoutingState>> {
@@ -118,6 +120,9 @@ fn make_routing(
         peers: HashMap::new(),
         request_timeouts: HashMap::new(),
         unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
+        resource_servers: HashSet::new(),
     }))
 }
 
@@ -126,6 +131,8 @@ fn empty_registry_has_no_tools() {
     let registry = McpToolRegistry {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
     assert!(!registry.has_tool("anything"));
@@ -143,6 +150,8 @@ fn registry_lookup() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
     assert!(registry.has_tool(&mcp_namespaced_name("search-server", "web_search")));
@@ -165,6 +174,8 @@ fn registry_schemas_default_to_concurrent_unsafe() {
             "inputSchema": {"type": "object"},
             "concurrent_safe": false
         })],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
 
@@ -243,6 +254,8 @@ async fn dispatch_routes_to_original_tool_name() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: Some(Arc::new(move |_tool_name, _arguments| {
             let received = received_clone.clone();
             Box::pin(async move {
@@ -262,6 +275,8 @@ async fn dispatch_unknown_tool_returns_error() {
     let registry = McpToolRegistry {
         routing: make_routing(HashMap::new(), HashMap::new()),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
     let result = registry.call_tool("nonexistent", None).await;
@@ -290,6 +305,8 @@ impl McpToolRegistry {
         Self {
             routing: make_routing(tool_to_server, namespaced_to_original),
             tool_schemas,
+            server_instructions: BTreeMap::new(),
+            resource_servers: Vec::new(),
             test_dispatch: Some(Arc::new(move |tool_name, arguments| {
                 let result = dispatch(tool_name, arguments);
                 Box::pin(async move { result })
@@ -447,6 +464,9 @@ async fn connect_to_server_sends_resolved_headers() {
             "Authorization".to_string(),
             "Bearer resolved-secret".to_string(),
         )]),
+        "test-server",
+        "test-task",
+        make_routing(HashMap::new(), HashMap::new()),
     )
     .await;
 
@@ -549,6 +569,8 @@ async fn removed_advertised_tool_returns_deterministic_error() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
 
@@ -588,6 +610,8 @@ fn refresh_does_not_add_newly_discovered_tools_to_schemas() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
 
@@ -619,6 +643,8 @@ async fn unchanged_advertised_tool_remains_dispatchable_after_refresh() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"ok": true})) })
         })),
@@ -645,6 +671,8 @@ async fn routing_state_is_clone_safe() {
     let registry = McpToolRegistry {
         routing: make_routing(tool_to_server, namespaced_to_original),
         tool_schemas: vec![serde_json::json!({"name": namespaced})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: None,
     };
 
@@ -657,6 +685,275 @@ async fn routing_state_is_clone_safe() {
     assert!(
         clone.is_unavailable(&namespaced),
         "clone must see unavailability set on original"
+    );
+}
+
+/// Helper: build an `Arc<RwLock<RoutingState>>` with explicit fingerprints.
+fn make_routing_with_fingerprints(
+    tool_to_server: HashMap<String, String>,
+    namespaced_to_original: HashMap<String, String>,
+    tool_fingerprints: HashMap<String, u64>,
+) -> Arc<RwLock<RoutingState>> {
+    Arc::new(RwLock::new(RoutingState {
+        tool_to_server,
+        namespaced_to_original,
+        peers: HashMap::new(),
+        request_timeouts: HashMap::new(),
+        unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints,
+        resource_servers: HashSet::new(),
+    }))
+}
+
+// ── tools/list_changed rename-routing tests ──────────────────────────
+
+#[test]
+fn apply_tools_list_result_unchanged_tools_remain() {
+    // Setup: one tool registered for "my-server".
+    let ns_stable = mcp_namespaced_name("my-server", "stable_tool");
+    let tool_to_server = HashMap::from([(ns_stable.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_stable.clone(), "stable_tool".to_string())]);
+    let fp = 12345u64;
+    let tool_fingerprints = HashMap::from([(ns_stable.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server still advertises stable_tool with the same fingerprint.
+    let new_tool = RmcpTool::new(
+        "stable_tool".to_string(),
+        "does something".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[new_tool]);
+
+    assert!(unavailable.is_empty(), "no tools should be removed");
+    assert!(renamed.is_empty(), "no tools should be renamed");
+    assert!(!routing.read().unwrap().unavailable.contains(&ns_stable));
+}
+
+#[test]
+fn apply_tools_list_result_removed_tool_marked_unavailable() {
+    let ns_gone = mcp_namespaced_name("my-server", "gone_tool");
+    let tool_to_server = HashMap::from([(ns_gone.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_gone.clone(), "gone_tool".to_string())]);
+    let fp = 99999u64;
+    let tool_fingerprints = HashMap::from([(ns_gone.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server no longer advertises gone_tool, and no new tool shares
+    // its fingerprint.
+    let new_tool = RmcpTool::new(
+        "completely_different".to_string(),
+        "something unrelated".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[new_tool]);
+
+    assert_eq!(unavailable, vec![ns_gone.clone()]);
+    assert!(renamed.is_empty());
+    assert!(routing.read().unwrap().unavailable.contains(&ns_gone));
+}
+
+#[test]
+fn apply_tools_list_result_new_tools_not_registered() {
+    // Setup: one existing tool.
+    let ns_existing = mcp_namespaced_name("my-server", "existing");
+    let tool_to_server = HashMap::from([(ns_existing.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_existing.clone(), "existing".to_string())]);
+    let tool_fingerprints = HashMap::from([(ns_existing.clone(), 111u64)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server advertises existing + a brand new tool.
+    let existing = RmcpTool::new(
+        "existing".to_string(),
+        "still here".to_string(),
+        object!({"type": "object"}),
+    );
+    let new_tool = RmcpTool::new(
+        "brand_new".to_string(),
+        "freshly added".to_string(),
+        object!({"type": "string"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[existing, new_tool]);
+
+    assert!(unavailable.is_empty());
+    assert!(renamed.is_empty());
+    // brand_new should NOT be in the routing maps.
+    let ns_new = mcp_namespaced_name("my-server", "brand_new");
+    assert!(
+        !routing.read().unwrap().tool_to_server.contains_key(&ns_new),
+        "newly discovered tools must not be registered"
+    );
+}
+
+#[test]
+fn apply_tools_list_result_provably_renamed_tool_routes_through_old_alias() {
+    // Setup: "old_name" tool with a known fingerprint.
+    let ns_old = mcp_namespaced_name("my-server", "old_name");
+    let tool_to_server = HashMap::from([(ns_old.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_old.clone(), "old_name".to_string())]);
+
+    // Compute the fingerprint from the original tool definition.
+    let original_tool = RmcpTool::new(
+        "old_name".to_string(),
+        "does the thing".to_string(),
+        object!({"type": "object", "properties": {"x": {"type": "number"}}}),
+    );
+    let fp = compute_tool_fingerprint(&original_tool);
+    let tool_fingerprints = HashMap::from([(ns_old.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: server now advertises "new_name" with the same description and
+    // input_schema (same fingerprint).  old_name is gone.
+    let renamed_tool = RmcpTool::new(
+        "new_name".to_string(),
+        "does the thing".to_string(),
+        object!({"type": "object", "properties": {"x": {"type": "number"}}}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[renamed_tool]);
+
+    assert!(
+        unavailable.is_empty(),
+        "renamed tool should not be unavailable"
+    );
+    assert_eq!(renamed, vec![ns_old.clone()], "should detect the rename");
+
+    // The old namespaced alias now routes to the new original name.
+    let r = routing.read().unwrap();
+    assert_eq!(
+        r.namespaced_to_original.get(&ns_old).map(String::as_str),
+        Some("new_name"),
+        "old alias should route to the new tool name"
+    );
+    assert!(!r.unavailable.contains(&ns_old));
+}
+
+#[test]
+fn apply_tools_list_result_ambiguous_rename_marks_unavailable() {
+    // Setup: "original_tool" with a fingerprint.
+    let ns_orig = mcp_namespaced_name("my-server", "original_tool");
+    let tool_to_server = HashMap::from([(ns_orig.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_orig.clone(), "original_tool".to_string())]);
+
+    let original_tool = RmcpTool::new(
+        "original_tool".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let fp = compute_tool_fingerprint(&original_tool);
+    let tool_fingerprints = HashMap::from([(ns_orig.clone(), fp)]);
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    // Refresh: two new tools share the same fingerprint (ambiguous).
+    let candidate_a = RmcpTool::new(
+        "helper_v2".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let candidate_b = RmcpTool::new(
+        "helper_v3".to_string(),
+        "generic helper".to_string(),
+        object!({"type": "object"}),
+    );
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[candidate_a, candidate_b]);
+
+    assert_eq!(
+        unavailable,
+        vec![ns_orig.clone()],
+        "ambiguous rename should mark as unavailable"
+    );
+    assert!(renamed.is_empty(), "ambiguous match should not rename");
+    assert!(routing.read().unwrap().unavailable.contains(&ns_orig));
+}
+
+#[test]
+fn apply_tools_list_result_no_fingerprint_marks_removed() {
+    // If a tool was registered without a fingerprint (edge case), it is
+    // treated as removed when its name disappears.
+    let ns_legacy = mcp_namespaced_name("my-server", "legacy_tool");
+    let tool_to_server = HashMap::from([(ns_legacy.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_legacy.clone(), "legacy_tool".to_string())]);
+    // Empty fingerprints map — no fingerprint stored.
+    let tool_fingerprints = HashMap::new();
+
+    let routing =
+        make_routing_with_fingerprints(tool_to_server, namespaced_to_original, tool_fingerprints);
+
+    let (unavailable, renamed) = routing
+        .write()
+        .unwrap()
+        .apply_tools_list_result("my-server", &[]);
+
+    assert_eq!(unavailable, vec![ns_legacy.clone()]);
+    assert!(renamed.is_empty());
+}
+
+#[test]
+fn apply_tools_list_result_session_fixed_schemas_unchanged() {
+    // tool_schemas is on McpToolRegistry, not RoutingState.  Verify that
+    // the McpToolRegistry-level apply_tools_refresh (name-only) does not
+    // modify tool_schemas, and that apply_tools_list_result on RoutingState
+    // has no way to modify them either.
+    let ns_tool = mcp_namespaced_name("my-server", "my_tool");
+    let tool_to_server = HashMap::from([(ns_tool.clone(), "my-server".to_string())]);
+    let namespaced_to_original = HashMap::from([(ns_tool.clone(), "my_tool".to_string())]);
+
+    let registry = McpToolRegistry {
+        routing: make_routing(tool_to_server, namespaced_to_original),
+        tool_schemas: vec![serde_json::json!({"name": ns_tool})],
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
+        test_dispatch: None,
+    };
+
+    let schemas_before = registry.tool_schemas().len();
+
+    // apply_tools_refresh (name-only path)
+    registry.apply_tools_refresh("my-server", &["brand_new".to_string()]);
+    assert_eq!(registry.tool_schemas().len(), schemas_before);
+
+    // apply_tools_list_result (full path) on the shared routing state
+    {
+        let new_tool = RmcpTool::new(
+            "brand_new".to_string(),
+            "freshly added".to_string(),
+            object!({"type": "string"}),
+        );
+        registry
+            .routing
+            .write()
+            .unwrap()
+            .apply_tools_list_result("my-server", &[new_tool]);
+    }
+    assert_eq!(
+        registry.tool_schemas().len(),
+        schemas_before,
+        "tool_schemas must remain session-fixed after any refresh path"
     );
 }
 
@@ -675,6 +972,9 @@ fn make_routing_with_timeouts(
         peers: HashMap::new(),
         request_timeouts,
         unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
+        resource_servers: HashSet::new(),
     }))
 }
 
@@ -694,6 +994,8 @@ async fn call_tool_timeout_returns_deterministic_error() {
             request_timeouts,
         ),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: Some(Arc::new(move |_, _| {
             Box::pin(async {
                 // Simulate a slow server that takes longer than the timeout.
@@ -736,6 +1038,8 @@ async fn call_tool_uses_default_timeout_when_server_not_in_map() {
             request_timeouts,
         ),
         tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
         test_dispatch: Some(Arc::new(|_, _| {
             Box::pin(async { Ok(serde_json::json!({"fast": true})) })
         })),
@@ -755,6 +1059,9 @@ async fn request_timeout_stored_per_server_at_discovery() {
         peers: HashMap::new(),
         request_timeouts: HashMap::new(),
         unavailable: HashSet::new(),
+        server_instructions: BTreeMap::new(),
+        tool_fingerprints: HashMap::new(),
+        resource_servers: HashSet::new(),
     };
     routing_state
         .request_timeouts
@@ -772,125 +1079,95 @@ async fn request_timeout_stored_per_server_at_discovery() {
     assert!(!routing_state.request_timeouts.contains_key("server-c"));
 }
 
-// ── rmcp capability access / adapter validation ────────────────────
-//
-// These compile-time probes verify that the rmcp API touchpoints
-// needed by sibling epics (yjc6, hyeu) are accessible through the
-// types already used in mcp_client.rs.  If a future rmcp upgrade
-// removes or renames any of these fields, these tests will fail to
-// compile — giving early warning before the sibling epics attempt
-// to use them.
-//
-// NOT exposed to the model:
-// - `InitializeResult.instructions` → yjc6 (prompt instructions block)
-// - resource tools → hyeu (resources-as-tools)
-//
-// Validated access points:
-// - `ServerCapabilities.tools` / `.resources` / `.logging` / `.prompts`
-// - `ToolsCapability.list_changed`
-// - `LoggingMessageNotification` type exists (notification handler shape)
-// - `ServerNotification` enum variants for handler dispatch
+// ── Server instructions accessor tests ─────────────────────────────
 
 #[test]
-fn rmcp_initialize_result_instructions_field_is_accessible() {
-    // Compile-time probe: InitializeResult has an `instructions` field.
-    // Used by yjc6 to extract server prompt instructions.
-    let result = rmcp::model::InitializeResult::new(rmcp::model::ServerCapabilities::default());
-    // instructions defaults to None
-    assert!(result.instructions.is_none());
-    // Can set instructions
-    let with_inst = result.with_instructions("test instructions");
-    assert_eq!(with_inst.instructions.as_deref(), Some("test instructions"));
-}
-
-#[test]
-fn rmcp_server_capabilities_fields_are_accessible() {
-    // Compile-time probe: ServerCapabilities exposes tools, resources,
-    // prompts, and logging fields.
-    let caps = rmcp::model::ServerCapabilities::default();
-    assert!(caps.tools.is_none());
-    assert!(caps.resources.is_none());
-    assert!(caps.prompts.is_none());
-    assert!(caps.logging.is_none());
-}
-
-#[test]
-fn rmcp_tools_capability_list_changed_is_accessible() {
-    // Compile-time probe: ToolsCapability.list_changed indicates whether
-    // the server supports tools/list_changed notifications.
-    let tc = rmcp::model::ToolsCapability {
-        list_changed: Some(true),
+fn server_instructions_accessor_returns_empty_by_default() {
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: BTreeMap::new(),
+        resource_servers: Vec::new(),
+        test_dispatch: None,
     };
-    assert_eq!(tc.list_changed, Some(true));
+    assert!(
+        registry.server_instructions().is_empty(),
+        "registry with no instructions should return empty map"
+    );
 }
 
 #[test]
-fn rmcp_logging_notification_type_is_accessible() {
-    // Compile-time probe: LoggingMessageNotification exists and can be
-    // pattern-matched from ServerNotification. This is the type that a
-    // notification handler/channel adapter would need to receive.
-    use rmcp::model::{LoggingLevel, LoggingMessageNotificationParam, ServerNotification};
-
-    // Construct a minimal logging notification.
-    let logging =
-        LoggingMessageNotificationParam::new(LoggingLevel::Info, serde_json::json!("test message"));
-
-    // Verify the param fields are accessible.
-    assert_eq!(logging.level, LoggingLevel::Info);
-    assert_eq!(logging.data, serde_json::json!("test message"));
-
-    // Wrap in ServerNotification to confirm the variant exists and is matchable.
-    let notif =
-        ServerNotification::LoggingMessageNotification(rmcp::model::Notification::new(logging));
-
-    // Pattern-match to verify the handler dispatch shape.
-    match notif {
-        ServerNotification::LoggingMessageNotification(inner) => {
-            assert_eq!(inner.params.level, LoggingLevel::Info);
-        }
-        _ => panic!("expected LoggingMessageNotification variant"),
-    }
-}
-
-#[test]
-fn rmcp_tool_list_changed_notification_type_is_accessible() {
-    // Compile-time probe: ToolListChangedNotification exists and can be
-    // constructed/matched. This is the type that a notification handler
-    // for tools/list_changed would receive.
-    use rmcp::model::ServerNotification;
-
-    // ToolListChangedNotification is NotificationNoParam<Method>, which
-    // derives Default since the Method is a unit struct.
-    let changed: rmcp::model::ToolListChangedNotification = Default::default();
-    let notif = ServerNotification::ToolListChangedNotification(changed);
-
-    match notif {
-        ServerNotification::ToolListChangedNotification(_) => {
-            // Successfully matched — the variant and type are accessible.
-        }
-        _ => panic!("expected ToolListChangedNotification variant"),
-    }
-}
-
-#[test]
-fn startup_timeout_defaults_match_config() {
-    // Verify the startup/request timeout defaults from McpServerConfig
-    // match the expected values.
-    assert_eq!(McpServerConfig::default_startup_timeout_ms(), 30_000);
-    assert_eq!(McpServerConfig::default_request_timeout_ms(), 120_000);
-}
-
-#[test]
-fn resolved_config_startup_and_request_timeouts_from_duration_helpers() {
-    let config = ResolvedMcpServerConfig {
-        url: Some("https://example.com/mcp".to_string()),
-        command: None,
-        args: Vec::new(),
-        env: HashMap::new(),
-        headers: HashMap::new(),
-        startup_timeout_ms: 5_000,
-        request_timeout_ms: 30_000,
+fn server_instructions_accessor_returns_populated_map() {
+    let mut instructions = BTreeMap::new();
+    instructions.insert(
+        "search-server".to_string(),
+        "Use web_search for live information.".to_string(),
+    );
+    instructions.insert(
+        "code-server".to_string(),
+        "Use code_search for repository lookup.".to_string(),
+    );
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        resource_servers: Vec::new(),
+        test_dispatch: None,
     };
-    assert_eq!(config.startup_timeout(), Duration::from_millis(5_000));
-    assert_eq!(config.request_timeout(), Duration::from_millis(30_000));
+    let result = registry.server_instructions();
+    assert_eq!(result.len(), 2);
+    assert_eq!(
+        result.get("search-server").map(String::as_str),
+        Some("Use web_search for live information.")
+    );
+    assert_eq!(
+        result.get("code-server").map(String::as_str),
+        Some("Use code_search for repository lookup.")
+    );
+}
+
+#[test]
+fn server_instructions_accessor_returns_btree_sorted_keys() {
+    // Insert in reverse-alphabetical order; BTreeMap sorts by key.
+    let mut instructions = BTreeMap::new();
+    instructions.insert("zebra".to_string(), "Zebra instr.".to_string());
+    instructions.insert("alpha".to_string(), "Alpha instr.".to_string());
+    instructions.insert("middle".to_string(), "Middle instr.".to_string());
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        resource_servers: Vec::new(),
+        test_dispatch: None,
+    };
+    let keys: Vec<&str> = registry
+        .server_instructions()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["alpha", "middle", "zebra"]);
+}
+
+#[test]
+fn server_instructions_clone_shares_same_data() {
+    let mut instructions = BTreeMap::new();
+    instructions.insert(
+        "shared-server".to_string(),
+        "Shared instructions.".to_string(),
+    );
+    let registry = McpToolRegistry {
+        routing: make_routing(HashMap::new(), HashMap::new()),
+        tool_schemas: Vec::new(),
+        server_instructions: instructions,
+        resource_servers: Vec::new(),
+        test_dispatch: None,
+    };
+    let clone = registry.clone();
+    assert_eq!(
+        clone
+            .server_instructions()
+            .get("shared-server")
+            .map(String::as_str),
+        Some("Shared instructions.")
+    );
 }
