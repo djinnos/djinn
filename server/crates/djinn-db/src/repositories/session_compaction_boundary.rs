@@ -833,4 +833,122 @@ mod tests {
             "insert_messages_batch must not create compaction boundary rows"
         );
     }
+
+    // ── Regression: repeated failed compaction retries leave no completed
+    //    boundary ────────────────────────────────────────────────────────
+
+    /// Regression: simulates repeated reply-loop compaction retries that each
+    /// record a `Started` boundary but never complete (summarizer error, early
+    /// stream end, or process kill). After all retries, `latest_completed_boundary`
+    /// must remain `None` and `boundary_count` must equal the number of Started
+    /// rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_failed_compactions_leave_only_started_rows() {
+        let db = test_db();
+        let (_project_id, _task_id, session_id) =
+            create_session(db.clone(), EventBus::noop()).await;
+
+        let repo = SessionCompactionBoundaryRepository::new(db);
+
+        // Simulate 3 failed compaction attempts (like reply-loop retries).
+        for i in 0..3 {
+            repo.record_compaction_started(BeginCompactionParams {
+                session_id: &session_id,
+                schema_version: 1,
+                first_message_id: Some(&format!("msg-{i}-first")),
+                last_compacted_message_id: Some(&format!("msg-{i}-last")),
+                first_retained_message_id: Some(&format!("msg-{i}-retained")),
+                retained_tail_hash: Some(&format!("hash-{i}")),
+                marker_metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            repo.boundary_count(&session_id).await.unwrap(),
+            3,
+            "three started rows should exist"
+        );
+
+        let latest = repo.latest_completed_boundary(&session_id).await.unwrap();
+        assert!(
+            latest.is_none(),
+            "no completed boundary should exist after repeated failures"
+        );
+    }
+
+    /// Regression: a completed compaction boundary followed by multiple failed
+    /// retry attempts must preserve the completed boundary. `latest_completed_boundary`
+    /// returns the original completed row, and the additional Started rows are
+    /// ignored by projection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_boundary_preserved_after_failed_retry_attempts() {
+        let db = test_db();
+        let (_project_id, _task_id, session_id) =
+            create_session(db.clone(), EventBus::noop()).await;
+
+        let repo = SessionCompactionBoundaryRepository::new(db);
+
+        // First compaction succeeds.
+        let completed = repo
+            .record_compaction_started(BeginCompactionParams {
+                session_id: &session_id,
+                schema_version: 1,
+                first_message_id: Some("msg-1"),
+                last_compacted_message_id: Some("msg-5"),
+                first_retained_message_id: Some("msg-6"),
+                retained_tail_hash: Some("hash-ok"),
+                marker_metadata: None,
+            })
+            .await
+            .unwrap();
+
+        repo.complete_compaction_boundary(CompleteCompactionParams {
+            boundary_id: &completed.id,
+            schema_version: 1,
+            first_message_id: Some("msg-1"),
+            last_compacted_message_id: Some("msg-5"),
+            first_retained_message_id: Some("msg-6"),
+            retained_tail_hash: Some("hash-ok"),
+            summary_text: "First successful summary.",
+            marker_metadata: None,
+        })
+        .await
+        .unwrap();
+
+        // Two subsequent compaction attempts fail (Started-only).
+        for i in 0..2 {
+            repo.record_compaction_started(BeginCompactionParams {
+                session_id: &session_id,
+                schema_version: 1,
+                first_message_id: Some(&format!("retry-{i}-first")),
+                last_compacted_message_id: Some(&format!("retry-{i}-last")),
+                first_retained_message_id: Some(&format!("retry-{i}-retained")),
+                retained_tail_hash: Some(&format!("retry-hash-{i}")),
+                marker_metadata: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        // 1 completed + 2 started = 3 total.
+        assert_eq!(
+            repo.boundary_count(&session_id).await.unwrap(),
+            3,
+            "1 completed + 2 started rows"
+        );
+
+        // latest_completed_boundary must return the original completed row.
+        let latest = repo
+            .latest_completed_boundary(&session_id)
+            .await
+            .unwrap()
+            .expect("completed boundary should exist");
+        assert_eq!(
+            latest.summary_text.as_deref(),
+            Some("First successful summary.")
+        );
+        assert_eq!(latest.id, completed.id);
+    }
 }
