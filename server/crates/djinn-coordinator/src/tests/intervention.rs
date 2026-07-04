@@ -3300,3 +3300,133 @@ async fn gs37_park_guard_not_triggered_below_quality_threshold_despite_raw_reope
         "no Planner intervention (review) task may be created below the park threshold"
     );
 }
+
+/// 2vxr regression: the park rung must NOT create a human-review hold while
+/// the newest post-intervention submission is pending review
+/// (needs_task_review / in_task_review) with no rejection/CI failure newer
+/// than it. CI evidence whose head SHA predates the latest submitted work
+/// cannot serve as the park-triggering strike.
+///
+/// Scenario: seed intervention_count=1, a post-intervention session with
+/// work_submitted, status needs_task_review, stale failing CI from a prior
+/// head; run the park evaluation; assert no hold is created. Then apply a
+/// review rejection and assert the park fires (attempt concluded).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_rung_does_not_park_while_submission_pending_review() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Create a task with reopen_count at the intervention threshold so
+    // quality_strikes >= REOPEN_INTERVENTION_THRESHOLD.
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    // Reset intervention counters: bumps intervention_count to 1 (>=
+    // MAX_PLANNER_INTERVENTIONS) and zeroes reopen_count.  The quality
+    // reopen count is computed from the activity log and stays at
+    // REOPEN_INTERVENTION_THRESHOLD.
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, 1);
+
+    // Insert a stale CI snapshot (failing, from a prior head SHA). The
+    // first_seen_at is set to now by the DB.
+    repo.upsert_ci_snapshot(djinn_core::models::TaskPrCiSnapshotInput {
+        task_id: task.id.clone(),
+        pr_number: 42,
+        head_sha: "old-head-sha-before-submission".to_string(),
+        ci_status: djinn_core::models::CiStatus::Failing,
+        blocking_required_check_names: vec!["test-check".to_string()],
+        failure_fingerprint: Some("fp:stale-ci".to_string()),
+        same_signature_count: 1,
+        last_remediation_base_sha: None,
+    })
+    .await
+    .unwrap();
+
+    // Sleep briefly so the work_submitted timestamp sorts strictly after the
+    // CI snapshot's first_seen_at (both are UTC ISO-8601 with ms precision).
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Log a work_submitted activity — the post-intervention session submitted.
+    repo.log_activity(
+        Some(&task.id),
+        "test",
+        "worker",
+        "work_submitted",
+        &serde_json::json!({"summary": "post-intervention submission"}).to_string(),
+    )
+    .await
+    .unwrap();
+
+    // The task is in needs_task_review — submission is pending review.
+    repo.set_status(&task.id, "needs_task_review")
+        .await
+        .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // ── Act: run the park evaluation ──────────────────────────────────
+    let handled = actor.maybe_intervene_on_stuck_task(&task).await;
+
+    // ── Assert: no hold is created (submission pending review) ────────
+    assert!(
+        !handled,
+        "park rung must NOT park while the newest post-intervention submission \
+         is pending review (needs_task_review)"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.is_empty(),
+        "no human-review hold should be created while submission is pending review"
+    );
+    let markers = park_redispatch_markers(&repo, &task.id).await;
+    assert_eq!(
+        markers.len(),
+        1,
+        "exactly one park-redispatch marker documenting the decision"
+    );
+    assert_eq!(
+        markers[0]["kind"], "submission_pending_review",
+        "marker kind must be submission_pending_review"
+    );
+
+    // ── Now apply a review rejection (attempt concludes with failure) ─
+    repo.transition(
+        &task.id,
+        djinn_core::models::TransitionAction::TaskReviewStart,
+        "reviewer",
+        "reviewer",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    repo.transition(
+        &task.id,
+        djinn_core::models::TransitionAction::TaskReviewReject,
+        "reviewer",
+        "reviewer",
+        Some("AC-2 unmet: handler not registered"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.status, "open", "rejection returns task to open");
+
+    // ── Act: run the park evaluation again ────────────────────────────
+    let handled = actor.maybe_intervene_on_stuck_task(&task).await;
+
+    // ── Assert: the park fires (attempt concluded with rejection) ─────
+    assert!(
+        handled,
+        "park rung must park after the attempt concluded with a genuine rejection"
+    );
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert_eq!(
+        blockers.len(),
+        1,
+        "one human-review hold should be created after attempt concluded"
+    );
+}
