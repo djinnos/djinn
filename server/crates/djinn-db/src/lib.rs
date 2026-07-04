@@ -13,7 +13,7 @@ pub mod test_support {
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
         UsageTestSessionSeed, UsageTestTaskSeed, backdate_task_updated_at,
         build_multi_project_housekeeping_fixture, drop_table_for_test, event_bus_for, make_project,
-        override_debate_trail_body_metadata, seed_project, seed_session_row,
+        override_debate_trail_body_metadata, seed_chat_session_row, seed_project, seed_session_row,
         seed_session_row_with_id, seed_task_row,
     };
 }

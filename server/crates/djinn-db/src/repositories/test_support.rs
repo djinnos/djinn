@@ -106,6 +106,29 @@ pub async fn seed_session_row_with_id(
     .expect("failed to seed session row");
 }
 
+/// Seed a projectless global-chat session row for boundary/compaction tests.
+///
+/// Global chat sessions (`agent_type = 'chat'`) are user-scoped and exist
+/// outside any project, so migration 15's `sessions_project_scope_by_agent_type`
+/// CHECK requires `project_id IS NULL`. The `UsageTestSessionSeed` helper can
+/// only express a non-null project id, so chat-session tests use this dedicated
+/// seed instead. `cost_basis` is `'unpriced'` to satisfy migration 83's
+/// `sessions_cost_basis_check`.
+pub async fn seed_chat_session_row(db: &Database, session_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query(
+        "INSERT INTO sessions \
+         (id, project_id, task_id, model_id, agent_type, status, \
+          started_at, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, cost_usd, cost_basis) \
+         VALUES ($1, NULL, NULL, 'test-model', 'chat', 'completed', \
+                 '2025-01-01T00:00:00Z', 0, 0, 0, 0, NULL, 'unpriced')",
+    )
+    .bind(session_id)
+    .execute(db.pool())
+    .await
+    .expect("failed to seed chat session row");
+}
+
 /// Seed a project so that `project_id` FK constraints pass.
 pub async fn seed_project(db: &Database, project_id: &str, name: &str) {
     db.ensure_initialized().await.unwrap();

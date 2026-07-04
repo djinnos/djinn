@@ -81,18 +81,25 @@ fn gather_chat_boundary_identity(
     )
 }
 
+/// Stable per-message identity that fits the boundary table's `VARCHAR(36)`
+/// id columns (`first_message_id`, `last_compacted_message_id`,
+/// `first_retained_message_id` — see migration 92). Prefers the
+/// provider-assigned message id when present and short enough; otherwise falls
+/// back to a content hash truncated to 36 characters. 34 hex chars (136 bits)
+/// is far beyond any collision risk across the messages of one conversation.
 fn message_identity(msg: &Message) -> String {
+    use sha2::{Digest, Sha256};
+    const MAX_LEN: usize = 36;
+
     if let Some(serde_json::Value::Object(provider_data)) =
         msg.metadata.as_ref().and_then(|m| m.provider_data.as_ref())
         && let Some(serde_json::Value::String(id)) = provider_data.get("id")
+        && id.len() <= MAX_LEN
     {
         return id.clone();
     }
-    use sha2::{Digest, Sha256};
-    format!(
-        "hash:{}",
-        hex_encode(&Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()))
-    )
+    let digest = hex_encode(&Sha256::digest(serde_json::to_vec(msg).unwrap_or_default()));
+    format!("h:{}", &digest[..MAX_LEN - 2])
 }
 
 /// Extract the accepted summary text from an already compacted chat conversation.
@@ -217,7 +224,6 @@ mod tests {
     use super::*;
     use djinn_core::events::EventBus;
     use djinn_db::CompactionPhase;
-    use djinn_db::test_support::seed_project;
     use djinn_provider::message::Message;
 
     fn test_db() -> djinn_db::Database {
@@ -225,25 +231,9 @@ mod tests {
     }
 
     async fn seed_chat_session(db: &djinn_db::Database, session_id: &str) {
-        seed_project(db, "project-test", "test project").await;
-        djinn_db::test_support::seed_session_row_with_id(
-            db,
-            session_id,
-            djinn_db::test_support::UsageTestSessionSeed {
-                project_id: "project-test",
-                model_id: "test-model",
-                agent_type: "chat",
-                started_at: "2025-01-01T00:00:00Z",
-                tokens_in: 0,
-                tokens_out: 0,
-                cache_read_tokens: 0,
-                cache_write_tokens: 0,
-                cost_usd: None,
-                cost_basis: "",
-                task_id: None,
-            },
-        )
-        .await;
+        // Global chat sessions are projectless (agent_type = 'chat',
+        // project_id NULL) per migration 15's project-scope CHECK.
+        djinn_db::test_support::seed_chat_session_row(db, session_id).await;
     }
 
     fn compacted_conversation() -> Conversation {
