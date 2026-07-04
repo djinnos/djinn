@@ -7,7 +7,10 @@ use std::sync::atomic::Ordering;
 use crate::helpers::{runtime_env_diagnostics, runtime_fs_diagnostics};
 use crate::host::SlotContext;
 use crate::output_parser::ParsedAgentOutput;
-use djinn_compaction::{CompactionContext, compact_conversation, needs_compaction};
+use djinn_compaction::{
+    COMPACTION_SUMMARY_END_MARKER, CompactionContext, compact_conversation, needs_compaction,
+    strip_compaction_markers,
+};
 use djinn_core::events::DjinnEventEnvelope;
 use djinn_db::SessionMessageRepository;
 use djinn_db::repositories::verify_run::TaskRejectedSubmissionIntegrityRepository;
@@ -33,9 +36,13 @@ use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
     ToolCallSignature, ToolFailureClass,
 };
-use super::persistence::{persist_session_message, serialize_llm_input, serialize_message};
+use super::persistence::{
+    complete_compaction_boundary, persist_session_message, record_compaction_started,
+    serialize_llm_input, serialize_message,
+};
 use super::streaming::{StreamLoopContext, StreamTurnState, consume_provider_stream};
 use super::tool_dispatch::{ToolDispatchContext, collect_tool_results, tool_runtime_metadata};
+use djinn_db::SessionCompactionBoundaryRepository;
 
 /// True when `model_id` (a `provider/model` string) is served by the Codex /
 /// OpenAI consumer backend that signals over-quota by answering a turn with an
@@ -727,11 +734,29 @@ pub async fn run_reply_loop(
                     if let Some(llm) = otel_llm {
                         llm.end_error("context_length_exceeded");
                     }
+                    let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
+                    let boundary_id = record_compaction_started(
+                        &boundary_repo, session_id, conversation,
+                    ).await;
                     let compacted = compact_conversation(
                         provider, conversation, session_id, task_id,
                         CompactionContext::MidSession(role_name.to_string()),
                         context_window,
                     ).await;
+                    if compacted {
+                        let summary = conversation
+                            .messages
+                            .iter()
+                            .find(|m| {
+                                m.role == Role::User
+                                    && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
+                            })
+                            .map(|m| strip_compaction_markers(&m.text_content()))
+                            .unwrap_or_default();
+                        complete_compaction_boundary(
+                            &boundary_repo, boundary_id.as_deref(), conversation, &summary,
+                        ).await;
+                    }
                     if compacted {
                         total_tokens_in = 0;
                         total_tokens_out = 0;
@@ -848,11 +873,29 @@ pub async fn run_reply_loop(
                     compaction_attempts,
                     "ReplyLoop: context_length_exceeded mid-stream; compacting reactively"
                 );
+                let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
+                let boundary_id = record_compaction_started(
+                    &boundary_repo, session_id, conversation,
+                ).await;
                 let compacted = compact_conversation(
                     provider, conversation, session_id, task_id,
                     CompactionContext::MidSession(role_name.to_string()),
                     context_window,
                 ).await;
+                if compacted {
+                    let summary = conversation
+                        .messages
+                        .iter()
+                        .find(|m| {
+                            m.role == Role::User
+                                && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
+                        })
+                        .map(|m| strip_compaction_markers(&m.text_content()))
+                        .unwrap_or_default();
+                    complete_compaction_boundary(
+                        &boundary_repo, boundary_id.as_deref(), conversation, &summary,
+                    ).await;
+                }
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;
@@ -1026,6 +1069,10 @@ pub async fn run_reply_loop(
                     usage_pct = current_context_tokens as f64 / context_window as f64,
                     "ReplyLoop: compaction threshold reached, compacting"
                 );
+                let boundary_repo = SessionCompactionBoundaryRepository::new(slot_ctx.db.clone());
+                let boundary_id = record_compaction_started(
+                    &boundary_repo, session_id, conversation,
+                ).await;
                 let compacted = compact_conversation(
                     provider,
                     conversation,
@@ -1035,6 +1082,20 @@ pub async fn run_reply_loop(
                     context_window,
                 )
                 .await;
+                if compacted {
+                    let summary = conversation
+                        .messages
+                        .iter()
+                        .find(|m| {
+                            m.role == Role::User
+                                && m.text_content().contains(COMPACTION_SUMMARY_END_MARKER)
+                        })
+                        .map(|m| strip_compaction_markers(&m.text_content()))
+                        .unwrap_or_default();
+                    complete_compaction_boundary(
+                        &boundary_repo, boundary_id.as_deref(), conversation, &summary,
+                    ).await;
+                }
                 if compacted {
                     total_tokens_in = 0;
                     total_tokens_out = 0;

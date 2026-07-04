@@ -63,13 +63,13 @@ closing remarks — and never mention this summary, the conversation's length, o
 /// Marker appended to summary text inside the user message so extraction can
 /// locate and strip the boundary unambiguously, even when preserved tails or
 /// re-appended user text follow the summary.
-pub(super) const COMPACTION_SUMMARY_END_MARKER: &str = "\n\n\n[Compaction summary complete]";
+pub const COMPACTION_SUMMARY_END_MARKER: &str = "\n\n\n[Compaction summary complete]";
 
-pub(super) const FULL_COMPACTION_CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the \
+pub const FULL_COMPACTION_CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the \
      conversation so far. Continue calling tools as necessary to complete the task.";
 
 /// Continuation message inserted after a *partial* compaction summary.
-pub(super) const PARTIAL_COMPACTION_CONTINUATION: &str = "Part of your context was compacted. The messages above the summary are \
+pub const PARTIAL_COMPACTION_CONTINUATION: &str = "Part of your context was compacted. The messages above the summary are \
      preserved verbatim; the summary covers your more recent work. Continue \
      calling tools as necessary to complete the task.";
 
@@ -84,7 +84,7 @@ pub(super) fn wrap_full_summary(summary: &str) -> String {
 /// Removes the end marker (and any single trailing newline left after
 /// stripping) so the cleaned text can be fed into [`previous_summary_block`]
 /// for the next prompt without leaking internal markers into the summariser.
-pub(super) fn strip_compaction_markers(text: &str) -> String {
+pub fn strip_compaction_markers(text: &str) -> String {
     let out = text
         .strip_suffix(COMPACTION_SUMMARY_END_MARKER)
         .unwrap_or(text);
