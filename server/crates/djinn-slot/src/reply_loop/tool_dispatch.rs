@@ -283,6 +283,52 @@ pub(super) async fn dispatch_single_tool<'a>(
             },
         );
     }
+    // Native MCP resource tools (`list_mcp_resources`, `read_mcp_resource`).
+    // Dispatched through the host's resource callback; results arrive as text.
+    if ctx.tool_dispatcher.is_resource_tool(&name) {
+        tracing::debug!(task_id = %ctx.task_id, tool = %name, "ReplyLoop: dispatching native MCP resource tool");
+        let resource_result = run_with_heartbeat(
+            tool_heartbeat_interval(),
+            || beat_activity(ctx.ctx, ctx.task_id),
+            ctx.tool_dispatcher
+                .dispatch_resource_tool(&name, args.clone()),
+        )
+        .await;
+        let (content, is_error) = match resource_result {
+            Ok(text) => {
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&text, false);
+                }
+                (vec![ContentBlock::Text { text }], false)
+            }
+            Err(err) => {
+                if let Some(ts) = &tool_span {
+                    ts.record_output(&err, true);
+                }
+                (
+                    vec![ContentBlock::Text {
+                        text: format!("error: {err}"),
+                    }],
+                    true,
+                )
+            }
+        };
+        if let Some(ts) = tool_span {
+            if is_error {
+                ts.end_error("MCP resource tool returned error");
+            } else {
+                ts.end_ok();
+            }
+        }
+        return (
+            idx,
+            ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error,
+            },
+        );
+    }
     let mut result = run_with_heartbeat(
         tool_heartbeat_interval(),
         || beat_activity(ctx.ctx, ctx.task_id),

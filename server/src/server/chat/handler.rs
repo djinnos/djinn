@@ -39,6 +39,7 @@ use djinn_agent::actors::slot::{
     format_family_for_provider, load_provider_credential, parse_model_id,
 };
 use djinn_agent::chat_tools::ChatResolvedProject;
+use djinn_compaction::COMPACTION_SUMMARY_END_MARKER;
 use djinn_control_plane::server::DjinnMcpServer;
 use djinn_core::auth_context::{SESSION_USER_ID, SESSION_USER_TOKEN};
 use djinn_db::{
@@ -49,6 +50,46 @@ use djinn_provider::message::{ContentBlock, Conversation, Message, Role};
 use djinn_provider::provider::{LlmProvider, StreamEvent, TelemetryMeta, create_provider};
 
 const MAX_TOOL_ITERATIONS: usize = 20;
+
+/// Metadata marker kind emitted by `SessionMessageRepository::summary_message`
+/// when `load_conversation` projects a completed compaction boundary.
+const PROJECTED_COMPACTION_MARKER_KIND: &str = "compaction_summary";
+
+/// Whether `msg` is a projected compaction summary produced by
+/// `load_conversation` when a completed durable boundary exists.
+///
+/// Projected summaries are `Role::System` messages with `marker_kind` metadata;
+/// raw historical system messages never carry this metadata.
+fn is_projected_compaction_summary(msg: &Message) -> bool {
+    msg.role == Role::System
+        && msg
+            .metadata
+            .as_ref()
+            .and_then(|m| m.provider_data.as_ref())
+            .and_then(|pd| pd.get("marker_kind"))
+            .and_then(|v| v.as_str())
+            == Some(PROJECTED_COMPACTION_MARKER_KIND)
+}
+
+/// Whether `msg` is an old compaction marker/continuation pair message that
+/// should be excluded from ordinary conversation input when a projected
+/// boundary summary is already present.
+fn is_compaction_marker_pair(msg: &Message) -> bool {
+    if msg.role == Role::User && msg.text_content().contains(COMPACTION_SUMMARY_END_MARKER) {
+        return true;
+    }
+    if msg.role == Role::Assistant {
+        let text = msg.text_content();
+        if text
+            == "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task."
+            || text.starts_with("Part of your context was compacted.")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Reactive compact-and-retry attempts on a context-overflow stream failure in
 /// the chat loop (C3). Matches the worker reply loop's `MAX_COMPACTION_RETRIES`.
 const MAX_CHAT_COMPACTION_RETRIES: u32 = 2;
@@ -660,11 +701,29 @@ pub(super) async fn completions_handler_impl(
                 .filter(|m| !matches!(m.role, Role::System)),
         );
     } else {
+        // Check whether load_conversation projected a completed boundary
+        // summary. When present, the projected summary is a Role::System
+        // message with marker metadata that must be preserved — the generic
+        // Role::System filter would otherwise discard it.
+        let has_projected_summary = persisted_history
+            .messages
+            .first()
+            .is_some_and(is_projected_compaction_summary);
         conversation.messages.extend(
             persisted_history
                 .messages
                 .into_iter()
-                .filter(|m| !matches!(m.role, Role::System)),
+                .filter(|m| {
+                    // Keep the projected summary; drop raw historical system messages.
+                    !matches!(m.role, Role::System) || is_projected_compaction_summary(m)
+                })
+                .filter(|m| {
+                    // When a projected boundary summary is present, exclude old
+                    // summary-marker/continuation pairs so the summarizer sees
+                    // prior summary through the projected path rather than as
+                    // duplicate raw turns.
+                    !has_projected_summary || !is_compaction_marker_pair(m)
+                }),
         );
         if !latest_user_already_persisted
             && let Some(content) = last_user_content_for_persist.clone()
@@ -1479,5 +1538,191 @@ fn clean_generated_title(raw: &str) -> String {
         collapsed.chars().take(120).collect()
     } else {
         collapsed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djinn_core::message::MessageMeta;
+    use serde_json;
+
+    fn compaction_marker_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "marker_kind": PROJECTED_COMPACTION_MARKER_KIND,
+            "end_marker": COMPACTION_SUMMARY_END_MARKER,
+        })
+    }
+
+    fn projected_summary_message(text: &str) -> Message {
+        let marker = compaction_marker_metadata();
+        let metadata = MessageMeta {
+            input_tokens: None,
+            output_tokens: None,
+            timestamp: None,
+            provider_data: Some(marker),
+        };
+        Message::system_with_metadata(text, metadata)
+    }
+
+    #[test]
+    fn is_projected_compaction_summary_recognises_marker_metadata() {
+        let msg = projected_summary_message("earlier turns summary");
+        assert!(is_projected_compaction_summary(&msg));
+    }
+
+    #[test]
+    fn is_projected_compaction_summary_rejects_raw_system_message() {
+        let msg = Message::system("You are a helpful assistant.");
+        assert!(!is_projected_compaction_summary(&msg));
+    }
+
+    #[test]
+    fn is_projected_compaction_summary_rejects_user_and_assistant() {
+        let user_msg = Message::user("hello");
+        let asst_msg = Message::assistant("hi");
+        assert!(!is_projected_compaction_summary(&user_msg));
+        assert!(!is_projected_compaction_summary(&asst_msg));
+    }
+
+    #[test]
+    fn is_compaction_marker_pair_recognises_user_summary_marker() {
+        let msg = Message::user(format!("summary{COMPACTION_SUMMARY_END_MARKER}"));
+        assert!(is_compaction_marker_pair(&msg));
+    }
+
+    #[test]
+    fn is_compaction_marker_pair_recognises_assistant_full_continuation() {
+        let msg = Message::assistant(
+            "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task.",
+        );
+        assert!(is_compaction_marker_pair(&msg));
+    }
+
+    #[test]
+    fn is_compaction_marker_pair_recognises_assistant_partial_continuation() {
+        let msg = Message::assistant(
+            "Part of your context was compacted. The messages above the summary are older context.",
+        );
+        assert!(is_compaction_marker_pair(&msg));
+    }
+
+    #[test]
+    fn is_compaction_marker_pair_rejects_normal_user_and_assistant() {
+        let user_msg = Message::user("hello");
+        let asst_msg = Message::assistant("hi there");
+        assert!(!is_compaction_marker_pair(&user_msg));
+        assert!(!is_compaction_marker_pair(&asst_msg));
+    }
+
+    #[test]
+    fn is_compaction_marker_pair_rejects_raw_system_message() {
+        let msg = Message::system("some system text");
+        assert!(!is_compaction_marker_pair(&msg));
+    }
+
+    #[test]
+    fn projected_summary_survives_system_filter() {
+        // Simulates the assembled persisted_history when a completed boundary
+        // exists: projected summary, marker pair, retained tail.
+        let persisted = vec![
+            projected_summary_message("Compacted summary of earlier turns."),
+            Message::user(format!("old summary{COMPACTION_SUMMARY_END_MARKER}")),
+            Message::assistant(
+                "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task.",
+            ),
+            Message::user("What about Rust lifetimes?"),
+            Message::assistant("Rust lifetimes ensure references are valid."),
+        ];
+
+        let has_projected_summary = persisted
+            .first()
+            .is_some_and(is_projected_compaction_summary);
+        assert!(has_projected_summary);
+
+        let assembled: Vec<Message> = persisted
+            .into_iter()
+            .filter(|m| !matches!(m.role, Role::System) || is_projected_compaction_summary(m))
+            .filter(|m| !has_projected_summary || !is_compaction_marker_pair(m))
+            .collect();
+
+        // Projected summary survives.
+        assert_eq!(assembled.len(), 3);
+        assert_eq!(assembled[0].role, Role::System);
+        assert_eq!(
+            assembled[0].text_content(),
+            "Compacted summary of earlier turns."
+        );
+        assert!(is_projected_compaction_summary(&assembled[0]));
+
+        // Stale marker pair excluded.
+        assert_eq!(assembled[1].role, Role::User);
+        assert_eq!(assembled[1].text_content(), "What about Rust lifetimes?");
+        assert_eq!(assembled[2].role, Role::Assistant);
+        assert_eq!(
+            assembled[2].text_content(),
+            "Rust lifetimes ensure references are valid."
+        );
+    }
+
+    #[test]
+    fn no_boundary_still_filters_raw_system_messages() {
+        // Simulates a raw-history conversation with no projected boundary.
+        let persisted = vec![
+            Message::system("You are a helpful assistant."),
+            Message::user("hello"),
+            Message::assistant("hi there"),
+        ];
+
+        let has_projected_summary = persisted
+            .first()
+            .is_some_and(is_projected_compaction_summary);
+        assert!(!has_projected_summary);
+
+        let assembled: Vec<Message> = persisted
+            .into_iter()
+            .filter(|m| !matches!(m.role, Role::System) || is_projected_compaction_summary(m))
+            .filter(|m| !has_projected_summary || !is_compaction_marker_pair(m))
+            .collect();
+
+        // Raw system message is filtered.
+        assert_eq!(assembled.len(), 2);
+        assert_eq!(assembled[0].role, Role::User);
+        assert_eq!(assembled[0].text_content(), "hello");
+        assert_eq!(assembled[1].role, Role::Assistant);
+        assert_eq!(assembled[1].text_content(), "hi there");
+    }
+
+    #[test]
+    fn boundary_with_raw_system_in_tail_filters_stale_system_and_markers() {
+        // Edge case: boundary projection falls back to full raw history
+        // (e.g. tail identity mismatch). Both the stale system row and the
+        // old marker pair must be excluded, but the projected summary survives.
+        let persisted = vec![
+            projected_summary_message("Compacted summary."),
+            Message::system("You are a helpful assistant."), // stale raw system
+            Message::user(format!("old summary{COMPACTION_SUMMARY_END_MARKER}")),
+            Message::assistant(
+                "Your context was compacted. The previous message contains a summary of the conversation so far. Continue calling tools as necessary to complete the task.",
+            ),
+            Message::user("latest user turn"),
+            Message::assistant("latest assistant turn"),
+        ];
+
+        let has_projected_summary = persisted
+            .first()
+            .is_some_and(is_projected_compaction_summary);
+        assert!(has_projected_summary);
+
+        let assembled: Vec<Message> = persisted
+            .into_iter()
+            .filter(|m| !matches!(m.role, Role::System) || is_projected_compaction_summary(m))
+            .filter(|m| !has_projected_summary || !is_compaction_marker_pair(m))
+            .collect();
+
+        assert_eq!(assembled.len(), 3);
+        assert_eq!(assembled[0].text_content(), "Compacted summary.");
+        assert_eq!(assembled[1].text_content(), "latest user turn");
+        assert_eq!(assembled[2].text_content(), "latest assistant turn");
     }
 }
