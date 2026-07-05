@@ -2873,7 +2873,97 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
         .unwrap();
 
     let run_id = "run-slow-ext";
-    let (pool, _cancel, session) = dispatch_stalled_worker_session(&db, &tx, &task, run_id).await;
+    // Set up DB artifacts (task_run + session) manually so we can also
+    // dispatch to the pool and age the activity tracker, which is required
+    // for the liveness classifier to return Slow (pod Running + Idle).
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Backdate past the stall threshold (30 min) so the idle check passes.
+    session_repo
+        .backdate_started_at(&session.id, "40 minutes")
+        .await
+        .unwrap();
+
+    // Dispatch the task to a live pool slot so `session_for_task` returns
+    // Some and the liveness classifier sees a Running pod.
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(RecordingRuntimeOps::new(true)));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+
+    // Age the activity tracker so idle > ZOMBIE_HARD_CAP_SECS but
+    // activity_tracked is still true. The classifier sees Running pod +
+    // Idle → Slow verdict with extension_eligible=true.
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(20 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.pool = pool;

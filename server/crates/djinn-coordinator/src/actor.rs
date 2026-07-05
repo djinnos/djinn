@@ -109,9 +109,8 @@ pub(super) struct CoordinatorActor {
     /// before the cheap doctor subset runs, so the check sees a bounded DB view
     /// without blocking the synchronous `DoctorCheck::run` seam. `None` in tests
     /// that construct the actor directly and do not need the stranded check.
-    pub(super) stranded_ready_source: Option<
-        Arc<crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource>,
-    >,
+    pub(super) stranded_ready_source:
+        Option<Arc<crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource>>,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -470,9 +469,7 @@ impl CoordinatorActor {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker,
-            stranded_ready_source: Some(Arc::clone(
-                &stranded_ready_source
-            )),
+            stranded_ready_source: Some(Arc::clone(&stranded_ready_source)),
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),

@@ -1341,7 +1341,7 @@ impl SessionRepository {
         self.db.ensure_initialized().await?;
         sqlx::query(
             "UPDATE sessions SET started_at = to_char(
-                 now() AT TIME ZONE 'utc' - $1::interval,
+                 now() AT TIME ZONE 'utc' - CAST($1 AS interval),
                  'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
              WHERE id = $2",
         )
