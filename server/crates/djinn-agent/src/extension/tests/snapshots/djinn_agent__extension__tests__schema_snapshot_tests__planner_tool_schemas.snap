@@ -896,7 +896,7 @@ expression: tool_schemas_planner()
   },
   {
     "name": "proposal_show",
-    "description": "Show a graduated proposal's spec for decomposition (Planner Mode D): title, body, status, acceptance_criteria, and targets (each with project slug + role of `primary`/`reference`). Use this first when dispatched on an `epic_breakdown` task.",
+    "description": "Show a proposal's full detail by UUID or short_id. Returns title, body, status, acceptance_criteria, targets, and optionally revisions, feedback, signoffs, debate, epics, and gate_status. Use `fields` to select only the sections you need (accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status; default: all). Use `revision_bodies` to control revision verbosity: `excerpt` (default, 512-char body_excerpt + body_truncated), `full` (complete body text), or `omit` (no body data). Ignored when `fields` omits `revisions`.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -905,7 +905,26 @@ expression: tool_schemas_planner()
       "properties": {
         "id": {
           "type": "string",
-          "description": "Proposal UUID or short ID"
+          "description": "Proposal UUID or short_id"
+        },
+        "fields": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "description": "Select which top-level sections to include. Accepted values: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status. Default: all. Invalid values return a validation error naming the accepted values.",
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "revision_bodies": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Controls revision body verbosity when revisions is selected: excerpt (default, 512-char body_excerpt), full (complete body), omit (no body data). Ignored when fields omits revisions.",
+          "default": null
         }
       }
     },
