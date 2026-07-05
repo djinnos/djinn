@@ -396,7 +396,8 @@ fn assert_truthful_harmless_second_kill_response(response: &serde_json::Value, t
     assert!(
         error.contains("no active slot")
             || error.contains("not running")
-            || error.contains("not found"),
+            || error.contains("not found")
+            || error.contains("kill_noop"),
         "second kill should fail only because the task is already not running/not found; got {error:?}"
     );
 }

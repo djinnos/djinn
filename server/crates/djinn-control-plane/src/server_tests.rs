@@ -854,11 +854,7 @@ mod tests {
             }
             std::fs::write(&fixture_path, &pretty)
                 .unwrap_or_else(|e| panic!("write fixture {}: {e}", fixture_path.display()));
-            eprintln!(
-                "Wrote DjinnMcpServer corpus fixture ({} tools) to {}",
-                sorted.len(),
-                fixture_path.display()
-            );
+            // Fixture updated successfully
         } else {
             // Assert mode: the committed fixture must match.
             let committed = std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| {

@@ -225,7 +225,17 @@ pub struct ProposalRevisionModel {
     pub id: String,
     pub seq: i32,
     pub title: String,
-    pub body: String,
+    /// Full revision body — present only when `revision_bodies = "full"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// First 512 Unicode scalar values of the revision body.
+    /// Present when `revision_bodies` is `excerpt` or `full`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_excerpt: Option<String>,
+    /// `true` when the original revision body exceeded the 512-scalar cap.
+    /// Present when `revision_bodies` is `excerpt` or `full`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_truncated: Option<bool>,
     /// Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
     pub body_format: String,
     pub acceptance_criteria: Vec<AcceptanceCriterionItem>,
@@ -249,7 +259,9 @@ impl From<&ProposalRevision> for ProposalRevisionModel {
             id: r.id.clone(),
             seq: r.seq,
             title: r.title.clone(),
-            body: r.body.clone(),
+            body: Some(r.body.clone()),
+            body_excerpt: None,
+            body_truncated: None,
             body_format: r.body_format.clone(),
             acceptance_criteria: parse_acceptance_criteria(&r.acceptance_criteria),
             edited_by_user_id: r.edited_by_user_id.clone(),
@@ -812,6 +824,87 @@ pub fn body_excerpt(body: &str) -> (String, bool) {
     }
     let excerpt: String = body.chars().take(BODY_EXCERPT_MAX_SCALARS).collect();
     (excerpt, true)
+}
+
+// ── proposal_show field selection & revision body modes ────────────────────
+
+/// Accepted field names for `proposal_show` `fields` parameter.
+pub const SHOW_FIELDS_ACCEPTED: &[&str] = &[
+    "proposal",
+    "targets",
+    "feedback",
+    "signoffs",
+    "revisions",
+    "debate",
+    "epics",
+    "gate_status",
+];
+
+/// Accepted values for `proposal_show` `revision_bodies` parameter.
+pub const REVISION_BODIES_ACCEPTED: &[&str] = &["excerpt", "full", "omit"];
+
+/// Validate field names passed to `proposal_show`. Returns `Ok(())` when
+/// every entry is in [`SHOW_FIELDS_ACCEPTED`], or an error naming the first
+/// invalid value and listing all accepted values.
+pub fn validate_show_fields(fields: &[String]) -> Result<(), String> {
+    for f in fields {
+        if !SHOW_FIELDS_ACCEPTED.contains(&f.as_str()) {
+            return Err(format!(
+                "invalid field: {f:?} (accepted: {})",
+                SHOW_FIELDS_ACCEPTED.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `revision_bodies` enum value. Returns `Ok(())` when
+/// the value is in [`REVISION_BODIES_ACCEPTED`], or an error naming the
+/// accepted values.
+pub fn validate_revision_bodies_value(s: &str) -> Result<(), String> {
+    if !REVISION_BODIES_ACCEPTED.contains(&s) {
+        return Err(format!(
+            "invalid revision_bodies: {s:?} (accepted: {})",
+            REVISION_BODIES_ACCEPTED.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Apply the revision body mode to a list of [`ProposalRevisionModel`]s.
+///
+/// * `"full"` — `body` is populated alongside `body_excerpt` / `body_truncated`.
+/// * `"excerpt"` (default) — `body` is `None`; `body_excerpt` and
+///   `body_truncated` are populated.
+/// * `"omit"` — `body`, `body_excerpt`, and `body_truncated` are all `None`.
+pub fn apply_revision_body_mode(revisions: &mut [ProposalRevisionModel], mode: &str) {
+    for rev in revisions.iter_mut() {
+        // We need the original body to compute excerpt/truncated.
+        // In "full" mode, body is already set. In other modes, we
+        // extract it from body (which was set by From) and then clear it.
+        let original_body: Option<String> = rev.body.take();
+        match mode {
+            "full" => {
+                if let Some(ref b) = original_body {
+                    let (excerpt, truncated) = body_excerpt(b);
+                    rev.body = original_body;
+                    rev.body_excerpt = Some(excerpt);
+                    rev.body_truncated = Some(truncated);
+                }
+            }
+            "omit" => {
+                // Everything stays None.
+            }
+            _ => {
+                // "excerpt" — default mode
+                if let Some(ref b) = original_body {
+                    let (excerpt, truncated) = body_excerpt(b);
+                    rev.body_excerpt = Some(excerpt);
+                    rev.body_truncated = Some(truncated);
+                }
+            }
+        }
+    }
 }
 
 /// List-specific proposal row model.
