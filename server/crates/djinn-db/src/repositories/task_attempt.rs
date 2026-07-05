@@ -576,7 +576,8 @@ impl TaskAttemptRepository {
         Ok(sqlx::query_as!(
             TaskAttemptPromptSummary,
             r#"SELECT attempt_seq, role, outcome AS "outcome!", summary, created_at AS "created_at!",
-                terminal_at, submit_ref, pr_url
+                terminal_at, submit_ref, pr_url,
+                guard_decision, guard_reason, checkpoint_ref, summary_json::text
              FROM task_attempts
              WHERE task_id = $1 AND outcome = 'completed'
              ORDER BY COALESCE(terminal_at, created_at) DESC
@@ -642,7 +643,8 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttemptPromptSummary,
                 r#"SELECT attempt_seq, role, outcome AS "outcome!", summary, created_at AS "created_at!",
-                    terminal_at, submit_ref, pr_url
+                    terminal_at, submit_ref, pr_url,
+                    guard_decision, guard_reason, checkpoint_ref, summary_json::text
                  FROM task_attempts
                  WHERE task_id = $1 AND role = $2
                  ORDER BY created_at DESC
@@ -657,7 +659,8 @@ impl TaskAttemptRepository {
             sqlx::query_as!(
                 TaskAttemptPromptSummary,
                 r#"SELECT attempt_seq, role, outcome AS "outcome!", summary, created_at AS "created_at!",
-                    terminal_at, submit_ref, pr_url
+                    terminal_at, submit_ref, pr_url,
+                    guard_decision, guard_reason, checkpoint_ref, summary_json::text
                  FROM task_attempts
                  WHERE task_id = $1
                  ORDER BY created_at DESC
