@@ -171,13 +171,13 @@ pub fn tool_write() -> RmcpTool {
 pub fn tool_edit() -> RmcpTool {
     RmcpTool::new(
         "edit".to_string(),
-        "Edit a file by replacing exact text. Finds old_text and replaces with new_text. Fails if old_text is not found or is ambiguous (appears multiple times).".to_string(),
+        "Edit a file by replacing text. Provide path, old_text, and new_text. The implementation may safely rescue common whitespace, indentation, escape, boundary, and Unicode drift between old_text and the file, but it fails instead of guessing when the match is ambiguous (multiple candidates) or rejected by a safety guard (e.g. CRLF or UTF-8 boundary corruption).".to_string(),
         object!({
             "type": "object",
             "required": ["path", "old_text", "new_text"],
             "properties": {
                 "path": {"type": "string", "description": "Absolute or worktree-relative file path"},
-                "old_text": {"type": "string", "description": "Exact text to find and replace"},
+                "old_text": {"type": "string", "description": "Text to find and replace (may differ from file in whitespace, indentation, or encoding; the matcher rescues common drift automatically)"},
                 "new_text": {"type": "string", "description": "Replacement text"}
             }
         }),

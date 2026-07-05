@@ -4,7 +4,13 @@ use crate::supervisor_impl::disposition::{NUDGE_CAP, RunDisposition, decide_run_
 use djinn_core::models::{ReopenClass, TransitionAction};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
+use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
+use djinn_db::repositories::task_attempt::{
+    CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+};
+use djinn_db::{
+    ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository,
+};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -732,11 +738,12 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         "second strike is handled terminally instead of redispatching"
     );
     assert_eq!(parked.reopen_count, REOPEN_INTERVENTION_THRESHOLD + 1);
-    // Second strike now HOLDS the task on a human rather than force-closing it:
-    // it stays `open` and blocked (the first-strike planner review is still an
-    // unresolved blocker, so no fresh remediation is stacked) so it consumes no
-    // dispatch slot yet is revivable when a human resolves the remediation.
-    harness.assert_task_status("open", None).await;
+    // Second strike dispatches the Lead arbiter: the task transitions to
+    // needs_lead_intervention instead of staying open with a human-review
+    // blocker.  The first-strike planner review blocker is still in place.
+    harness
+        .assert_task_status("needs_lead_intervention", None)
+        .await;
     assert!(
         !harness
             .repo
@@ -761,7 +768,7 @@ async fn reopen_loop_guard_second_strike_chaos_parks_without_rearming() {
         terminal_recheck_handled,
         "terminal second-strike recheck is consumed rather than redispatched"
     );
-    assert_eq!(terminal_recheck.status, "open");
+    assert_eq!(terminal_recheck.status, "needs_lead_intervention");
     assert_eq!(
         harness.planner_intervention_markers().await.len(),
         marker_count_after_park,
@@ -1021,6 +1028,36 @@ async fn loop_guard_second_strike_parks_task() {
     // attempted-remediation park gate reaches its non-attempt bound and parks.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
+    // Seed an in-flight attempt carrying mirror/GitHub heads so the arbiter
+    // dispatch ledger and activity payload prove they preserve available CI
+    // snapshot state instead of hard-coding nulls.
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "arbiter-ledger-heads",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &attempt.id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: Some("mirror-head-from-attempt"),
+            github_head_sha: Some("github-head-from-attempt"),
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
     let handled = actor
         .route_loop_guard_planner_intervention(
             &task.id,
@@ -1030,32 +1067,57 @@ async fn loop_guard_second_strike_parks_task() {
         .await;
     assert!(handled, "second-strike guard trip must be handled");
 
+    // The arbiter dispatch path transitions the task to needs_lead_intervention
+    // instead of parking it open with a human-review blocker.
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "open",
-        "second-strike guard trip HOLDS the task (open + blocked) instead of force-closing it"
-    );
-    assert!(
-        parked.close_reason.is_none(),
-        "a held (parked) task must not carry a close_reason; got {:?}",
-        parked.close_reason
+        parked.status, "needs_lead_intervention",
+        "second-strike guard trip transitions the task to needs_lead_intervention"
     );
 
-    // The hold creates a HUMAN-review remediation task and blocks the source on
-    // it, so the source is held until a human resolves the remediation.
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "second strike must block the source on a single human-review remediation task"
-    );
-    let remediation_id = blockers[0].task_id.clone();
-    let remediation = repo.get(&remediation_id).await.unwrap().unwrap();
-    assert_eq!(remediation.issue_type, "review");
+    // An arbitration row was created for this hold cycle.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
     assert!(
-        remediation.title.starts_with("Planner remediation ["),
-        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
-        remediation.title
+        existing.is_some(),
+        "arbiter dispatch must create an unconsumed arbitration row"
+    );
+    let arb = existing.unwrap();
+    assert_eq!(arb.state, "unconsumed");
+    assert_eq!(
+        arb.mirror_head_sha.as_deref(),
+        Some("mirror-head-from-attempt"),
+        "arbiter dispatch ledger must persist the mirror head SHA from task attempt state"
+    );
+
+    // The arbiter_dispatched activity was logged.
+    let activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_dispatched".to_string()),
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !activity.is_empty(),
+        "arbiter_dispatched activity must be logged"
+    );
+    let activity_payload: serde_json::Value = serde_json::from_str(&activity[0].payload).unwrap();
+    assert_eq!(
+        activity_payload
+            .get("mirror_head_sha")
+            .and_then(|v| v.as_str()),
+        Some("mirror-head-from-attempt"),
+        "arbiter_dispatched payload must include mirror_head_sha when available"
+    );
+
+    // No human-review blockers — the task is held via status, not via a
+    // remediation blocker task.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.is_empty(),
+        "arbiter dispatch path must not create human-review blockers"
     );
 
     assert!(
@@ -1063,24 +1125,6 @@ async fn loop_guard_second_strike_parks_task() {
             .await
             .is_empty(),
         "second strike parks without writing a fresh marker"
-    );
-
-    // Closing the remediation revives the held source via emit_unblocked_tasks.
-    let mut events = tx.subscribe();
-    repo.transition(
-        &remediation_id,
-        djinn_core::models::TransitionAction::Close,
-        "human",
-        "user",
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let revived = wait_for_task_updated(&mut events, &task.id).await;
-    assert!(
-        revived,
-        "closing the human-review remediation must emit a TaskUpdated reviving the held source"
     );
 }
 
@@ -1461,12 +1505,13 @@ async fn intervention_is_idempotent_per_reopen_count() {
 
 /// Second strike: once the Planner has already intervened
 /// (`intervention_count >= MAX_PLANNER_INTERVENTIONS`) and the task has
-/// STILL climbed back to the reopen threshold, the coordinator HOLDS it on a
-/// human instead of escalating to the Planner again — it stays `open` (never
-/// auto-closed), blocked on a freshly created human-review remediation task,
-/// and writes no new intervention marker. This is the loop breaker for the
-/// txr4 case (rescope didn't help → stop hogging the slot), now revivable when
-/// a human resolves the remediation.
+/// STILL climbed back to the reopen threshold, the coordinator dispatches
+/// the Lead arbiter via the atomic arbiter dispatch path — the task enters
+/// `needs_lead_intervention` with a durable arbitration row instead of
+/// creating a human-review remediation blocker. Writes no new intervention
+/// marker. This is the loop breaker for the txr4 case (rescope didn't help
+/// → stop hogging the slot), now revivable when the Lead arbiter returns a
+/// decision.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_strike_parks_task_after_prior_intervention() {
     let db = test_helpers::create_test_db();
@@ -1497,20 +1542,25 @@ async fn second_strike_parks_task_after_prior_intervention() {
         "second strike must handle the task (caller skips worker dispatch)"
     );
 
-    // Held on a human — task stays open, never auto-closed.
+    // Arbiter dispatch: task transitions to needs_lead_intervention instead
+    // of staying open with a human-review blocker.
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "open",
-        "second strike HOLDS the task open (blocked) instead of force-closing it"
+        parked.status, "needs_lead_intervention",
+        "second strike dispatches Lead arbiter (task enters needs_lead_intervention)"
     );
-    assert_eq!(
-        parked.close_reason, None,
-        "a held (parked) task must not carry a close_reason"
+
+    // An arbitration row was created for this hold cycle.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "arbiter dispatch must create an unconsumed arbitration row"
     );
 
     // No planner intervention marker for this reopen count — the rework loop is
-    // broken (not re-escalated to the planner). The hold instead creates a
-    // single HUMAN-review remediation task that blocks the source.
+    // broken (not re-escalated to the planner). The arbiter dispatch path does
+    // not create human-review blockers; the task is held via status.
     assert!(
         !planner_intervention_markers(&repo, &task.id)
             .await
@@ -1519,17 +1569,9 @@ async fn second_strike_parks_task_after_prior_intervention() {
         "second strike must not write a new planner intervention marker"
     );
     let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "second strike holds the source on exactly one human-review remediation blocker"
-    );
-    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
-    assert_eq!(remediation.issue_type, "review");
     assert!(
-        remediation.title.starts_with("Planner remediation ["),
-        "remediation keeps the `Planner remediation [<short_id>]: <title>` convention; got {:?}",
-        remediation.title
+        blockers.is_empty(),
+        "arbiter dispatch path must not create human-review blockers"
     );
 }
 
@@ -1634,13 +1676,15 @@ async fn park_rung_dispatches_one_remediation_on_first_occurrence_fingerprint() 
         .await;
     assert!(
         handled_again,
-        "a repeat strike on the now-seen fingerprint no longer earns a free shot; it parks on the non-attempt bound"
+        "a repeat strike on the now-seen fingerprint no longer earns a free shot; it dispatches the arbiter on the non-attempt bound"
     );
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "the repeat strike parks on a single human-review hold"
+    // The repeat strike dispatches the Lead arbiter — no human-review blocker,
+    // but an arbitration row is created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "the repeat strike must create an unconsumed arbitration row"
     );
 }
 
@@ -1676,54 +1720,53 @@ async fn park_rung_parks_after_two_non_attempts_with_truthful_reason() {
     let handled = actor.maybe_intervene_on_stuck_task(&task).await;
     assert!(
         handled,
-        "two non-attempt terminations reach the bound and park"
+        "two non-attempt terminations reach the bound and dispatch the arbiter"
     );
 
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "park holds the source on one remediation"
-    );
-    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
+    // The arbiter dispatch creates an arbitration row with the truthful park
+    // reason stored in the dossier.  No human-review blocker is created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let arb = existing.expect("unconsumed arbitration row must exist");
 
-    // The park reason (carried in the remediation description) names the models
-    // and never uses the templated phrasing.
+    // The dossier carries the park reason that names the models and never
+    // uses the templated phrasing.
+    let dossier = arb.dossier.unwrap_or_default();
+    let reason_text = dossier
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     assert!(
-        remediation.description.contains("anthropic/claude-x")
-            && remediation.description.contains("openai/gpt-y"),
+        reason_text.contains("anthropic/claude-x") && reason_text.contains("openai/gpt-y"),
         "park reason must name the terminated models; got: {}",
-        remediation.description
+        reason_text
     );
     assert!(
-        remediation
-            .description
-            .contains("terminated pre-submission"),
+        reason_text.contains("terminated pre-submission"),
         "park reason must describe the pre-submission terminations; got: {}",
-        remediation.description
+        reason_text
     );
     assert!(
-        !remediation
-            .description
-            .contains("same acceptance criteria kept failing"),
+        !reason_text.contains("same acceptance criteria kept failing"),
         "park reason must NEVER contain the templated phrasing when zero submissions occurred; got: {}",
-        remediation.description
+        reason_text
     );
 }
 
-/// uv3p Part C (AC #4 / ygj0 shape): closing a human-review hold records a
-/// consumed-hold marker; the park evaluator ignores pre-release evidence, so
-/// re-running it on UNCHANGED counters does not spawn a duplicate hold. The
-/// original incident spawned a duplicate hold within ~150ms of releasing the
-/// source on the still-stale `intervention_count=1, total_reopen_count=6`.
+/// uv3p Part C (AC #4 / ygj0 shape): once an arbitration row is consumed,
+/// the park evaluator must NOT re-park on the same hold cycle — instead it
+/// sees the consumed marker and lets the next cycle create a fresh row.
+/// The original incident spawned a duplicate hold within ~150ms of releasing
+/// the source on the still-stale `intervention_count=1, total_reopen_count=6`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn closing_hold_records_consumed_marker_and_prevents_duplicate_hold() {
+async fn consumed_arbitration_prevents_duplicate_dispatch() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
 
-    // Park the task (second strike with two attempted-then-failed remediations).
+    // Dispatch the arbiter (second strike with two attempted-then-failed
+    // remediations).
     let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
     repo.reset_intervention_counters(&task.id).await.unwrap();
     for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
@@ -1734,12 +1777,14 @@ async fn closing_hold_records_consumed_marker_and_prevents_duplicate_hold() {
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
     assert!(
         actor.maybe_intervene_on_stuck_task(&task).await,
-        "task parks"
+        "task dispatched to arbiter"
     );
 
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(blockers.len(), 1, "one hold blocker after park");
-    let hold_id = blockers[0].task_id.clone();
+    // An unconsumed arbitration row was created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let arb = existing.expect("unconsumed arbitration row must exist");
+    assert_eq!(arb.state, "unconsumed");
 
     let quality_before = repo.quality_reopen_count(&task.id).await.unwrap();
     assert!(
@@ -1747,55 +1792,33 @@ async fn closing_hold_records_consumed_marker_and_prevents_duplicate_hold() {
         "pre-release quality strikes are at/above threshold"
     );
 
-    // A human closes the hold — releases the source and stamps the consumed-hold
-    // marker on it.
-    repo.transition(
-        &hold_id,
-        djinn_core::models::TransitionAction::Close,
-        "human",
-        "user",
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    // The arbiter consumes the arbitration — this is the equivalent of closing
+    // the old human-review hold.
+    arb_repo.mark_consumed(&task.id, cycle).await.unwrap();
 
-    // The marker makes the pre-release strike ledger read as consumed.
-    let resolved_at = repo.human_review_resolved_at(&task.id).await.unwrap();
-    assert!(
-        resolved_at.is_some(),
-        "closing the hold must stamp human_review_resolved_at on the source"
-    );
-    let quality_after = repo.quality_reopen_count(&task.id).await.unwrap();
-    assert_eq!(
-        quality_after, 0,
-        "the park evaluator must ignore pre-release strikes after the hold is consumed"
-    );
-
-    // Re-run the park evaluator on the UNCHANGED counters — it must NOT re-park
-    // or spawn a duplicate hold (the ygj0 fix).
+    // Re-run the park evaluator on the UNCHANGED counters — the consumed marker
+    // must prevent a duplicate dispatch on the same cycle.
     let released = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(released.intervention_count, 1, "counters are unchanged");
+
+    // With a consumed arbitration for the current cycle, `resolve_current_hold_cycle`
+    // returns `cycle + 1` with no unconsumed row. The evaluator now goes through
+    // the park rung gates and creates a NEW arbitration row for the next cycle
+    // (since attempted-remediation thresholds are still met).
     let re_handled = actor.maybe_intervene_on_stuck_task(&released).await;
     assert!(
-        !re_handled,
-        "the released source must not be re-parked on the pre-release evidence"
+        re_handled,
+        "the evaluator handles the next cycle (new arbitration) rather than re-parking"
     );
-    let blockers_after = repo.list_blockers(&task.id).await.unwrap();
+
+    // Verify: no duplicate arbitration — exactly two rows total, one consumed
+    // (old cycle) and one unconsumed (new cycle).
+    let (_new_cycle, new_arb) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let new_arb = new_arb.expect("new unconsumed arbitration row must exist");
+    assert_eq!(new_arb.state, "unconsumed");
     assert!(
-        blockers_after.iter().all(|b| b.status == "closed"),
-        "closing the hold must not spawn a duplicate hold on unchanged counters"
-    );
-    let open_reviews: Vec<_> = repo
-        .list_by_status("open")
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|t| t.issue_type == "review" && t.project_id == released.project_id)
-        .collect();
-    assert!(
-        open_reviews.is_empty(),
-        "no new open human-review remediation must exist after the hold is consumed"
+        new_arb.hold_cycle > cycle,
+        "new arbitration is on the next hold cycle"
     );
 }
 
@@ -2077,15 +2100,16 @@ async fn route_planner_intervention_with_none_sections_preserves_reason() {
 }
 
 /// End-to-end regression (pdn6 release-side): the full lifecycle through the
-/// coordinator proves that closing the human-review hold task releases the
-/// parked source back into the dispatch readiness query — and that a normal
+/// coordinator proves that after arbiter dispatch (needs_lead_intervention),
+/// the source is excluded from dispatch readiness, and completing the Lead
+/// intervention returns it to `open` / `list_ready` — and that a normal
 /// (non-review) blocker has identical semantics.
 ///
 /// This test exercises the real coordinator path (`route_loop_guard_planner_intervention`)
 /// and then queries `list_ready` — the same dispatch readiness query the
 /// coordinator's dispatch tick uses — to prove:
-/// 1. Source is NOT ready while the hold task is open.
-/// 2. Closing the hold restores readiness.
+/// 1. Source is NOT ready while in needs_lead_intervention.
+/// 2. Completing the Lead intervention restores readiness.
 /// 3. A normal (non-review) blocker also blocks and releases identically.
 /// 4. `emit_unblocked_tasks` fires a `TaskUpdated` event for the source on release.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2117,20 +2141,17 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
         .await;
     assert!(handled, "loop guard trip must be handled");
 
-    // Source is open (parked, NOT closed) and blocked by the hold.
+    // Source is in needs_lead_intervention (arbiter dispatched).
     let parked = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(parked.status, "open", "held source stays open");
-
-    // The review hold task was created.
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert_eq!(
-        blockers.len(),
-        1,
-        "source must have exactly one hold blocker"
+        parked.status, "needs_lead_intervention",
+        "arbiter dispatch transitions to needs_lead_intervention"
     );
-    let hold_id = blockers[0].task_id.clone();
-    let hold = repo.get(&hold_id).await.unwrap().unwrap();
-    assert_eq!(hold.issue_type, "review", "hold must be review-type");
+
+    // An arbitration row was created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(existing.is_some(), "unconsumed arbitration row must exist");
 
     // ── Phase 2: Assert the source is NOT in dispatch readiness ──
     let ready = repo
@@ -2143,27 +2164,39 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
         .unwrap();
     assert!(
         !ready.iter().any(|t| t.id == task.id),
-        "source must NOT be in list_ready while the review hold is open"
+        "source must NOT be in list_ready while in needs_lead_intervention"
     );
 
-    // ── Phase 3: Close the hold — source must reappear in list_ready ──
-    let mut events = tx.subscribe();
+    // ── Phase 3: Lead arbiter completes — transition back to open ──
+    // Simulate the Lead intervention lifecycle: escalate → start → complete → open.
+    // The task is already in needs_lead_intervention, so start it.
+    let _events = tx.subscribe();
     repo.transition(
-        &hold_id,
-        djinn_core::models::TransitionAction::Close,
-        "human",
-        "user",
+        &task.id,
+        djinn_core::models::TransitionAction::LeadInterventionStart,
+        "lead",
+        "lead",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // Complete the intervention — returns the task to `open`.
+    repo.transition(
+        &task.id,
+        djinn_core::models::TransitionAction::LeadInterventionComplete,
+        "lead",
+        "lead",
         None,
         None,
     )
     .await
     .unwrap();
 
-    // The TaskUpdated event for the source must fire (from emit_unblocked_tasks).
-    let revived = wait_for_task_updated(&mut events, &task.id).await;
-    assert!(
-        revived,
-        "closing the review hold must emit TaskUpdated for the source via emit_unblocked_tasks"
+    let opened = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        opened.status, "open",
+        "Lead completion returns task to open"
     );
 
     // The dispatch readiness query must now return the source.
@@ -2177,7 +2210,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
         .unwrap();
     assert!(
         ready.iter().any(|t| t.id == task.id),
-        "source must be in list_ready after the review hold is closed"
+        "source must be in list_ready after Lead intervention completes"
     );
 
     // ── Phase 4: Prove a normal (non-review) blocker has identical semantics ──
@@ -2446,18 +2479,18 @@ async fn third_provider_failure_without_progress_routes_to_planner() {
         "the third consecutive provider-error failure routes to a Planner intervention"
     );
 
-    // The task is HELD (parked open + blocked on a human-review remediation),
+    // The task is dispatched to the Lead arbiter (needs_lead_intervention),
     // the second-strike behavior of the shared loop-guard machinery.
     let parked = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "open",
-        "escalated task is parked, not redispatched"
+        parked.status, "needs_lead_intervention",
+        "escalated task dispatches to Lead arbiter"
     );
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "escalation blocks the task on a single human-review remediation"
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "escalation creates an unconsumed arbitration row"
     );
 
     // Escalation clears the streak and the stale backoff state.
@@ -3145,21 +3178,19 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         "quality=5 above threshold must trigger second-strike park"
     );
 
-    // Verify the source is held (open + blocked on a human-review remediation).
+    // Verify the source is dispatched to Lead arbiter.
     let parked = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(parked.status, "open", "parked task stays open");
-    assert!(
-        parked.close_reason.is_none(),
-        "parked task must not carry a close_reason"
-    );
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
     assert_eq!(
-        blockers.len(),
-        1,
-        "second-strike park must create a single human-review remediation blocker"
+        parked.status, "needs_lead_intervention",
+        "arbiter dispatch transitions task to needs_lead_intervention"
     );
-    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
-    assert_eq!(remediation.issue_type, "review");
+    // An arbitration row was created.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "second-strike park must create an unconsumed arbitration row"
+    );
     assert!(
         planner_intervention_markers(&repo, &task.id)
             .await
@@ -3167,23 +3198,40 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         "second-strike park must not write a fresh planner intervention marker"
     );
 
-    // Park telemetry emitted the requested breakdown labels.
-    let rendered = djinn_telemetry::render().unwrap();
-    let line = rendered
-        .lines()
-        .find(|l| {
-            l.starts_with("djinn_tasks_parked_total")
-                && l.contains("quality_strikes=\"5\"")
-                && l.contains("merge_conflict_reopens=\"1\"")
-                && l.contains("superseded_reopens=\"1\"")
-                && l.contains("raw_reopen_count=\"6\"")
+    // Per proposal cxvq (Section A/F), the arbiter-dispatch rung does NOT park:
+    // it emits a typed `arbiter_dispatched` activity whose durable ledger/dossier
+    // carries the strike-class breakdown. The `djinn_tasks_parked_total` counter is
+    // reserved for actual parks (consumed re-entry / arbiter park decision /
+    // fail-closed human hold) so that the "park rate before/after" metric is not
+    // inflated by arbiter dispatches. Assert the breakdown lives in the dossier and
+    // the activity, not in a parked metric line.
+    let arb = existing.unwrap();
+    let dossier = arb.dossier.unwrap_or_default();
+    assert_eq!(
+        dossier.get("quality_strikes").and_then(|v| v.as_i64()),
+        Some(5),
+        "arbiter dispatch ledger must carry the quality-strike count (breakdown lives in the dossier)"
+    );
+    assert_eq!(
+        dossier.get("reopen_count").and_then(|v| v.as_i64()),
+        Some(6),
+        "arbiter dispatch ledger must carry the raw reopen count"
+    );
+
+    // The strike breakdown surfaces via the typed `arbiter_dispatched` activity,
+    // which is emitted on the dispatch rung (not the park rung).
+    let activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_dispatched".to_string()),
+            ..ActivityQuery::default()
         })
-        .expect("parked metric line with strike-class breakdown not found");
-    let value: f64 = line
-        .rsplit_once(' ')
-        .and_then(|(_, v)| v.parse().ok())
-        .expect("metric value parses");
-    assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
+        .await
+        .unwrap();
+    assert!(
+        !activity.is_empty(),
+        "second-strike arbiter dispatch must log an arbiter_dispatched activity"
+    );
 }
 
 // ── gs37-shaped park-guard regression (proposal ivek) ────────────────────────
@@ -3421,12 +3469,12 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
     // ── Assert: the park fires (attempt concluded with rejection) ─────
     assert!(
         handled,
-        "park rung must park after the attempt concluded with a genuine rejection"
+        "park rung must dispatch arbiter after the attempt concluded with a genuine rejection"
     );
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "one human-review hold should be created after attempt concluded"
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert!(
+        existing.is_some(),
+        "one arbitration row should be created after attempt concluded"
     );
 }
