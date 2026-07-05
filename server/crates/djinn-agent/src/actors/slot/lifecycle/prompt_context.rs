@@ -4,12 +4,14 @@
 use std::path::Path;
 
 use djinn_core::models::Task;
+use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
     build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
     extract_worker_context, format_knowledge_notes, recent_feedback,
 };
+use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
 use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
@@ -37,6 +39,10 @@ pub(crate) struct PromptContext {
     pub reviewer_diff_context: Option<String>,
     /// sa4x: promoted BLOCKING directive for red required CI.
     pub ci_blocking_directive: Option<String>,
+    /// 4x3v / jteh: durable prior attempt history for the current task.
+    pub prior_attempts: Option<Vec<TaskAttemptPromptSummary>>,
+    /// 4x3v / jteh: completed dependency-parent summaries from blocker parents.
+    pub completed_dependency_parents: Option<Vec<djinn_db::CompletedParentSummary>>,
     /// y8pv / 48ru: one-line resume note for worker dispatch.
     pub worker_resume_note: Option<String>,
     /// Base system prompt rendered from the role template + `TaskContext`.
@@ -425,6 +431,10 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state).await;
     let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
     let ci_blocking_directive = build_ci_blocking_directive(task);
+    let task_attempt_repo = djinn_db::TaskAttemptRepository::new(app_state.db.clone());
+    let prior_attempts = attempt_context::load_prior_attempts(task, &task_attempt_repo).await;
+    let completed_dependency_parents =
+        attempt_context::load_completed_dependency_parents(task, &task_attempt_repo).await;
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
     let code_graph_context = build_role_code_graph_context(
         runtime_role.config().name,
@@ -505,6 +515,8 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         reviewer_diff_context,
         ci_blocking_directive,
         worker_resume_note: worker_resume_note.map(str::to_string),
+        prior_attempts,
+        completed_dependency_parents,
         base_system_prompt,
         system_prompt_with_extensions,
         system_prompt,

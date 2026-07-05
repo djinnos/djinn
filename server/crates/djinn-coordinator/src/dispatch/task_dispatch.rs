@@ -1873,6 +1873,18 @@ impl CoordinatorActor {
                     )
                     .await;
                     self.dispatched += 1;
+                    // Attempt lifecycle: record the dispatch-start as a
+                    // pending task_attempt row. Best-effort — never fails the
+                    // dispatch path.
+                    let dispatch_key = super::attempt_lifecycle::make_dispatch_key(&task.id, role);
+                    super::attempt_lifecycle::record_dispatch_start(
+                        &self.db,
+                        &task.id,
+                        role,
+                        None,
+                        &dispatch_key,
+                    )
+                    .await;
                     // Bump the per-user running count for the model actually
                     // used (the first health-available one — the elastic pool
                     // accepts it), so further same-creator+model tasks in THIS
@@ -2315,6 +2327,7 @@ mod inflight_ledger_tests {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
+            stranded_ready_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: std::sync::Arc::new(
                 crate::consolidation::DbConsolidationRunner::new(db.clone()),

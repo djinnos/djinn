@@ -198,6 +198,29 @@ pub async fn backdate_task_updated_at(db: &Database, task_id: &str, interval: &s
     .unwrap();
 }
 
+/// Close a task at an explicit timestamp. Test-fixture helper: production
+/// `closed_at` is stamped automatically by terminal status transitions.
+pub async fn close_task_at(db: &Database, task_id: &str, closed_at: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("UPDATE tasks SET status = 'closed', closed_at = $1 WHERE id = $2")
+        .bind(closed_at)
+        .bind(task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to close task at timestamp");
+}
+
+/// Wire a blocker edge: `blocking_task_id` blocks `task_id`. Test-fixture helper.
+pub async fn add_blocker_edge(db: &Database, task_id: &str, blocking_task_id: &str) {
+    db.ensure_initialized().await.unwrap();
+    sqlx::query("INSERT INTO blockers (task_id, blocking_task_id) VALUES ($1, $2)")
+        .bind(task_id)
+        .bind(blocking_task_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to add blocker edge");
+}
+
 pub fn event_bus_for(tx: &broadcast::Sender<DjinnEventEnvelope>) -> EventBus {
     let tx = tx.clone();
     EventBus::new(move |event| {

@@ -254,9 +254,7 @@ impl TaskArbitrationRepository {
         let latest = self.get_latest_for_task(task_id).await?;
         match latest {
             Some(record) => match record.arbitration_state() {
-                Some(ArbitrationState::Unconsumed) => {
-                    Ok((record.hold_cycle, Some(record)))
-                }
+                Some(ArbitrationState::Unconsumed) => Ok((record.hold_cycle, Some(record))),
                 _ => Ok((record.hold_cycle.saturating_add(1), None)),
             },
             None => Ok((0, None)),
