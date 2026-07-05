@@ -734,6 +734,30 @@ pub async fn rev_list_count(repo_root: &Path, range: &str) -> Result<u64, GitErr
         .map_err(|e| GitError::Other(anyhow::anyhow!("rev-list count not a u64: {e}")))
 }
 
+/// `git rev-parse <rev>` against `repo_root`. Returns the trimmed output
+/// (typically a 40-char commit SHA). Used by callers that need to resolve an
+/// arbitrary revision without manually parsing `CommandOutput`.
+pub async fn rev_parse(repo_root: &Path, rev: &str) -> Result<String, GitError> {
+    let out = run_git_command(
+        repo_root.to_path_buf(),
+        vec!["rev-parse".into(), rev.to_string()],
+    )
+    .await?;
+    Ok(out.stdout.trim().to_string())
+}
+
+/// `git merge-base <a> <b>` against `repo_root`. Returns the trimmed merge-base
+/// SHA on stdout. Used by callers that need the common ancestor of two commits
+/// without manually parsing `CommandOutput`.
+pub async fn merge_base(repo_root: &Path, a: &str, b: &str) -> Result<String, GitError> {
+    let out = run_git_command(
+        repo_root.to_path_buf(),
+        vec!["merge-base".into(), a.to_string(), b.to_string()],
+    )
+    .await?;
+    Ok(out.stdout.trim().to_string())
+}
+
 // ─── Synchronous git2 helpers ─────────────────────────────────────────────
 //
 // These wrap libgit2 operations that callers (djinn-coordinator, djinn-stack)
