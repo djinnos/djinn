@@ -16410,7 +16410,7 @@
   },
   {
     "name": "proposal_show",
-    "description": "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, the debate-trail (objections/rebuttals/verdicts kept separate from feedback), its revision history, and review sign-offs (each flagged `stale` when given against an older revision).",
+    "description": "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status (default: all). Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "required": [
@@ -16421,6 +16421,24 @@
         "id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
+        },
+        "fields": {
+          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "revision_bodies": {
+          "description": "Controls revision body verbosity when `revisions` is selected.\nAccepted values: `excerpt` (default), `full`, `omit`.\nIgnored when `fields` omits `revisions`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -16740,7 +16758,25 @@
               "type": "string"
             },
             "body": {
-              "type": "string"
+              "description": "Full revision body — present only when `revision_bodies = \"full\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body_excerpt": {
+              "description": "First 512 Unicode scalar values of the revision body.\nPresent when `revision_bodies` is `excerpt` or `full`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body_truncated": {
+              "description": "`true` when the original revision body exceeded the 512-scalar cap.\nPresent when `revision_bodies` is `excerpt` or `full`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "body_format": {
               "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
@@ -16788,7 +16824,6 @@
             "id",
             "seq",
             "title",
-            "body",
             "body_format",
             "acceptance_criteria",
             "event_kind",

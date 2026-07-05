@@ -5,7 +5,7 @@ use djinn_core::models::IssueType;
 
 const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 
-fn toolset_for_role(role: &str) -> &'static [&'static str] {
+pub(super) fn toolset_for_role(role: &str) -> &'static [&'static str] {
     match role {
         "planner" => &[
             "task_create",
@@ -556,12 +556,24 @@ impl TaskRepository {
             }));
         }
 
+        // ── Additive liveness / protocol / stranded-ready sections ────────
+        // These bounded JSON sections live in the sibling `board_health`
+        // module to keep this file under the repository size guard.
+        let liveness_outcomes =
+            super::board_health::liveness_outcomes_section(self.db.pool()).await;
+        let protocol_violations =
+            super::board_health::protocol_violations_section(self.db.pool()).await;
+        let stranded_ready = super::board_health::stranded_ready_section(self.db.pool()).await;
+
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
             "stale_tasks":           stale_tasks,
             "review_queue":          review_queue,
             "repeated_reopen_role_tool_mismatches": repeated_reopen_role_tool_mismatches,
             "stale_threshold_hours": stale_hours,
+            "liveness_outcomes":     liveness_outcomes,
+            "protocol_violations":   protocol_violations,
+            "stranded_ready":        stranded_ready,
         }))
     }
 
