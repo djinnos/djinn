@@ -363,17 +363,28 @@ async fn main_branch_is_protected_and_not_safe_to_cleanup() {
 /// a future contributor picks up.
 #[tokio::test]
 async fn workspace_try_merge_uses_no_ff_not_squash() {
-    // Read the public `Workspace::try_merge` source to confirm it
-    // still uses `--no-commit --no-ff` (the worker still produces a
-    // merge commit, which the supervisor's `enforce_merge_parent`
-    // then converts to a true two-parent merge). The squash landing
-    // path is `detect_pr_conflict_files` + GitHub's
-    // `merge_pull_request(MergeMethod::Squash, ...)`.
-    let source = include_str!("../src/workspace.rs");
+    // Read the `try_merge` git-invocation source to confirm it still uses
+    // `--no-commit --no-ff` (the worker still produces a merge commit, which
+    // the supervisor's `enforce_merge_parent` then converts to a true
+    // two-parent merge). The squash landing path is `detect_pr_conflict_files`
+    // + GitHub's `merge_pull_request(MergeMethod::Squash, ...)`.
+    //
+    // The actual `git merge` shell-out was migrated out of `workspace.rs` into
+    // the `git_helpers` module (routed through `djinn-git`), so pin the
+    // invocation there. `Workspace::try_merge` delegates to
+    // `git_helpers::try_merge_no_commit_no_ff`.
+    let source = include_str!("../src/git_helpers.rs");
     assert!(
-        source.contains("\"merge\", \"--no-commit\", \"--no-ff\""),
-        "Workspace::try_merge must remain `--no-commit --no-ff` so the worker produces a merge commit; \
-         the squash landing semantics live in `detect_pr_conflict_files` + the PR poller's \
-         `merge_pull_request(MergeMethod::Squash, ...)` call"
+        source.contains("\"merge\".to_string()")
+            && source.contains("\"--no-commit\".to_string()")
+            && source.contains("\"--no-ff\".to_string()"),
+        "git_helpers::try_merge_no_commit_no_ff must remain `--no-commit --no-ff` so the worker \
+         produces a merge commit; the squash landing semantics live in `detect_pr_conflict_files` \
+         + the PR poller's `merge_pull_request(MergeMethod::Squash, ...)` call"
+    );
+    assert!(
+        !source.contains("\"--squash\""),
+        "git_helpers::try_merge_no_commit_no_ff must not switch to `--squash`; squash landing \
+         lives in `detect_pr_conflict_files` + the PR poller, not the worker's mid-run merge"
     );
 }

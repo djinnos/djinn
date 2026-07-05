@@ -25,9 +25,13 @@ async fn run_git_simple(cwd: &Path, args: &[&str]) -> Result<String, String> {
 /// of B, `Ok(false)` when it is not, and `Err` for any other failure.
 /// Equivalent to the original workspace logic but routed through djinn-git.
 pub async fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    // `git merge-base --is-ancestor` uses exit 1 as a *boolean answer* ("not an
+    // ancestor"), not an error — so we must run it through the allow-failure
+    // runner and discriminate on the exit code ourselves. Routing it through
+    // the erroring runner would surface exit 1 as `GitError::CommandFailed`.
     let output = timeout(
         GIT_CMD_TIMEOUT,
-        djinn_git::run_git_command_in(
+        djinn_git::run_git_command_in_allow_failure(
             cwd,
             vec![
                 "merge-base".to_string(),
@@ -60,9 +64,14 @@ pub async fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result
 /// merge stops on conflicts (no error; caller must inspect unmerged files), and
 /// `Err` on any other failure.
 pub async fn try_merge_no_commit_no_ff(cwd: &Path, merge_ref: &str) -> Result<bool, String> {
+    // `git merge --no-commit --no-ff` uses exit 1 to signal a *merge conflict* —
+    // an expected outcome the caller recovers from (it inspects the unmerged
+    // index and leaves conflict markers on disk), not an error. Route it through
+    // the allow-failure runner so exit 1 is reported via the exit code instead
+    // of collapsing into `GitError::CommandFailed`.
     let output = timeout(
         GIT_CMD_TIMEOUT,
-        djinn_git::run_git_command_in_with_env(
+        djinn_git::run_git_command_in_with_env_allow_failure(
             cwd,
             vec![
                 "merge".to_string(),

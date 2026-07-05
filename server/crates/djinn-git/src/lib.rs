@@ -554,6 +554,75 @@ pub async fn run_git_command_with_timeout_in(
 ) -> Result<CommandOutput, GitError> {
     run_git_command_with_timeout(cwd.to_path_buf(), args, timeout).await
 }
+
+/// Like [`run_git_command`] but returns the [`CommandOutput`] even when git
+/// exits non-zero. Only returns `Err` on a spawn / I/O failure; a non-zero
+/// exit is reported through [`CommandOutput::code`] /
+/// [`CommandOutput::is_success`] / [`CommandOutput::exit_code`].
+///
+/// Use this for git commands where a specific non-zero exit is an *expected
+/// answer* rather than an error — e.g. `git merge-base --is-ancestor` (exit 1 =
+/// "not an ancestor") or `git merge --no-commit` (exit 1 = merge conflict).
+/// For commands where any non-zero exit is a genuine failure, prefer
+/// [`run_git_command`] / [`run_git_command_in`] which surface it as
+/// [`GitError::CommandFailed`].
+pub async fn run_git_command_allow_failure(
+    path: PathBuf,
+    args: Vec<String>,
+) -> Result<CommandOutput, GitError> {
+    use std::process::Stdio;
+    let mut cmd = tokio::process::Command::new("git");
+    apply_safe_directory_env(&mut cmd);
+    cmd.args(&args)
+        .current_dir(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    lower_process_priority(&mut cmd);
+    let output = cmd.output().await?;
+    Ok(CommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+    })
+}
+
+/// Like [`run_git_command_allow_failure`] but takes `&Path`.
+pub async fn run_git_command_in_allow_failure(
+    cwd: &Path,
+    args: Vec<String>,
+) -> Result<CommandOutput, GitError> {
+    run_git_command_allow_failure(cwd.to_path_buf(), args).await
+}
+
+/// Like [`run_git_command_in_allow_failure`] but merges additional environment
+/// variables into the child process (e.g. `GIT_AUTHOR_NAME` for a `git merge`).
+/// Returns the [`CommandOutput`] even when git exits non-zero; only returns
+/// `Err` on a spawn / I/O failure.
+pub async fn run_git_command_in_with_env_allow_failure(
+    cwd: &Path,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+) -> Result<CommandOutput, GitError> {
+    use std::process::Stdio;
+    let mut cmd = tokio::process::Command::new("git");
+    apply_safe_directory_env(&mut cmd);
+    for (k, v) in &extra_env {
+        cmd.env(k, v);
+    }
+    cmd.args(&args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    lower_process_priority(&mut cmd);
+    let output = cmd.output().await?;
+    Ok(CommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        code: output.status.code().unwrap_or(-1),
+    })
+}
 /// Like [`run_git_command_in`] but synchronous and returns the raw
 /// `std::process::Output` (including stdout/stderr as `Vec<u8>`) so callers
 /// that need binary/NUL-delimited output are not forced through lossy UTF-8
