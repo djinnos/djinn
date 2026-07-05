@@ -27,6 +27,12 @@ pub struct WorkerLifecycleConfig {
     /// Placeholder config for future model-rotation enforcement.
     #[serde(default)]
     pub model_rotation: ModelRotationLifecycleConfig,
+    /// Slow-verdict claim extension configuration. When the liveness
+    /// classifier produces a `Slow` verdict for a stalled session and
+    /// the hard runtime cap is not exceeded, the coordinator extends the
+    /// claim by the configured quantum instead of killing the session.
+    #[serde(default)]
+    pub slow_extension: SlowExtensionConfig,
 }
 
 /// Rollout switches for durable-progress observation and no-progress action.
@@ -683,6 +689,52 @@ pub struct ModelRotationLifecycleMetadata {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Slow-verdict claim extension config for stall recovery.
+///
+/// When the liveness classifier produces a `Slow` verdict for a stalled
+/// session and the hard runtime cap is not exceeded, the coordinator grants
+/// up to `max_extensions` extensions before falling through to the kill
+/// path. Each extension persists `slow_extended` evidence and records a
+/// [`ClaimExtensionRecord`] without incrementing task retry/dispatch
+/// failure attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlowExtensionConfig {
+    /// Whether slow-extension claim grants are enabled.
+    #[serde(default = "default_slow_extension_enabled")]
+    pub enabled: bool,
+    /// How many seconds each extension logically grants. Recorded in the
+    /// `ClaimExtensionRecord` metadata; the coordinator re-evaluates the
+    /// session on each tick.
+    #[serde(default = "default_slow_extension_quantum_secs")]
+    pub quantum_secs: u64,
+    /// Maximum number of slow extensions per session before falling
+    /// through to the kill path.
+    #[serde(default = "default_slow_max_extensions")]
+    pub max_extensions: u32,
+}
+
+impl Default for SlowExtensionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_slow_extension_enabled(),
+            quantum_secs: default_slow_extension_quantum_secs(),
+            max_extensions: default_slow_max_extensions(),
+        }
+    }
+}
+
+fn default_slow_extension_enabled() -> bool {
+    true
+}
+
+fn default_slow_extension_quantum_secs() -> u64 {
+    10 * 60 // 10 minutes
+}
+
+fn default_slow_max_extensions() -> u32 {
+    3
+}
+
 /// Passive model-rotation rollout config; defaults do not change model choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRotationLifecycleConfig {
@@ -769,6 +821,9 @@ mod tests {
         assert!(!config.auto_submit.enabled);
         assert!(!config.resume.enabled);
         assert!(!config.model_rotation.enabled);
+        assert!(config.slow_extension.enabled);
+        assert_eq!(config.slow_extension.quantum_secs, 10 * 60);
+        assert_eq!(config.slow_extension.max_extensions, 3);
     }
 
     fn enforcing_config() -> WorkerLifecycleConfig {
@@ -802,6 +857,7 @@ mod tests {
             },
             resume: ResumeLifecycleConfig::default(),
             model_rotation: ModelRotationLifecycleConfig::default(),
+            slow_extension: SlowExtensionConfig::default(),
         }
     }
 

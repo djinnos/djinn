@@ -62,6 +62,7 @@ fn enforcing_config() -> WorkerLifecycleConfig {
             max_checkpoint_age_secs: Some(300),
         },
         model_rotation: crate::ModelRotationLifecycleConfig::default(),
+        slow_extension: crate::SlowExtensionConfig::default(),
     }
 }
 
