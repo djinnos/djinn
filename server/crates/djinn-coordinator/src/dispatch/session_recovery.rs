@@ -7,8 +7,7 @@ use djinn_slot::RunningTaskInfo;
 use tracing::Instrument as _;
 
 use super::liveness::{
-    ActivitySignal, ClassificationResult, DbSessionStatus, DbTaskStatus, LivenessEvidence,
-    PodPhase,
+    ActivitySignal, ClassificationResult, DbSessionStatus, DbTaskStatus, LivenessEvidence, PodPhase,
 };
 
 /// A `running`, zero-token session older than this has slipped past the
@@ -1795,17 +1794,14 @@ fn build_liveness_evidence(
     };
 
     // ── DB session status ────────────────────────────────────────────
-    let db_session_status = db_state
-        .active_session_status
-        .as_deref()
-        .map(|s| match s {
-            "running" => DbSessionStatus::Running,
-            "completed" => DbSessionStatus::Completed,
-            "interrupted" => DbSessionStatus::Interrupted,
-            "failed" => DbSessionStatus::Failed,
-            "paused" => DbSessionStatus::Paused,
-            _ => DbSessionStatus::Running,
-        });
+    let db_session_status = db_state.active_session_status.as_deref().map(|s| match s {
+        "running" => DbSessionStatus::Running,
+        "completed" => DbSessionStatus::Completed,
+        "interrupted" => DbSessionStatus::Interrupted,
+        "failed" => DbSessionStatus::Failed,
+        "paused" => DbSessionStatus::Paused,
+        _ => DbSessionStatus::Running,
+    });
 
     // ── DB task status ───────────────────────────────────────────────
     let db_task_status = db_state.task_status.as_deref().map(|s| match s {
@@ -1848,9 +1844,7 @@ fn build_liveness_evidence(
     // The current system does not have an explicit extension budget counter;
     // sessions beyond the zombie hard cap are already dead, so the budget is
     // implicitly exhausted when claim_ttl_remaining is zero.
-    let extension_budget_exhausted = claim_ttl_remaining
-        .map(|t| t.is_zero())
-        .unwrap_or(false);
+    let extension_budget_exhausted = claim_ttl_remaining.map(|t| t.is_zero()).unwrap_or(false);
 
     LivenessEvidence {
         pod_phase: Some(pod_phase),
@@ -1900,8 +1894,8 @@ mod liveness_foundation_tests {
     use super::*;
     use djinn_db::CurrentLivenessState;
     use djinn_slot::RunningTaskInfo;
-    use time::OffsetDateTime;
     use time::Duration as TimeDuration;
+    use time::OffsetDateTime;
 
     /// Format an `OffsetDateTime` as an ISO-8601 string matching the DB format.
     fn format_iso(dt: OffsetDateTime) -> String {
