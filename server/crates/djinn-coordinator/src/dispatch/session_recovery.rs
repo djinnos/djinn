@@ -1669,6 +1669,7 @@ impl CoordinatorActor {
     /// extend claims, kill pods, or increment attempts. It only records
     /// classifier evidence for later consumer epics (`vbgl`, `jk7v`, `ptvg`).
     /// Terminal task races are recorded as noop/idempotent outcomes.
+    #[allow(dead_code)]
     #[tracing::instrument(
         name = "djinn.session_recovery.classify_liveness",
         skip(self),
