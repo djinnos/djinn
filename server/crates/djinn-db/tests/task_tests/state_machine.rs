@@ -1091,3 +1091,260 @@ async fn board_health_stranded_ready_severity_escalates_with_elapsed_time() {
     let f3 = findings.iter().find(|f| f["id"] == t3.id).unwrap();
     assert_eq!(f3["severity"], "critical");
 }
+
+/// A stale ready task whose dispatch backoff ladder has tripped
+/// (`failure_streak >= 3`) is an explicit rate-limit gate, so it must be
+/// excluded from stranded_ready rather than reported as starved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_excludes_rate_limited_tasks() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Rate-limited task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+    // Rate-limit backoff has tripped (>= 3 consecutive dispatch failures).
+    sqlx::query("INSERT INTO dispatch_state (task_id, failure_streak) VALUES ($1, 3)")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != task.id),
+        "rate-limited task (failure_streak >= 3) must be excluded from stranded_ready"
+    );
+}
+
+/// A stale ready task with a future breaker cooldown is intentionally held, so
+/// it must be excluded from stranded_ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_excludes_cooldown_active_tasks() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Cooldown task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+    // Breaker cooldown deadline one hour in the future.
+    sqlx::query(
+        "INSERT INTO dispatch_state (task_id, cooldown_until) \
+         VALUES ($1, now() AT TIME ZONE 'utc' + interval '1 hour')",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != task.id),
+        "breaker-open (future cooldown) task must be excluded from stranded_ready"
+    );
+}
+
+/// A stale ready task with a paused session is manually held, so it must be
+/// excluded from stranded_ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_excludes_paused_tasks() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Paused task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
+    sqlx::query("UPDATE sessions SET status = 'paused' WHERE id = $1")
+        .bind(&session.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != task.id),
+        "manually paused task must be excluded from stranded_ready"
+    );
+}
+
+/// A genuinely stranded task carries a fully-populated `dispatch_gate` object.
+/// When the inflight model has no healthy model_health row, `image_ready` is
+/// false, `no_eligible_model` is reported, and the gate verdict is `blocked`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_gate_evidence_fields() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Gate evidence task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+    // An inflight model was chosen, but there is no model_health row for it.
+    sqlx::query(
+        "INSERT INTO dispatch_state (task_id, failure_streak, last_dispatched_role, inflight_model_id) \
+         VALUES ($1, 0, 'worker', 'testprov/testmodel')",
+    )
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f["id"] == task.id)
+        .expect("task should appear as stranded");
+    let gate = &finding["dispatch_gate"];
+    assert_eq!(gate["evaluated_role"], "worker");
+    assert!(gate["toolset"].as_array().is_some_and(|t| !t.is_empty()));
+    assert_eq!(gate["model_requirement"], "testprov/testmodel");
+    assert_eq!(gate["image_ready"], false);
+    assert_eq!(gate["breaker_open"], false);
+    assert_eq!(gate["manually_paused"], false);
+    assert_eq!(gate["rate_limited"], false);
+    assert_eq!(gate["credential_available"], true);
+    assert_eq!(gate["gate_verdict"], "blocked");
+    let reasons = gate["reasons"].as_array().unwrap();
+    assert!(
+        reasons.iter().any(|r| r == "no_eligible_model"),
+        "expected no_eligible_model in dispatch_gate reasons, got {reasons:?}"
+    );
+}
+
+/// A stale ready task whose creator has credentials that are all revoked (and
+/// no org-shared fallback) is owner-credential-blocked and must be excluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_excludes_credential_revoked_tasks() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Credential-blocked task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+
+    // Attribute the task to a user whose only credential is revoked.
+    let user_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query("INSERT INTO users (id, github_id, github_login) VALUES ($1, $2, $3)")
+        .bind(&user_id)
+        .bind(rand_github_id())
+        .bind(format!("user-{user_id}"))
+        .execute(db.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tasks SET created_by_user_id = $1 WHERE id = $2")
+        .bind(&user_id)
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let cred_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO credentials \
+         (id, provider_id, key_name, encrypted_value, owner_user_id, revoked_at) \
+         VALUES ($1, 'anthropic', $2, '\\x00'::bytea, $3, '2025-01-01T00:00:00.000Z')",
+    )
+    .bind(&cred_id)
+    .bind(format!("key-{cred_id}"))
+    .bind(&user_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+    assert!(
+        findings.iter().all(|f| f["id"] != task.id),
+        "owner-credential-revoked task must be excluded from stranded_ready"
+    );
+}
+
+/// Small unique-ish github_id generator for seeding test users without
+/// colliding on the `uq_users_github_id` constraint within a test DB. Derived
+/// from a fresh UUIDv7 (monotonic, high-entropy) to stay off wall-clock APIs.
+fn rand_github_id() -> i64 {
+    (uuid::Uuid::now_v7().as_u128() & 0x7fff_ffff_ffff) as i64
+}

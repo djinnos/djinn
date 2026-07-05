@@ -5,7 +5,7 @@ use djinn_core::models::IssueType;
 
 const REPEATED_REOPEN_MISMATCH_THRESHOLD: i64 = 3;
 
-fn toolset_for_role(role: &str) -> &'static [&'static str] {
+pub(super) fn toolset_for_role(role: &str) -> &'static [&'static str] {
     match role {
         "planner" => &[
             "task_create",
@@ -114,76 +114,6 @@ fn role_tool_mismatch_reason(
     format!(
         "Repeated reopen churn ({total_reopen_count} reopens) suggests this task needs the {expected_role} toolset ({expected_tools}) rather than the currently routed {dispatched_role} toolset ({dispatched_tools})."
     )
-}
-
-/// Compute the number of elapsed minutes between two ISO-8601 UTC timestamps
-/// stored as `YYYY-MM-DDTHH:MM:SS.MSZ`. Returns `None` if either timestamp
-/// cannot be parsed. This is intentionally minimal — the format is always
-/// produced by Postgres/Dolt `to_char(now(), ...)` and validated at insert time.
-fn elapsed_minutes_iso(iso_start: &str, iso_end: &str) -> Option<i64> {
-    fn parse_iso_minutes(s: &str) -> Option<i64> {
-        // Expected: "2025-01-15T10:30:00.000Z"
-        if s.len() < 20 || !s.is_ascii() {
-            return None;
-        }
-        let bytes = s.as_bytes();
-        if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-            return None;
-        }
-        let year: i64 = s[0..4].parse().ok()?;
-        let month: u32 = s[5..7].parse().ok()?;
-        let day: u32 = s[8..10].parse().ok()?;
-        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-            return None;
-        }
-        // Find the seconds end: the format is HH:MM:SS.MSZ so we look for '.'
-        // (fractional seconds start) or 'Z' (no fractional part fallback).
-        let time_part = &s[11..];
-        let sec_end = time_part
-            .find('.')
-            .or_else(|| time_part.find('Z'))
-            .unwrap_or(time_part.len());
-        // There must be at least HH:MM:SS (8 chars)
-        if sec_end < 8 {
-            return None;
-        }
-        let seconds_str = &time_part[0..sec_end];
-        // Parse HH:MM:SS
-        let total_seconds: i64 =
-            seconds_str
-                .split(':')
-                .enumerate()
-                .try_fold(0i64, |acc, (i, part)| {
-                    let v: i64 = part.parse().ok()?;
-                    Some(acc + v * [3600, 60, 1][i])
-                })?;
-        // Total days since year 0 (proleptic Gregorian, good enough for elapsed
-        // computation — we only care about the *difference* between two nearby
-        // timestamps, so leap-year drift is negligible).
-        let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-        let month_days: [i64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-        let mut doy = month_days[(month - 1) as usize] + (day as i64 - 1);
-        if month > 2 && is_leap {
-            doy += 1;
-        }
-        let total_days = year * 365 + year / 4 - year / 100 + year / 400 + doy;
-        Some(total_days * 24 * 60 + total_seconds / 60)
-    }
-    let start = parse_iso_minutes(iso_start)?;
-    let end = parse_iso_minutes(iso_end)?;
-    Some(end - start)
-}
-
-/// Return the current UTC time formatted as ISO-8601 with milliseconds from the
-/// database clock, matching the Postgres `to_char(now() ...)` format used
-/// throughout the codebase. Used for string-comparison thresholds.
-async fn db_utc_now(pool: &sqlx::PgPool) -> String {
-    sqlx::query_scalar(
-        r#"SELECT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')"#,
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or_else(|_| "9999-12-31T23:59:59.999Z".to_string())
 }
 
 async fn list_board_health_mismatch_candidates(repo: &TaskRepository) -> Result<Vec<Task>> {
@@ -626,201 +556,14 @@ impl TaskRepository {
             }));
         }
 
-        // ── Liveness classifier outcomes ──────────────────────────────────
-        // Bounded top-N recent outcomes from the append-only evidence table.
-        let liveness_rows = sqlx::query(
-            r#"SELECT le.verdict, le.outcome_kind, le.outcome_reason,
-                      le.created_at, le.task_id, le.session_id
-               FROM liveness_evidence le
-               ORDER BY le.created_at DESC
-               LIMIT 25"#,
-        )
-        .fetch_all(self.db.pool())
-        .await
-        .unwrap_or_default();
-        let total_liveness = liveness_rows.len();
-        let liveness_by_verdict = {
-            let mut counts = serde_json::Map::new();
-            for row in &liveness_rows {
-                use sqlx::Row;
-                let v: String = row.get("verdict");
-                let entry = counts.entry(v).or_insert(serde_json::json!(0));
-                *entry = serde_json::json!(entry.as_i64().unwrap_or(0) + 1);
-            }
-            serde_json::Value::Object(counts)
-        };
-        let recent_liveness: Vec<serde_json::Value> = liveness_rows
-            .into_iter()
-            .map(|row| {
-                use sqlx::Row;
-                serde_json::json!({
-                    "verdict":        row.get::<String, _>("verdict"),
-                    "outcome_kind":   row.get::<Option<String>, _>("outcome_kind"),
-                    "outcome_reason": row.get::<Option<String>, _>("outcome_reason"),
-                    "created_at":     row.get::<String, _>("created_at"),
-                    "task_id":        row.get::<Option<String>, _>("task_id"),
-                    "session_id":     row.get::<String, _>("session_id"),
-                })
-            })
-            .collect();
-
-        // ── Protocol violations ───────────────────────────────────────────
-        // Bounded top-N recent protocol-violation evidence rows.
-        let pv_rows = sqlx::query(
-            r#"SELECT le.verdict, le.outcome_kind, le.outcome_reason,
-                      le.created_at, le.task_id, le.session_id,
-                      t.short_id AS task_short_id,
-                      t.title    AS task_title,
-                      t.status   AS task_status
-               FROM liveness_evidence le
-               LEFT JOIN tasks t ON t.id = le.task_id
-               WHERE le.verdict = 'protocol_violation'
-                  OR le.outcome_kind = 'protocol_violation'
-               ORDER BY le.created_at DESC
-               LIMIT 15"#,
-        )
-        .fetch_all(self.db.pool())
-        .await
-        .unwrap_or_default();
-        let pv_count = pv_rows.len();
-        let protocol_violations: Vec<serde_json::Value> = pv_rows
-            .into_iter()
-            .map(|row| {
-                use sqlx::Row;
-                serde_json::json!({
-                    "verdict":        row.get::<String, _>("verdict"),
-                    "outcome_kind":   row.get::<Option<String>, _>("outcome_kind"),
-                    "outcome_reason": row.get::<Option<String>, _>("outcome_reason"),
-                    "created_at":     row.get::<String, _>("created_at"),
-                    "task_id":        row.get::<Option<String>, _>("task_id"),
-                    "session_id":     row.get::<String, _>("session_id"),
-                    "task_short_id":  row.get::<Option<String>, _>("task_short_id"),
-                    "task_title":     row.get::<Option<String>, _>("task_title"),
-                    "task_status":    row.get::<Option<String>, _>("task_status"),
-                })
-            })
-            .collect();
-
-        // ── Stranded-ready tasks ──────────────────────────────────────────
-        // Open or in_progress tasks with no active running session whose
-        // unclaimed duration exceeds a 30-minute threshold. Severity is
-        // warning at ≥1×, error at ≥2×, critical at ≥6× the threshold.
-        let stranded_threshold_minutes: i64 = 30;
-        let warning_threshold = stranded_threshold_minutes;
-        let error_threshold = stranded_threshold_minutes * 2;
-        let critical_threshold = stranded_threshold_minutes * 6;
-
-        let stranded_sql = r#"SELECT t.id, t.short_id, t.title, t.status, t.updated_at, t.owner,
-                      t.epic_id,
-                      e.short_id AS epic_short_id,
-                      ds.last_dispatched_role,
-                      ds.cooldown_until,
-                      (SELECT al.created_at
-                       FROM activity_log al
-                       WHERE al.task_id = t.id
-                         AND al.event_type = 'status_changed'
-                         AND al.payload->>'to_status' = 'open'
-                       ORDER BY al.created_at DESC
-                       LIMIT 1) AS unclaimed_since
-               FROM tasks t
-               LEFT JOIN epics e ON e.id = t.epic_id
-               LEFT JOIN dispatch_state ds ON ds.task_id = t.id
-               WHERE t.status IN ('open', 'in_progress')
-                 -- Exclude tasks in terminal or review statuses (redundant
-                 -- with the IN filter above, but defensive).
-                 AND t.status NOT IN ('closed', 'needs_task_review',
-                                      'in_task_review', 'approved',
-                                      'pr_draft', 'pr_review')
-                 -- No active running session for this task.
-                 AND NOT EXISTS (
-                     SELECT 1 FROM sessions s
-                     WHERE s.task_id = t.id AND s.status = 'running'
-                 )
-                 -- Exclude blocked tasks (unresolved blockers).
-                 AND NOT EXISTS (
-                     SELECT 1 FROM blockers b
-                     JOIN tasks bt ON b.blocking_task_id = bt.id
-                     WHERE b.task_id = t.id AND bt.status != 'closed'
-                 )
-               ORDER BY t.updated_at ASC"#;
-        let stranded_rows = sqlx::query(stranded_sql)
-            .fetch_all(self.db.pool())
-            .await
-            .unwrap_or_default();
-
-        let now_iso = db_utc_now(self.db.pool()).await;
-        let stranded_findings: Vec<serde_json::Value> = stranded_rows
-            .into_iter()
-            .filter_map(|row| {
-                use sqlx::Row;
-                let task_status: String = row.get("status");
-
-                // Exclusions: breaker-open / cooldown.
-                let cooldown_until: Option<String> =
-                    row.try_get("cooldown_until").ok().flatten();
-                if let Some(ref cd) = cooldown_until
-                    && cd.as_str() > now_iso.as_str()
-                {
-                    return None;
-                }
-
-                let unclaimed_since: Option<String> =
-                    row.try_get("unclaimed_since").ok().flatten();
-                let updated_at: String = row.get("updated_at");
-
-                // Compute elapsed minutes; fall back to low-confidence estimate
-                // from updated_at when no activity-log transition was found.
-                let (elapsed, confidence) = if let Some(ref us) = unclaimed_since {
-                    (
-                        elapsed_minutes_iso(us, &now_iso).unwrap_or(0),
-                        "high",
-                    )
-                } else {
-                    (
-                        elapsed_minutes_iso(&updated_at, &now_iso).unwrap_or(0),
-                        "low",
-                    )
-                };
-
-                // Skip tasks whose unclaimed duration hasn't reached 1× the
-                // threshold yet (not yet stranded).
-                if elapsed < warning_threshold {
-                    return None;
-                }
-
-                let severity = if elapsed >= critical_threshold {
-                    "critical"
-                } else if elapsed >= error_threshold {
-                    "error"
-                } else {
-                    "warning"
-                };
-
-                Some(serde_json::json!({
-                    "id":            row.get::<String, _>("id"),
-                    "short_id":      row.get::<String, _>("short_id"),
-                    "title":         row.get::<String, _>("title"),
-                    "status":        task_status,
-                    "owner":         row.get::<String, _>("owner"),
-                    "updated_at":    updated_at,
-                    "epic_short_id": row.get::<Option<String>, _>("epic_short_id"),
-                    "unclaimed_since": unclaimed_since
-                        .unwrap_or_else(|| row.get::<String, _>("updated_at")),
-                    "unclaimed_since_confidence": confidence,
-                    "elapsed_minutes": elapsed,
-                    "severity":      severity,
-                    "threshold":     serde_json::json!({
-                        "warning_minutes":  warning_threshold,
-                        "error_minutes":    error_threshold,
-                        "critical_minutes": critical_threshold,
-                    }),
-                    "dispatch_gate": serde_json::json!({
-                        "last_dispatched_role": row.get::<Option<String>, _>("last_dispatched_role"),
-                        "cooldown_until":      cooldown_until,
-                    }),
-                }))
-            })
-            .collect();
+        // ── Additive liveness / protocol / stranded-ready sections ────────
+        // These bounded JSON sections live in the sibling `board_health`
+        // module to keep this file under the repository size guard.
+        let liveness_outcomes =
+            super::board_health::liveness_outcomes_section(self.db.pool()).await;
+        let protocol_violations =
+            super::board_health::protocol_violations_section(self.db.pool()).await;
+        let stranded_ready = super::board_health::stranded_ready_section(self.db.pool()).await;
 
         Ok(serde_json::json!({
             "epic_stats":            epic_stats,
@@ -828,20 +571,9 @@ impl TaskRepository {
             "review_queue":          review_queue,
             "repeated_reopen_role_tool_mismatches": repeated_reopen_role_tool_mismatches,
             "stale_threshold_hours": stale_hours,
-            "liveness_outcomes":     serde_json::json!({
-                "total":         total_liveness,
-                "by_verdict":    liveness_by_verdict,
-                "recent":        recent_liveness,
-            }),
-            "protocol_violations":   serde_json::json!({
-                "total":    pv_count,
-                "recent":   protocol_violations,
-            }),
-            "stranded_ready":        serde_json::json!({
-                "total":              stranded_findings.len(),
-                "threshold_minutes":  stranded_threshold_minutes,
-                "findings":           stranded_findings,
-            }),
+            "liveness_outcomes":     liveness_outcomes,
+            "protocol_violations":   protocol_violations,
+            "stranded_ready":        stranded_ready,
         }))
     }
 

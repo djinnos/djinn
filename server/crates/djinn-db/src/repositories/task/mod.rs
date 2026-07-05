@@ -11,6 +11,7 @@ use djinn_core::models::{
 
 mod activity;
 mod blockers;
+mod board_health;
 mod ci;
 mod queries;
 mod reads;
