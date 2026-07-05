@@ -2455,3 +2455,259 @@ async fn second_consecutive_stall_cancel_escalates_to_planner() {
     );
     cancel.cancel();
 }
+
+// ── Dead verdict liveness evidence for zombie/stale recovery ────────────
+
+/// Zombie reap with Dead verdict persists `dead_reclaimed` liveness evidence
+/// linked to the session and task_run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zombie_reap_persists_dead_reclaimed_evidence() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "dead-evidence").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-dead-evidence";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+    actor.reap_zombie_sessions().await;
+
+    // Session must be finalized.
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "zombie session must be finalized"
+    );
+
+    // Task must be released.
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "task must be released for redispatch"
+    );
+
+    // Verify dead_reclaimed evidence on the session's denormalized columns.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let (verdict, outcome_kind) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        verdict.as_deref(),
+        Some("dead"),
+        "session must have dead verdict recorded"
+    );
+    assert_eq!(
+        outcome_kind.as_deref(),
+        Some("dead_reclaimed"),
+        "session must have dead_reclaimed outcome recorded"
+    );
+
+    // Verify evidence row in the append-only liveness_evidence table.
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    assert!(
+        evidence_count >= 1,
+        "liveness_evidence table must have a dead_reclaimed row for this session"
+    );
+}
+
+/// A session within the zombie hard cap (young session) is NOT reaped even if
+/// it has zero tokens. The liveness classifier gate is not reached because the
+/// existing age guard suppresses reap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zombie_reap_suppressed_by_recent_activity() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "suppress-dead").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    // Session is young (within the hard cap) — zero tokens but NOT backdated.
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.reap_zombie_sessions().await;
+
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "young session must NOT be reaped — existing age guard suppresses Dead reclaim"
+    );
+
+    // No liveness evidence should be persisted (classifier is not reached).
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        evidence_count, 0,
+        "no liveness evidence should be persisted for a session that is not reaped"
+    );
+}
+
+/// When a zombie session's owning task has already been closed (terminal),
+/// the zombie reaper records `kill_noop` evidence and does NOT reopen the task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zombie_reap_terminal_task_race_records_kill_noop() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "terminal-race").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-terminal-race";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    // Close the task BEFORE the reaper runs — simulates a concurrent
+    // terminal transition (e.g. human override, PR merge, force-close).
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+    actor.reap_zombie_sessions().await;
+
+    // The task must remain closed (not reopened).
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "closed",
+        "task must remain closed — zombie reaper must NOT reopen a terminal task"
+    );
+
+    // Verify kill_noop evidence is persisted.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
+    assert!(
+        evidence_count >= 1,
+        "liveness_evidence table must have a kill_noop row for the terminal-task race"
+    );
+
+    // Session should still be finalized (the running row is cleaned up).
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "zombie session must still be finalized even in the terminal-task race"
+    );
+}

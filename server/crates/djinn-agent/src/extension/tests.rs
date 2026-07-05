@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 mod code_graph_tests;
+mod edit_dispatch_tests;
 mod epic_extension_tests;
 mod evidence_spike_dispatch_tests;
 mod lsp_dispatch_tests;
