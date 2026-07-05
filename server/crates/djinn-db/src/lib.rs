@@ -57,6 +57,9 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus},
+    liveness::{
+        ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
+    },
     models::ModelsRepository,
     note::{
         AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
@@ -125,6 +128,10 @@ pub use repositories::{
     task_arbitration::{
         ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
         TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,
+    },
+    task_attempt::{
+        CreateTaskAttemptParams, FillTaskAttemptParams, GuardDeferTaskAttemptParams,
+        SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{

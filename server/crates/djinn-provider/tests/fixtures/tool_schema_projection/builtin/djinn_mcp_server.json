@@ -14788,7 +14788,7 @@
   },
   {
     "name": "proposal_list",
-    "description": "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Returns {proposals[], total_count, limit, offset, has_more}.",
+    "description": "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Rows carry body_excerpt (first 512 chars) and body_truncated by default; pass include_bodies=true for full body strings. Returns {proposals[], total_count, limit, offset, has_more}.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -14839,6 +14839,13 @@
             "null"
           ],
           "format": "int64"
+        },
+        "include_bodies": {
+          "description": "When `true`, include the full `body` string on each list row.\nDefault `false` — rows omit the full body and carry only\n`body_excerpt` (first 512 Unicode scalars) and `body_truncated`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -14846,7 +14853,8 @@
     "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$defs": {
-        "ProposalModel": {
+        "ProposalListRow": {
+          "description": "List-specific proposal row model.\n\nBy default (`include_bodies = false`) the full `body` field is omitted\nfrom serialization; callers receive only `body_excerpt` and\n`body_truncated`.  When `include_bodies = true`, the full `body` is\nincluded alongside the excerpt metadata so callers that need the\ncomplete text can still get it in a single list call.",
           "type": "object",
           "properties": {
             "id": {
@@ -14858,8 +14866,20 @@
             "title": {
               "type": "string"
             },
-            "body": {
+            "body_excerpt": {
+              "description": "First 512 Unicode scalar values of the proposal body.  Always\npresent regardless of `include_bodies`.",
               "type": "string"
+            },
+            "body_truncated": {
+              "description": "`true` when the original body exceeded the 512-scalar cap.",
+              "type": "boolean"
+            },
+            "body": {
+              "description": "Full proposal body — **only serialized when `include_bodies = true`**.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "body_format": {
               "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
@@ -14925,7 +14945,7 @@
               ]
             },
             "unresolved_feedback_count": {
-              "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list. Only populated on `proposal_list`; `0` on show paths.",
+              "description": "Count of unresolved feedback entries — drives the per-row badge in the\nproposals list.",
               "type": "integer",
               "format": "int64",
               "default": 0
@@ -14945,7 +14965,7 @@
               ]
             },
             "list_summary": {
-              "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals, so list rows can\nrender tribunal/gate chips without opening each proposal. `None` on show\npaths and for terminal proposals (done/rejected/archived/superseded).",
+              "description": "Compact tribunal/readiness summary — populated only on `proposal_list`\n(batched across the page) for non-terminal proposals.",
               "anyOf": [
                 {
                   "$ref": "#/$defs/ProposalListSummary"
@@ -14960,7 +14980,8 @@
             "id",
             "short_id",
             "title",
-            "body",
+            "body_excerpt",
+            "body_truncated",
             "body_format",
             "acceptance_criteria",
             "status",
@@ -15049,7 +15070,7 @@
             "null"
           ],
           "items": {
-            "$ref": "#/$defs/ProposalModel"
+            "$ref": "#/$defs/ProposalListRow"
           }
         },
         "total_count": {
