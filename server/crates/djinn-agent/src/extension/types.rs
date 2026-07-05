@@ -127,6 +127,11 @@ pub(super) struct EpicBlockersParams {
 #[derive(Deserialize)]
 pub(super) struct ProposalShowParams {
     pub id: String,
+    /// Select which top-level sections to include in the response.
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+    /// Controls revision body verbosity: `excerpt` (default), `full`, `omit`.
+    pub revision_bodies: Option<String>,
 }
 
 #[derive(Deserialize)]
