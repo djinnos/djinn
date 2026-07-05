@@ -39,6 +39,7 @@ pub use djinn_orchestration_types::slot::{
 };
 
 mod actor;
+pub mod attempt_lifecycle;
 pub mod commands;
 pub mod finalize_handlers;
 pub mod finalize_types;

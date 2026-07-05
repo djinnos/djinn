@@ -106,6 +106,22 @@ pub async fn handle_budget_park(
             "finalize_handlers: failed to log budget-park work_submitted activity"
         );
     }
+    // Attempt lifecycle: advance the matching pending attempt to `submitted`
+    // for budget-park settlements. Best-effort.
+    crate::attempt_lifecycle::advance_to_submitted(
+        app_state,
+        crate::attempt_lifecycle::SubmitAdvancementParams {
+            task_id,
+            role: "worker",
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some(summary),
+            summary_json: None,
+        },
+    )
+    .await;
 }
 
 /// Log structured work-submission activity for a worker session.
@@ -152,6 +168,22 @@ pub(crate) async fn handle_submit_work(
         );
         return false;
     }
+    // Attempt lifecycle: advance the matching pending attempt to `submitted`.
+    // Best-effort — never fails the submit path.
+    crate::attempt_lifecycle::advance_to_submitted(
+        app_state,
+        crate::attempt_lifecycle::SubmitAdvancementParams {
+            task_id,
+            role: "worker",
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some(&work.summary),
+            summary_json: None,
+        },
+    )
+    .await;
     if let Some(metadata) = metadata {
         match resolve_auto_submit_diff_fingerprint(task_id, &metadata, app_state).await {
             Ok(fingerprint) => {
