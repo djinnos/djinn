@@ -931,8 +931,68 @@ impl CoordinatorActor {
             // classifier is the authoritative gate: a `Live` or `Slow`
             // verdict suppresses reclaim, and a terminal-task `KillNoop`
             // prevents reopening a task that is already finished.
+            //
+            // KillNoop is checked FIRST because the classifier returns
+            // `Verdict::Live` for terminal tasks (the verdict is moot;
+            // only the outcome matters). Without this ordering the `Live`
+            // arm fires and the KillNoop handling is unreachable.
             let classification = self.classify_task_liveness(task_id).await;
             if let Some(ref result) = classification {
+                // Terminal task race: task is already terminal.
+                // classify_task_liveness already persisted the KillNoop
+                // evidence (verdict + outcome_kind on the session row
+                // and in the liveness_evidence table). We must still
+                // finalize the orphaned session, but must NOT release
+                // the task — it is already finished.
+                if result.outcome == Some(LivenessOutcome::KillNoop) {
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        "CoordinatorActor: zombie session — task already terminal; finalizing session (KillNoop)"
+                    );
+                    // Persist KillNoop evidence. classify_task_liveness may
+                    // have already written this, but we write it unconditionally
+                    // so the outcome is always recorded even if the classifier's
+                    // own persistence failed (e.g. load_current_state returned
+                    // an active_session_id that changed between classify and
+                    // here, or the DB write was silently swallowed).
+                    let liveness_repo = LivenessRepository::new(self.db.clone());
+                    let snapshot = LivenessEvidenceSnapshot {
+                        session_id: session.id.clone(),
+                        task_id: Some(task_id.to_owned()),
+                        task_run_id: session.task_run_id.clone(),
+                        verdict: result.verdict.as_str().to_owned(),
+                        outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
+                        outcome_reason: None,
+                        evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+                    };
+                    if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            error = %e,
+                            "CoordinatorActor: failed to persist KillNoop evidence"
+                        );
+                    }
+                    // Finalize the orphaned running row.
+                    if let Err(e) = session_repo.interrupt_running_for_task(task_id).await {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            error = %e,
+                            "CoordinatorActor: failed to finalize zombie session row for KillNoop"
+                        );
+                    }
+                    // Teardown any leaked K8s Job for this task-run.
+                    self.teardown_zombie_taskrun_job(
+                        task_id,
+                        &session.id,
+                        session.task_run_id.as_deref(),
+                    )
+                    .await;
+                    self.stall_killed.remove(&session.id);
+                    continue;
+                }
                 match result.verdict {
                     Verdict::Live | Verdict::Slow => {
                         tracing::info!(
@@ -944,27 +1004,6 @@ impl CoordinatorActor {
                         continue;
                     }
                     _ => {}
-                }
-                // Terminal task race: task became terminal concurrently.
-                // Record noop evidence and skip destructive reclaim.
-                if result.outcome == Some(LivenessOutcome::KillNoop) {
-                    let liveness_repo = LivenessRepository::new(self.db.clone());
-                    let snapshot = LivenessEvidenceSnapshot {
-                        session_id: session.id.clone(),
-                        task_id: Some(task_id.to_owned()),
-                        task_run_id: session.task_run_id.clone(),
-                        verdict: result.verdict.as_str().to_owned(),
-                        outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
-                        outcome_reason: None,
-                        evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
-                    };
-                    let _ = liveness_repo.persist_evidence(&snapshot).await;
-                    tracing::info!(
-                        task_id = %task_id,
-                        session_id = %session.id,
-                        "CoordinatorActor: zombie session — task already terminal; recording KillNoop"
-                    );
-                    continue;
                 }
             }
 
