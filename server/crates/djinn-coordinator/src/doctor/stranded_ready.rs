@@ -10,9 +10,13 @@ use djinn_core::doctor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 use tracing::warn;
 
 pub const STRANDED_READY_CHECK_NAME: &str = "stranded_ready";
+pub const DEFAULT_WARNING_MINUTES: i64 = 30;
+pub const DEFAULT_ERROR_MINUTES: i64 = 60;
+pub const DEFAULT_CRITICAL_MINUTES: i64 = 180;
 
 /// Source of the stranded-ready board-health snapshot.
 ///
@@ -47,9 +51,15 @@ impl StrandedReadyCandidate {
             title: value.get("title")?.as_str()?.to_owned(),
             status: value.get("status")?.as_str()?.to_owned(),
             owner: value.get("owner")?.as_str()?.to_owned(),
-            epic_short_id: value.get("epic_short_id").and_then(|v| v.as_str()).map(str::to_owned),
+            epic_short_id: value
+                .get("epic_short_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             unclaimed_since: value.get("unclaimed_since")?.as_str()?.to_owned(),
-            unclaimed_since_confidence: value.get("unclaimed_since_confidence")?.as_str()?.to_owned(),
+            unclaimed_since_confidence: value
+                .get("unclaimed_since_confidence")?
+                .as_str()?
+                .to_owned(),
             elapsed_minutes: value.get("elapsed_minutes")?.as_i64()?,
             severity: value.get("severity")?.as_str()?.to_owned(),
             threshold: value.get("threshold")?.clone(),
@@ -58,25 +68,74 @@ impl StrandedReadyCandidate {
     }
 }
 
-fn severity_from_str(s: &str) -> FindingSeverity {
-    match s {
-        "critical" => FindingSeverity::Critical,
-        "warn" | "warning" => FindingSeverity::Warn,
-        _ => FindingSeverity::Info,
+fn severity_from_thresholds(
+    elapsed_minutes: i64,
+    warning: i64,
+    error: i64,
+    critical: i64,
+) -> FindingSeverity {
+    if elapsed_minutes >= critical {
+        FindingSeverity::Critical
+    } else if elapsed_minutes >= error {
+        FindingSeverity::Critical
+    } else if elapsed_minutes >= warning {
+        FindingSeverity::Warn
+    } else {
+        FindingSeverity::Info
     }
 }
 
-/// Cheap, read-only doctor check for stranded-ready tasks.
-pub struct StrandedReadyCheck<S: StrandedReadySource> {
-    source: S,
+fn parse_threshold(threshold: &serde_json::Value, key: &str, default: i64) -> i64 {
+    threshold
+        .get(key)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(default)
 }
 
-impl<S: StrandedReadySource> StrandedReadyCheck<S> {
-    pub fn new(source: S) -> Self {
+/// Cheap, read-only doctor check for stranded-ready tasks.
+pub struct StrandedReadyCheck {
+    source: Arc<dyn StrandedReadySource>,
+}
+
+impl StrandedReadyCheck {
+    pub fn new(source: Arc<dyn StrandedReadySource>) -> Self {
         Self { source }
     }
 
     fn finding_for(candidate: StrandedReadyCandidate) -> Option<Finding> {
+        let warning_minutes = parse_threshold(
+            &candidate.threshold,
+            "warning_minutes",
+            DEFAULT_WARNING_MINUTES,
+        );
+        let error_minutes =
+            parse_threshold(&candidate.threshold, "error_minutes", DEFAULT_ERROR_MINUTES);
+        let critical_minutes = parse_threshold(
+            &candidate.threshold,
+            "critical_minutes",
+            DEFAULT_CRITICAL_MINUTES,
+        );
+        let severity = severity_from_thresholds(
+            candidate.elapsed_minutes,
+            warning_minutes,
+            error_minutes,
+            critical_minutes,
+        );
+        let severity_label = severity.as_str();
+
+        // Defence in depth: the DB contract is expected to exclude tasks whose
+        // dispatch gate would allow a normal dispatch. If a non-stranded verdict
+        // leaks through, skip it so the doctor check stays read-only and does not
+        // flag tasks that are gated for legitimate reasons.
+        let gate_verdict = candidate
+            .dispatch_gate
+            .get("gate_verdict")
+            .and_then(|v| v.as_str())
+            .unwrap_or("stranded");
+        if gate_verdict != "stranded" {
+            return None;
+        }
+
         let inputs = json!({
             "id": candidate.id,
             "short_id": candidate.short_id,
@@ -87,14 +146,14 @@ impl<S: StrandedReadySource> StrandedReadyCheck<S> {
         });
         let outputs = json!({
             "is_stranded": true,
-            "severity": candidate.severity,
+            "severity": severity_label,
             "reason": "stranded_ready",
         });
-        let snapshot = ResolverSnapshot::new("resolve_stranded_ready", inputs.clone(), outputs.clone());
-        let severity = severity_from_str(&candidate.severity);
+        let snapshot =
+            ResolverSnapshot::new("resolve_stranded_ready", inputs.clone(), outputs.clone());
         let detail = format!(
             "task {} ({}) has been stranded-ready for {} minutes (severity: {})",
-            candidate.short_id, candidate.title, candidate.elapsed_minutes, candidate.severity
+            candidate.short_id, candidate.title, candidate.elapsed_minutes, severity_label
         );
         let evidence = json!({
             "task_id": candidate.id,
@@ -106,7 +165,7 @@ impl<S: StrandedReadySource> StrandedReadyCheck<S> {
             "unclaimed_since": candidate.unclaimed_since,
             "unclaimed_since_confidence": candidate.unclaimed_since_confidence,
             "elapsed_minutes": candidate.elapsed_minutes,
-            "severity": candidate.severity,
+            "severity": severity_label,
             "threshold": candidate.threshold,
             "dispatch_gate": candidate.dispatch_gate,
         });
@@ -120,7 +179,7 @@ impl<S: StrandedReadySource> StrandedReadyCheck<S> {
     }
 }
 
-impl<S: StrandedReadySource + Send + Sync> DoctorCheck for StrandedReadyCheck<S> {
+impl DoctorCheck for StrandedReadyCheck {
     fn name(&self) -> &'static str {
         STRANDED_READY_CHECK_NAME
     }
@@ -138,6 +197,7 @@ impl<S: StrandedReadySource + Send + Sync> DoctorCheck for StrandedReadyCheck<S>
         let findings_array = snapshot
             .get("findings")
             .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
             .unwrap_or(&[]);
         let mut findings = Vec::new();
         for raw in findings_array {
@@ -178,10 +238,16 @@ impl StrandedReadySource for MemoryStrandedReadySource {
 }
 
 /// Production source backed by a `TaskRepository::board_health` query.
+///
+/// The DB query is async, but the [`DoctorCheck::run`] seam is synchronous.
+/// This source bridges the two worlds by keeping a cached snapshot that is
+/// refreshed asynchronously by the coordinator tick; the synchronous `snapshot()`
+/// method reads the last cached value without blocking.
 #[derive(Clone)]
 pub struct TaskRepositoryStrandedReadySource {
     db: djinn_db::Database,
     events_tx: tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+    cache: Arc<tokio::sync::RwLock<serde_json::Value>>,
 }
 
 impl TaskRepositoryStrandedReadySource {
@@ -189,15 +255,48 @@ impl TaskRepositoryStrandedReadySource {
         db: djinn_db::Database,
         events_tx: tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
     ) -> Self {
-        Self { db, events_tx }
+        Self {
+            db,
+            events_tx,
+            cache: Arc::new(tokio::sync::RwLock::new(json!({}))),
+        }
     }
 
-    pub async fn snapshot(&self) -> serde_json::Value {
-        let task_repo = djinn_db::TaskRepository::new(self.db.clone(), crate::events::event_bus_for(&self.events_tx));
-        match task_repo.board_health(30).await {
-            Ok(report) => report.get("stranded_ready").cloned().unwrap_or_else(|| json!({})),
+    /// Refresh the cached snapshot from the DB. The coordinator tick calls this
+    /// once before running the cheap doctor subset so the check sees a fresh,
+    /// bounded view of stranded-ready tasks.
+    pub async fn refresh(&self) {
+        let task_repo = djinn_db::TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let snapshot = match task_repo.board_health(30).await {
+            Ok(report) => report
+                .get("stranded_ready")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
             Err(error) => {
-                warn!(error = %error, "stranded_ready doctor: failed to load board_health snapshot");
+                warn!(
+                    error = %error,
+                    "stranded_ready doctor: failed to load board_health snapshot"
+                );
+                json!({})
+            }
+        };
+        let mut guard = self.cache.write().await;
+        *guard = snapshot;
+    }
+}
+
+impl StrandedReadySource for TaskRepositoryStrandedReadySource {
+    fn snapshot(&self) -> serde_json::Value {
+        // Best-effort read of the last refreshed snapshot. If the cache is
+        // contended with a writer, fall back to an empty snapshot so the cheap
+        // tick never blocks on the refresh task.
+        match self.cache.try_read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                warn!("stranded_ready doctor: cache locked during snapshot read; returning empty");
                 json!({})
             }
         }
@@ -207,6 +306,7 @@ impl TaskRepositoryStrandedReadySource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn candidate_json(overrides: serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
         let mut map = serde_json::Map::new();
@@ -216,7 +316,10 @@ mod tests {
         map.insert("status".to_owned(), json!("open"));
         map.insert("owner".to_owned(), json!("owner-1"));
         map.insert("epic_short_id".to_owned(), json!("ep01"));
-        map.insert("unclaimed_since".to_owned(), json!("2026-01-01T00:00:00.000Z"));
+        map.insert(
+            "unclaimed_since".to_owned(),
+            json!("2026-01-01T00:00:00.000Z"),
+        );
         map.insert("unclaimed_since_confidence".to_owned(), json!("high"));
         map.insert("elapsed_minutes".to_owned(), json!(45));
         map.insert("severity".to_owned(), json!("warn"));
@@ -255,28 +358,42 @@ mod tests {
 
     #[test]
     fn check_is_cheap_and_named() {
-        let check = StrandedReadyCheck::new(MemoryStrandedReadySource::default());
+        let check = StrandedReadyCheck::new(Arc::new(MemoryStrandedReadySource::default()));
         assert_eq!(check.name(), STRANDED_READY_CHECK_NAME);
         assert_eq!(check.cadence(), DoctorCheckCadence::Cheap);
     }
 
     #[test]
     fn warning_finding_includes_threshold_and_gate_evidence() {
-        let source = MemoryStrandedReadySource::new(snapshot_with(vec![candidate_json(serde_json::Map::new())]));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(serde_json::Map::new()),
+        ])));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
         assert_eq!(finding.check_name, STRANDED_READY_CHECK_NAME);
         assert_eq!(finding.severity, FindingSeverity::Warn);
-        assert_eq!(finding.entity_ids.get("task_id").map(String::as_str), Some("task-id-1"));
-        assert_eq!(finding.entity_ids.get("short_id").map(String::as_str), Some("task-1"));
+        assert_eq!(
+            finding.entity_ids.get("task_id").map(String::as_str),
+            Some("task-id-1")
+        );
+        assert_eq!(
+            finding.entity_ids.get("short_id").map(String::as_str),
+            Some("task-1")
+        );
         assert_eq!(finding.evidence["elapsed_minutes"], 45);
         assert_eq!(finding.evidence["severity"], "warn");
         assert_eq!(finding.evidence["threshold"]["warning_minutes"], 30);
         assert_eq!(finding.evidence["threshold"]["error_minutes"], 60);
         assert_eq!(finding.evidence["threshold"]["critical_minutes"], 180);
-        assert_eq!(finding.evidence["dispatch_gate"]["evaluated_role"], "worker");
-        assert_eq!(finding.evidence["dispatch_gate"]["gate_verdict"], "stranded");
+        assert_eq!(
+            finding.evidence["dispatch_gate"]["evaluated_role"],
+            "worker"
+        );
+        assert_eq!(
+            finding.evidence["dispatch_gate"]["gate_verdict"],
+            "stranded"
+        );
         assert_eq!(finding.resolver_snapshot.resolver, "resolve_stranded_ready");
         assert_eq!(finding.resolver_snapshot.outputs["severity"], "warn");
         assert!(finding.detail.contains("task-1") && finding.detail.contains("45 minutes"));
@@ -287,9 +404,11 @@ mod tests {
         let mut overrides = serde_json::Map::new();
         overrides.insert("elapsed_minutes".to_owned(), json!(75));
         overrides.insert("severity".to_owned(), json!("error"));
-        let source = MemoryStrandedReadySource::new(snapshot_with(vec![candidate_json(overrides)]));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
-        assert_eq!(findings[0].severity, FindingSeverity::Warn);
+        assert_eq!(findings[0].severity, FindingSeverity::Critical);
         assert_eq!(findings[0].evidence["severity"], "error");
     }
 
@@ -298,7 +417,9 @@ mod tests {
         let mut overrides = serde_json::Map::new();
         overrides.insert("elapsed_minutes".to_owned(), json!(200));
         overrides.insert("severity".to_owned(), json!("critical"));
-        let source = MemoryStrandedReadySource::new(snapshot_with(vec![candidate_json(overrides)]));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert_eq!(findings[0].severity, FindingSeverity::Critical);
         assert_eq!(findings[0].evidence["severity"], "critical");
@@ -306,17 +427,45 @@ mod tests {
 
     #[test]
     fn excluded_gated_task_produces_no_finding() {
-        let source = MemoryStrandedReadySource::new(snapshot_with(Vec::new()));
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(Vec::new())));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert!(findings.is_empty());
     }
 
     #[test]
+    fn non_stranded_gate_verdict_is_skipped() {
+        let mut overrides = serde_json::Map::new();
+        overrides.insert(
+            "dispatch_gate".to_owned(),
+            json!({
+                "evaluated_role": "worker",
+                "toolset": ["task_edit"],
+                "model_requirement": "provider/model-a",
+                "image_ready": true,
+                "breaker_open": false,
+                "manually_paused": false,
+                "rate_limited": false,
+                "credential_available": true,
+                "gate_verdict": "not_stranded",
+                "reasons": [],
+            }),
+        );
+        let source = Arc::new(MemoryStrandedReadySource::new(snapshot_with(vec![
+            candidate_json(overrides),
+        ])));
+        let findings = StrandedReadyCheck::new(source).run().expect("run");
+        assert!(
+            findings.is_empty(),
+            "a candidate with a non-stranded gate verdict must be skipped"
+        );
+    }
+
+    #[test]
     fn malformed_candidate_is_skipped() {
-        let source = MemoryStrandedReadySource::new(json!({
+        let source = Arc::new(MemoryStrandedReadySource::new(json!({
             "total": 1,
             "findings": [{"id": "broken"}],
-        }));
+        })));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
         assert!(findings.is_empty());
     }
