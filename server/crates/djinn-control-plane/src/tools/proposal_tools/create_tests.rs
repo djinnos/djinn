@@ -595,7 +595,7 @@ mod body_excerpt_tests {
             .await
             .unwrap();
 
-        let err = server
+        let resp = server
             .dispatch_tool(
                 "proposal_show",
                 serde_json::json!({
@@ -604,7 +604,8 @@ mod body_excerpt_tests {
                 }),
             )
             .await
-            .expect_err("invalid fields should fail");
+            .unwrap();
+        let err = resp["error"].as_str().expect("response should contain error field");
         assert!(err.contains("invalid field: \"unknown_field\""), "err: {err}");
         assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
     }
@@ -625,7 +626,7 @@ mod body_excerpt_tests {
             .await
             .unwrap();
 
-        let err = server
+        let resp = server
             .dispatch_tool(
                 "proposal_show",
                 serde_json::json!({
@@ -635,7 +636,8 @@ mod body_excerpt_tests {
                 }),
             )
             .await
-            .expect_err("invalid revision_bodies should fail");
+            .unwrap();
+        let err = resp["error"].as_str().expect("response should contain error field");
         assert!(err.contains("invalid revision_bodies: \"compressed\""), "err: {err}");
         assert!(err.contains("accepted: excerpt, full, omit"), "err: {err}");
     }
