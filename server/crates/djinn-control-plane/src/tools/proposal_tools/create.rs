@@ -28,12 +28,11 @@
 use std::borrow::Cow;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
-use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
@@ -43,8 +42,8 @@ use crate::tools::proposal_blocks::{
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
     ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
-    apply_revision_body_mode, validate_revision_bodies_value, validate_show_fields,
+    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse, apply_revision_body_mode,
+    validate_revision_bodies_value, validate_show_fields,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -64,6 +63,12 @@ use super::mdx::{
 use super::{
     build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
     parse_ac_items, proposal_not_found_error,
+};
+
+// Parameter structs live in `params.rs` to keep this file under the size guard.
+use super::params::{
+    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalImportParams,
+    ProposalListParams, ProposalShowParams, ProposalTargetParams, ProposalUpdateParams,
 };
 
 // ── Target/show response helpers ─────────────────────────────────────────────
@@ -250,104 +255,6 @@ fn build_list_summary(
         gate_ready,
         unresolved_blocking_count: raw.unresolved_blocking_count,
     }
-}
-
-// ── Param structs ────────────────────────────────────────────────────────────
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalCreateParams {
-    pub title: String,
-    /// Spec body (markdown or MDX depending on `body_format`).
-    pub body: Option<String>,
-    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
-    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
-    /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
-    /// Editable later via proposal_add_target / proposal_remove_target.
-    pub target_projects: Option<Vec<String>>,
-    /// Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
-    /// role authors are always placed in `triage` regardless of this value.
-    pub status: Option<String>,
-    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
-    pub body_format: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalImportParams {
-    /// Full portable proposal.mdx content, including optional YAML frontmatter.
-    pub mdx: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalExportParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalShowParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    /// Select which top-level sections to include in the response.
-    /// Accepted values: `proposal`, `targets`, `feedback`, `signoffs`,
-    /// `revisions`, `debate`, `epics`, `gate_status`.
-    /// Default: all fields selected. Invalid values return a validation error.
-    #[serde(default)]
-    pub fields: Option<Vec<String>>,
-    /// Controls revision body verbosity when `revisions` is selected.
-    /// Accepted values: `excerpt` (default), `full`, `omit`.
-    /// Ignored when `fields` omits `revisions`.
-    pub revision_bodies: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalListParams {
-    pub status: Option<String>,
-    /// Filter by author user id.
-    pub author: Option<String>,
-    /// Filter to proposals targeting this project (UUID or owner/repo slug).
-    pub target_project: Option<String>,
-    /// Full-text search on title and body.
-    pub text: Option<String>,
-    /// Sort order: "created_desc" (default), "created", "updated", "updated_desc".
-    pub sort: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    /// When `true`, include the full `body` string on each list row.
-    /// Default `false` — rows omit the full body and carry only
-    /// `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
-    pub include_bodies: Option<bool>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalTargetParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    /// Target project: UUID or owner/repo slug (must be registered).
-    pub project: String,
-    /// `primary` (a write-target, default) or `reference` (read-only context).
-    pub role: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalUpdateParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
-    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
-    /// draft | in_review | approved | building | done | rejected | archived | superseded.
-    pub status: Option<String>,
-    /// UUID or short_id of the proposal that supersedes this one.
-    pub superseded_by: Option<String>,
-    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
-    pub body_format: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalDeleteParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
 }
 
 // ── Tool router: create / import / export / show / list / update / block-patch / delete / target ──
@@ -714,15 +621,14 @@ impl DjinnMcpServer {
         // ── targets ─────────────────────────────────────────────────────
         // Build full target models only when `targets` is selected.
         // When only `gate_status` is selected, we need just the count.
-        let targets: Option<Vec<ProposalTargetModel>> =
-            if field_selected("targets") {
-                match target_models(&repo, &project_repo, &proposal.id).await {
-                    Ok(t) => Some(t),
-                    Err(e) => return Json(err_show(e)),
-                }
-            } else {
-                None
-            };
+        let targets: Option<Vec<ProposalTargetModel>> = if field_selected("targets") {
+            match target_models(&repo, &project_repo, &proposal.id).await {
+                Ok(t) => Some(t),
+                Err(e) => return Json(err_show(e)),
+            }
+        } else {
+            None
+        };
 
         // ── feedback ────────────────────────────────────────────────────
         let feedback: Option<Vec<crate::tools::proposal_ops::ProposalFeedbackModel>> =
@@ -758,24 +664,20 @@ impl DjinnMcpServer {
         }
 
         // ── signoffs ────────────────────────────────────────────────────
-        let signoffs: Option<Vec<ProposalSignoffModel>> =
-            if field_selected("signoffs") {
-                match repo.signoffs(&proposal.id).await {
-                    Ok(s) => Some(
-                        s.iter()
-                            .map(|so| {
-                                ProposalSignoffModel::from_signoff(
-                                    so,
-                                    proposal.latest_revision_seq,
-                                )
-                            })
-                            .collect(),
-                    ),
-                    Err(e) => return Json(err_show(e.to_string())),
-                }
-            } else {
-                None
-            };
+        let signoffs: Option<Vec<ProposalSignoffModel>> = if field_selected("signoffs") {
+            match repo.signoffs(&proposal.id).await {
+                Ok(s) => Some(
+                    s.iter()
+                        .map(|so| {
+                            ProposalSignoffModel::from_signoff(so, proposal.latest_revision_seq)
+                        })
+                        .collect(),
+                ),
+                Err(e) => return Json(err_show(e.to_string())),
+            }
+        } else {
+            None
+        };
 
         // ── epics (includes memory_refs) ────────────────────────────────
         let (epics, memory_refs): (
@@ -840,9 +742,7 @@ impl DjinnMcpServer {
                     .map(|t| t.len())
                     .unwrap_or(0),
             };
-            Some(
-                build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await,
-            )
+            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await)
         } else {
             None
         };

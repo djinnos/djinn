@@ -877,10 +877,7 @@ pub fn validate_revision_bodies_value(s: &str) -> Result<(), String> {
 /// * `"excerpt"` (default) — `body` is `None`; `body_excerpt` and
 ///   `body_truncated` are populated.
 /// * `"omit"` — `body`, `body_excerpt`, and `body_truncated` are all `None`.
-pub fn apply_revision_body_mode(
-    revisions: &mut [ProposalRevisionModel],
-    mode: &str,
-) {
+pub fn apply_revision_body_mode(revisions: &mut [ProposalRevisionModel], mode: &str) {
     for rev in revisions.iter_mut() {
         // We need the original body to compute excerpt/truncated.
         // In "full" mode, body is already set. In other modes, we
