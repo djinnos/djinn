@@ -77,7 +77,7 @@ fn severity_from_thresholds(
     if elapsed_minutes >= critical {
         FindingSeverity::Critical
     } else if elapsed_minutes >= error {
-        FindingSeverity::Critical
+        FindingSeverity::Error
     } else if elapsed_minutes >= warning {
         FindingSeverity::Warn
     } else {
@@ -408,7 +408,7 @@ mod tests {
             candidate_json(overrides),
         ])));
         let findings = StrandedReadyCheck::new(source).run().expect("run");
-        assert_eq!(findings[0].severity, FindingSeverity::Critical);
+        assert_eq!(findings[0].severity, FindingSeverity::Error);
         assert_eq!(findings[0].evidence["severity"], "error");
     }
 
