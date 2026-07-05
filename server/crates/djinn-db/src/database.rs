@@ -504,6 +504,10 @@ impl Database {
                         // template is bootstrapped automatically (idempotent,
                         // advisory-locked) so DB-backed tests can run without
                         // a CI-only provisioning step.
+                        // This template bootstrap is djinn-repo-specific
+                        // scaffolding (djinn's own schema/migrations); it only
+                        // runs for djinn's own test suite, not for arbitrary
+                        // target repos.
                         template_bootstrap::ensure_test_template(&init.server_prefix).await?;
                         clone_postgres_test_template(&init.server_prefix, &init.test_db).await?;
                     }
