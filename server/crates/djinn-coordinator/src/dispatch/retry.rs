@@ -429,7 +429,7 @@ impl CoordinatorActor {
              already sufficient or the task is moot/duplicate.",
             task.status, task.reopen_count
         );
-        self.route_planner_intervention(&task, role, &reason, None, task.reopen_count)
+        self.route_planner_intervention(task, role, &reason, None, task.reopen_count)
             .await
     }
 

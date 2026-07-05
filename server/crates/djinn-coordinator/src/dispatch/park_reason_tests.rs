@@ -3,7 +3,8 @@
 //! These tests directly exercise `park_reason_detail` / `compute_park_reason` so
 //! the 3t22 misattribution (merge-queue failure folded into the generic AC
 //! phrasing) stays fixed without needing a full DB-backed coordinator harness.
-use crate::dispatch::retry::{compute_park_reason, PostInterventionHistory};
+use crate::CoordinatorActor;
+use crate::dispatch::retry::PostInterventionHistory;
 use djinn_core::models::ReopenClass;
 
 /// Build a minimal `Task` with the CI fields used by the park reason builder.
@@ -75,7 +76,7 @@ fn merge_queue_failed_park_reason_names_merge_queue_failure_and_checks() {
     );
     let history = post_intervention_history_with_submission(ReopenClass::MergeQueueFailed);
 
-    let reason = compute_park_reason(&task, &history);
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
 
     assert!(
         reason.contains("merge-queue full suite failed"),
@@ -109,7 +110,7 @@ fn review_rejected_park_reason_keeps_ac_phrasing() {
     let task = test_task("failing", "[Clippy]", None);
     let history = post_intervention_history_with_submission(ReopenClass::ReviewRejected);
 
-    let reason = compute_park_reason(&task, &history);
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
 
     assert!(
         reason.contains("acceptance criteria still did not pass"),
@@ -126,7 +127,7 @@ fn merge_queue_failed_with_unknown_checks_falls_back_gracefully() {
     let task = test_task("failing", "[]", None);
     let history = post_intervention_history_with_submission(ReopenClass::MergeQueueFailed);
 
-    let reason = compute_park_reason(&task, &history);
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
 
     assert!(
         reason.contains("unknown check(s)"),
@@ -154,7 +155,7 @@ fn non_attempt_history_uses_rotation_phrasing() {
         most_recent_reopen_class: ReopenClass::ReviewRejected,
     };
 
-    let reason = compute_park_reason(&task, &history);
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
 
     assert!(
         reason.contains("terminated pre-submission"),
