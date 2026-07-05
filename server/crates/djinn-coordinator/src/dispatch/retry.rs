@@ -698,8 +698,7 @@ impl CoordinatorActor {
     /// but failed the merge-queue full suite. For review_rejected, keep the
     /// existing AC-focused phrasing. Optionally note PR-head CI that shows
     /// passing-with-skips so the green badge is not misleading.
-    fn park_reason_detail(
-        &self,
+    pub(crate) fn park_reason_detail(
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
     ) -> String {
@@ -759,12 +758,11 @@ impl CoordinatorActor {
     /// uv3p Part B: truthful park reason computed from `history`. Never contains
     /// the templated "same acceptance criteria kept failing" phrasing that five
     /// of five 2026-07-04 parks asserted falsely.
-    fn compute_park_reason(
-        &self,
+    pub(crate) fn compute_park_reason(
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
     ) -> String {
-        let detail = self.park_reason_detail(task, history);
+        let detail = Self::park_reason_detail(task, history);
         format!(
             "Auto-parked for human review after {} planner intervention(s) \
              (intervention_count={}, total_reopen_count={}). {detail} The task is held (open + \
@@ -974,7 +972,7 @@ impl CoordinatorActor {
             // Truthful park reason computed from actual post-intervention
             // history — never the templated "same acceptance criteria kept
             // failing" text when zero post-intervention rounds occurred.
-            let reason = self.compute_park_reason(task, &history);
+            let reason = Self::compute_park_reason(task, &history);
             tracing::warn!(
                 task_id = %task.short_id,
                 intervention_count = task.intervention_count,
