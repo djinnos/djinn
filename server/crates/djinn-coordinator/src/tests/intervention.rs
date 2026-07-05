@@ -3198,23 +3198,40 @@ async fn mixed_reopen_ledger_park_uses_quality_count_and_emits_telemetry_breakdo
         "second-strike park must not write a fresh planner intervention marker"
     );
 
-    // Park telemetry emitted the requested breakdown labels.
-    let rendered = djinn_telemetry::render().unwrap();
-    let line = rendered
-        .lines()
-        .find(|l| {
-            l.starts_with("djinn_tasks_parked_total")
-                && l.contains("quality_strikes=\"5\"")
-                && l.contains("merge_conflict_reopens=\"1\"")
-                && l.contains("superseded_reopens=\"1\"")
-                && l.contains("raw_reopen_count=\"6\"")
+    // Per proposal cxvq (Section A/F), the arbiter-dispatch rung does NOT park:
+    // it emits a typed `arbiter_dispatched` activity whose durable ledger/dossier
+    // carries the strike-class breakdown. The `djinn_tasks_parked_total` counter is
+    // reserved for actual parks (consumed re-entry / arbiter park decision /
+    // fail-closed human hold) so that the "park rate before/after" metric is not
+    // inflated by arbiter dispatches. Assert the breakdown lives in the dossier and
+    // the activity, not in a parked metric line.
+    let arb = existing.unwrap();
+    let dossier = arb.dossier.unwrap_or_default();
+    assert_eq!(
+        dossier.get("quality_strikes").and_then(|v| v.as_i64()),
+        Some(5),
+        "arbiter dispatch ledger must carry the quality-strike count (breakdown lives in the dossier)"
+    );
+    assert_eq!(
+        dossier.get("reopen_count").and_then(|v| v.as_i64()),
+        Some(6),
+        "arbiter dispatch ledger must carry the raw reopen count"
+    );
+
+    // The strike breakdown surfaces via the typed `arbiter_dispatched` activity,
+    // which is emitted on the dispatch rung (not the park rung).
+    let activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_dispatched".to_string()),
+            ..ActivityQuery::default()
         })
-        .expect("parked metric line with strike-class breakdown not found");
-    let value: f64 = line
-        .rsplit_once(' ')
-        .and_then(|(_, v)| v.parse().ok())
-        .expect("metric value parses");
-    assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
+        .await
+        .unwrap();
+    assert!(
+        !activity.is_empty(),
+        "second-strike arbiter dispatch must log an arbiter_dispatched activity"
+    );
 }
 
 // ── gs37-shaped park-guard regression (proposal ivek) ────────────────────────
