@@ -3,12 +3,13 @@ use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::{ReopenClass, TaskStatus, TransitionAction};
-use djinn_db::repositories::task_arbitration::{
-    ArbitrationState, CreateArbitrationParams, TaskArbitrationRepository, TryCreateResult,
-};
+use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
+use djinn_db::repositories::task_arbitration::{
+    CreateArbitrationParams, TaskArbitrationRepository, TryCreateResult,
+};
+use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
 /// uv3p Part B: what the fleet actually did after the current intervention (or
 /// after a human released a prior hold), derived from durable sessions +
@@ -933,7 +934,9 @@ impl CoordinatorActor {
                         error = %e,
                         "CoordinatorActor: second-strike — failed to resolve current hold cycle; failing closed to human review"
                     );
-                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                    return self
+                        .park_source_human_review(task, &reason, quality_strikes)
+                        .await;
                 }
             };
 
@@ -967,12 +970,31 @@ impl CoordinatorActor {
                     chrono::DateTime::<chrono::Utc>::from(dt).to_rfc3339()
                 });
 
+            // Resolve mirror_head_sha from the latest task attempt (pending
+            // or submitted). The Task model does not carry this field; the
+            // CI snapshot / task attempt does.
+            let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+            let mirror_head_sha = match attempt_repo
+                .latest_pending_or_submitted(&task.id, None)
+                .await
+            {
+                Ok(attempt) => attempt.and_then(|a| a.mirror_head_sha),
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "CoordinatorActor: failed to read latest task attempt for mirror_head_sha; proceeding with None"
+                    );
+                    None
+                }
+            };
+
             let create_result = match arbiter_repo
                 .try_create(CreateArbitrationParams {
                     task_id: &task.id,
                     hold_cycle,
                     deadline_at: deadline.as_deref(),
-                    mirror_head_sha: None,
+                    mirror_head_sha: mirror_head_sha.as_deref(),
                     github_head_sha: task.ci_head_sha.as_deref(),
                     pr_url: task.pr_url.as_deref(),
                     failing_ci_job_ids: &failing_ci_job_ids,
@@ -990,13 +1012,14 @@ impl CoordinatorActor {
                         error = %e,
                         "CoordinatorActor: second-strike — failed to create arbitration row; failing closed to human review"
                     );
-                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                    return self
+                        .park_source_human_review(task, &reason, quality_strikes)
+                        .await;
                 }
             };
 
             match create_result {
-                TryCreateResult::Created(_)
-                | TryCreateResult::AlreadyExistsUnconsumed(_) => {
+                TryCreateResult::Created(_) | TryCreateResult::AlreadyExistsUnconsumed(_) => {
                     // Arbiter dispatch path.
                     tracing::warn!(
                         task_id = %task.short_id,
@@ -1033,11 +1056,12 @@ impl CoordinatorActor {
                         );
                     }
                     // Transition to needs_lead_intervention if not already in a
-                    // Lead status.
-                    if !matches!(
-                        task.status,
-                        TaskStatus::NeedsLeadIntervention | TaskStatus::InLeadIntervention
-                    ) {
+                    // Lead status.  Fail closed: if the transition cannot be
+                    // applied, route to the human-review hold path rather than
+                    // leaving the task in its original status.
+                    if task.status != "needs_lead_intervention"
+                        && task.status != "in_lead_intervention"
+                    {
                         let task_repo = self.task_repo();
                         if let Err(e) = task_repo
                             .transition(
@@ -1054,14 +1078,18 @@ impl CoordinatorActor {
                                 task_id = %task.short_id,
                                 error = %e,
                                 status = %task.status,
-                                "CoordinatorActor: failed to transition source to needs_lead_intervention; will still hold dispatch"
+                                "CoordinatorActor: failed to transition source to \
+                                 needs_lead_intervention; failing closed to human review"
                             );
+                            return self
+                                .park_source_human_review(task, &reason, quality_strikes)
+                                .await;
                         }
                     }
                     // Log the arbiter_dispatched outbox payload.
                     let payload = serde_json::json!({
                         "hold_cycle": hold_cycle,
-                        "mirror_head_sha": null,
+                        "mirror_head_sha": mirror_head_sha,
                         "github_head_sha": task.ci_head_sha,
                         "pr_url": task.pr_url,
                         "failing_ci_job_ids": failing_ci_job_ids,
@@ -1094,7 +1122,9 @@ impl CoordinatorActor {
                         hold_cycle,
                         "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
                     );
-                    return self.park_source_human_review(task, &reason, quality_strikes).await;
+                    return self
+                        .park_source_human_review(task, &reason, quality_strikes)
+                        .await;
                 }
             }
         }
