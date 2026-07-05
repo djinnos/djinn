@@ -68,7 +68,7 @@ capability = "git"
 	path = "server/crates/djinn-agent-worker/src/main.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent"
-	rationale = "Still-pending owner-crate migration: agent-worker CLI / bootstrap code that shells out to git for workspace introspection. Should be routed through djinn-git once a helper exists for this call pattern."
+	rationale = "Test-local helper for creating temporary git repos in agent-worker checkpoint durability unit tests. Not used by production worker or checkpoint logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
