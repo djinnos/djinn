@@ -490,6 +490,7 @@ fn coordinator_actor_for_tests(
         worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
         active_refinements: HashMap::new(),
         refinement_sessions: HashMap::new(),
+        stranded_ready_source: None,
         dispatched: 0,
         recovered: 0,
     }
