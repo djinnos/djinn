@@ -1127,6 +1127,80 @@ fn evidence_spike_preserves_normal_architect_surface() {
     );
 }
 
+/// Focused tests validating the edit tool description and input schema surface
+/// after the vmpq description update. These guard against accidental regression
+/// to exact-only wording and ensure the required input contract is unchanged.
+#[test]
+fn edit_tool_description_and_schema_surface() {
+    let edit = serde_json::to_value(tool_edit()).expect("serialize tool_edit");
+
+    // ── tool-level description ────────────────────────────────────────────
+    let desc = edit["description"]
+        .as_str()
+        .expect("edit tool has description");
+
+    // Must mention the unchanged input contract.
+    assert!(
+        desc.contains("path") && desc.contains("old_text") && desc.contains("new_text"),
+        "edit description must reference all three inputs: {desc}"
+    );
+
+    // Must describe fuzzy-rescue behavior (no longer exact-only).
+    assert!(
+        desc.contains("rescue") || desc.contains("whitespace") || desc.contains("drift"),
+        "edit description should describe fuzzy-rescue behavior: {desc}"
+    );
+
+    // Must describe ambiguity/guard failure instead of only "not found".
+    assert!(
+        desc.contains("ambiguous") || desc.contains("guard"),
+        "edit description should describe ambiguity/guard failure: {desc}"
+    );
+
+    // Should NOT claim exact-only matching.
+    assert!(
+        !desc.contains("exact text") && !desc.contains("Exact text"),
+        "edit description should not claim exact-only matching: {desc}"
+    );
+
+    // ── input schema ──────────────────────────────────────────────────────
+    let input_schema = edit["inputSchema"]
+        .as_object()
+        .expect("input_schema is object");
+
+    // Required fields must be exactly path, old_text, new_text (order-insensitive).
+    let required: Vec<&str> = input_schema["required"]
+        .as_array()
+        .expect("required is array")
+        .iter()
+        .map(|v| v.as_str().expect("required entry is string"))
+        .collect();
+    assert_eq!(
+        required,
+        vec!["path", "old_text", "new_text"],
+        "required input fields must be exactly [path, old_text, new_text]"
+    );
+
+    // No additional required fields beyond the original three.
+    assert_eq!(required.len(), 3, "no new required input fields");
+
+    // old_text property description must not be exact-only.
+    let old_text_desc = input_schema["properties"]["old_text"]["description"]
+        .as_str()
+        .expect("old_text has description");
+    assert!(
+        !old_text_desc.contains("Exact text"),
+        "old_text description should not claim exact matching: {old_text_desc}"
+    );
+
+    // old_text must still be typed as string.
+    assert_eq!(
+        input_schema["properties"]["old_text"]["type"].as_str(),
+        Some("string"),
+        "old_text must be type string"
+    );
+}
+
 #[test]
 fn evidence_spike_preserves_normal_worker_surface() {
     // Verify the normal worker surface is NOT affected.

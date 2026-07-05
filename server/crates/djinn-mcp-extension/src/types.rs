@@ -317,6 +317,16 @@ pub struct WriteParams {
     pub content: String,
 }
 
+/// Edit tool input parameters. The required schema is unchanged (`path`,
+/// `old_text`, `new_text`); callers still provide `old_text` text, but the
+/// matcher may rescue common whitespace, indentation, escape, boundary, and
+/// Unicode drift automatically.
+///
+/// **Response surface:** the edit handler returns dynamic JSON. On success the
+/// top-level fields `ok`, `path`, and `diagnostics` are stable and may include
+/// optional `match_note` and `edit_match` objects. On failure the error string
+/// embeds an `edit_match` JSON fragment. Parsers that only consume `ok`,
+/// `path`, and `diagnostics` remain fully compatible.
 #[derive(Deserialize)]
 pub struct EditParams {
     pub path: String,
