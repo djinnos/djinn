@@ -2138,6 +2138,154 @@ impl CoordinatorActor {
 
         Some(result)
     }
+
+    /// Classify a just-ended session for protocol-violation detection and
+    /// persist structured liveness evidence.
+    ///
+    /// Called when a session transitions to `completed`, `interrupted`, or
+    /// `failed`. The classifier determines whether the exit is:
+    ///
+    /// - **ProtocolViolation (CleanExitNonterminal):** session completed
+    ///   (exit 0) but the task is still nonterminal. This is a genuine failed
+    ///   attempt — not success — and must be counted by retry accounting.
+    /// - **ProtocolViolation (NonzeroExitNonterminal):** session failed/
+    ///   interrupted (nonzero exit) while the task is nonterminal. Crash
+    ///   semantics; existing retry/failure-streak mechanisms handle it.
+    /// - **KillNoop:** the task is already terminal. Preserve terminal state
+    ///   and attach metadata only.
+    ///
+    /// Returns `Some(ClassificationResult)` when a classification was made,
+    /// or `None` on error. The caller uses the result to decide retry
+    /// accounting (protocol violations increment attempts; slow extensions
+    /// do not — but slow extensions never reach this path because they never
+    /// end the session).
+    #[tracing::instrument(
+        name = "djinn.session_recovery.classify_exit",
+        skip(self),
+        fields(task_id, session_id, session_status)
+    )]
+    pub(crate) async fn classify_session_exit_liveness(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        task_run_id: Option<&str>,
+        session_status: &str,
+    ) -> Option<ClassificationResult> {
+        tracing::Span::current().record("task_id", task_id);
+        tracing::Span::current().record("session_id", session_id);
+        tracing::Span::current().record("session_status", session_status);
+
+        // ── 1. Load DB liveness state ──────────────────────────────────
+        let liveness_repo = LivenessRepository::new(self.db.clone());
+        let db_state = match liveness_repo.load_current_state(task_id).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    error = %e,
+                    "classify_session_exit_liveness: failed to load current state"
+                );
+                return None;
+            }
+        };
+
+        // ── 2. Build evidence with exit code from session status ───────
+        // Map session terminal status → pod phase and exit code.
+        // - completed → Succeeded, exit 0
+        // - failed / interrupted → Failed, exit nonzero (1 as sentinel;
+        //   the exact exit code is not stored on the session row)
+        let (exit_pod_phase, exit_code) = match session_status {
+            "completed" => (PodPhase::Succeeded, Some(0)),
+            "failed" | "interrupted" => (PodPhase::Failed, Some(1)),
+            _ => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    session_status = %session_status,
+                    "classify_session_exit_liveness: non-terminal session status, skipping"
+                );
+                return None;
+            }
+        };
+
+        // Build the base evidence from pool/DB state, then override
+        // pod_phase and exit_code for the exit path.
+        //
+        // IMPORTANT: The `db_session_status` is set to `Running` (not
+        // the terminal value) because the protocol-violation check in
+        // the classifier fires when the POD exits while the SESSION is
+        // still running. The session has since been marked terminal by
+        // the settlement code, but the evidence must reflect the state
+        // at the moment of the violation: pod exited, session was still
+        // running, task was nonterminal.
+        let mut evidence = build_liveness_evidence(
+            None, // no pool info — session already ended, pod is gone
+            &db_state,
+        );
+        evidence.pod_phase = Some(exit_pod_phase);
+        evidence.exit_code = exit_code;
+        // Use Running to represent the state when the pod exited — this
+        // is what triggers the protocol-violation classifier path.
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        // ── 3. Classify ────────────────────────────────────────────────
+        let result = super::liveness::classify(&evidence);
+
+        tracing::info!(
+            task_id = %task_id,
+            session_id = %session_id,
+            session_status = %session_status,
+            verdict = %result.verdict,
+            outcome = ?result.outcome,
+            reason = ?result.reason,
+            "classify_session_exit_liveness: classification complete"
+        );
+
+        // ── 4. Persist evidence ────────────────────────────────────────
+        let snapshot = LivenessEvidenceSnapshot {
+            session_id: session_id.to_owned(),
+            task_id: Some(task_id.to_owned()),
+            task_run_id: task_run_id.map(str::to_owned),
+            verdict: result.verdict.as_str().to_owned(),
+            outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+        };
+        match liveness_repo.persist_evidence(&snapshot).await {
+            Ok(evidence_id) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    evidence_id = %evidence_id,
+                    verdict = %result.verdict,
+                    "classify_session_exit_liveness: evidence persisted"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    error = %e,
+                    "classify_session_exit_liveness: failed to persist evidence"
+                );
+            }
+        }
+
+        // ── 5. Log protocol violation prominently ──────────────────────
+        if result.verdict == Verdict::ProtocolViolation {
+            tracing::warn!(
+                task_id = %task_id,
+                session_id = %session_id,
+                session_status = %session_status,
+                reason = ?result.reason,
+                outcome = ?result.outcome,
+                "classify_session_exit_liveness: protocol violation detected — \
+                 session exited while task is nonterminal; counts as failed attempt"
+            );
+        }
+
+        Some(result)
+    }
 }
 
 /// Map normalized pool activity and DB state into a [`LivenessEvidence`]
@@ -2763,5 +2911,216 @@ mod liveness_foundation_tests {
         let result = super::super::liveness::classify(&evidence);
         assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
         assert!(result.extension_eligible);
+    }
+}
+
+// ─── Session-exit protocol-violation consumer tests ──────────────────────
+
+#[cfg(test)]
+mod session_exit_protocol_violation_tests {
+    use super::super::liveness::LivenessReason;
+    use super::*;
+    use djinn_db::CurrentLivenessState;
+    use time::Duration as TimeDuration;
+    use time::OffsetDateTime;
+
+    /// Format an `OffsetDateTime` as an ISO-8601 string matching the DB format.
+    fn format_iso(dt: OffsetDateTime) -> String {
+        dt.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_else(|_| "2026-01-01T00:00:00.000Z".to_owned())
+    }
+
+    /// Helper: nonterminal task + running session (recent).
+    fn nonterminal_db_state() -> CurrentLivenessState {
+        let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
+        let ts = format_iso(recent);
+        CurrentLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_id: Some("sess-exit-1".to_owned()),
+            active_session_status: Some("running".to_owned()),
+            latest_task_run_id: Some("run-exit-1".to_owned()),
+            latest_task_run_status: Some("running".to_owned()),
+            session_liveness_verdict: None,
+            session_liveness_outcome_kind: None,
+            session_liveness_outcome_reason: None,
+            session_liveness_evidence: None,
+            task_run_liveness_outcome_kind: None,
+            task_run_liveness_outcome_reason: None,
+            task_run_liveness_evidence: None,
+            task_created_at: Some(ts.clone()),
+            session_started_at: Some(ts.clone()),
+            task_run_started_at: Some(ts),
+            task_run_ended_at: None,
+        }
+    }
+
+    /// Helper: terminal (closed) task.
+    fn terminal_db_state() -> CurrentLivenessState {
+        let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
+        let ts = format_iso(recent);
+        CurrentLivenessState {
+            task_status: Some("closed".to_owned()),
+            task_is_terminal: true,
+            active_session_id: Some("sess-exit-2".to_owned()),
+            active_session_status: Some("completed".to_owned()),
+            latest_task_run_id: Some("run-exit-2".to_owned()),
+            latest_task_run_status: Some("completed".to_owned()),
+            session_liveness_verdict: None,
+            session_liveness_outcome_kind: None,
+            session_liveness_outcome_reason: None,
+            session_liveness_evidence: None,
+            task_run_liveness_outcome_kind: None,
+            task_run_liveness_outcome_reason: None,
+            task_run_liveness_evidence: None,
+            task_created_at: Some(ts.clone()),
+            session_started_at: Some(ts.clone()),
+            task_run_started_at: Some(ts),
+            task_run_ended_at: None,
+        }
+    }
+
+    /// AC 1: Status-0 worker exit with nonterminal task → protocol violation
+    /// with reason `clean_exit_nonterminal`. Evidence maps pod phase to
+    /// Succeeded and exit_code to 0. The session status in evidence is
+    /// `Running` because the violation is detected at the moment the pod
+    /// exits while the session was still running (before settlement marks
+    /// it terminal).
+    #[test]
+    fn clean_exit_nonterminal_session_completed_is_protocol_violation() {
+        let db = nonterminal_db_state();
+        // Simulate a session that completed (exit 0) while task is nonterminal.
+        // The evidence reflects the state AT pod exit: session was still running.
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Succeeded);
+        evidence.exit_code = Some(0);
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(result.verdict, Verdict::ProtocolViolation);
+        assert_eq!(result.outcome, Some(LivenessOutcome::Success));
+        assert_eq!(result.reason, Some(LivenessReason::CleanExitNonterminal));
+        assert!(!result.extension_eligible);
+    }
+
+    /// AC 2: Nonzero exit while task is nonterminal → protocol violation
+    /// with crash outcome and reason `nonzero_exit_nonterminal`.
+    #[test]
+    fn nonzero_exit_nonterminal_session_failed_is_crash() {
+        let db = nonterminal_db_state();
+        // Simulate a session that failed (exit nonzero) while task is nonterminal.
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Failed);
+        evidence.exit_code = Some(137);
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(result.verdict, Verdict::ProtocolViolation);
+        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+        assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+        assert!(!result.extension_eligible);
+    }
+
+    /// AC 3: Interrupted session (nonzero exit) while task is nonterminal
+    /// → same crash/protocol-violation semantics.
+    #[test]
+    fn interrupted_session_nonterminal_is_crash() {
+        let db = nonterminal_db_state();
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Failed);
+        evidence.exit_code = Some(1);
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(result.verdict, Verdict::ProtocolViolation);
+        assert_eq!(result.outcome, Some(LivenessOutcome::Crash));
+        assert_eq!(result.reason, Some(LivenessReason::NonzeroExitNonterminal));
+    }
+
+    /// AC 4: Already-terminal task on session exit → KillNoop, not protocol
+    /// violation. Terminal status is preserved; only metadata is attached.
+    #[test]
+    fn terminal_task_session_completed_is_kill_noop() {
+        let db = terminal_db_state();
+        let mut evidence = build_liveness_evidence(None, &db);
+        // Simulate exit 0, but task is terminal.
+        evidence.pod_phase = Some(PodPhase::Succeeded);
+        evidence.exit_code = Some(0);
+        evidence.db_session_status = Some(DbSessionStatus::Completed);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        // Terminal task → KillNoop (not protocol violation).
+        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
+        assert_ne!(result.verdict, Verdict::ProtocolViolation);
+        assert!(!result.extension_eligible);
+    }
+
+    /// AC 4: Already-terminal task + nonzero exit → KillNoop, not crash.
+    #[test]
+    fn terminal_task_session_failed_is_kill_noop() {
+        let db = terminal_db_state();
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Failed);
+        evidence.exit_code = Some(137);
+        evidence.db_session_status = Some(DbSessionStatus::Failed);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        // Terminal task → KillNoop regardless of exit code.
+        assert_eq!(result.outcome, Some(LivenessOutcome::KillNoop));
+        assert_ne!(result.verdict, Verdict::ProtocolViolation);
+    }
+
+    /// AC 5: Retry accounting — protocol violations produce a structured
+    /// result with a reason. The retry/redispatch system already treats
+    /// same-role reappearance as a failure, but the protocol-violation
+    /// evidence gives it structured cause. Verify the result shape is
+    /// suitable for retry accounting (non-extension-eligible, has reason).
+    #[test]
+    fn protocol_violation_result_is_retry_signal() {
+        let db = nonterminal_db_state();
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Succeeded);
+        evidence.exit_code = Some(0);
+        // Session was still running when pod exited (protocol violation context).
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        // Protocol violation result is a retry signal:
+        assert_eq!(result.verdict, Verdict::ProtocolViolation);
+        assert!(!result.extension_eligible); // cannot extend — session already ended
+        assert!(result.reason.is_some()); // structured reason for audit trail
+        assert!(result.outcome.is_some()); // structured outcome for persistence
+    }
+
+    /// AC 5: Slow verdict extensions are metadata-only and do NOT produce
+    /// protocol violation or increment attempts. This is a Slow verdict
+    /// test to verify it does NOT cross into protocol-violation territory.
+    #[test]
+    fn slow_verdict_is_not_protocol_violation() {
+        // Simulate a Slow verdict (running pod, idle, below hard cap).
+        // Slow extensions NEVER end the session — they extend the claim.
+        // This test verifies the boundary: if the pod is still running
+        // and the session is still "running" (nonterminal), the classifier
+        // returns Slow, not ProtocolViolation.
+        let db = nonterminal_db_state();
+        let mut evidence = build_liveness_evidence(None, &db);
+        evidence.pod_phase = Some(PodPhase::Running);
+        evidence.activity = ActivitySignal::Idle;
+        evidence.db_session_status = Some(DbSessionStatus::Running);
+
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(result.verdict, Verdict::Slow);
+        assert_ne!(result.verdict, Verdict::ProtocolViolation);
+        assert!(result.extension_eligible);
+        // Slow verdict does not produce an outcome/reason until acted upon.
+        assert_eq!(result.outcome, None);
+        assert_eq!(result.reason, None);
     }
 }
