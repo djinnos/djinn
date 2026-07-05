@@ -779,6 +779,182 @@ pub struct BoardHealthRoleToolMismatchItem {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct BoardHealthLspWarning {
+    /// e.g. "rust-analyzer", "typescript-language-server"
+    pub server: String,
+    /// Human-readable install instructions.
+    pub message: String,
+}
+
+/// One bounded row of persisted liveness-classifier evidence surfaced via
+/// `liveness_outcomes.recent`. The DB only returns a top-N slice plus counts,
+/// so the model stays small even under incident volume.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthLivenessOutcomeItem {
+    /// Verdict kind from the classifier taxonomy (e.g. `live`, `wedged`,
+    /// `protocol_violation`).
+    pub verdict: String,
+    /// Coarse outcome bucket (`stalled`, `killed`, `protocol_violation`, …)
+    /// — may be absent on rows persisted before the outcome column existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_kind: Option<String>,
+    /// Machine-readable reason explaining the verdict/outcome (e.g.
+    /// `idle_exceeded_threshold`, `no_progress_signals`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_reason: Option<String>,
+    /// ISO-8601 UTC timestamp of when this evidence row was persisted.
+    pub created_at: String,
+    /// Task this evidence was attached to, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Session this evidence was attached to.
+    pub session_id: String,
+}
+
+/// Bounded rollup of recent liveness-classifier outcomes on `board_health`.
+/// `None` for payloads produced before this section existed (the field is
+/// `#[serde(default)]` on the response, so old DB JSON deserializes cleanly).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthLivenessOutcomes {
+    /// Total number of liveness-evidence rows surfaced in `recent`.
+    pub total: i64,
+    /// Count of surfaced outcomes grouped by `verdict` (e.g. `{"live": 12,
+    /// "wedged": 3}`). The DB returns `HashMap<String, i64>`; absent keys
+    /// are simply omitted from the rollup.
+    #[serde(default)]
+    pub by_verdict: HashMap<String, i64>,
+    /// Bounded recent evidence rows (newest first).
+    #[serde(default)]
+    pub recent: Vec<BoardHealthLivenessOutcomeItem>,
+}
+
+/// One bounded row of protocol-violation evidence surfaced via
+/// `protocol_violations.recent`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthProtocolViolationItem {
+    pub verdict: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_reason: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub session_id: String,
+    /// Joined from `tasks.short_id` when the evidence row references a task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_short_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_status: Option<String>,
+}
+
+/// Bounded rollup of recent protocol-violation evidence on `board_health`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthProtocolViolations {
+    pub total: i64,
+    #[serde(default)]
+    pub recent: Vec<BoardHealthProtocolViolationItem>,
+}
+
+/// Threshold configuration echoed on each stranded-ready finding so clients
+/// can interpret severity without hard-coding the 30m/2x/6x ladder.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthStrandedThreshold {
+    pub warning_minutes: i64,
+    pub error_minutes: i64,
+    pub critical_minutes: i64,
+}
+
+/// Dispatch-gate evaluation attached to a single stranded-ready finding.
+/// Mirrors the DB-built JSON so callers can render the gate verdict and
+/// surface machine-readable `reasons` (e.g. `no_eligible_model`,
+/// `image_not_ready`).
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthDispatchGate {
+    /// Role the coordinator would dispatch this task to, derived from
+    /// `task.status`/`task.issue_type`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluated_role: Option<String>,
+    /// Toolset associated with `evaluated_role` (DB-derived; absent when
+    /// the role has no registered toolset).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolset: Option<Vec<String>>,
+    /// Currently chosen model for the task, when derivable from
+    /// `dispatch_state.inflight_model_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_requirement: Option<String>,
+    /// True when no model was chosen or the chosen model is healthy /
+    /// not in `unreachable`/`error`/`down`/`offline`/`unhealthy`.
+    pub image_ready: bool,
+    /// True when `dispatch_state.cooldown_until` is in the future.
+    pub breaker_open: bool,
+    /// True when a paused session exists for the task or a project/user
+    /// `dispatch_pauses` row is active.
+    pub manually_paused: bool,
+    /// True when `dispatch_state.failure_streak >= 3` (rate-limit backoff).
+    pub rate_limited: bool,
+    /// True when a usable credential exists for the creator or as an
+    /// org-shared fallback.
+    pub credential_available: bool,
+    /// Final gate verdict — `stranded` when no blocker fired, `blocked`
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_verdict: Option<String>,
+    /// Machine-readable gate reasons (`no_eligible_model`,
+    /// `image_not_ready`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub reasons: Vec<String>,
+    /// Last role the dispatcher actually attempted for this task, when
+    /// known. Retained for backward compatibility with the initial
+    /// board_health contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_dispatched_role: Option<String>,
+    /// Future cooldown deadline, when set. Persists even when the
+    /// breaker has cooled (`breaker_open == false`) so clients can see
+    /// the most recent breaker state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<String>,
+}
+
+/// One stranded-ready finding: a ready/dispatchable task with no active
+/// session and an unclaimed duration past the threshold.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthStrandedReadyFinding {
+    pub id: String,
+    pub short_id: String,
+    pub title: String,
+    pub status: String,
+    pub owner: String,
+    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub epic_short_id: Option<String>,
+    /// ISO-8601 UTC timestamp the task became unclaimed.
+    pub unclaimed_since: String,
+    /// `high` when derived from an activity_log open transition or
+    /// session release; `low` when falling back to `tasks.updated_at`.
+    pub unclaimed_since_confidence: String,
+    /// Elapsed minutes between `unclaimed_since` and the DB clock at
+    /// query time.
+    pub elapsed_minutes: i64,
+    /// `warning` (>=30m), `error` (>=60m), `critical` (>=180m).
+    pub severity: String,
+    pub threshold: BoardHealthStrandedThreshold,
+    pub dispatch_gate: BoardHealthDispatchGate,
+}
+
+/// Bounded rollup of stranded-ready findings on `board_health`.
+#[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
+pub struct BoardHealthStrandedReady {
+    pub total: i64,
+    /// Base threshold (30 minutes) used to derive severity.
+    pub threshold_minutes: i64,
+    #[serde(default)]
+    pub findings: Vec<BoardHealthStrandedReadyFinding>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BoardHealthResponse {
     pub epic_stats: Vec<BoardHealthEpicStat>,
     pub stale_tasks: Vec<BoardHealthTaskItem>,
@@ -803,14 +979,19 @@ pub struct BoardHealthResponse {
     /// Per-project PR creation errors (project_id → error message).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_errors: Option<HashMap<String, String>>,
-}
-
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BoardHealthLspWarning {
-    /// e.g. "rust-analyzer", "typescript-language-server"
-    pub server: String,
-    /// Human-readable install instructions.
-    pub message: String,
+    /// Bounded recent liveness-classifier outcomes (from epic 5ric
+    /// persistence). `#[serde(default)]` keeps old DB payloads that
+    /// pre-date this section deserializable.
+    #[serde(default)]
+    pub liveness_outcomes: BoardHealthLivenessOutcomes,
+    /// Bounded recent protocol-violation evidence with a tasks LEFT JOIN.
+    #[serde(default)]
+    pub protocol_violations: BoardHealthProtocolViolations,
+    /// Stranded-ready findings: ready/dispatchable tasks with no active
+    /// session, unclaimed past the 30-minute threshold, with dispatch-gate
+    /// evidence attached.
+    #[serde(default)]
+    pub stranded_ready: BoardHealthStrandedReady,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
