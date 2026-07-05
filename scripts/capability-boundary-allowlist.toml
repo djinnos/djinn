@@ -89,30 +89,6 @@ capability = "git"
 
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-control-plane/src/tools/memory_tools/mod.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/control-plane"
-	rationale = "Still-pending owner-crate migration: control-plane memory tool collects git history for context. Should be routed through djinn-git once the helper surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-control-plane/src/tools/pr_review_tools.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/control-plane"
-	rationale = "Still-pending owner-crate migration: PR-review tool shells out to git for diff metadata. Should be routed through djinn-git once the helper surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-control-plane/src/tools/project_tools/lifecycle_ops.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/control-plane"
-	rationale = "Still-pending owner-crate migration: project lifecycle operations shell out to git for repo initialization. Should be routed through djinn-git once the helper surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-coordinator/src/preapproval_gate.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"
@@ -156,7 +132,7 @@ capability = "git"
 	path = "server/crates/djinn-supervisor/src/lib.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/supervisor"
-	rationale = "Still-pending owner-crate migration: supervisor runtime shells out to git for workspace operations. Should be routed through djinn-git once the helper surface supports this use case."
+	rationale = "Test-local helpers inside #[cfg(test)] modules (run_git, run_git_stdout) for creating temporary git repos in supervisor unit tests. Not used by production supervisor logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -164,7 +140,7 @@ capability = "git"
 	path = "server/crates/djinn-workspace/src/workspace.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/workspace"
-	rationale = "Still-pending owner-crate migration: workspace runtime shells out to git for repo state queries. Should be routed through djinn-git once the helper surface supports this use case."
+	rationale = "Test-local helpers inside #[cfg(test)] mod tests (git, commit_at, empty-commit builder) for creating temporary git repos in workspace unit tests. Not used by production workspace logic."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -187,13 +163,20 @@ capability = "git"
 # remaining non-owner K8s usage is the image-controller (large deferred
 # migration); the server state module was migrated (ouss) and its entry
 # removed.
+#
+# The image-controller entries are intentionally narrow (exact file + matcher)
+# and point to the committed inventory at
+# server/docs/capability-boundaries/image-controller-k8s-inventory.md for the
+# per-file pattern breakdown, the adapter path, and the distinction between
+# production code and test-only fixtures. They share owner team/image-controller
+# and cleanup epic/fztz.
 
 [[entries]]
 capability = "k8s"
 	path = "server/crates/djinn-image-controller/src/build_job.rs"
 	matcher = "k8s_openapi"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller build-job constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Production: image-controller build-job constructs Kubernetes API objects (Job, ConfigMap, PodSpec) directly. Temporarily allowed while the dedicated image-controller-to-djinn-k8s adapter is designed. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 1."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -201,7 +184,7 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/src/controller.rs"
 	matcher = "k8s_openapi"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller controller constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Production: image-controller controller uses Kubernetes API object types (Job, ConfigMap, OwnerReference) alongside kube client operations. Temporarily allowed while the dedicated image-controller-to-djinn-k8s adapter is designed. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 2."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -209,7 +192,7 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/src/controller.rs"
 	matcher = "kube::"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller controller uses the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Production: image-controller controller uses the kube client (Api, ListParams, PatchParams, DeleteParams, PostParams) to drive Job/ConfigMap lifecycle. Temporarily allowed while the dedicated image-controller-to-djinn-k8s adapter is designed. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 2."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -217,7 +200,7 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/src/watcher.rs"
 	matcher = "k8s_openapi"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller watcher constructs Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Production: image-controller watcher uses Kubernetes API object types (Job, Pod, JobStatus) when handling terminal Job events. Temporarily allowed while the dedicated image-controller-to-djinn-k8s adapter is designed. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 3."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -225,7 +208,7 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/src/watcher.rs"
 	matcher = "kube::"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller watcher uses the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Production: image-controller watcher runs a kube::runtime::watcher and uses Api<Pod>/LogParams to tail builder logs on failure. Temporarily allowed while the dedicated image-controller-to-djinn-k8s adapter is designed. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 3."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -233,7 +216,7 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/tests/unit.rs"
 	matcher = "k8s_openapi"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller unit tests construct Kubernetes API objects directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Test-only: unit tests construct synthetic Job/JobStatus/ObjectMeta fixtures. Cannot move behind djinn-k8s until the image-controller job-watcher abstraction provides a test double. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 4."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
@@ -241,5 +224,5 @@ capability = "k8s"
 	path = "server/crates/djinn-image-controller/tests/unit.rs"
 	matcher = "kube::"
 	owner = "team/image-controller"
-	rationale = "Deferred large migration: image-controller unit tests use the kube client directly. Must be routed behind djinn-k8s once the adapter design for image-controller is defined."
+	rationale = "Test-only: unit tests feed synthetic kube::runtime::watcher::Event values into the watcher transition logic. Cannot move behind djinn-k8s until the image-controller job-watcher abstraction provides a test double. See server/docs/capability-boundaries/image-controller-k8s-inventory.md section 4."
 	cleanup_issue = "epic/fztz"
