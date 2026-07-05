@@ -10,6 +10,16 @@ use crate::Result;
 use crate::database::Database;
 use crate::error::DbError;
 
+/// Summary of a completed task blocker parent for prompt context.
+#[derive(Clone, Debug)]
+pub struct CompletedParentSummary {
+    pub task_id: String,
+    pub short_id: String,
+    pub title: String,
+    pub terminal_at: String,
+    pub latest_completed_attempt: Option<TaskAttemptPromptSummary>,
+}
+
 pub struct TaskAttemptRepository {
     db: Database,
 }
@@ -554,6 +564,66 @@ impl TaskAttemptRepository {
             .await?
         };
         Ok(row)
+    }
+
+    /// Latest completed attempt summary for a task, used for dependency-parent
+    /// prompt context. Returns None if the task has no `completed` attempt.
+    pub async fn latest_completed_prompt_summary(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<TaskAttemptPromptSummary>> {
+        self.db.ensure_initialized().await?;
+        Ok(sqlx::query_as!(
+            TaskAttemptPromptSummary,
+            r#"SELECT attempt_seq, role, outcome AS "outcome!", summary, created_at AS "created_at!",
+                terminal_at, submit_ref, pr_url
+             FROM task_attempts
+             WHERE task_id = $1 AND outcome = 'completed'
+             ORDER BY COALESCE(terminal_at, created_at) DESC
+             LIMIT 1"#,
+            task_id
+        )
+        .fetch_optional(self.db.pool())
+        .await?)
+    }
+
+    /// Prompt-summaries for tasks that block a given task and are completed,
+    /// ordered by completed-at descending then stable task id, bounded.
+    pub async fn completed_blocker_parent_summaries(
+        &self,
+        task_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CompletedParentSummary>> {
+        self.db.ensure_initialized().await?;
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let parents = sqlx::query!(
+            r#"SELECT t.id as task_id, t.short_id, t.title, t.closed_at as "terminal_at!"
+             FROM blockers b
+             JOIN tasks t ON t.id = b.blocker_task_id
+             WHERE b.blocked_task_id = $1
+               AND b.blocker_task_id IS NOT NULL
+               AND t.status = 'closed'
+             ORDER BY t.closed_at DESC, t.id ASC
+             LIMIT $2"#,
+            task_id,
+            limit
+        )
+        .fetch_all(self.db.pool())
+        .await?;
+        let mut out = Vec::with_capacity(parents.len());
+        for p in parents {
+            let latest = self.latest_completed_prompt_summary(&p.task_id).await?;
+            out.push(CompletedParentSummary {
+                task_id: p.task_id,
+                short_id: p.short_id,
+                title: p.title,
+                terminal_at: p.terminal_at,
+                latest_completed_attempt: latest,
+            });
+        }
+        Ok(out)
     }
 
     /// Prompt-context summaries for a task: newest-first, bounded, optionally
