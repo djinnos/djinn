@@ -90,28 +90,39 @@ impl DjinnMcpServer {
 
         if task_is_terminal {
             // Task is already terminal — no live work to free. Record kill_noop evidence.
+            // We need a valid session_id for the FK constraint. Try active first,
+            // then fall back to any session for the task (including terminal ones).
             let active_session = session_repo
                 .active_for_task(&p.task_id)
                 .await
                 .ok()
                 .flatten();
-            let snapshot = LivenessEvidenceSnapshot {
-                session_id: active_session
-                    .as_ref()
-                    .map(|s| s.id.clone())
-                    .unwrap_or_default(),
-                task_id: Some(p.task_id.clone()),
-                task_run_id: active_session.as_ref().and_then(|s| s.task_run_id.clone()),
-                verdict: "live".to_owned(), // verdict is moot for terminal tasks
-                outcome_kind: Some("kill_noop".to_owned()),
-                outcome_reason: None,
-                evidence: serde_json::json!({
-                    "reason": "task_already_terminal",
-                    "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
-                    "kill_source": "execution_kill_task",
-                }),
+            let any_session = if active_session.is_some() {
+                None // don't query again if we already have one
+            } else {
+                session_repo
+                    .list_for_task(&p.task_id)
+                    .await
+                    .ok()
+                    .and_then(|sessions| sessions.into_iter().next())
             };
-            let _ = liveness_repo.persist_evidence(&snapshot).await;
+            let evidence_session = active_session.as_ref().or(any_session.as_ref());
+            if let Some(session) = evidence_session {
+                let snapshot = LivenessEvidenceSnapshot {
+                    session_id: session.id.clone(),
+                    task_id: Some(p.task_id.clone()),
+                    task_run_id: session.task_run_id.clone(),
+                    verdict: "live".to_owned(), // verdict is moot for terminal tasks
+                    outcome_kind: Some("kill_noop".to_owned()),
+                    outcome_reason: None,
+                    evidence: serde_json::json!({
+                        "reason": "task_already_terminal",
+                        "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
+                        "kill_source": "execution_kill_task",
+                    }),
+                };
+                let _ = liveness_repo.persist_evidence(&snapshot).await;
+            }
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
@@ -130,19 +141,28 @@ impl DjinnMcpServer {
             .flatten();
         let has_pool_session = pool.has_session(&p.task_id).await.unwrap_or(true);
         if active_session.is_none() && !has_pool_session {
-            let snapshot = LivenessEvidenceSnapshot {
-                session_id: String::new(),
-                task_id: Some(p.task_id.clone()),
-                task_run_id: None,
-                verdict: "live".to_owned(),
-                outcome_kind: Some("kill_noop".to_owned()),
-                outcome_reason: None,
-                evidence: serde_json::json!({
-                    "reason": "no_active_session",
-                    "kill_source": "execution_kill_task",
-                }),
-            };
-            let _ = liveness_repo.persist_evidence(&snapshot).await;
+            // No live work to free — try to find any session for the task
+            // to satisfy the liveness_evidence FK constraint on session_id.
+            let any_session = session_repo
+                .list_for_task(&p.task_id)
+                .await
+                .ok()
+                .and_then(|sessions| sessions.into_iter().next());
+            if let Some(session) = any_session.as_ref() {
+                let snapshot = LivenessEvidenceSnapshot {
+                    session_id: session.id.clone(),
+                    task_id: Some(p.task_id.clone()),
+                    task_run_id: session.task_run_id.clone(),
+                    verdict: "live".to_owned(),
+                    outcome_kind: Some("kill_noop".to_owned()),
+                    outcome_reason: None,
+                    evidence: serde_json::json!({
+                        "reason": "no_active_session",
+                        "kill_source": "execution_kill_task",
+                    }),
+                };
+                let _ = liveness_repo.persist_evidence(&snapshot).await;
+            }
             return Json(ExecutionKillTaskResponse {
                 ok: false,
                 task_id: Some(p.task_id),
@@ -359,31 +379,12 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)] // test helper methods available for future tests
     impl RecordingSlotPool {
-        fn killed(&self) -> Vec<String> {
-            self.killed.lock().expect("recording pool mutex").clone()
-        }
-
         fn terminated(&self) -> Vec<String> {
             self.terminated
                 .lock()
                 .expect("recording pool mutex")
                 .clone()
-        }
-
-        fn confirmations(&self) -> Vec<String> {
-            self.confirmations
-                .lock()
-                .expect("recording pool mutex")
-                .clone()
-        }
-
-        fn with_terminate_error(message: &str) -> Self {
-            Self {
-                terminate_result: Mutex::new(Err(message.to_string())),
-                ..Self::default()
-            }
         }
 
         fn with_has_session_result(result: Result<bool, String>) -> Self {
@@ -697,6 +698,23 @@ mod tests {
             .await
             .expect("create task");
 
+        // Create a (now-terminal) session linked to the task so evidence can
+        // reference a valid session_id and satisfy the FK constraint.
+        let session_repo = djinn_db::SessionRepository::new(db.clone(), events.clone());
+        let session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+
         let pool = Arc::new(RecordingSlotPool::default());
         let state = McpState::new(
             db.clone(),
@@ -727,12 +745,10 @@ mod tests {
         // Terminate should NOT have been called.
         assert_eq!(pool.terminated(), Vec::<String>::new());
 
-        // Verify kill_noop evidence was persisted.
+        // Verify kill_noop evidence was persisted on the session.
         let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
-        // No active session, so evidence was persisted with an empty session_id.
-        // Check the liveness_evidence table directly.
         let count = liveness_repo
-            .count_evidence_for_session("", Some("kill_noop"))
+            .count_evidence_for_session(&session.id, Some("kill_noop"))
             .await
             .expect("count evidence");
         assert!(
