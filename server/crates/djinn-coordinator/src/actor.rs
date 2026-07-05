@@ -234,6 +234,14 @@ pub(super) struct CoordinatorActor {
     /// Planner intervention instead of blindly redispatching a third time.
     /// Reset when the task's status advances or it leaves execution.
     pub(super) stall_cancel_streak: HashMap<String, StallCancelStreak>,
+    /// Restart-safe-to-lose: per-session slow-extension count. When the
+    /// liveness classifier produces a `Slow` verdict for a stalled session,
+    /// the coordinator extends the claim instead of killing. This counter
+    /// tracks how many times each session has been extended; after
+    /// `SlowExtensionConfig::max_extensions` is reached, the session falls
+    /// through to the kill path. Pruned alongside `stall_killed` when the
+    /// session leaves `list_active()`.
+    pub(super) stall_extension_count: HashMap<String, u32>,
     /// Restart-safe-to-lose: consecutive provider-error FAILED sessions per TASK
     /// id with no durable task-status progress between them. A task whose
     /// session dies on a terminal provider error (e.g. a poisoned transcript
@@ -463,6 +471,7 @@ impl CoordinatorActor {
             stall_killed: HashSet::new(),
             stall_progress_watermark: HashMap::new(),
             stall_cancel_streak: HashMap::new(),
+            stall_extension_count: HashMap::new(),
             provider_failure_streak: HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

@@ -141,6 +141,7 @@ pub(crate) fn build_refinement_actor(
         stall_killed: HashSet::new(),
         stall_progress_watermark: HashMap::new(),
         stall_cancel_streak: HashMap::new(),
+        stall_extension_count: HashMap::new(),
         provider_failure_streak: HashMap::new(),
         last_idle_consolidation: None,
         idle_consolidation_cancel: None,
