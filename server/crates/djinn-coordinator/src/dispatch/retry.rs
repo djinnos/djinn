@@ -923,9 +923,9 @@ impl CoordinatorActor {
                     tracing::info!(
                         task_id = %task.short_id,
                         hold_cycle = cycle,
-                        "CoordinatorActor: second-strike — current hold cycle already has an unconsumed arbiter; holding"
+                        "CoordinatorActor: second-strike — current hold cycle already has an unconsumed arbiter; ensuring Lead arbiter routing"
                     );
-                    return true;
+                    cycle
                 }
                 Ok((cycle, None)) => cycle,
                 Err(e) => {
@@ -969,20 +969,18 @@ impl CoordinatorActor {
                     .ok()
             };
 
-            // Resolve mirror_head_sha from the latest task attempt (pending
-            // or submitted). The Task model does not carry this field; the
-            // CI snapshot / task attempt does.
+            // Resolve mirror_head_sha from the latest task attempt carrying
+            // one. The Task model does not carry this field; the CI snapshot /
+            // task attempt ledger does, and by the park rung the relevant
+            // attempt may already be terminal.
             let attempt_repo = TaskAttemptRepository::new(self.db.clone());
-            let mirror_head_sha = match attempt_repo
-                .latest_pending_or_submitted(&task.id, None)
-                .await
-            {
-                Ok(attempt) => attempt.and_then(|a| a.mirror_head_sha),
+            let mirror_head_sha = match attempt_repo.list_for_task(&task.id).await {
+                Ok(attempts) => attempts.into_iter().find_map(|a| a.mirror_head_sha),
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task.short_id,
                         error = %e,
-                        "CoordinatorActor: failed to read latest task attempt for mirror_head_sha; proceeding with None"
+                        "CoordinatorActor: failed to read task attempts for mirror_head_sha; proceeding with None"
                     );
                     None
                 }
@@ -1054,18 +1052,23 @@ impl CoordinatorActor {
                             "CoordinatorActor: failed to interrupt running sessions while dispatching Lead arbiter"
                         );
                     }
-                    // Transition to needs_lead_intervention if not already in a
-                    // Lead status.  Fail closed: if the transition cannot be
-                    // applied, route to the human-review hold path rather than
-                    // leaving the task in its original status.
-                    if task.status != "needs_lead_intervention"
-                        && task.status != "in_lead_intervention"
-                    {
+                    // The arbiter entry contract is explicit: the source task
+                    // must be in `needs_lead_intervention` after this path. If
+                    // it is already actively running a Lead intervention, move
+                    // it back to the queued Lead status; otherwise use the
+                    // widened Escalate transition. Fail closed if either
+                    // transition cannot be applied.
+                    if task.status != "needs_lead_intervention" {
                         let task_repo = self.task_repo();
+                        let transition_action = if task.status == "in_lead_intervention" {
+                            TransitionAction::LeadInterventionRelease
+                        } else {
+                            TransitionAction::Escalate
+                        };
                         if let Err(e) = task_repo
                             .transition(
                                 &task.id,
-                                TransitionAction::Escalate,
+                                transition_action,
                                 "system",
                                 "coordinator",
                                 Some(&reason),

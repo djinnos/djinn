@@ -5,7 +5,12 @@ use djinn_core::models::{ReopenClass, TransitionAction};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
-use djinn_db::{ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
+use djinn_db::repositories::task_attempt::{
+    CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+};
+use djinn_db::{
+    ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository,
+};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -1023,6 +1028,36 @@ async fn loop_guard_second_strike_parks_task() {
     // attempted-remediation park gate reaches its non-attempt bound and parks.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
+    // Seed an in-flight attempt carrying mirror/GitHub heads so the arbiter
+    // dispatch ledger and activity payload prove they preserve available CI
+    // snapshot state instead of hard-coding nulls.
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "arbiter-ledger-heads",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &attempt.id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: Some("mirror-head-from-attempt"),
+            github_head_sha: Some("github-head-from-attempt"),
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
     let handled = actor
         .route_loop_guard_planner_intervention(
             &task.id,
@@ -1049,6 +1084,11 @@ async fn loop_guard_second_strike_parks_task() {
     );
     let arb = existing.unwrap();
     assert_eq!(arb.state, "unconsumed");
+    assert_eq!(
+        arb.mirror_head_sha.as_deref(),
+        Some("mirror-head-from-attempt"),
+        "arbiter dispatch ledger must persist the mirror head SHA from task attempt state"
+    );
 
     // The arbiter_dispatched activity was logged.
     let activity = repo
@@ -1062,6 +1102,14 @@ async fn loop_guard_second_strike_parks_task() {
     assert!(
         !activity.is_empty(),
         "arbiter_dispatched activity must be logged"
+    );
+    let activity_payload: serde_json::Value = serde_json::from_str(&activity[0].payload).unwrap();
+    assert_eq!(
+        activity_payload
+            .get("mirror_head_sha")
+            .and_then(|v| v.as_str()),
+        Some("mirror-head-from-attempt"),
+        "arbiter_dispatched payload must include mirror_head_sha when available"
     );
 
     // No human-review blockers — the task is held via status, not via a
