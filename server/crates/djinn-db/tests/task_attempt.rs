@@ -13,8 +13,6 @@ pub(crate) use djinn_db::{
     GuardDeferTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
     TerminalTaskAttemptParams,
 };
-pub(crate) use uuid::Uuid;
-
 #[path = "task_attempt/create_and_lifecycle.rs"]
 mod create_and_lifecycle;
 #[path = "task_attempt/lookups_and_bounds.rs"]

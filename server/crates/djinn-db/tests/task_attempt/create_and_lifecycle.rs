@@ -545,7 +545,7 @@ async fn bounded_fields_rejected_when_too_large() {
     let (_pid, task_id) = create_task(&db).await;
     let repo = TaskAttemptRepository::new(db);
 
-    let id = Uuid::new_v4().to_string();
+    let id = new_attempt_id();
     let big_summary = "x".repeat(TASK_ATTEMPT_SUMMARY_MAX_LEN + 1);
     let attempt = repo
         .create_or_get_pending(CreateTaskAttemptParams {
