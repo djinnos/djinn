@@ -98,7 +98,7 @@ async fn edit_twice_without_reread_forces_reread() {
         .expect("obj")
         .clone(),
     );
-    call_edit(&state, &edit1, worktree.path(), None)
+    call_edit(&state, &edit1, worktree.path(), None, None, None)
         .await
         .expect("first edit should succeed");
 
@@ -113,7 +113,7 @@ async fn edit_twice_without_reread_forces_reread() {
         .expect("obj")
         .clone(),
     );
-    let err = call_edit(&state, &edit2, worktree.path(), None)
+    let err = call_edit(&state, &edit2, worktree.path(), None, None, None)
         .await
         .expect_err("second edit without re-read must be rejected");
     assert!(
@@ -125,7 +125,7 @@ async fn edit_twice_without_reread_forces_reread() {
     call_read(&state, &read_args, worktree.path())
         .await
         .expect("re-read");
-    call_edit(&state, &edit2, worktree.path(), None)
+    call_edit(&state, &edit2, worktree.path(), None, None, None)
         .await
         .expect("edit after re-read should succeed");
 }
@@ -164,7 +164,7 @@ async fn edit_success_includes_edit_match_metadata() {
         .expect("obj")
         .clone(),
     );
-    let response = call_edit(&state, &edit_args, worktree.path(), None)
+    let response = call_edit(&state, &edit_args, worktree.path(), None, None, None)
         .await
         .expect("edit should succeed");
 
@@ -241,7 +241,7 @@ async fn edit_fuzzy_match_includes_strategy_and_note() {
         .expect("obj")
         .clone(),
     );
-    let response = call_edit(&state, &edit_args, worktree.path(), None)
+    let response = call_edit(&state, &edit_args, worktree.path(), None, None, None)
         .await
         .expect("fuzzy edit should succeed");
 
@@ -294,7 +294,7 @@ async fn edit_ambiguous_does_not_modify_file() {
         .expect("obj")
         .clone(),
     );
-    let err = call_edit(&state, &edit_args, worktree.path(), None)
+    let err = call_edit(&state, &edit_args, worktree.path(), None, None, None)
         .await
         .expect_err("ambiguous edit must return error");
 
@@ -350,7 +350,7 @@ async fn edit_no_match_does_not_modify_file() {
         .expect("obj")
         .clone(),
     );
-    let err = call_edit(&state, &edit_args, worktree.path(), None)
+    let err = call_edit(&state, &edit_args, worktree.path(), None, None, None)
         .await
         .expect_err("no-match edit must return error");
 
@@ -410,7 +410,7 @@ async fn edit_success_preserves_read_before_edit_freshness() {
         .expect("obj")
         .clone(),
     );
-    let resp = call_edit(&state, &edit1, worktree.path(), None)
+    let resp = call_edit(&state, &edit1, worktree.path(), None, None, None)
         .await
         .expect("first edit");
     assert_eq!(resp["ok"], serde_json::json!(true));
@@ -427,11 +427,295 @@ async fn edit_success_preserves_read_before_edit_freshness() {
         .expect("obj")
         .clone(),
     );
-    let err = call_edit(&state, &edit2, worktree.path(), None)
+    let err = call_edit(&state, &edit2, worktree.path(), None, None, None)
         .await
         .expect_err("second edit without re-read must be rejected");
     assert!(
         err.contains("modified since last read") || err.contains("read"),
         "expected re-read guard, got: {err}"
+    );
+}
+
+// ── Telemetry event capture helpers ───────────────────────────────────────
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{Layer, registry::LookupSpan};
+
+#[derive(Clone, Debug, Default)]
+struct CapturedEvent {
+    fields: HashMap<String, String>,
+}
+
+#[derive(Default, Clone)]
+struct EventCaptureLayer {
+    events: Arc<StdMutex<Vec<CapturedEvent>>>,
+}
+
+impl EventCaptureLayer {
+    fn events(&self) -> Vec<CapturedEvent> {
+        self.events.lock().expect("event capture mutex").clone()
+    }
+}
+
+#[derive(Default)]
+struct FieldVisitor {
+    fields: HashMap<String, String>,
+}
+
+impl Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(
+            field.name().to_owned(),
+            format!("{value:?}").trim_matches('"').to_owned(),
+        );
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_owned());
+    }
+}
+
+impl<S> Layer<S> for EventCaptureLayer
+where
+    S: tracing::Subscriber,
+    S: for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = FieldVisitor::default();
+        event.record(&mut visitor);
+        self.events
+            .lock()
+            .expect("event capture mutex")
+            .push(CapturedEvent {
+                fields: visitor.fields,
+            });
+    }
+}
+
+/// Install a temporary global tracing subscriber that captures events,
+/// run the async closure, then return captured events.
+///
+/// Uses a `OnceLock`-guarded mutex to serialize access across concurrent
+/// tests (only one global subscriber can be active at a time).
+async fn with_captured_events<F, Fut>(f: F) -> Vec<CapturedEvent>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    let _guard = LOCK
+        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+        .lock_owned()
+        .await;
+
+    let layer = EventCaptureLayer::default();
+    let subscriber = tracing_subscriber::registry().with(layer.clone());
+
+    // Use `set_global` only if no global subscriber is set; otherwise
+    // just run without capturing (best-effort).
+    let _guard = tracing::subscriber::set_default(subscriber);
+    f().await;
+    layer.events()
+}
+
+/// Success outcome emits `edit_match_outcome` and `edit_match_strategy`
+/// events with all expected fields populated.
+#[tokio::test]
+async fn edit_success_emits_telemetry_events() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-telem-success-");
+    let file = worktree.path().join("svc.rs");
+    tokio::fs::write(&file, "let a = services;\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "svc.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "svc.rs",
+            "old_text": "services",
+            "new_text": "collections_query_registration",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let events = with_captured_events(|| async {
+        let _ = call_edit(
+            &state,
+            &edit_args,
+            worktree.path(),
+            None,
+            Some("task-abc"),
+            Some("worker"),
+        )
+        .await;
+    })
+    .await;
+
+    // Filter to our edit_match events.
+    let outcome_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_outcome"))
+        .collect();
+    assert_eq!(
+        outcome_events.len(),
+        1,
+        "expected exactly one edit_match_outcome event, got {}",
+        outcome_events.len()
+    );
+
+    let strategy_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_strategy"))
+        .collect();
+    assert_eq!(
+        strategy_events.len(),
+        1,
+        "expected exactly one edit_match_strategy event for success, got {}",
+        strategy_events.len()
+    );
+
+    // Verify fields on the outcome event.
+    let evt = &outcome_events[0];
+    assert_eq!(evt.fields["task_id"], "task-abc");
+    assert_eq!(evt.fields["agent_role"], "worker");
+    assert_eq!(evt.fields["tool_name"], "edit");
+    assert_eq!(evt.fields["path_ext"], "rs");
+    assert_eq!(evt.fields["outcome"], "success");
+    assert_eq!(evt.fields["strategy"], "exact");
+    assert_eq!(evt.fields["candidate_count"], "1");
+    assert_eq!(evt.fields["reindented"], "false");
+    // old_bytes / new_bytes should be numeric
+    assert!(
+        evt.fields.contains_key("old_bytes"),
+        "must have old_bytes field"
+    );
+    assert!(
+        evt.fields.contains_key("new_bytes"),
+        "must have new_bytes field"
+    );
+    assert!(
+        evt.fields.contains_key("matched_bytes"),
+        "must have matched_bytes field"
+    );
+
+    // The strategy event should have the same fields.
+    let sevt = &strategy_events[0];
+    assert_eq!(sevt.fields["event_name"], "edit_match_strategy");
+    assert_eq!(sevt.fields["strategy"], "exact");
+    assert_eq!(sevt.fields["outcome"], "success");
+}
+
+/// No-match outcome emits `edit_match_outcome` but NOT `edit_match_strategy`.
+#[tokio::test]
+async fn edit_no_match_emits_telemetry_outcome_only() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-telem-nomatch-");
+    let file = worktree.path().join("svc.rs");
+    tokio::fs::write(&file, "let a = 1;\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "svc.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "svc.rs",
+            "old_text": "this text does not exist anywhere",
+            "new_text": "replacement",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let events = with_captured_events(|| async {
+        let _ = call_edit(
+            &state,
+            &edit_args,
+            worktree.path(),
+            None,
+            Some("task-xyz"),
+            Some("reviewer"),
+        )
+        .await;
+    })
+    .await;
+
+    let outcome_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_outcome"))
+        .collect();
+    assert_eq!(
+        outcome_events.len(),
+        1,
+        "expected exactly one edit_match_outcome event for no-match, got {}",
+        outcome_events.len()
+    );
+
+    // No success → no edit_match_strategy event.
+    let strategy_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_strategy"))
+        .collect();
+    assert!(
+        strategy_events.is_empty(),
+        "non-success must NOT emit edit_match_strategy"
+    );
+
+    let evt = &outcome_events[0];
+    assert_eq!(evt.fields["task_id"], "task-xyz");
+    assert_eq!(evt.fields["agent_role"], "reviewer");
+    assert_eq!(evt.fields["tool_name"], "edit");
+    assert_eq!(evt.fields["path_ext"], "rs");
+    assert_eq!(evt.fields["outcome"], "no_match");
+    assert!(
+        evt.fields.contains_key("score"),
+        "no_match must have score (nearest_miss)"
     );
 }
