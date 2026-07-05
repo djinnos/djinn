@@ -109,6 +109,24 @@ pub(crate) async fn settle_no_progress_submission(task_id: &str, ctx: &SlotConte
             "teardown: failed to log no_progress_submission activity"
         );
     }
+    // Attempt lifecycle: advance the matching pending attempt to `submitted`
+    // for the no-progress settlement. Best-effort.
+    crate::attempt_lifecycle::advance_to_submitted(
+        ctx,
+        crate::attempt_lifecycle::SubmitAdvancementParams {
+            task_id,
+            role: "worker",
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some(
+                "no_progress_submission: second consecutive identical rejected-fingerprint submit_work",
+            ),
+            summary_json: None,
+        },
+    )
+    .await;
     // Increment the task-level no_progress_streak by recording a new rejected
     // integrity entry with the same fingerprint. This uses the latest rejected
     // fingerprint already on file.

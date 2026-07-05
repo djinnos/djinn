@@ -133,6 +133,16 @@ pub struct EpicBlockersParams {
 #[derive(Deserialize)]
 pub struct ProposalShowParams {
     pub id: String,
+    /// Select which top-level sections to include in the response.
+    /// Accepted values: `proposal`, `targets`, `feedback`, `signoffs`,
+    /// `revisions`, `debate`, `epics`, `gate_status`.
+    /// Default: all fields selected. Invalid values return a validation error.
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+    /// Controls revision body verbosity when `revisions` is selected.
+    /// Accepted values: `excerpt` (default), `full`, `omit`.
+    /// Ignored when `fields` omits `revisions`.
+    pub revision_bodies: Option<String>,
 }
 
 #[derive(Deserialize)]
