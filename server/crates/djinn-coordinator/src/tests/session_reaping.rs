@@ -2966,14 +2966,18 @@ async fn slow_extension_budget_exhaustion_falls_through_to_kill() {
     );
 }
 
-/// AC 2: Hard runtime cap — when the liveness classifier's
-/// hard_runtime_deadline_exceeded is true, the classifier returns Dead with
-/// Timeout outcome. In the zombie reap path, this means the session is
-/// reclaimed even when the DB state would otherwise be Live.
+/// AC 3: Hard runtime cap — when the liveness classifier's
+/// `hard_runtime_deadline_exceeded` is true, the classifier returns Dead with
+/// Timeout outcome (rule #2). In the zombie reap path, the reap action
+/// records `dead_reclaimed` on the denormalized session row, but the
+/// classifier-level Timeout outcome persists in the append-only
+/// `liveness_evidence` table.
 ///
 /// This test verifies the integrated path: an old session with a task_run
-/// whose started_at exceeds the zombie hard cap gets classified as Dead with
-/// hard_runtime_exceeded, and the zombie reaper reclaims it.
+/// whose started_at exceeds the zombie hard cap is classified as Dead
+/// (verifying hard-runtime precedence over Live/Slow), the zombie reaper
+/// reclaims it, and the classifier-level Timeout outcome is preserved in the
+/// append-only evidence chain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -3042,7 +3046,9 @@ async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
         "hard-runtime-exceeded session must be finalized"
     );
 
-    // Verify timeout evidence.
+    // The reap action records `dead_reclaimed` on the denormalized session
+    // row. Hard-runtime precedence is verified by the verdict being `dead`
+    // regardless of the underlying activity/heartbeat signals.
     let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
     let (verdict, outcome_kind) = liveness_repo
         .get_session_liveness_fields(&session.id)
@@ -3055,8 +3061,20 @@ async fn hard_runtime_cap_zombie_reap_forces_dead_timeout() {
     );
     assert_eq!(
         outcome_kind.as_deref(),
-        Some("timeout"),
-        "hard-runtime-exceeded session must have timeout outcome"
+        Some("dead_reclaimed"),
+        "zombie reap records dead_reclaimed for the reclaim action"
+    );
+
+    // The classifier's Timeout outcome (rule #2) is observable in the
+    // append-only liveness_evidence rows written by the classifier pass that
+    // runs inside reap_zombie_sessions.
+    let timeout_evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("timeout"))
+        .await
+        .unwrap();
+    assert!(
+        timeout_evidence_count >= 1,
+        "classifier pass must have persisted a `timeout` evidence row (AC 3: hard-runtime precedence)"
     );
 }
 

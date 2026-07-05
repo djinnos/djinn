@@ -10,8 +10,24 @@ use tracing::Instrument as _;
 
 use super::liveness::{
     ActivitySignal, ClassificationResult, DbSessionStatus, DbTaskStatus, LivenessEvidence,
-    LivenessOutcome, PodPhase, Verdict,
+    LivenessOutcome, LivenessReason, PodPhase, Verdict,
 };
+
+/// Map a classifier [`LivenessReason`] into the persisted
+/// `outcome_reason` string, dropping the `None` variant to `NULL`.
+///
+/// Migration 95's CHECK constraint permits only the four concrete reason
+/// strings (`clean_exit_nonterminal`, `nonzero_exit_nonterminal`,
+/// `hard_runtime_exceeded`, `slow_extension_budget_exhausted`) — the
+/// `LivenessReason::None` enum variant is reserved for cases with no
+/// specific reason and must be stored as SQL NULL. Attempting to persist
+/// the literal string `"none"` violates the CHECK constraint.
+fn liveness_reason_for_persistence(reason: Option<LivenessReason>) -> Option<String> {
+    reason.and_then(|r| match r {
+        LivenessReason::None => None,
+        other => Some(other.as_str().to_owned()),
+    })
+}
 
 /// A `running`, zero-token session older than this has slipped past the
 /// 180s fast-path stall breaker — its in-memory tracking has drifted. Reap it
@@ -2210,7 +2226,7 @@ impl CoordinatorActor {
                 task_run_id: db_state.latest_task_run_id.clone(),
                 verdict: result.verdict.as_str().to_owned(),
                 outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
-                outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+                outcome_reason: liveness_reason_for_persistence(result.reason),
                 evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
             };
             match liveness_repo.persist_evidence(&snapshot).await {
@@ -2352,7 +2368,7 @@ impl CoordinatorActor {
             task_run_id: task_run_id.map(str::to_owned),
             verdict: result.verdict.as_str().to_owned(),
             outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
-            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            outcome_reason: liveness_reason_for_persistence(result.reason),
             evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
         };
         match liveness_repo.persist_evidence(&snapshot).await {

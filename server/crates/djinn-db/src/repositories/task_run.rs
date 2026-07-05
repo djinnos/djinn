@@ -275,10 +275,13 @@ impl TaskRunRepository {
     /// simulate a task_run whose hard runtime deadline has been exceeded.
     pub async fn backdate_started_at(&self, id: &str, interval: &str) -> Result<()> {
         self.db.ensure_initialized().await?;
-        sqlx::query(&format!(
-            "UPDATE task_runs SET started_at = datetime('now', '-{}') WHERE id = $1",
-            interval
-        ))
+        sqlx::query(
+            "UPDATE task_runs SET started_at = to_char(
+                 now() AT TIME ZONE 'utc' - $1::interval,
+                 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
+             WHERE id = $2",
+        )
+        .bind(interval)
         .bind(id)
         .execute(self.db.pool())
         .await?;
