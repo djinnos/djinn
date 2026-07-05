@@ -8,6 +8,7 @@
 //! [`crate::supervisor_impl::stage::execute_stage`] composes for each role in
 //! a task-run.
 
+pub(crate) mod attempt_context;
 pub(crate) mod mcp_resolve;
 pub(crate) mod model_resolution;
 pub(crate) mod prompt_context;

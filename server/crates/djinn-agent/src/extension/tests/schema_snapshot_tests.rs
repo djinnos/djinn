@@ -328,3 +328,18 @@ fn worker_cannot_use_lead_only_tool() {
         "task_transition"
     ));
 }
+
+// ── insta schema snapshot tests ──────────────────────────────────────
+// These keep the `djinn-agent` extension schema snapshots in lockstep with
+// the `djinn-mcp-extension` schema tests.  Both surfaces expose the same
+// tool_edit() description and `path`/`old_text`/`new_text` input contract.
+
+#[test]
+fn worker_tool_schemas() {
+    insta::assert_json_snapshot!(tool_schemas_worker());
+}
+
+#[test]
+fn planner_tool_schemas() {
+    insta::assert_json_snapshot!(tool_schemas_planner());
+}

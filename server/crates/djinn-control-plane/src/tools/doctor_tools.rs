@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Admin-facing doctor MCP tools (`doctor_run`, `doctor_fix`).
 //!
 //! These are the production tool methods that expose the
@@ -294,6 +295,7 @@ fn persisted_to_finding(row: &djinn_db::DoctorFinding) -> Result<Finding, String
     let severity = match row.severity.as_str() {
         "info" => FindingSeverity::Info,
         "warn" => FindingSeverity::Warn,
+        "error" => FindingSeverity::Error,
         "critical" => FindingSeverity::Critical,
         other => {
             return Err(format!(

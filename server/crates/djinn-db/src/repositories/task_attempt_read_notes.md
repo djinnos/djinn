@@ -1,0 +1,1 @@
+Scratch notes for moving repository tests. The two tests to move are at lines 1308-1422 of `task_attempt.rs`, plus the private helpers `create_closed_task_at` and `add_blocker_edge` at lines 1282-1306. These will live in `task_attempt_tests.rs` and use the public `test_support` helpers instead (or keep local private helpers if needed).
