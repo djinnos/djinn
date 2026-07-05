@@ -2573,6 +2573,11 @@ mod tests {
 
     /// The wind-down checkpoint commits an uncommitted edit and pushes it to
     /// the mirror — the durability seam that lets work survive a Pod kill.
+    ///
+    /// This helper is intentionally test-local: it creates temporary git
+    /// repositories so the checkpoint durability tests can exercise the real
+    /// `checkpoint_workspace` path without relying on a production mirror.
+    /// It is not used by production worker or checkpoint logic.
     #[tokio::test]
     async fn checkpoint_commits_and_pushes_uncommitted_work() {
         let origin = tempfile::TempDir::new().expect("origin");

@@ -27,18 +27,7 @@ pub(super) async fn resolve_project(
 /// Run `git fetch --all --prune` inside `path`. Best-effort refresh for an
 /// existing server-managed clone.
 async fn git_fetch_in(path: &str) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["fetch", "--all", "--prune"]).current_dir(path);
-    let output = crate::process::output(cmd)
-        .await
-        .map_err(|e| format!("git fetch failed: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git fetch failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
+    crate::tools::git_ops::git_fetch_in(path).await
 }
 
 const DJINN_GITIGNORE: &str = "worktrees/\n";
@@ -325,23 +314,11 @@ impl DjinnMcpServer {
         );
 
         if !std::path::Path::new(&clone_path).join(".git").exists() {
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(["clone", "--filter=blob:none", &remote_url, &clone_path]);
-            let output = match crate::process::output(cmd).await {
-                Ok(o) => o,
-                Err(e) => {
-                    return Json(ProjectAddResponse {
-                        status: format!("error: git clone failed: {e}"),
-                        project: ProjectInfo::unknown(display_name),
-                    });
-                }
-            };
-            if !output.status.success() {
+            if let Err(e) =
+                crate::tools::git_ops::git_clone_blob_none(&remote_url, &clone_path).await
+            {
                 return Json(ProjectAddResponse {
-                    status: format!(
-                        "error: git clone failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
+                    status: format!("error: {e}"),
                     project: ProjectInfo::unknown(display_name),
                 });
             }
@@ -362,9 +339,8 @@ impl DjinnMcpServer {
                 ("user.name", "djinn-bot[bot]"),
                 ("user.email", email.as_str()),
             ] {
-                let mut cmd = std::process::Command::new("git");
-                cmd.args(["-C", &clone_path, "config", key, value]);
-                if let Err(e) = crate::process::output(cmd).await {
+                if let Err(e) = crate::tools::git_ops::git_config_set(&clone_path, key, value).await
+                {
                     tracing::warn!(
                         path = %clone_path, key, error = %e,
                         "project_add_from_github: failed to set git config"
@@ -457,75 +433,28 @@ impl DjinnMcpServer {
             });
         }
 
-        // 1. Current branch via `git rev-parse --abbrev-ref HEAD`.
-        let mut head_cmd = std::process::Command::new("git");
-        head_cmd.args(["-C", &path, "rev-parse", "--abbrev-ref", "HEAD"]);
-        let head_fut = crate::process::output(head_cmd);
-        let head_out =
-            match tokio::time::timeout(std::time::Duration::from_secs(30), head_fut).await {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => {
-                    return Json(ProjectBranchesResponse {
-                        status: format!("error: git rev-parse failed: {e}"),
-                        branches: vec![],
-                        current: None,
-                    });
-                }
-                Err(_) => {
-                    return Json(ProjectBranchesResponse {
-                        status: "error: git rev-parse timed out after 30s".into(),
-                        branches: vec![],
-                        current: None,
-                    });
-                }
-            };
-        let current = if head_out.status.success() {
-            let raw = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
-            // Detached HEAD surfaces as "HEAD" — treat as no current branch.
-            if raw.is_empty() || raw == "HEAD" {
-                None
-            } else {
-                Some(raw)
+        let current = match crate::tools::git_ops::git_current_branch(&path).await {
+            Ok(branch) => branch,
+            Err(e) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git rev-parse failed: {e}"),
+                    branches: vec![],
+                    current: None,
+                });
             }
-        } else {
-            None
         };
 
-        // 2. Local branch list.
-        let mut list_cmd = std::process::Command::new("git");
-        list_cmd.args(["-C", &path, "branch", "--list", "--format=%(refname:short)"]);
-        let list_fut = crate::process::output(list_cmd);
-        let list_out =
-            match tokio::time::timeout(std::time::Duration::from_secs(30), list_fut).await {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => {
-                    return Json(ProjectBranchesResponse {
-                        status: format!("error: git branch failed: {e}"),
-                        branches: vec![],
-                        current,
-                    });
-                }
-                Err(_) => {
-                    return Json(ProjectBranchesResponse {
-                        status: "error: git branch timed out after 30s".into(),
-                        branches: vec![],
-                        current,
-                    });
-                }
-            };
-        if !list_out.status.success() {
-            return Json(ProjectBranchesResponse {
-                status: format!(
-                    "error: git branch failed: {}",
-                    String::from_utf8_lossy(&list_out.stderr).trim()
-                ),
-                branches: vec![],
-                current,
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&list_out.stdout);
-        let parsed = parse_branch_list(&stdout);
+        let list_stdout = match crate::tools::git_ops::git_local_branches(&path).await {
+            Ok(out) => out,
+            Err(e) => {
+                return Json(ProjectBranchesResponse {
+                    status: format!("error: git branch failed: {e}"),
+                    branches: vec![],
+                    current,
+                });
+            }
+        };
+        let parsed = parse_branch_list(&list_stdout);
         let branches = order_branches(parsed, current.as_deref());
 
         Json(ProjectBranchesResponse {

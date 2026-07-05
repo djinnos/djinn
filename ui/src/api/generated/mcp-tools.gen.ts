@@ -7024,6 +7024,12 @@ export namespace ProposalListInputSchema {
    * Filter by author user id.
    */
   author?: string
+  /**
+   * When `true`, include the full `body` string on each list row.
+   * Default `false` — rows omit the full body and carry only
+   * `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
+   */
+  include_bodies?: boolean
   limit?: number
   offset?: number
   /**
@@ -7052,22 +7058,43 @@ export namespace ProposalListOutputSchema {
   has_more?: boolean
   limit?: number
   offset?: number
-  proposals?: ProposalModel[]
+  proposals?: ProposalListRow[]
   total_count?: number
   [k: string]: any
   }
-  export interface ProposalModel {
+  /**
+   * List-specific proposal row model.
+   * 
+   * By default (`include_bodies = false`) the full `body` field is omitted
+   * from serialization; callers receive only `body_excerpt` and
+   * `body_truncated`.  When `include_bodies = true`, the full `body` is
+   * included alongside the excerpt metadata so callers that need the
+   * complete text can still get it in a single list call.
+   */
+  export interface ProposalListRow {
   /**
    * Structured acceptance criteria (`{criterion, met}` or plain string),
    * same shape as tasks. `met` means "agreed during scoping".
    */
   acceptance_criteria: AcceptanceCriterionItem[]
   author_user_id?: string
-  body: string
+  /**
+   * Full proposal body — **only serialized when `include_bodies = true`**.
+   */
+  body?: string
+  /**
+   * First 512 Unicode scalar values of the proposal body.  Always
+   * present regardless of `include_bodies`.
+   */
+  body_excerpt: string
   /**
    * Body encoding: `markdown` (legacy default) or `mdx` (block-aware).
    */
   body_format: string
+  /**
+   * `true` when the original body exceeded the 512-scalar cap.
+   */
+  body_truncated: boolean
   /**
    * Build owner once graduated.
    */
@@ -7089,9 +7116,7 @@ export namespace ProposalListOutputSchema {
   linked_spike_task_id?: string
   /**
    * Compact tribunal/readiness summary — populated only on `proposal_list`
-   * (batched across the page) for non-terminal proposals, so list rows can
-   * render tribunal/gate chips without opening each proposal. `None` on show
-   * paths and for terminal proposals (done/rejected/archived/superseded).
+   * (batched across the page) for non-terminal proposals.
    */
   list_summary?: (ProposalListSummary | null)
   /**
@@ -7112,7 +7137,7 @@ export namespace ProposalListOutputSchema {
   title: string
   /**
    * Count of unresolved feedback entries — drives the per-row badge in the
-   * proposals list. Only populated on `proposal_list`; `0` on show paths.
+   * proposals list.
    */
   unresolved_feedback_count?: number
   updated_at: string

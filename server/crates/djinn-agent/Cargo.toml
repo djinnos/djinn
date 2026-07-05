@@ -58,6 +58,7 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 globset = "0.4"
+unicode-normalization = "0.1"
 ring = "0.17"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v7"] }

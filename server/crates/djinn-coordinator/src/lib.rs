@@ -106,8 +106,8 @@ pub use worker_lifecycle::{
     NoProgressCommandState, NoProgressControlledExitDecision, NoProgressEnforcementMode,
     NoProgressThresholdConfig, PreservationFailurePolicy, PreservationGateResult,
     PreservationOutcome, ResumeLifecycleConfig, ResumeLifecycleMetadata, ResumeSelectionReason,
-    WorkerLifecycleConfig, WorkerLifecycleMetadata, decide_controlled_exit_preservation_action,
-    evaluate_no_progress_controlled_exit,
+    SlowExtensionConfig, WorkerLifecycleConfig, WorkerLifecycleMetadata,
+    decide_controlled_exit_preservation_action, evaluate_no_progress_controlled_exit,
 };
 
 // Re-export orchestration-types debug DTOs so djinn-agent can re-export from here.

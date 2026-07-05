@@ -10,6 +10,7 @@
 //!   clone per project (`<root>/{project_id}/`) for the chat subsystem.
 //!   Refreshed whenever the mirror fetcher advances the project's refs.
 
+pub mod git_helpers;
 pub mod merge_safety;
 pub mod mirror;
 pub mod workspace;
