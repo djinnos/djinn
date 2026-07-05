@@ -1,14 +1,11 @@
+use crate::Result;
+use crate::database::Database;
+use crate::error::DbError;
 use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
     TaskAttemptPromptSummary,
 };
-#[cfg(test)]
-use uuid::Uuid;
-
-use crate::Result;
-use crate::database::Database;
-use crate::error::DbError;
 
 pub struct TaskAttemptRepository {
     db: Database,
