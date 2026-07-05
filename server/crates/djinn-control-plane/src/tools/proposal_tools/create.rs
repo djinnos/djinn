@@ -41,9 +41,9 @@ use crate::tools::proposal_blocks::{
     parse_mdx_blocks, validate_mdx_blocks, validate_question_form_placement,
 };
 use crate::tools::proposal_ops::{
-    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListSummary,
-    ProposalModel, ProposalShowResponse, ProposalSignoffModel, ProposalSingleResponse,
-    ProposalTargetModel, ProposalTargetsResponse,
+    ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
+    ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
+    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -158,12 +158,12 @@ async fn finish_targets(
 
 #[derive(Clone)]
 pub struct ProposalListResponse {
-    pub proposals: Option<Vec<ProposalModel>>,
+    pub proposals: Option<Vec<ProposalListRow>>,
     pub meta: ListMeta,
 }
 
 impl NamedListResponse for ProposalListResponse {
-    type Item = ProposalModel;
+    type Item = ProposalListRow;
     const FIELD_NAME: &'static str = "proposals";
     const TITLE: &'static str = "ProposalListResponse";
 
@@ -195,7 +195,7 @@ impl schemars::JsonSchema for ProposalListResponse {
         Cow::Borrowed(Self::TITLE)
     }
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        named_list_response_schema::<ProposalModel>(generator, Self::TITLE, Self::FIELD_NAME)
+        named_list_response_schema::<ProposalListRow>(generator, Self::TITLE, Self::FIELD_NAME)
     }
 }
 
@@ -301,6 +301,10 @@ pub struct ProposalListParams {
     pub sort: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// When `true`, include the full `body` string on each list row.
+    /// Default `false` — rows omit the full body and carry only
+    /// `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
+    pub include_bodies: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -741,7 +745,7 @@ impl DjinnMcpServer {
 
     /// List proposals (global) with optional filters and pagination.
     #[tool(
-        description = "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Returns {proposals[], total_count, limit, offset, has_more}."
+        description = "List proposals globally (not scoped to a project) with optional filters: status, author, target_project (UUID or owner/repo slug), text. Offset-based pagination. Rows carry body_excerpt (first 512 chars) and body_truncated by default; pass include_bodies=true for full body strings. Returns {proposals[], total_count, limit, offset, has_more}."
     )]
     pub async fn proposal_list(
         &self,
@@ -807,11 +811,13 @@ impl DjinnMcpServer {
             repo.list_summaries(&summary_ids).await.unwrap_or_default()
         };
 
-        let rows: Vec<ProposalModel> = result
+        let include_bodies = p.include_bodies.unwrap_or(false);
+
+        let rows: Vec<ProposalListRow> = result
             .proposals
             .iter()
             .map(|(p, count)| {
-                let model = ProposalModel::from_with_count(p, *count);
+                let model = ProposalListRow::from_proposal(p, *count, include_bodies);
                 match summaries.get(&p.id) {
                     Some(raw) => model.with_list_summary(build_list_summary(p, raw)),
                     None => model,
