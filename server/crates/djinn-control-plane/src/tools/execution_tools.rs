@@ -359,6 +359,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // test helper methods available for future tests
     impl RecordingSlotPool {
         fn killed(&self) -> Vec<String> {
             self.killed.lock().expect("recording pool mutex").clone()
