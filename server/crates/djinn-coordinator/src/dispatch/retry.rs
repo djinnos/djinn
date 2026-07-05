@@ -1169,9 +1169,7 @@ impl CoordinatorActor {
                                     &reason,
                                     quality_strikes,
                                     None,
-                                    &Self::arbiter_failure_dossier(
-                                        &reason, role, task, &history,
-                                    ),
+                                    &Self::arbiter_failure_dossier(&reason, role, task, &history),
                                 )
                                 .await;
                         }
@@ -1212,10 +1210,8 @@ impl CoordinatorActor {
                         hold_cycle,
                         "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
                     );
-                    let stored_dossier = record
-                        .dossier
-                        .clone()
-                        .or_else(|| record.directive.clone());
+                    let stored_dossier =
+                        record.dossier.clone().or_else(|| record.directive.clone());
                     return self
                         .park_source_human_review_with_dossier(
                             task,
