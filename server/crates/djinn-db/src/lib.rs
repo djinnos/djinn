@@ -125,6 +125,10 @@ pub use repositories::{
         ActivityQuery, BlockerRef, CountQuery, CreateTaskInProjectParams, CreateTaskParams,
         ListQuery, ListResult, ReadyQuery, UpdateTaskParams,
     },
+    task_arbitration::{
+        ArbitrationState, CreateArbitrationParams, TaskArbitrationRecord,
+        TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,
+    },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
         EntityBreakdownRow, GroupDimension, ModelEffectivenessRow, ProjectModelMatrixRow,
