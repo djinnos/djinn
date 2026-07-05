@@ -771,14 +771,14 @@ fn guard_reason_if(condition: bool, reason: &'static str) -> Option<&'static str
 /// `content`, locate the candidate, then report the original byte range of the
 /// inner content so the replacement is applied only to the intended candidate.
 fn try_trimmed_boundary(content: &str, old_text: &str) -> Option<MatchMetadata> {
-    let trimmed_old = trim_boundary_lines(old_text);
+    let (trimmed_old, _, _) = trim_boundary_lines_with_info(old_text);
     if trimmed_old.is_empty() {
         return None;
     }
 
     // Candidate content may have extra leading/trailing whitespace-only
     // boundary lines. Strip them and look for a unique match.
-    let trimmed_content = trim_boundary_lines(content);
+    let (trimmed_content, leading_skip, trailing_skip) = trim_boundary_lines_with_info(content);
     let count = trimmed_content.matches(&trimmed_old as &str).count();
     if count == 0 {
         return None;
@@ -790,9 +790,16 @@ fn try_trimmed_boundary(content: &str, old_text: &str) -> Option<MatchMetadata> 
     let trimmed_start = trimmed_content.find(&trimmed_old)?;
     let trimmed_end = trimmed_start + trimmed_old.len();
 
-    // Map the trimmed positions back to the original content.
-    let (orig_start, orig_end) =
-        map_trimmed_to_original(content, &trimmed_content, trimmed_start, trimmed_end);
+    // Map the trimmed positions back to the original content using the number
+    // of leading/trailing boundary lines that were stripped.
+    let (orig_start, orig_end) = map_trimmed_to_original_with_skip(
+        content,
+        &trimmed_content,
+        trimmed_start,
+        trimmed_end,
+        leading_skip,
+        trailing_skip,
+    );
 
     Some(success_metadata(
         MatchStrategy::TrimmedBoundary,
@@ -805,7 +812,9 @@ fn try_trimmed_boundary(content: &str, old_text: &str) -> Option<MatchMetadata> 
 }
 
 /// Remove leading/trailing lines that are empty or contain only whitespace.
-fn trim_boundary_lines(s: &str) -> String {
+/// Returns the trimmed string plus the number of leading and trailing lines
+/// that were removed.
+fn trim_boundary_lines_with_info(s: &str) -> (String, usize, usize) {
     let lines: Vec<&str> = s.split('\n').collect();
     let first_content = lines
         .iter()
@@ -816,7 +825,62 @@ fn trim_boundary_lines(s: &str) -> String {
         .rposition(|line| !line.trim().is_empty())
         .map(|idx| idx + 1)
         .unwrap_or(lines.len());
-    lines[first_content..last_content].join("\n")
+    let leading_skip = first_content;
+    let trailing_skip = lines.len().saturating_sub(last_content);
+    (
+        lines[first_content..last_content].join("\n"),
+        leading_skip,
+        trailing_skip,
+    )
+}
+
+/// Map byte positions from a trimmed version back to the original content,
+/// accounting for leading boundary lines that were removed.
+fn map_trimmed_to_original_with_skip(
+    original: &str,
+    trimmed: &str,
+    trimmed_start: usize,
+    trimmed_end: usize,
+    leading_skip: usize,
+    _trailing_skip: usize,
+) -> (usize, usize) {
+    let orig_lines: Vec<&str> = original.split('\n').collect();
+    let trimmed_lines: Vec<&str> = trimmed.split('\n').collect();
+
+    let skipped_bytes: usize = orig_lines[..leading_skip]
+        .iter()
+        .map(|line| line.len() + 1) // +1 for the newline separator
+        .sum();
+
+    let mut orig_offset = skipped_bytes;
+    let mut trimmed_offset = 0usize;
+    let mut result_start = 0usize;
+    let mut result_end = original.len();
+    let mut found_start = false;
+
+    for (i, trimmed_line) in trimmed_lines.iter().enumerate() {
+        let orig_line_index = leading_skip + i;
+        let orig_line = orig_lines[orig_line_index];
+        let newline = usize::from(orig_line_index < orig_lines.len() - 1);
+
+        if !found_start && trimmed_start < trimmed_offset + trimmed_line.len() + newline {
+            let offset_in_line = trimmed_start - trimmed_offset;
+            result_start = orig_offset + offset_in_line;
+            found_start = true;
+        }
+
+        if trimmed_end <= trimmed_offset + trimmed_line.len() + newline {
+            let offset_in_line = trimmed_end - trimmed_offset;
+            let clamped = offset_in_line.min(orig_line.len() + newline);
+            result_end = orig_offset + clamped;
+            break;
+        }
+
+        orig_offset += orig_line.len() + newline;
+        trimmed_offset += trimmed_line.len() + newline;
+    }
+
+    (result_start, result_end)
 }
 
 /// Metadata constructor for guard-rejected outcomes.
@@ -1332,8 +1396,9 @@ mod tests {
 
     #[test]
     fn escape_normalized_match_handles_escaped_quotes() {
-        // File contains a single-quoted string with escaped quotes; the old_text
-        // uses a different escaping style but is escape-equivalent.
+        // File contains escaped quotes; old_text uses literal quotes. The literal
+        // substring does not appear in content, so earlier strategies fail and
+        // escape-normalization is reached.
         let content = "let s = \"He said \\\"hello\\\"\";";
         let old_text = "He said \"hello\"";
 
@@ -1347,24 +1412,27 @@ mod tests {
 
     #[test]
     fn escape_normalized_match_handles_escaped_backslashes() {
-        let content = "let path = \"C:\\\\Users\\\\foo\";";
-        let old_text = "C:\\\\Users\\\\foo";
+        // File contains escaped backslashes; old_text uses literal backslashes. The
+        // literal substring does not appear in content, so earlier strategies fail and
+        // escape-normalization is reached.
+        let content = "C:\\\\Users\\foo";
+        let old_text = "C:\\Users\\foo";
 
         let m = find_match(content, old_text);
 
         assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
         assert_eq!(m.outcome, MatchOutcome::Success);
         let br = m.byte_range.expect("escape success has byte range");
-        assert_eq!(&content[br.start..br.end], old_text);
+        assert_eq!(&content[br.start..br.end], content);
     }
 
     #[test]
     fn escape_normalized_rejects_quote_imbalance_guard() {
-        // The candidate ("x"; let b = "x") contains unescaped quotes, so it
-        // crosses a literal boundary. The normalized view matches old_text but
-        // the guard rejects it.
-        let content = "let a = \"x\"; let b = \"x\";";
-        let old_text = "x\"; let b = \"x";
+        // The candidate crosses a literal boundary because it contains unescaped quotes.
+        // old_text uses literal quotes that do not appear in content, so earlier
+        // strategies fail and escape-normalization is reached; the guard then rejects it.
+        let content = "let a = \"x\"; let b = \\\"x\\\";";
+        let old_text = "\"x\"; let b = \"x\"";
 
         let m = find_match(content, old_text);
 
@@ -1380,8 +1448,10 @@ mod tests {
     fn escape_normalized_rejects_backslash_imbalance_guard() {
         // The candidate starts immediately after an opening backslash escape and
         // ends inside another, so the boundaries split escape sequences.
-        let content = "let a = \\\"x\\\";";
-        let old_text = "x";
+        // old_text has one fewer backslash than content, so exact fails and
+        // escape-normalization is reached.
+        let content = "\\x\\\\y";
+        let old_text = "x\\y";
 
         let m = find_match(content, old_text);
 
@@ -1407,8 +1477,12 @@ mod tests {
 
     #[test]
     fn trimmed_boundary_ignores_leading_blank_lines() {
-        let content = "\n\nlet x = 1;\nlet y = 2;\n";
-        let old_text = "let x = 1;\nlet y = 2;";
+        // old_text has a leading whitespace-only boundary line that is not present
+        // in content. Exact/line/whitespace/indentation all fail because the
+        // leading boundary changes the string, while trimmed_boundary strips it
+        // and matches the inner candidate.
+        let content = "let x = 1;\nlet y = 2;\n";
+        let old_text = "   \nlet x = 1;\nlet y = 2;";
 
         let m = find_match(content, old_text);
 
@@ -1417,13 +1491,16 @@ mod tests {
         let br = m
             .byte_range
             .expect("trimmed boundary success has byte range");
-        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;\n");
+        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;");
     }
 
     #[test]
     fn trimmed_boundary_ignores_trailing_whitespace_lines() {
-        let content = "let x = 1;\nlet y = 2;\n   \n\n";
-        let old_text = "let x = 1;\nlet y = 2;";
+        // old_text has a trailing whitespace-only boundary line that is not present
+        // in content. Exact/line/whitespace/indentation all fail because the
+        // trailing boundary changes the string, while trimmed_boundary strips it.
+        let content = "let x = 1;\nlet y = 2;";
+        let old_text = "let x = 1;\nlet y = 2;\n   \n";
 
         let m = find_match(content, old_text);
 
@@ -1432,13 +1509,16 @@ mod tests {
         let br = m
             .byte_range
             .expect("trimmed boundary success has byte range");
-        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;\n");
+        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;");
     }
 
     #[test]
     fn trimmed_boundary_does_not_replace_surrounding_whitespace_lines() {
+        // old_text includes extra whitespace-only boundary lines that are not in
+        // content, so earlier strategies fail and trimmed_boundary matches the
+        // inner candidate once.
         let content = "header\n\nlet x = 1;\nlet y = 2;\n\nfooter\n";
-        let old_text = "\n\nlet x = 1;\nlet y = 2;\n\n";
+        let old_text = "   \n\n\nlet x = 1;\nlet y = 2;\n\n\n   \n";
         let new_text = "let a = 9;\nlet b = 8;";
 
         let (updated, note) =
@@ -1448,15 +1528,18 @@ mod tests {
             note.as_deref(),
             Some("(matched with trimmed boundary lines)")
         );
-        assert!(updated.contains("header\n"));
-        assert!(updated.contains("let a = 9;\nlet b = 8;"));
-        assert!(updated.contains("footer\n"));
+        assert!(updated.starts_with("header\n"));
+        assert!(updated.contains("\nlet a = 9;\nlet b = 8;\n"));
+        assert!(updated.ends_with("footer\n"));
     }
 
     #[test]
     fn trimmed_boundary_ambiguity_requires_disambiguation() {
+        // old_text includes whitespace-only boundary lines that are not in content,
+        // so earlier strategies fail. The trimmed inner content appears twice,
+        // producing ambiguity under trimmed_boundary.
         let content = "let x = 1;\n\nlet x = 1;";
-        let old_text = "\n\nlet x = 1;\n";
+        let old_text = "   \n\nlet x = 1;\n   \n";
 
         let m = find_match(content, old_text);
 
