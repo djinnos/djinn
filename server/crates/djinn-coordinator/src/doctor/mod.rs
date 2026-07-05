@@ -12,15 +12,12 @@
 //! The `DoctorCheck` trait itself is defined in [`djinn_core::doctor`]; this
 //! module mirrors the framework's shape and is registered into the framework's
 //! registry by [`register_doctor_checks`].
-//!
-//! `dead_code` is allowed at the module level because T4 delivers the check
-//! implementation and bridge; T5 wires them into the registry. Until T5
-//! lands, the non-test consumers do not yet exist.
 
 #![allow(dead_code)]
 
 pub mod leader_tick;
 pub mod live_mover;
+pub mod stranded_ready;
 pub mod zombie_running_session;
 
 use std::sync::Arc;
@@ -28,6 +25,10 @@ use std::sync::Arc;
 use djinn_core::doctor::{DoctorCheck, DoctorRegistry};
 
 pub use live_mover::{ActiveTask, LiveMoverPredicateCheck, LiveMoverSource};
+pub use stranded_ready::{
+    MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate,
+    StrandedReadyCheck, StrandedReadySource, TaskRepositoryStrandedReadySource,
+};
 pub use zombie_running_session::{
     SnapshotZombieRunningSessionSource, ZOMBIE_RUNNING_SESSION_CHECK_NAME,
     ZombieRunningSessionCandidate, ZombieRunningSessionCheck, ZombieRunningSessionSource,
@@ -36,31 +37,32 @@ pub use zombie_running_session::{
 
 /// Register all `djinn-agent`-side seed checks into `registry`.
 ///
-/// Currently registers the `live_mover_predicate` check (T4), bound to
-/// `source` — an in-memory or production-backed [`LiveMoverSource`].
-///
-/// The `source` is held by the registered check via [`std::sync::Arc`]
-/// so the registry can store the check as a `'static` trait object. The
-/// caller must therefore hand in an `Arc<dyn LiveMoverSource>` —
-/// production code wraps a long-lived adapter over the coordinator's
-/// evidence collector; tests wrap an in-memory double.
+/// Registers the `live_mover_predicate` and `stranded_ready` checks. Both
+/// sources are held via [`std::sync::Arc`] so the registry can store the
+/// checks as `'static` trait objects. Production code wraps long-lived adapters
+/// over the coordinator's evidence collector and DB repository; tests wrap
+/// in-memory doubles.
 ///
 /// The control-plane wiring calls this after
 /// `djinn_core::doctor::register_default_checks(reg)` so both halves of
-/// the seed-check suite share a single [`DoctorRegistry`]. The smoke
-/// test in `djinn-agent` exercises the same registration path against a
-/// fabricated fixture.
+/// the seed-check suite share a single [`DoctorRegistry`].
 ///
 /// Returns the list of check names that were replaced by this call
 /// (empty if every check was newly registered). Re-registering the same
 /// check name replaces the previous registration.
 pub fn register_doctor_checks(
     registry: &DoctorRegistry,
-    source: Arc<dyn LiveMoverSource>,
+    live_mover_source: Arc<dyn LiveMoverSource>,
+    stranded_source: Arc<dyn StrandedReadySource>,
 ) -> Vec<String> {
     let mut registered = Vec::new();
-    let check: Arc<dyn DoctorCheck> = Arc::new(LiveMoverPredicateCheck::new(source));
-    if let Some(previous) = registry.register(check) {
+    let live_mover: Arc<dyn DoctorCheck> =
+        Arc::new(LiveMoverPredicateCheck::new(live_mover_source));
+    if let Some(previous) = registry.register(live_mover) {
+        registered.push(previous);
+    }
+    let stranded: Arc<dyn DoctorCheck> = Arc::new(StrandedReadyCheck::new(stranded_source));
+    if let Some(previous) = registry.register(stranded) {
         registered.push(previous);
     }
     registered
@@ -70,16 +72,16 @@ pub fn register_doctor_checks(
 // Agent-side doctor smoke test (T5)
 // ---------------------------------------------------------------------------
 //
-// Verifies that [`register_doctor_checks`] wires the live_mover check
-// into a `DoctorRegistry` and that the framework's `doctor_run` API
-// drives it correctly end-to-end. Combined with the djinn-core smoke
-// test, this covers all 7 seed checks the epic requires.
+// Verifies that [`register_doctor_checks`] wires both the live_mover and
+// stranded_ready checks into a `DoctorRegistry` and that the framework's
+// `doctor_run` API drives them correctly end-to-end.
 
 #[cfg(test)]
 mod smoke {
     use super::*;
     use crate::supervisor_impl::LiveMoverEvidence;
     use djinn_core::doctor::{Finding, FindingSeverity, doctor_run};
+    use serde_json::json;
     use std::sync::Arc;
 
     /// In-memory `LiveMoverSource` test double. Stages a single task with
@@ -123,45 +125,98 @@ mod smoke {
         }
     }
 
-    #[test]
-    fn register_doctor_checks_adds_live_mover_predicate() {
-        let registry = DoctorRegistry::new();
-        let source = Arc::new(MemoryLiveMoverSource::divergent());
-        let replaced = register_doctor_checks(&registry, source);
-        assert!(
-            replaced.is_empty(),
-            "fresh registry must accept the live_mover_predicate check without replacement"
-        );
-        assert_eq!(registry.len(), 1);
-        let names: Vec<&str> = registry.enumerate().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["live_mover_predicate"]);
+    fn empty_stranded_source() -> Arc<dyn StrandedReadySource> {
+        Arc::new(MemoryStrandedReadySource::new(json!({
+            "total": 0,
+            "threshold_minutes": 30,
+            "findings": [],
+        })))
+    }
+
+    fn one_stranded_source() -> Arc<dyn StrandedReadySource> {
+        Arc::new(MemoryStrandedReadySource::new(json!({
+            "total": 1,
+            "threshold_minutes": 30,
+            "findings": [{
+                "id": "task-stranded-1",
+                "short_id": "ts1",
+                "title": "Stranded",
+                "status": "open",
+                "owner": "owner",
+                "epic_short_id": "ep01",
+                "unclaimed_since": "2026-01-01T00:00:00.000Z",
+                "unclaimed_since_confidence": "high",
+                "elapsed_minutes": 45,
+                "severity": "warn",
+                "threshold": {"warning_minutes": 30, "error_minutes": 60, "critical_minutes": 180},
+                "dispatch_gate": {
+                    "evaluated_role": "worker",
+                    "toolset": ["task_edit"],
+                    "model_requirement": "provider/model-a",
+                    "image_ready": true,
+                    "breaker_open": false,
+                    "manually_paused": false,
+                    "rate_limited": false,
+                    "credential_available": true,
+                    "gate_verdict": "stranded",
+                    "reasons": []
+                }
+            }],
+        })))
     }
 
     #[test]
-    fn register_doctor_checks_replaces_existing_live_mover_predicate() {
+    fn register_doctor_checks_adds_both_checks() {
         let registry = DoctorRegistry::new();
-        let source_a = Arc::new(MemoryLiveMoverSource::divergent());
-        let source_b = Arc::new(MemoryLiveMoverSource::healthy());
-        register_doctor_checks(&registry, source_a);
-        let replaced = register_doctor_checks(&registry, source_b);
+        let live_mover = Arc::new(MemoryLiveMoverSource::divergent());
+        let stranded = empty_stranded_source();
+        let replaced = register_doctor_checks(&registry, live_mover, stranded);
+        assert!(
+            replaced.is_empty(),
+            "fresh registry must accept both checks without replacement"
+        );
+        assert_eq!(registry.len(), 2);
+        let mut names: Vec<&str> = registry.enumerate().into_iter().map(|(n, _)| n).collect();
+        names.sort();
+        assert_eq!(names, vec!["live_mover_predicate", "stranded_ready"]);
+    }
+
+    #[test]
+    fn register_doctor_checks_replaces_existing_registrations() {
+        let registry = DoctorRegistry::new();
+        let live_mover_a = Arc::new(MemoryLiveMoverSource::divergent());
+        let live_mover_b = Arc::new(MemoryLiveMoverSource::healthy());
+        let stranded_a = empty_stranded_source();
+        let stranded_b = one_stranded_source();
+        register_doctor_checks(&registry, live_mover_a, stranded_a);
+        let mut replaced = register_doctor_checks(&registry, live_mover_b, stranded_b);
+        replaced.sort();
         assert_eq!(
             replaced,
-            vec!["live_mover_predicate".to_string()],
-            "second registration must report the replaced name"
+            vec![
+                "live_mover_predicate".to_string(),
+                "stranded_ready".to_string()
+            ],
+            "second registration must report the replaced names"
         );
-        assert_eq!(registry.len(), 1, "still one check, the new one");
+        assert_eq!(registry.len(), 2, "still two checks, the new ones");
     }
 
     #[test]
     fn doctor_run_with_live_mover_predicate_finds_divergent_task() {
         let registry = DoctorRegistry::new();
-        let source = Arc::new(MemoryLiveMoverSource::divergent());
-        register_doctor_checks(&registry, source);
+        let live_mover = Arc::new(MemoryLiveMoverSource::divergent());
+        let stranded = empty_stranded_source();
+        register_doctor_checks(&registry, live_mover, stranded);
 
         let results = doctor_run(&registry, None).expect("run succeeds");
-        assert_eq!(results.len(), 1);
-        let (name, findings) = &results[0];
-        assert_eq!(name, "live_mover_predicate");
+        assert_eq!(results.len(), 2);
+        let live_mover_results: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name == "live_mover_predicate")
+            .collect();
+        assert_eq!(live_mover_results.len(), 1);
+        let (_, findings) = live_mover_results[0];
         assert_eq!(findings.len(), 1);
 
         let finding: &Finding = &findings[0];
@@ -179,12 +234,16 @@ mod smoke {
     #[test]
     fn doctor_run_with_live_mover_predicate_healthy_source_no_findings() {
         let registry = DoctorRegistry::new();
-        let source = Arc::new(MemoryLiveMoverSource::healthy());
-        register_doctor_checks(&registry, source);
+        let live_mover = Arc::new(MemoryLiveMoverSource::healthy());
+        let stranded = empty_stranded_source();
+        register_doctor_checks(&registry, live_mover, stranded);
 
         let results = doctor_run(&registry, None).expect("run succeeds");
-        assert_eq!(results.len(), 1);
-        let (_, findings) = &results[0];
+        let live_mover_results: Vec<_> = results
+            .iter()
+            .filter(|(name, _)| name == "live_mover_predicate")
+            .collect();
+        let (_, findings) = live_mover_results[0];
         assert!(
             findings.is_empty(),
             "healthy source must produce no findings, got {findings:?}"
@@ -194,8 +253,9 @@ mod smoke {
     #[test]
     fn doctor_run_named_subset_with_live_mover_predicate() {
         let registry = DoctorRegistry::new();
-        let source = Arc::new(MemoryLiveMoverSource::divergent());
-        register_doctor_checks(&registry, source);
+        let live_mover = Arc::new(MemoryLiveMoverSource::divergent());
+        let stranded = empty_stranded_source();
+        register_doctor_checks(&registry, live_mover, stranded);
 
         let results =
             doctor_run(&registry, Some(&["live_mover_predicate"])).expect("named run succeeds");
@@ -208,8 +268,9 @@ mod smoke {
     #[test]
     fn doctor_run_unknown_check_alongside_live_mover_predicate() {
         let registry = DoctorRegistry::new();
-        let source = Arc::new(MemoryLiveMoverSource::divergent());
-        register_doctor_checks(&registry, source);
+        let live_mover = Arc::new(MemoryLiveMoverSource::divergent());
+        let stranded = empty_stranded_source();
+        register_doctor_checks(&registry, live_mover, stranded);
 
         let err =
             doctor_run(&registry, Some(&["nope"])).expect_err("unknown check name must error");
@@ -219,5 +280,20 @@ mod smoke {
             }
             other => panic!("expected UnknownCheck, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn doctor_run_runs_stranded_ready_check() {
+        let registry = DoctorRegistry::new();
+        let live_mover = Arc::new(MemoryLiveMoverSource::healthy());
+        let stranded = one_stranded_source();
+        register_doctor_checks(&registry, live_mover, stranded);
+
+        let results = doctor_run(&registry, Some(&["stranded_ready"])).expect("named run succeeds");
+        assert_eq!(results.len(), 1);
+        let (name, findings) = &results[0];
+        assert_eq!(name, "stranded_ready");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, FindingSeverity::Warn);
     }
 }

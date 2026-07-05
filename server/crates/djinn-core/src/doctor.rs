@@ -167,12 +167,14 @@ pub struct DoctorCheckRun {
 /// How serious a [`Finding`] is.
 ///
 /// `Info` is observational, `Warn` indicates a condition that will become a
-/// problem, and `Critical` indicates an active failure that needs attention.
+/// problem, `Error` indicates a condition requiring attention, and `Critical`
+/// indicates an active failure that needs immediate attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingSeverity {
     Info,
     Warn,
+    Error,
     Critical,
 }
 
@@ -182,6 +184,7 @@ impl FindingSeverity {
         match self {
             Self::Info => "info",
             Self::Warn => "warn",
+            Self::Error => "error",
             Self::Critical => "critical",
         }
     }
@@ -850,6 +853,10 @@ mod tests {
             json!("warn")
         );
         assert_eq!(
+            serde_json::to_value(FindingSeverity::Error).unwrap(),
+            json!("error")
+        );
+        assert_eq!(
             serde_json::to_value(FindingSeverity::Critical).unwrap(),
             json!("critical")
         );
@@ -857,6 +864,7 @@ mod tests {
         for sev in [
             FindingSeverity::Info,
             FindingSeverity::Warn,
+            FindingSeverity::Error,
             FindingSeverity::Critical,
         ] {
             let s = serde_json::to_string(&sev).unwrap();
