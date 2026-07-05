@@ -239,6 +239,30 @@ impl TaskArbitrationRepository {
         )
     }
 
+    /// Resolve the current hold cycle for `task_id`.
+    ///
+    /// Returns `(current_hold_cycle, existing_unconsumed_record)`:
+    /// - If the latest arbitration row is `unconsumed`, the current cycle is
+    ///   that row's `hold_cycle` and the record is returned.
+    /// - If the latest row is `consumed` or `failed`, or no row exists, the
+    ///   current cycle is `latest.hold_cycle + 1` (or `0` if there are no rows)
+    ///   and no record is returned.
+    pub async fn resolve_current_hold_cycle(
+        &self,
+        task_id: &str,
+    ) -> Result<(i32, Option<TaskArbitrationRecord>)> {
+        let latest = self.get_latest_for_task(task_id).await?;
+        match latest {
+            Some(record) => match record.arbitration_state() {
+                Some(ArbitrationState::Unconsumed) => {
+                    Ok((record.hold_cycle, Some(record)))
+                }
+                _ => Ok((record.hold_cycle.saturating_add(1), None)),
+            },
+            None => Ok((0, None)),
+        }
+    }
+
     /// Mark an unconsumed arbitration as consumed (arbiter decision received).
     /// Returns `true` if the transition was applied, `false` if the row was
     /// already consumed or missing.
