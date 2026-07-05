@@ -2534,13 +2534,11 @@ async fn zombie_reap_persists_dead_reclaimed_evidence() {
     );
 
     // Verify dead_reclaimed evidence on the session's denormalized columns.
-    let (verdict, outcome_kind): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT liveness_verdict, liveness_outcome_kind FROM sessions WHERE id = $1",
-    )
-    .bind(&session.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let (verdict, outcome_kind) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
     assert_eq!(
         verdict.as_deref(),
         Some("dead"),
@@ -2553,13 +2551,10 @@ async fn zombie_reap_persists_dead_reclaimed_evidence() {
     );
 
     // Verify evidence row in the append-only liveness_evidence table.
-    let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM liveness_evidence WHERE session_id = $1 AND outcome_kind = 'dead_reclaimed'",
-    )
-    .bind(&session.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
     assert!(
         evidence_count >= 1,
         "liveness_evidence table must have a dead_reclaimed row for this session"
@@ -2612,12 +2607,11 @@ async fn zombie_reap_suppressed_by_recent_activity() {
     );
 
     // No liveness evidence should be persisted (classifier is not reached).
-    let evidence_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE session_id = $1")
-            .bind(&session.id)
-            .fetch_one(db.pool())
-            .await
-            .unwrap();
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
     assert_eq!(
         evidence_count, 0,
         "no liveness evidence should be persisted for a session that is not reaped"
@@ -2696,13 +2690,11 @@ async fn zombie_reap_terminal_task_race_records_kill_noop() {
     );
 
     // Verify kill_noop evidence is persisted.
-    let evidence_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM liveness_evidence WHERE session_id = $1 AND outcome_kind = 'kill_noop'",
-    )
-    .bind(&session.id)
-    .fetch_one(db.pool())
-    .await
-    .unwrap();
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let evidence_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
     assert!(
         evidence_count >= 1,
         "liveness_evidence table must have a kill_noop row for the terminal-task race"
