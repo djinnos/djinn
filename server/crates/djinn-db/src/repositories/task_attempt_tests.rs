@@ -1,0 +1,157 @@
+use djinn_core::events::EventBus;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
+
+use crate::Database;
+use crate::repositories::epic::EpicRepository;
+use crate::repositories::task_attempt::{
+    CreateTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
+};
+use crate::repositories::test_support::{add_blocker_edge, close_task_at};
+
+fn test_db() -> Database {
+    Database::open_in_memory().unwrap()
+}
+
+async fn create_task(db: &Database) -> (String, String) {
+    let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+    let epic = epic_repo
+        .create("Epic", "", "", "", "", None)
+        .await
+        .unwrap();
+
+    let task_id = uuid::Uuid::now_v7().to_string();
+    let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+    sqlx::query!(
+        "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                            issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+         VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+        task_id,
+        epic.project_id,
+        short_id,
+        epic.id
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    (epic.project_id, task_id)
+}
+
+fn new_attempt_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_blocker_parent_summaries_orders_and_bounds() {
+    let db = test_db();
+    let (_pid, dependent_id) = create_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // Three additional tasks to act as closed blocker parents.
+    let (_p1dep, p1) = create_task(&db).await;
+    let (_p2dep, p2) = create_task(&db).await;
+    let (_p3dep, p3) = create_task(&db).await;
+
+    // Flip each parent to closed with distinct timestamps.
+    close_task_at(&db, &p1, "2025-01-01T00:00:00Z").await;
+    close_task_at(&db, &p2, "2025-03-01T00:00:00Z").await;
+    close_task_at(&db, &p3, "2025-02-01T00:00:00Z").await;
+
+    // Wire blocker edges: each parent blocks the dependent task.
+    add_blocker_edge(&db, &dependent_id, &p1).await;
+    add_blocker_edge(&db, &dependent_id, &p2).await;
+    add_blocker_edge(&db, &dependent_id, &p3).await;
+
+    // Seed a completed attempt for each parent so latest_completed_prompt_summary returns it.
+    for (i, parent_id) in [&p1, &p2, &p3].iter().enumerate() {
+        let attempt_id = new_attempt_id();
+        repo.create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: parent_id,
+            role: "worker",
+            dispatch_key: &format!("dk-parent-{i}"),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt_id,
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: Some(&format!("https://example.com/pr/{i}")),
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some(&format!("parent summary {i}")),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    // Ordering: p2 (Mar) > p3 (Feb) > p1 (Jan).
+    let parents = repo
+        .completed_blocker_parent_summaries(&dependent_id, 5)
+        .await
+        .unwrap();
+    assert_eq!(parents.len(), 3);
+    assert_eq!(parents[0].task_id, p2);
+    assert_eq!(parents[1].task_id, p3);
+    assert_eq!(parents[2].task_id, p1);
+    // Each parent carries its latest completed attempt summary.
+    assert!(parents[0].latest_completed_attempt.is_some());
+    assert_eq!(
+        parents[0]
+            .latest_completed_attempt
+            .as_ref()
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some("parent summary 1")
+    );
+    assert_eq!(
+        parents[0]
+            .latest_completed_attempt
+            .as_ref()
+            .unwrap()
+            .pr_url
+            .as_deref(),
+        Some("https://example.com/pr/1")
+    );
+
+    // Bounds: limit to 2 returns the two newest.
+    let limited = repo
+        .completed_blocker_parent_summaries(&dependent_id, 2)
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].task_id, p2);
+    assert_eq!(limited[1].task_id, p3);
+
+    // Zero/negative limit returns empty.
+    assert!(
+        repo.completed_blocker_parent_summaries(&dependent_id, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_blocker_parent_summaries_excludes_non_completed_parents() {
+    let db = test_db();
+    let (_pid, dependent_id) = create_task(&db).await;
+    let (_pdep, open_parent) = create_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+
+    // The open_parent stays in `open` status — should be excluded.
+    add_blocker_edge(&db, &dependent_id, &open_parent).await;
+
+    let parents = repo
+        .completed_blocker_parent_summaries(&dependent_id, 5)
+        .await
+        .unwrap();
+    assert!(parents.is_empty(), "open blocker parent should be excluded");
+}

@@ -12,10 +12,10 @@ mod template_bootstrap;
 pub mod test_support {
     pub use crate::repositories::test_support::{
         HousekeepingFixture, HousekeepingFixtureExpectedCounts, HousekeepingFixtureProject,
-        UsageTestSessionSeed, UsageTestTaskSeed, backdate_task_updated_at,
-        build_multi_project_housekeeping_fixture, drop_table_for_test, event_bus_for, make_project,
-        override_debate_trail_body_metadata, seed_chat_session_row, seed_project, seed_session_row,
-        seed_session_row_with_id, seed_task_row,
+        UsageTestSessionSeed, UsageTestTaskSeed, add_blocker_edge, backdate_task_updated_at,
+        build_multi_project_housekeeping_fixture, close_task_at, drop_table_for_test,
+        event_bus_for, make_project, override_debate_trail_body_metadata, seed_chat_session_row,
+        seed_project, seed_session_row, seed_session_row_with_id, seed_task_row,
     };
 }
 
@@ -130,8 +130,9 @@ pub use repositories::{
         TaskArbitrationRepository, TryCreateResult, UpdateDispatchLedgerParams,
     },
     task_attempt::{
-        CreateTaskAttemptParams, FillTaskAttemptParams, GuardDeferTaskAttemptParams,
-        SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
+        CompletedParentSummary, CreateTaskAttemptParams, FillTaskAttemptParams,
+        GuardDeferTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+        TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
