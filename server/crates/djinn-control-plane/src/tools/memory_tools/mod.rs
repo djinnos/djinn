@@ -135,36 +135,7 @@ fn parse_timeframe(s: &str) -> i64 {
 
 /// Run `git log --format="%H|||%s|||%an|||%ai" -n N -- file` and parse entries.
 async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<GitLogEntry> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args([
-        "log",
-        "--format=%H|||%s|||%an|||%ai",
-        &format!("-n{limit}"),
-        "--",
-        file_path,
-    ]);
-    let output = crate::process::output(cmd).await;
-
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(4, "|||").collect();
-                if parts.len() == 4 {
-                    Some(GitLogEntry {
-                        sha: parts[0].to_string(),
-                        message: parts[1].to_string(),
-                        author: parts[2].to_string(),
-                        date: parts[3].to_string(),
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect(),
-        _ => vec![],
-    }
+    crate::tools::git_ops::git_log_for_file(file_path, limit).await
 }
 
 // `git_diff_for_file` was deleted alongside the live memory_diff tool body;
