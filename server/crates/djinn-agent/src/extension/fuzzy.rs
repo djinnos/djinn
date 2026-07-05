@@ -25,6 +25,7 @@ use std::path::Path;
 /// any candidate (unique match or ambiguity). Future waves will extend this
 /// enum with `escape_normalized`, `trimmed_boundary`, `unicode_normalized`,
 /// `block_anchor`, and `context_aware` — see [[design/c77e-roadmap]].
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchStrategy {
     /// Exact byte-for-byte match.
@@ -33,6 +34,20 @@ pub(super) enum MatchStrategy {
     LineTrimmed,
     /// Match after collapsing runs of spaces/tabs to a single space.
     WhitespaceNormalized,
+    /// Match after normalizing common string-literal escaping differences
+    /// (notably quote and backslash escaping) while rejecting unsafe candidates.
+    EscapeNormalized,
+    /// Match after allowing extra leading/trailing blank or whitespace-only
+    /// boundary lines; replacement is applied only to the intended candidate.
+    TrimmedBoundary,
+    /// Match after Unicode NFKC/confusables normalization; replacement is
+    /// byte-preserving for unchanged original graphemes.
+    UnicodeNormalized,
+    /// Match using a unique surrounding block anchor; rejects non-unique or
+    /// overly broad block candidates.
+    BlockAnchor,
+    /// Match with context-aware threshold and tie-rejection for loose matches.
+    ContextAware,
     /// Match after stripping leading whitespace per line; the replacement is
     /// reindented to the matched block's base indentation.
     IndentationFlexible,
@@ -46,6 +61,11 @@ impl MatchStrategy {
             Self::Exact => "exact",
             Self::LineTrimmed => "line_trimmed",
             Self::WhitespaceNormalized => "whitespace_normalized",
+            Self::EscapeNormalized => "escape_normalized",
+            Self::TrimmedBoundary => "trimmed_boundary",
+            Self::UnicodeNormalized => "unicode_normalized",
+            Self::BlockAnchor => "block_anchor",
+            Self::ContextAware => "context_aware",
             Self::IndentationFlexible => "indentation_flexible",
         }
     }
@@ -60,6 +80,8 @@ const STRATEGY_ORDER: &[MatchStrategy] = &[
     MatchStrategy::LineTrimmed,
     MatchStrategy::WhitespaceNormalized,
     MatchStrategy::IndentationFlexible,
+    MatchStrategy::EscapeNormalized,
+    MatchStrategy::TrimmedBoundary,
 ];
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -181,6 +203,11 @@ fn run_strategy(strategy: MatchStrategy, content: &str, old_text: &str) -> Optio
         MatchStrategy::LineTrimmed => try_line_trimmed(content, old_text),
         MatchStrategy::WhitespaceNormalized => try_whitespace_normalized(content, old_text),
         MatchStrategy::IndentationFlexible => try_indentation_flexible(content, old_text),
+        MatchStrategy::EscapeNormalized => try_escape_normalized(content, old_text),
+        MatchStrategy::TrimmedBoundary => try_trimmed_boundary(content, old_text),
+        MatchStrategy::UnicodeNormalized
+        | MatchStrategy::BlockAnchor
+        | MatchStrategy::ContextAware => None,
     }
 }
 
@@ -433,6 +460,206 @@ fn try_indentation_flexible(content: &str, old_text: &str) -> Option<MatchMetada
     ))
 }
 
+/// Normalize string-literal escaping: treat backslash-escaped quotes and
+/// backslash-escaped backslashes as equivalent to their literal counterparts
+/// for matching purposes only. The original content's byte range is preserved
+/// for the replacement, so no actual escaping is changed in the output.
+///
+/// The escape map maps each byte in the normalized string back to the original
+/// byte index.
+fn normalize_escapes_with_map(s: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::with_capacity(s.len());
+    let mut map: Vec<usize> = Vec::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip a backslash that precedes a quote or another backslash, but emit
+        // the escaped character to the normalized view.
+        if bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && (bytes[i + 1] == b'\\' || bytes[i + 1] == b'\'' || bytes[i + 1] == b'"')
+        {
+            normalized.push(bytes[i + 1] as char);
+            map.push(i + 1);
+            i += 2;
+        } else {
+            normalized.push(bytes[i] as char);
+            map.push(i);
+            i += 1;
+        }
+    }
+    (normalized, map)
+}
+
+/// Returns true if `candidate` contains an unescaped single or double quote.
+/// Such a candidate would cross or corrupt a string-literal boundary, so the
+/// escape-normalized strategy rejects it.
+fn candidate_crosses_quote_boundary(candidate: &str) -> bool {
+    let mut escaped = false;
+    for c in candidate.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '\'' || c == '"' {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if byte position `pos` in `content` is inside a backslash escape
+/// sequence (i.e., an odd number of consecutive backslashes immediately precede
+/// `pos`). A candidate that starts or ends inside an escape sequence could
+/// leave a partial escape prefix after replacement, so it is rejected.
+fn position_inside_escape_sequence(content: &str, pos: usize) -> bool {
+    let mut count = 0usize;
+    for c in content[..pos].chars().rev() {
+        if c == '\\' {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count % 2 == 1
+}
+
+/// Escape-normalized match. Differences limited to quote/backslash escaping
+/// between `old_text` and `content` are allowed. The replacement is applied to
+/// the original byte range. Guard rejection occurs when the candidate's
+/// quote/backslash balance differs from the surrounding context in a way that
+/// would indicate crossing a literal boundary.
+fn try_escape_normalized(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let (norm_content, content_map) = normalize_escapes_with_map(content);
+    let (norm_old, _) = normalize_escapes_with_map(old_text);
+
+    if norm_old.is_empty() {
+        return None;
+    }
+
+    let count = norm_content.matches(&norm_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(ambiguous_metadata(MatchStrategy::EscapeNormalized, count));
+    }
+
+    let norm_start = norm_content.find(&norm_old)?;
+    let norm_end = norm_start + norm_old.len();
+
+    let orig_start = content_map[norm_start];
+    let orig_end = if norm_end >= content_map.len() {
+        content.len()
+    } else {
+        content_map[norm_end]
+    };
+
+    // Guard: the candidate must not cross a quote boundary, and the candidate
+    // boundaries must not split an escape sequence in the original content.
+    let candidate = &content[orig_start..orig_end];
+    let quote_reason = guard_reason_if(
+        candidate_crosses_quote_boundary(candidate),
+        "escape quote balance mismatch",
+    );
+    let backslash_reason = guard_reason_if(
+        position_inside_escape_sequence(content, orig_start)
+            || position_inside_escape_sequence(content, orig_end),
+        "escape backslash balance mismatch",
+    );
+    if let Some(reason) = quote_reason.or(backslash_reason) {
+        return Some(guard_rejected_metadata(
+            MatchStrategy::EscapeNormalized,
+            reason,
+        ));
+    }
+
+    Some(success_metadata(
+        MatchStrategy::EscapeNormalized,
+        ByteRange {
+            start: orig_start,
+            end: orig_end,
+        },
+        line_range_for(content, orig_start, orig_end),
+    ))
+}
+
+/// Return `Some(reason)` if `condition` is true, else `None`.
+fn guard_reason_if(condition: bool, reason: &'static str) -> Option<&'static str> {
+    if condition { Some(reason) } else { None }
+}
+
+/// Trim leading/trailing blank or whitespace-only lines from `old_text` and
+/// `content`, locate the candidate, then report the original byte range of the
+/// inner content so the replacement is applied only to the intended candidate.
+fn try_trimmed_boundary(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let trimmed_old = trim_boundary_lines(old_text);
+    if trimmed_old.is_empty() {
+        return None;
+    }
+
+    // Candidate content may have extra leading/trailing whitespace-only
+    // boundary lines. Strip them and look for a unique match.
+    let trimmed_content = trim_boundary_lines(content);
+    let count = trimmed_content.matches(&trimmed_old as &str).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(ambiguous_metadata(MatchStrategy::TrimmedBoundary, count));
+    }
+
+    let trimmed_start = trimmed_content.find(&trimmed_old)?;
+    let trimmed_end = trimmed_start + trimmed_old.len();
+
+    // Map the trimmed positions back to the original content.
+    let (orig_start, orig_end) =
+        map_trimmed_to_original(content, &trimmed_content, trimmed_start, trimmed_end);
+
+    Some(success_metadata(
+        MatchStrategy::TrimmedBoundary,
+        ByteRange {
+            start: orig_start,
+            end: orig_end,
+        },
+        line_range_for(content, orig_start, orig_end),
+    ))
+}
+
+/// Remove leading/trailing lines that are empty or contain only whitespace.
+fn trim_boundary_lines(s: &str) -> String {
+    let lines: Vec<&str> = s.split('\n').collect();
+    let first_content = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    let last_content = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|idx| idx + 1)
+        .unwrap_or(lines.len());
+    lines[first_content..last_content].join("\n")
+}
+
+/// Metadata constructor for guard-rejected outcomes.
+fn guard_rejected_metadata(strategy: MatchStrategy, reason: &'static str) -> MatchMetadata {
+    MatchMetadata {
+        strategy,
+        outcome: MatchOutcome::GuardRejected,
+        candidate_count: 1,
+        byte_range: None,
+        line_range: None,
+        nearest_miss: None,
+        reindented: false,
+        guard_rejected_reason: Some(reason),
+        unicode_splice: None,
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Compatibility wrapper (preserves the call_edit contract)
 // ════════════════════════════════════════════════════════════════════════════
@@ -444,6 +671,8 @@ fn try_indentation_flexible(content: &str, old_text: &str) -> Option<MatchMetada
 /// 2. Line-trimmed match (trailing whitespace stripped per line)
 /// 3. Whitespace-normalized match (runs of whitespace collapsed to single space)
 /// 4. Indentation-flexible match (leading whitespace stripped per line)
+/// 5. Escape-normalized match (quote/backslash escaping normalized)
+/// 6. Trimmed-boundary match (extra blank boundary lines ignored)
 ///
 /// Returns `(new_content, optional_match_note)`. Internally delegates to the
 /// typed `find_match` core and translates its metadata into the existing
@@ -517,6 +746,11 @@ fn match_note_for(strategy: MatchStrategy) -> Option<String> {
         MatchStrategy::IndentationFlexible => {
             Some("(matched with flexible indentation)".to_string())
         }
+        MatchStrategy::EscapeNormalized => Some("(matched with escape normalization)".to_string()),
+        MatchStrategy::TrimmedBoundary => Some("(matched with trimmed boundary lines)".to_string()),
+        MatchStrategy::UnicodeNormalized
+        | MatchStrategy::BlockAnchor
+        | MatchStrategy::ContextAware => None,
     }
 }
 
@@ -528,6 +762,11 @@ fn ambiguity_phrase(strategy: MatchStrategy) -> &'static str {
         MatchStrategy::LineTrimmed => "after trimming trailing whitespace",
         MatchStrategy::WhitespaceNormalized => "after whitespace normalization",
         MatchStrategy::IndentationFlexible => "after stripping indentation",
+        MatchStrategy::EscapeNormalized => "after escape normalization",
+        MatchStrategy::TrimmedBoundary => "after trimming boundary lines",
+        MatchStrategy::UnicodeNormalized
+        | MatchStrategy::BlockAnchor
+        | MatchStrategy::ContextAware => "with future strategy",
     }
 }
 
@@ -842,6 +1081,11 @@ mod tests {
             MatchStrategy::IndentationFlexible.as_str(),
             "indentation_flexible"
         );
+        assert_eq!(
+            MatchStrategy::EscapeNormalized.as_str(),
+            "escape_normalized"
+        );
+        assert_eq!(MatchStrategy::TrimmedBoundary.as_str(), "trimmed_boundary");
     }
 
     #[test]
@@ -858,6 +1102,31 @@ mod tests {
         assert_eq!(
             ambiguity_phrase(MatchStrategy::IndentationFlexible),
             "after stripping indentation"
+        );
+        assert_eq!(
+            ambiguity_phrase(MatchStrategy::EscapeNormalized),
+            "after escape normalization"
+        );
+        assert_eq!(
+            ambiguity_phrase(MatchStrategy::TrimmedBoundary),
+            "after trimming boundary lines"
+        );
+    }
+
+    #[test]
+    fn strategy_order_includes_new_strategies_after_indentation_flexible() {
+        let expected: &[MatchStrategy] = &[
+            MatchStrategy::Exact,
+            MatchStrategy::LineTrimmed,
+            MatchStrategy::WhitespaceNormalized,
+            MatchStrategy::IndentationFlexible,
+            MatchStrategy::EscapeNormalized,
+            MatchStrategy::TrimmedBoundary,
+        ];
+        assert_eq!(
+            super::STRATEGY_ORDER,
+            expected,
+            "escape_normalized and trimmed_boundary must follow indentation_flexible and precede later strategies"
         );
     }
 
@@ -876,6 +1145,171 @@ mod tests {
         assert_eq!(lr.start, 2);
         assert_eq!(lr.end, 3);
     }
+
+    // ── New strategy tests: escape_normalized and trimmed_boundary ───────────
+
+    #[test]
+    fn escape_normalized_match_handles_escaped_quotes() {
+        // File contains a single-quoted string with escaped quotes; the old_text
+        // uses a different escaping style but is escape-equivalent.
+        let content = "let s = \"He said \\\"hello\\\"\";";
+        let old_text = "He said \"hello\"";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        let br = m.byte_range.expect("escape success has byte range");
+        assert_eq!(&content[br.start..br.end], "He said \\\"hello\\\"");
+    }
+
+    #[test]
+    fn escape_normalized_match_handles_escaped_backslashes() {
+        let content = "let path = \"C:\\\\Users\\\\foo\";";
+        let old_text = "C:\\\\Users\\\\foo";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        let br = m.byte_range.expect("escape success has byte range");
+        assert_eq!(&content[br.start..br.end], old_text);
+    }
+
+    #[test]
+    fn escape_normalized_rejects_quote_imbalance_guard() {
+        // The candidate ("x"; let b = "x") contains unescaped quotes, so it
+        // crosses a literal boundary. The normalized view matches old_text but
+        // the guard rejects it.
+        let content = "let a = \"x\"; let b = \"x\";";
+        let old_text = "x\"; let b = \"x";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::GuardRejected);
+        assert_eq!(
+            m.guard_rejected_reason,
+            Some("escape quote balance mismatch")
+        );
+    }
+
+    #[test]
+    fn escape_normalized_rejects_backslash_imbalance_guard() {
+        // The candidate starts immediately after an opening backslash escape and
+        // ends inside another, so the boundaries split escape sequences.
+        let content = "let a = \\\"x\\\";";
+        let old_text = "x";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::GuardRejected);
+        assert_eq!(
+            m.guard_rejected_reason,
+            Some("escape backslash balance mismatch")
+        );
+    }
+
+    #[test]
+    fn escape_normalized_ambiguity_requires_disambiguation() {
+        let content = "x\\\" y x\\\" y";
+        let old_text = "x\" y";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+        assert_eq!(m.candidate_count, 2);
+    }
+
+    #[test]
+    fn trimmed_boundary_ignores_leading_blank_lines() {
+        let content = "\n\nlet x = 1;\nlet y = 2;\n";
+        let old_text = "let x = 1;\nlet y = 2;";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::TrimmedBoundary);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        let br = m
+            .byte_range
+            .expect("trimmed boundary success has byte range");
+        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;\n");
+    }
+
+    #[test]
+    fn trimmed_boundary_ignores_trailing_whitespace_lines() {
+        let content = "let x = 1;\nlet y = 2;\n   \n\n";
+        let old_text = "let x = 1;\nlet y = 2;";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::TrimmedBoundary);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+        let br = m
+            .byte_range
+            .expect("trimmed boundary success has byte range");
+        assert_eq!(&content[br.start..br.end], "let x = 1;\nlet y = 2;\n");
+    }
+
+    #[test]
+    fn trimmed_boundary_does_not_replace_surrounding_whitespace_lines() {
+        let content = "header\n\nlet x = 1;\nlet y = 2;\n\nfooter\n";
+        let old_text = "\n\nlet x = 1;\nlet y = 2;\n\n";
+        let new_text = "let a = 9;\nlet b = 8;";
+
+        let (updated, note) =
+            fuzzy_replace(content, old_text, new_text, Path::new("test.rs")).unwrap();
+
+        assert_eq!(
+            note.as_deref(),
+            Some("(matched with trimmed boundary lines)")
+        );
+        assert!(updated.contains("header\n"));
+        assert!(updated.contains("let a = 9;\nlet b = 8;"));
+        assert!(updated.contains("footer\n"));
+    }
+
+    #[test]
+    fn trimmed_boundary_ambiguity_requires_disambiguation() {
+        let content = "let x = 1;\n\nlet x = 1;";
+        let old_text = "\n\nlet x = 1;\n";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::TrimmedBoundary);
+        assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+        assert_eq!(m.candidate_count, 2);
+    }
+
+    #[test]
+    fn first_match_wins_escape_before_trimmed_boundary() {
+        // A case that could be matched by both escape_normalized and
+        // trimmed_boundary: the earlier escape strategy should win.
+        let content = "let s = \"x\\\" y\";";
+        let old_text = "x\" y";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+    }
+
+    #[test]
+    fn first_match_wins_indentation_before_escape() {
+        // A case that indentation_flexible can match; escape_normalized should not
+        // shadow it because indentation_flexible is earlier in the chain.
+        let content = "    if ready {\n        do_thing();\n    }\n";
+        let old_text = "if ready {\n    do_thing();\n}";
+
+        let m = find_match(content, old_text);
+
+        assert_eq!(m.strategy, MatchStrategy::IndentationFlexible);
+        assert_eq!(m.outcome, MatchOutcome::Success);
+    }
+
+    // ── Wrapper tests ─────────────────────────────────────────────────────
 
     #[test]
     fn wrapper_preserves_exact_match_note_absence() {
