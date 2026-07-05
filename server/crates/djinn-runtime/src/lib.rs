@@ -32,7 +32,7 @@ pub mod test_runtime;
 
 pub use credentials::{ResolvedCredentials, SerializableCredential};
 pub use handle::RunHandle;
-pub use session_runtime::{RuntimeError, SessionRuntime};
+pub use session_runtime::{InfraDeathLogTailCapture, RuntimeError, SessionRuntime};
 pub use spec::{
     LoopGuardKind, LoopGuardTrip, ProviderFailureClass, ResumeLifecycleMetadata,
     ResumeSelectionReason, ResumeSourceKind, RoleKind, SupervisorFlow, TaskRunOutcome,
