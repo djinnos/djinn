@@ -261,6 +261,9 @@ pub async fn run_cheap_doctor_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doctor::stranded_ready::{
+        MemoryStrandedReadySource, StrandedReadyCheck, STRANDED_READY_CHECK_NAME,
+    };
     use djinn_core::doctor::{
         DoctorCheck, DoctorCheckCadence, DoctorRegistry, DoctorResult, Finding, FindingSeverity,
         ResolverSnapshot,
@@ -406,6 +409,14 @@ mod tests {
         djinn_core::doctor::register(&registry, FixtureCheck);
         djinn_core::doctor::register(&registry, BoardWideCheck);
         djinn_core::doctor::register(&registry, ExpensiveCheck);
+        djinn_core::doctor::register(
+            &registry,
+            StrandedReadyCheck::new(MemoryStrandedReadySource::new(json!({
+                "total": 0,
+                "threshold_minutes": 30,
+                "findings": [],
+            }))),
+        );
         registry
     }
 

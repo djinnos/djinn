@@ -22,6 +22,7 @@
 pub mod leader_tick;
 pub mod live_mover;
 pub mod zombie_running_session;
+pub mod stranded_ready;
 
 use std::sync::Arc;
 
@@ -32,6 +33,10 @@ pub use zombie_running_session::{
     SnapshotZombieRunningSessionSource, ZOMBIE_RUNNING_SESSION_CHECK_NAME,
     ZombieRunningSessionCandidate, ZombieRunningSessionCheck, ZombieRunningSessionSource,
     check_from_coordinator_state,
+};
+pub use stranded_ready::{
+    MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCandidate, StrandedReadyCheck,
+    StrandedReadySource, TaskRepositoryStrandedReadySource,
 };
 
 /// Register all `djinn-agent`-side seed checks into `registry`.
