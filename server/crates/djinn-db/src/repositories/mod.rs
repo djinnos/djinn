@@ -9,6 +9,7 @@ pub mod events;
 pub mod git_settings;
 pub mod image;
 pub mod init;
+pub mod liveness;
 pub mod models;
 pub mod note;
 pub mod oauth;
