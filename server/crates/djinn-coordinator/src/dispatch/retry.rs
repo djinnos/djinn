@@ -961,14 +961,13 @@ impl CoordinatorActor {
                 "kind": "lead_arbiter",
                 "goal": "Forensic review of the current hold cycle after repeated planner interventions",
             });
-            let deadline = SystemClock::new()
-                .now()
-                .checked_add(std::time::Duration::from_secs(24 * 60 * 60))
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| {
-                    let dt = std::time::SystemTime::UNIX_EPOCH + d;
-                    chrono::DateTime::<chrono::Utc>::from(dt).to_rfc3339()
-                });
+            let deadline = {
+                let now = time::OffsetDateTime::now_utc();
+                let future = now + time::Duration::hours(24);
+                future
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            };
 
             // Resolve mirror_head_sha from the latest task attempt (pending
             // or submitted). The Task model does not carry this field; the
@@ -1372,10 +1371,10 @@ impl CoordinatorActor {
         let mut ids = Vec::new();
         if let Some(text) = ci_failure_sections {
             for chunk in text.split("job_id=") {
-                if let Some(num_part) = chunk.split_once(')') {
-                    if let Ok(job_id) = num_part.0.parse::<i64>() {
-                        ids.push(job_id);
-                    }
+                if let Some(num_part) = chunk.split_once(')')
+                    && let Ok(job_id) = num_part.0.parse::<i64>()
+                {
+                    ids.push(job_id);
                 }
             }
         }

@@ -5,7 +5,7 @@ use djinn_core::models::{ReopenClass, TransitionAction};
 use djinn_core::run_progress::RunProgress;
 use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
-use djinn_db::{DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
+use djinn_db::{ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository};
 
 #[allow(dead_code)]
 struct InterventionChaosHarness {
@@ -1051,15 +1051,16 @@ async fn loop_guard_second_strike_parks_task() {
     assert_eq!(arb.state, "unconsumed");
 
     // The arbiter_dispatched activity was logged.
-    let rows: Vec<serde_json::Value> = sqlx::query_scalar(
-        "SELECT payload FROM activity_log WHERE task_id = $1 AND event_type = 'arbiter_dispatched'",
-    )
-    .bind(&task.id)
-    .fetch_all(db.pool())
-    .await
-    .unwrap();
+    let activity = repo
+        .query_activity(ActivityQuery {
+            task_id: Some(task.id.clone()),
+            event_type: Some("arbiter_dispatched".to_string()),
+            ..ActivityQuery::default()
+        })
+        .await
+        .unwrap();
     assert!(
-        !rows.is_empty(),
+        !activity.is_empty(),
         "arbiter_dispatched activity must be logged"
     );
 
@@ -2101,7 +2102,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
 
     // An arbitration row was created.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
-    let (cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
     assert!(existing.is_some(), "unconsumed arbitration row must exist");
 
     // ── Phase 2: Assert the source is NOT in dispatch readiness ──
@@ -2121,7 +2122,7 @@ async fn review_hold_release_lifecycle_proves_dispatch_readiness_recovery() {
     // ── Phase 3: Lead arbiter completes — transition back to open ──
     // Simulate the Lead intervention lifecycle: escalate → start → complete → open.
     // The task is already in needs_lead_intervention, so start it.
-    let mut events = tx.subscribe();
+    let _events = tx.subscribe();
     repo.transition(
         &task.id,
         djinn_core::models::TransitionAction::LeadInterventionStart,
