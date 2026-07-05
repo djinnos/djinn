@@ -38,6 +38,9 @@ pub(crate) struct PostInterventionHistory {
     /// `first_seen_at` predates this timestamp is from a prior head SHA and
     /// must not serve as the park-triggering strike.
     pub latest_submission_at: Option<String>,
+    /// Class of the most recent reopen after the evidence floor. Determines the
+    /// truthful park-reason attribution (merge_queue_failed vs review_rejected).
+    pub most_recent_reopen_class: ReopenClass,
 }
 
 /// Which kind of remediation task to create for a stuck source task.
@@ -446,7 +449,7 @@ impl CoordinatorActor {
     /// coordinator-initiated stall kills, so these failures had no Planner path.
     ///
     /// Advances the per-task `provider_failure_streak` — sibling of the
-    /// stall-cancel streak, reset when the task's status advances (durable
+    /// `stall_cancel_streak`, reset when the task's status advances (durable
     /// progress) between strikes — and on the
     /// [`FAILURE_ESCALATION_THRESHOLD`]-th consecutive strike routes the task to
     /// a Planner intervention (decompose / rescope / close), clearing its
@@ -583,6 +586,18 @@ impl CoordinatorActor {
             return PostInterventionHistory::default();
         };
 
+        // Determine the class of the most recent post-intervention reopen so
+        // the reason can truthfully attribute the park to the correct trigger.
+        let most_recent_reopen_class = self
+            .task_repo()
+            .recent_reopen_ledger(&task.id, 1)
+            .await
+            .ok()
+            .and_then(|mut ledger| ledger.pop())
+            .filter(|entry| entry.created_at > floor)
+            .map(|entry| entry.reopen_class)
+            .unwrap_or(djinn_core::models::ReopenClass::Other);
+
         // Did any post-intervention session reach submit_work?
         let (any_submitted, latest_submission_at) = match self
             .task_repo()
@@ -616,6 +631,7 @@ impl CoordinatorActor {
                 );
                 return PostInterventionHistory {
                     any_submitted: true,
+                    most_recent_reopen_class,
                     ..Default::default()
                 };
             }
@@ -634,6 +650,7 @@ impl CoordinatorActor {
                 any_submitted: true,
                 submission_pending_review,
                 latest_submission_at,
+                most_recent_reopen_class,
                 ..Default::default()
             };
         }
@@ -675,22 +692,62 @@ impl CoordinatorActor {
             non_attempt_session_labels,
             submission_pending_review: false,
             latest_submission_at: None,
+            most_recent_reopen_class,
         }
     }
 
-    /// uv3p Part B: truthful park reason computed from `history`. Never contains
-    /// the templated "same acceptance criteria kept failing" phrasing that five
-    /// of five 2026-07-04 parks asserted falsely.
-    fn compute_park_reason(
-        &self,
+    /// Build a truthful detail sentence for the park reason, branching on the
+    /// post-intervention reopen class. For a merge_queue_failed after an
+    /// approved submission, explain that the post-intervention work was approved
+    /// but failed the merge-queue full suite. For review_rejected, keep the
+    /// existing AC-focused phrasing. Optionally note PR-head CI that shows
+    /// passing-with-skips so the green badge is not misleading.
+    pub(crate) fn park_reason_detail(
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
     ) -> String {
-        let detail = if history.any_submitted {
-            "The post-intervention remediation WAS attempted — at least one session submitted \
-             work after the planner reshaped the scope — but the acceptance criteria still did \
-             not pass, so re-dispatching would only loop again."
-                .to_string()
+        let has_pr_head_passing_with_skips = task.ci_status.as_str() == "passing"
+            && !task.ci_blocking_required_check_names.is_empty();
+        let skip_note = if has_pr_head_passing_with_skips {
+            " Note: the PR-head CI status currently shows passing, but some required checks are \
+             skipped on PR heads (they run only in the merge queue); that green badge does not \
+             reflect the merge-queue failure."
+        } else {
+            ""
+        };
+
+        if history.any_submitted {
+            match history.most_recent_reopen_class {
+                djinn_core::models::ReopenClass::MergeQueueFailed => {
+                    let fingerprint = task
+                        .ci_failure_fingerprint
+                        .as_deref()
+                        .filter(|f| !f.is_empty())
+                        .map(|f| format!(" (fingerprint: {f})"))
+                        .unwrap_or_default();
+                    let checks = task
+                        .ci_blocking_required_check_names
+                        .trim()
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "unknown check(s)".to_string());
+                    format!(
+                        "The post-intervention remediation WAS attempted and approved by review, \
+                         but the merge-queue full suite failed on {checks}{fingerprint}, so \
+                         re-dispatching would only loop again.{skip_note}"
+                    )
+                }
+                _ => {
+                    // review_rejected / other quality strikes keep the existing AC phrasing.
+                    format!(
+                        "The post-intervention remediation WAS attempted — at least one session \
+                         submitted work after the planner reshaped the scope — but the acceptance \
+                         criteria still did not pass, so re-dispatching would only loop again.{skip_note}"
+                    )
+                }
+            }
         } else {
             format!(
                 "{} post-intervention session(s) terminated pre-submission across models {} — \
@@ -699,7 +756,17 @@ impl CoordinatorActor {
                 history.non_attempt_session_labels.len(),
                 history.non_attempt_models.join(", "),
             )
-        };
+        }
+    }
+
+    /// uv3p Part B: truthful park reason computed from `history`. Never contains
+    /// the templated "same acceptance criteria kept failing" phrasing that five
+    /// of five 2026-07-04 parks asserted falsely.
+    pub(crate) fn compute_park_reason(
+        task: &djinn_core::models::Task,
+        history: &PostInterventionHistory,
+    ) -> String {
+        let detail = Self::park_reason_detail(task, history);
         format!(
             "Auto-parked for human review after {} planner intervention(s) \
              (intervention_count={}, total_reopen_count={}). {detail} The task is held (open + \
@@ -909,7 +976,7 @@ impl CoordinatorActor {
             // Truthful park reason computed from actual post-intervention
             // history — never the templated "same acceptance criteria kept
             // failing" text when zero post-intervention rounds occurred.
-            let reason = self.compute_park_reason(task, &history);
+            let reason = Self::compute_park_reason(task, &history);
 
             // Arbiter-first routing for the current hold cycle. If the cycle is
             // already unconsumed, the Lead arbiter is already in flight; if a
@@ -1231,7 +1298,7 @@ impl CoordinatorActor {
     }
 
     /// Record a `planner_intervention` marker keyed by raw `reopen_count`.
-    /// `quality_strikes` stored in payload for audit.
+    /// `quality_strikes` stored in audit.
     async fn record_planner_intervention_marker(
         &self,
         task: &djinn_core::models::Task,

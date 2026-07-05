@@ -28,12 +28,11 @@
 use std::borrow::Cow;
 
 use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::server::DjinnMcpServer;
 use crate::tools::acting_user::acting_caps;
-use crate::tools::epic_ops::AcceptanceCriterionItem;
 use crate::tools::list_response::{
     self, ListMeta, NamedListResponse, named_list_response_schema, serialize_named_list_response,
 };
@@ -43,7 +42,8 @@ use crate::tools::proposal_blocks::{
 use crate::tools::proposal_ops::{
     ProposalDebateTrailModel, ProposalDeleteResponse, ProposalEpicModel, ProposalListRow,
     ProposalListSummary, ProposalModel, ProposalShowResponse, ProposalSignoffModel,
-    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse,
+    ProposalSingleResponse, ProposalTargetModel, ProposalTargetsResponse, apply_revision_body_mode,
+    validate_revision_bodies_value, validate_show_fields,
 };
 use crate::tools::proposal_readiness::evaluate_proposal_readiness;
 use crate::tools::validation::{
@@ -63,6 +63,12 @@ use super::mdx::{
 use super::{
     build_gate_status, err_show, err_single, evaluate_composed_gate, format_readiness_error,
     parse_ac_items, proposal_not_found_error,
+};
+
+// Parameter structs live in `params.rs` to keep this file under the size guard.
+use super::params::{
+    ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalImportParams,
+    ProposalListParams, ProposalShowParams, ProposalTargetParams, ProposalUpdateParams,
 };
 
 // ── Target/show response helpers ─────────────────────────────────────────────
@@ -249,94 +255,6 @@ fn build_list_summary(
         gate_ready,
         unresolved_blocking_count: raw.unresolved_blocking_count,
     }
-}
-
-// ── Param structs ────────────────────────────────────────────────────────────
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalCreateParams {
-    pub title: String,
-    /// Spec body (markdown or MDX depending on `body_format`).
-    pub body: Option<String>,
-    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
-    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
-    /// Target projects (UUIDs or owner/repo slugs) this proposal touches.
-    /// Editable later via proposal_add_target / proposal_remove_target.
-    pub target_projects: Option<Vec<String>>,
-    /// Initial status: `triage`, `draft` (default), or `in_review`. Proposer-
-    /// role authors are always placed in `triage` regardless of this value.
-    pub status: Option<String>,
-    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
-    pub body_format: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalImportParams {
-    /// Full portable proposal.mdx content, including optional YAML frontmatter.
-    pub mdx: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalExportParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalShowParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalListParams {
-    pub status: Option<String>,
-    /// Filter by author user id.
-    pub author: Option<String>,
-    /// Filter to proposals targeting this project (UUID or owner/repo slug).
-    pub target_project: Option<String>,
-    /// Full-text search on title and body.
-    pub text: Option<String>,
-    /// Sort order: "created_desc" (default), "created", "updated", "updated_desc".
-    pub sort: Option<String>,
-    pub limit: Option<i64>,
-    pub offset: Option<i64>,
-    /// When `true`, include the full `body` string on each list row.
-    /// Default `false` — rows omit the full body and carry only
-    /// `body_excerpt` (first 512 Unicode scalars) and `body_truncated`.
-    pub include_bodies: Option<bool>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalTargetParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    /// Target project: UUID or owner/repo slug (must be registered).
-    pub project: String,
-    /// `primary` (a write-target, default) or `reference` (read-only context).
-    pub role: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalUpdateParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
-    pub title: Option<String>,
-    pub body: Option<String>,
-    /// Acceptance criteria: plain strings or `{criterion, met}` objects.
-    pub acceptance_criteria: Option<Vec<AcceptanceCriterionItem>>,
-    /// draft | in_review | approved | building | done | rejected | archived | superseded.
-    pub status: Option<String>,
-    /// UUID or short_id of the proposal that supersedes this one.
-    pub superseded_by: Option<String>,
-    /// Body encoding: `markdown` (default) or `mdx` (block-aware).
-    pub body_format: Option<String>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct ProposalDeleteParams {
-    /// Proposal UUID or short_id.
-    pub id: String,
 }
 
 // ── Tool router: create / import / export / show / list / update / block-patch / delete / target ──
@@ -660,81 +578,182 @@ impl DjinnMcpServer {
         })
     }
 
-    /// Show a proposal with targets, feedback, debate trail, revisions, and sign-offs.
+    /// Show a proposal with configurable field selection and revision body modes.
     #[tool(
-        description = "Show a proposal (by UUID or short_id) including target projects, the feedback/discussion thread, the debate-trail (objections/rebuttals/verdicts kept separate from feedback), its revision history, and review sign-offs (each flagged `stale` when given against an older revision)."
+        description = "Show a proposal (by UUID or short_id) with optional field selection. Pass `fields` to include only specific sections: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status (default: all). Pass `revision_bodies` to control revision verbosity: excerpt (default), full, omit. Omitted fields are absent from the response and their data is not loaded."
     )]
     pub async fn proposal_show(
         &self,
         Parameters(p): Parameters<ProposalShowParams>,
     ) -> Json<ProposalShowResponse> {
+        // ── Validate params ──────────────────────────────────────────────
+        if let Some(ref fields) = p.fields
+            && let Err(e) = validate_show_fields(fields)
+        {
+            return Json(err_show(e));
+        }
+        if let Some(ref rb) = p.revision_bodies
+            && let Err(e) = validate_revision_bodies_value(rb)
+        {
+            return Json(err_show(e));
+        }
+        // Helper: is this field selected? None = all selected (default).
+        let field_selected = |name: &str| -> bool {
+            match &p.fields {
+                None => true,
+                Some(f) => f.iter().any(|f| f == name),
+            }
+        };
+
         let repo = ProposalRepository::new(self.state.db().clone(), self.state.event_bus());
         let project_repo = ProjectRepository::new(self.state.db().clone(), self.state.event_bus());
         let Some(proposal) = repo.resolve(&p.id).await.ok().flatten() else {
             return Json(err_show(proposal_not_found_error(&p.id)));
         };
-        let targets = match target_models(&repo, &project_repo, &proposal.id).await {
-            Ok(t) => t,
-            Err(e) => return Json(err_show(e)),
+
+        // ── proposal ────────────────────────────────────────────────────
+        let proposal_model = if field_selected("proposal") {
+            Some(ProposalModel::from(&proposal))
+        } else {
+            None
         };
-        let feedback = match repo.feedback(&proposal.id).await {
-            Ok(f) => f.iter().map(Into::into).collect(),
-            Err(e) => return Json(err_show(e.to_string())),
+
+        // ── targets ─────────────────────────────────────────────────────
+        // Build full target models only when `targets` is selected.
+        // When only `gate_status` is selected, we need just the count.
+        let targets: Option<Vec<ProposalTargetModel>> = if field_selected("targets") {
+            match target_models(&repo, &project_repo, &proposal.id).await {
+                Ok(t) => Some(t),
+                Err(e) => return Json(err_show(e)),
+            }
+        } else {
+            None
         };
-        let revisions = match repo.revisions(&proposal.id).await {
-            Ok(r) => r.iter().map(Into::into).collect(),
-            Err(e) => return Json(err_show(e.to_string())),
+
+        // ── feedback ────────────────────────────────────────────────────
+        let feedback: Option<Vec<crate::tools::proposal_ops::ProposalFeedbackModel>> =
+            if field_selected("feedback") {
+                match repo.feedback(&proposal.id).await {
+                    Ok(f) => Some(f.iter().map(Into::into).collect()),
+                    Err(e) => return Json(err_show(e.to_string())),
+                }
+            } else {
+                None
+            };
+
+        // ── revisions ───────────────────────────────────────────────────
+        let mut revisions: Option<Vec<crate::tools::proposal_ops::ProposalRevisionModel>> =
+            if field_selected("revisions") {
+                match repo.revisions(&proposal.id).await {
+                    Ok(r) => Some(r.iter().map(Into::into).collect()),
+                    Err(e) => return Json(err_show(e.to_string())),
+                }
+            } else {
+                None
+            };
+
+        // Apply revision body mode only when revisions are selected.
+        let revision_bodies_mode = if field_selected("revisions") {
+            p.revision_bodies.as_deref().unwrap_or("excerpt")
+        } else {
+            // When revisions are not selected, ignore revision_bodies.
+            "omit"
         };
-        let signoffs = match repo.signoffs(&proposal.id).await {
-            Ok(s) => s
-                .iter()
-                .map(|so| ProposalSignoffModel::from_signoff(so, proposal.latest_revision_seq))
-                .collect(),
-            Err(e) => return Json(err_show(e.to_string())),
+        if let Some(ref mut revs) = revisions {
+            apply_revision_body_mode(revs, revision_bodies_mode);
+        }
+
+        // ── signoffs ────────────────────────────────────────────────────
+        let signoffs: Option<Vec<ProposalSignoffModel>> = if field_selected("signoffs") {
+            match repo.signoffs(&proposal.id).await {
+                Ok(s) => Some(
+                    s.iter()
+                        .map(|so| {
+                            ProposalSignoffModel::from_signoff(so, proposal.latest_revision_seq)
+                        })
+                        .collect(),
+                ),
+                Err(e) => return Json(err_show(e.to_string())),
+            }
+        } else {
+            None
         };
-        let epic_repo =
-            djinn_db::EpicRepository::new(self.state.db().clone(), self.state.event_bus());
-        let epics = match graduated_epic_models(
-            &repo,
-            &epic_repo,
-            &project_repo,
-            &proposal.id,
-            proposal.latest_revision_seq,
-            proposal.pending_reconcile,
-        )
-        .await
-        {
-            Ok(e) => e,
-            Err(e) => return Json(err_show(e)),
+
+        // ── epics (includes memory_refs) ────────────────────────────────
+        let (epics, memory_refs): (
+            Option<Vec<ProposalEpicModel>>,
+            Vec<crate::tools::proposal_ops::ProposalMemoryRefModel>,
+        ) = if field_selected("epics") {
+            let epic_repo =
+                djinn_db::EpicRepository::new(self.state.db().clone(), self.state.event_bus());
+            let epics_result = match graduated_epic_models(
+                &repo,
+                &epic_repo,
+                &project_repo,
+                &proposal.id,
+                proposal.latest_revision_seq,
+                proposal.pending_reconcile,
+            )
+            .await
+            {
+                Ok(e) => e,
+                Err(e) => return Json(err_show(e)),
+            };
+            let memory_refs = match repo.memory_refs_for_proposal(&proposal.id).await {
+                Ok(refs) => refs.into_iter().map(Into::into).collect(),
+                Err(e) => return Json(err_show(e.to_string())),
+            };
+            (Some(epics_result), memory_refs)
+        } else {
+            (None, Vec::new())
         };
-        let memory_refs = match repo.memory_refs_for_proposal(&proposal.id).await {
-            Ok(refs) => refs.into_iter().map(Into::into).collect(),
-            Err(e) => return Json(err_show(e.to_string())),
+
+        // ── debate (includes refinement status) ─────────────────────────
+        let (debate_trail, refinement): (
+            Option<Vec<ProposalDebateTrailModel>>,
+            Option<crate::tools::proposal_ops::ProposalRefinementStatusModel>,
+        ) = if field_selected("debate") {
+            let trail = match repo.debate_trail(&proposal.id).await {
+                Ok(d) => Some(d.iter().map(ProposalDebateTrailModel::from).collect()),
+                Err(e) => return Json(err_show(e.to_string())),
+            };
+            // Derive refinement status from lifecycle events + debate trail.
+            // Non-critical — swallow errors silently so proposal_show still
+            // works even if refinement status can't be computed.
+            let refinement =
+                crate::tools::refinement_tools::build_refinement_status(&repo, &proposal.id)
+                    .await
+                    .ok();
+            (trail, refinement)
+        } else {
+            (None, None)
         };
-        let debate_trail = match repo.debate_trail(&proposal.id).await {
-            Ok(d) => Some(d.iter().map(ProposalDebateTrailModel::from).collect()),
-            Err(e) => return Json(err_show(e.to_string())),
+
+        // ── gate_status ─────────────────────────────────────────────────
+        let gate_status = if field_selected("gate_status") {
+            let ac_json = &proposal.acceptance_criteria;
+            // Use target count from already-loaded targets, or fetch just the
+            // count when targets are not selected.
+            let target_count = match &targets {
+                Some(t) => t.len(),
+                None => repo
+                    .targets(&proposal.id)
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0),
+            };
+            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await)
+        } else {
+            None
         };
-        // Derive refinement status from lifecycle events + debate trail.
-        // Non-critical — swallow errors silently so proposal_show still works
-        // even if refinement status can't be computed.
-        let refinement =
-            crate::tools::refinement_tools::build_refinement_status(&repo, &proposal.id)
-                .await
-                .ok();
-        // Build composed gate status (DoR + tribunal conditions).
-        // Non-critical — swallow errors so proposal_show still works.
-        let ac_json = &proposal.acceptance_criteria;
-        let target_count = targets.len();
-        let gate_status =
-            Some(build_gate_status(&repo, &proposal, &proposal.body, ac_json, target_count).await);
+
         Json(ProposalShowResponse {
-            proposal: Some(ProposalModel::from(&proposal)),
-            targets: Some(targets),
-            feedback: Some(feedback),
-            revisions: Some(revisions),
-            signoffs: Some(signoffs),
-            epics: Some(epics),
+            proposal: proposal_model,
+            targets,
+            feedback,
+            revisions,
+            signoffs,
+            epics,
             memory_refs,
             debate_trail,
             refinement,
