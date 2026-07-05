@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id as task_id, t.short_id, t.title, t.closed_at as \"terminal_at!\"\n             FROM blockers b\n             JOIN tasks t ON t.id = b.blocking_task_id\n             WHERE b.task_id = $1\n               AND b.blocking_task_id IS NOT NULL\n               AND t.status = 'closed'\n             ORDER BY t.closed_at DESC, t.id ASC\n             LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "short_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "terminal_at!",
+        "type_info": "Varchar"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "a21a17edab38473c3e75bf7a6e7e6d1fcfa70adcb2ad98d3ac1d8c3ab2be3746"
+}

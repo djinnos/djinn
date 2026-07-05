@@ -462,6 +462,7 @@ mod tests {
             dispatch_cooldowns: std::collections::HashMap::new(),
             dispatch_failure_streak: std::collections::HashMap::new(),
             background_work_tracker: BackgroundWorkTracker::default(),
+            stranded_ready_source: None,
             auto_merge_tracker: AutoMergeTracker::default(),
             consolidation_runner: runner,
             last_stale_sweep: StdInstant::now(),
