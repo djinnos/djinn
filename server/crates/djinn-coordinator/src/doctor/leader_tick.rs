@@ -262,7 +262,7 @@ pub async fn run_cheap_doctor_checks(
 mod tests {
     use super::*;
     use crate::doctor::stranded_ready::{
-        MemoryStrandedReadySource, STRANDED_READY_CHECK_NAME, StrandedReadyCheck,
+        MemoryStrandedReadySource, StrandedReadyCheck,
     };
     use djinn_core::doctor::{
         DoctorCheck, DoctorCheckCadence, DoctorRegistry, DoctorResult, Finding, FindingSeverity,

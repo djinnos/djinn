@@ -1,3 +1,4 @@
+// djinn:allow-oversize
 //! Admin-facing doctor MCP tools (`doctor_run`, `doctor_fix`).
 //!
 //! These are the production tool methods that expose the
