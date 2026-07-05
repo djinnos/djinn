@@ -5,6 +5,7 @@
 //! user-facing dispatch or submit path. They consume the foundation APIs
 //! delivered by epic `u74z`.
 
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_db::{CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository};
 
 /// Record the start of a dispatch attempt.
@@ -154,6 +155,98 @@ pub async fn advance_to_submitted(db: &djinn_db::Database, params: SubmitAdvance
                 attempt_id = %attempt.id,
                 error = %e,
                 "attempt_lifecycle: failed to advance attempt to submitted (best-effort)"
+            );
+        }
+    }
+}
+
+/// Parameters for the coordinator-side terminal outcome helper.
+#[allow(dead_code)]
+pub struct TerminalizeAttemptParams<'a> {
+    pub task_id: &'a str,
+    pub role: Option<&'a str>,
+    pub outcome: TaskAttemptOutcome,
+    pub pr_url: Option<&'a str>,
+    pub submit_ref: Option<&'a str>,
+    pub checkpoint_ref: Option<&'a str>,
+    pub mirror_head_sha: Option<&'a str>,
+    pub github_head_sha: Option<&'a str>,
+    pub summary: Option<&'a str>,
+    pub summary_json: Option<&'a str>,
+    pub log_tail: Option<&'a str>,
+}
+
+/// Terminalize the latest pending or submitted attempt for a task.
+///
+/// Looks up via `latest_pending_or_submitted` with the supplied role filter,
+/// then advances to the requested terminal outcome.  Best-effort: errors are
+/// logged and never propagated.  Idempotent: repeated calls with the same
+/// outcome are no-ops; calls with a different outcome are rejected by the
+/// repository's forward-only guard and logged at debug.
+#[allow(dead_code)]
+pub async fn terminalize_attempt(
+    db: &djinn_db::Database,
+    params: TerminalizeAttemptParams<'_>,
+) {
+    use djinn_db::TerminalTaskAttemptParams;
+    let repo = djinn_db::TaskAttemptRepository::new(db.clone());
+    let attempt = match repo
+        .latest_pending_or_submitted(params.task_id, params.role)
+        .await
+    {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            tracing::debug!(
+                task_id = %params.task_id,
+                role = ?params.role,
+                "attempt_lifecycle: no pending/submitted attempt found for terminalization; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %params.task_id,
+                role = ?params.role,
+                error = %e,
+                "attempt_lifecycle: failed to look up attempt for terminalization"
+            );
+            return;
+        }
+    };
+
+    match repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: params.outcome,
+            pr_url: params.pr_url,
+            submit_ref: params.submit_ref,
+            checkpoint_ref: params.checkpoint_ref,
+            mirror_head_sha: params.mirror_head_sha,
+            github_head_sha: params.github_head_sha,
+            summary: params.summary,
+            summary_json: params.summary_json,
+            log_tail: params.log_tail,
+        })
+        .await
+    {
+        Ok(updated) => {
+            tracing::info!(
+                task_id = %params.task_id,
+                role = ?params.role,
+                attempt_id = %updated.id,
+                outcome = %updated.outcome,
+                terminal_at = ?updated.terminal_at,
+                "attempt_lifecycle: terminal outcome recorded"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %params.task_id,
+                role = ?params.role,
+                attempt_id = %attempt.id,
+                desired_outcome = %params.outcome,
+                error = %e,
+                "attempt_lifecycle: failed to terminalize attempt (best-effort)"
             );
         }
     }
