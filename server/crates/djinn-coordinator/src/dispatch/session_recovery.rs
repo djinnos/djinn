@@ -2484,11 +2484,16 @@ fn build_liveness_evidence(
         .map(|elapsed| elapsed >= ZOMBIE_HARD_CAP_SECS)
         .unwrap_or(false);
 
-    // ── Extension budget (derive from existing reaper thresholds) ────
-    // The current system does not have an explicit extension budget counter;
-    // sessions beyond the zombie hard cap are already dead, so the budget is
-    // implicitly exhausted when claim_ttl_remaining is zero.
-    let extension_budget_exhausted = claim_ttl_remaining.map(|t| t.is_zero()).unwrap_or(false);
+    // ── Extension budget ────────────────────────────────────────────
+    // The coordinator tracks slow-extension budget via its own
+    // `stall_extension_count` per session (checked in
+    // `enforce_session_stall_timeout`).  The liveness classifier should
+    // NOT derive exhaustion from `claim_ttl_remaining` because a session
+    // that exceeds the zombie hard cap may still be eligible for a slow
+    // extension (e.g. long tool-run heartbeats).  Default to `false`
+    // here; the coordinator's extension-budget gate handles the real
+    // accounting.
+    let extension_budget_exhausted = false;
 
     LivenessEvidence {
         pod_phase: Some(pod_phase),
@@ -2917,22 +2922,22 @@ mod liveness_foundation_tests {
 
     #[test]
     fn slow_verdict_with_exhausted_extension_budget_is_not_eligible() {
-        // Same as above but extension_budget_exhausted = true.
-        // Classifier returns Slow but extension_eligible = false.
-        let mut pool = healthy_pool_info();
-        pool.idle_seconds = ZOMBIE_HARD_CAP_SECS + 1;
-        pool.activity_tracked = true;
+        // Construct LivenessEvidence directly with extension_budget_exhausted = true
+        // to verify the pure classifier behavior. build_liveness_evidence no longer
+        // derives extension_budget_exhausted from claim_ttl_remaining; the
+        // coordinator tracks extension budget via stall_extension_count.
+        use super::super::liveness::LivenessEvidence;
 
-        let mut db = running_db_state();
-        // Force extension budget exhausted (claim_ttl_remaining = 0)
-        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
-        db.session_started_at = Some(format_iso(old));
-
-        let evidence = build_liveness_evidence(Some(&pool), &db);
-
-        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
-        assert_eq!(evidence.activity, ActivitySignal::Idle);
-        assert!(evidence.extension_budget_exhausted);
+        let evidence = LivenessEvidence {
+            pod_phase: Some(PodPhase::Running),
+            activity: ActivitySignal::Idle,
+            db_session_status: Some(DbSessionStatus::Running),
+            db_task_status: Some(DbTaskStatus::InProgress),
+            claim_ttl_remaining: Some(Duration::from_secs(100)),
+            extension_budget_exhausted: true,
+            hard_runtime_deadline_exceeded: false,
+            exit_code: None,
+        };
 
         let result = super::super::liveness::classify(&evidence);
         assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
