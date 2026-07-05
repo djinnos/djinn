@@ -3484,12 +3484,20 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
 // These tests prove that the non-happy paths after arbiter creation use a
 // structured dossier (never the old static "same acceptance criteria kept
 // failing" template) and do not create duplicate unresolved human-review holds.
+//
+// When a consumed/failed arbitration exists for the latest hold cycle,
+// `resolve_current_hold_cycle` advances to the next cycle and a new arbiter
+// is dispatched (the normal flow).  The `AlreadyExistsConsumed` /
+// `AlreadyExistsFailed` match arms in `route_planner_intervention` are
+// race-condition safety nets: they fire when `try_create` hits a uniqueness
+// conflict on the SAME hold cycle — e.g. the unconsumed row was consumed
+// between `resolve_current_hold_cycle` and `try_create`.
 
-/// A consumed arbitration row for the current hold cycle must cause the
-/// re-entry path to park the task on human review using a structured
-/// `arbiter_consumed_dossier` — never the old static repeated-AC template.
+/// When the latest arbitration is consumed, `resolve_current_hold_cycle`
+/// advances to the next cycle and `route_planner_intervention` dispatches a
+/// new arbiter.  The task transitions to `needs_lead_intervention`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consumed_arbitration_reentry_parks_with_structured_dossier() {
+async fn consumed_arbitration_advances_to_next_cycle_and_dispatches() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -3504,10 +3512,10 @@ async fn consumed_arbitration_reentry_parks_with_structured_dossier() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
 
-    // Seed an unconsumed arbitration row for hold_cycle 0, then mark it
-    // consumed with a stored dossier to simulate a completed arbiter.
+    // Seed a consumed arbitration at hold_cycle 0 to simulate a completed
+    // arbiter.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
-    let arb = arb_repo
+    arb_repo
         .try_create(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
@@ -3523,75 +3531,70 @@ async fn consumed_arbitration_reentry_parks_with_structured_dossier() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        arb,
-        djinn_db::repositories::task_arbitration::TryCreateResult::Created(_)
-    ));
     arb_repo.mark_consumed(&task.id, 0).await.unwrap();
 
     // Seed post-intervention terminated sessions so the attempted-remediation
     // gate does not decline to park.
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
-    // Act: trigger the second-strike park rung.
+    // Act: trigger the second-strike park rung.  Because the consumed
+    // arbitration at cycle 0 is detected, `resolve_current_hold_cycle`
+    // advances to cycle 1 and `try_create(1)` inserts a new row → dispatch.
     let handled = actor
-        .route_planner_intervention(&task, "worker", "second strike consumed reentry", None, 5)
+        .route_planner_intervention(&task, "worker", "consumed cycle reentry", None, 5)
         .await;
-    assert!(handled, "consumed re-entry must park the task");
+    assert!(handled, "consumed-cycle re-entry must be handled");
 
-    // The task must be parked open with a human-review remediation blocker.
-    let parked = repo.get(&task.id).await.unwrap().unwrap();
+    // The task transitions to needs_lead_intervention (arbiter dispatched).
+    let after = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(
-        parked.status, "open",
-        "consumed re-entry parks the source open"
+        after.status, "needs_lead_intervention",
+        "consumed-cycle re-entry dispatches a new arbiter"
     );
+
+    // A new arbitration row exists at cycle 1 (the advanced cycle).
+    let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        all_arbs.len(),
+        2,
+        "consumed cycle must produce exactly two rows (cycle 0 consumed + cycle 1 unconsumed)"
+    );
+    let new_arb = all_arbs.iter().find(|a| a.hold_cycle == 1).expect(
+        "cycle 1 arbitration must exist",
+    );
+    assert_eq!(
+        new_arb.state, "unconsumed",
+        "new arbitration must be unconsumed"
+    );
+
+    // No human-review blockers (dispatch path does not create them).
     let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers.len(),
-        1,
-        "consumed re-entry creates exactly one human-review blocker"
-    );
-    let remediation = repo.get(&blockers[0].task_id).await.unwrap().unwrap();
     assert!(
-        remediation.labels.contains("human-review-hold"),
-        "remediation must carry human-review-hold label"
+        blockers.is_empty(),
+        "dispatch path must NOT create human-review blockers"
     );
 
-    // The park reason must contain the structured dossier (not the old
-    // static "same acceptance criteria kept failing" template).
-    let entries = repo
-        .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
-            event_type: Some("status_changed".to_string()),
-            ..ActivityQuery::default()
-        })
-        .await
-        .unwrap();
-    let reason = entries
-        .last()
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
-        .and_then(|p| p.get("reason").and_then(|r| r.as_str()).map(str::to_owned))
+    // The new arbitration dossier is structured (not the old template).
+    let dossier_text = new_arb
+        .dossier
+        .as_ref()
+        .map(|d| d.to_string())
         .unwrap_or_default();
-
     assert!(
-        reason.contains("arbiter_consumed_dossier"),
-        "park reason must contain the structured consumed dossier; got: {reason}"
+        dossier_text.contains("post_intervention_history"),
+        "arbitration dossier must contain post_intervention_history; got: {dossier_text}"
     );
     assert!(
-        reason.contains("Arbiter re-entry / failure dossier:"),
-        "park reason must include the dossier section header"
-    );
-    assert!(
-        !reason.contains("same acceptance criteria kept failing"),
-        "park reason must NOT contain the old static repeated-AC template"
+        !dossier_text.contains("same acceptance criteria kept failing"),
+        "arbitration dossier must NOT contain the old static repeated-AC template"
     );
 }
 
-/// A failed arbitration row for the current hold cycle must cause the
-/// re-entry path to park with a structured `arbiter_consumed_dossier`
-/// containing the failure state — never the old template.
+/// A failed arbitration row for the latest hold cycle must cause the code to
+/// advance to the next cycle and dispatch a new arbiter, with a structured
+/// dossier — never the old template.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_arbitration_reentry_parks_with_structured_dossier() {
+async fn failed_arbitration_advances_to_next_cycle_and_dispatches() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -3606,9 +3609,9 @@ async fn failed_arbitration_reentry_parks_with_structured_dossier() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
 
-    // Seed an unconsumed arbitration and immediately mark it failed.
+    // Seed a failed arbitration at hold_cycle 0.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
-    let arb = arb_repo
+    arb_repo
         .try_create(CreateArbitrationParams {
             task_id: &task.id,
             hold_cycle: 0,
@@ -3624,50 +3627,44 @@ async fn failed_arbitration_reentry_parks_with_structured_dossier() {
         })
         .await
         .unwrap();
-    assert!(matches!(
-        arb,
-        djinn_db::repositories::task_arbitration::TryCreateResult::Created(_)
-    ));
     arb_repo.mark_failed(&task.id, 0).await.unwrap();
 
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
     let handled = actor
-        .route_planner_intervention(&task, "worker", "second strike failed reentry", None, 5)
+        .route_planner_intervention(&task, "worker", "failed cycle reentry", None, 5)
         .await;
-    assert!(handled, "failed re-entry must park the task");
+    assert!(handled, "failed-cycle re-entry must be handled");
 
-    let parked = repo.get(&task.id).await.unwrap().unwrap();
-    assert_eq!(parked.status, "open", "failed re-entry parks source open");
-    let blockers = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(blockers.len(), 1, "exactly one human-review blocker");
+    // Task transitions to needs_lead_intervention (new arbiter dispatched).
+    let after = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "needs_lead_intervention",
+        "failed-cycle re-entry dispatches a new arbiter"
+    );
 
-    // The generated dossier must carry the failure-specific fields.
-    let entries = repo
-        .query_activity(ActivityQuery {
-            task_id: Some(task.id.clone()),
-            event_type: Some("status_changed".to_string()),
-            ..ActivityQuery::default()
-        })
-        .await
-        .unwrap();
-    let reason = entries
-        .last()
-        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.payload).ok())
-        .and_then(|p| p.get("reason").and_then(|r| r.as_str()).map(str::to_owned))
+    // A new arbitration row exists at cycle 1.
+    let all_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(all_arbs.len(), 2, "must have cycle 0 (failed) + cycle 1");
+    let new_arb = all_arbs
+        .iter()
+        .find(|a| a.hold_cycle == 1)
+        .expect("cycle 1 must exist");
+    assert_eq!(new_arb.state, "unconsumed");
+
+    // Dossier is structured — no old template.
+    let dossier_text = new_arb
+        .dossier
+        .as_ref()
+        .map(|d| d.to_string())
         .unwrap_or_default();
-
     assert!(
-        reason.contains("arbiter_consumed_dossier"),
-        "failed re-entry reason must contain the structured dossier; got: {reason}"
+        dossier_text.contains("post_intervention_history"),
+        "dossier must contain post_intervention_history; got: {dossier_text}"
     );
     assert!(
-        reason.contains("\"failed\""),
-        "dossier must record the failed arbitration state; got: {reason}"
-    );
-    assert!(
-        !reason.contains("same acceptance criteria kept failing"),
-        "park reason must NOT contain the old static repeated-AC template"
+        !dossier_text.contains("same acceptance criteria kept failing"),
+        "dossier must NOT contain the old static repeated-AC template"
     );
 }
 
@@ -3747,11 +3744,10 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     );
 }
 
-/// When the source is already parked with a human-review hold from a consumed
-/// arbitration re-entry, a second re-entry must NOT stack a duplicate
-/// unresolved human-review blocker.
+/// Repeated consumed-cycle interventions must NOT create duplicate arbitration
+/// rows for the same cycle.  Each consumed cycle advances to the next.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn consumed_reentry_does_not_create_duplicate_human_review_holds() {
+async fn repeated_consumed_cycles_do_not_create_duplicate_arbitration_rows() {
     let db = test_helpers::create_test_db();
     let (tx, _rx) = broadcast::channel(256);
     let mut actor = coordinator_actor_for_tests(&db, &tx);
@@ -3766,7 +3762,7 @@ async fn consumed_reentry_does_not_create_duplicate_human_review_holds() {
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
 
-    // Seed an unconsumed arbitration and immediately mark it consumed.
+    // Seed consumed arbitration at cycle 0.
     let arb_repo = TaskArbitrationRepository::new(db.clone());
     arb_repo
         .try_create(CreateArbitrationParams {
@@ -3777,7 +3773,7 @@ async fn consumed_reentry_does_not_create_duplicate_human_review_holds() {
             github_head_sha: None,
             pr_url: None,
             failing_ci_job_ids: &serde_json::json!([]),
-            dossier: Some(&serde_json::json!({"stored": "first-decision"})),
+            dossier: Some(&serde_json::json!({"stored": "cycle-0"})),
             directive: None,
             verification_command: None,
             excluded_models: &serde_json::json!([]),
@@ -3788,39 +3784,203 @@ async fn consumed_reentry_does_not_create_duplicate_human_review_holds() {
 
     seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
 
-    // First park: creates the human-review remediation blocker.
+    // First intervention: advances from consumed cycle 0 to cycle 1.
     let handled1 = actor
         .route_planner_intervention(&task, "worker", "first consumed reentry", None, 5)
         .await;
-    assert!(handled1, "first consumed re-entry must park");
+    assert!(handled1, "first consumed re-entry must be handled");
 
-    let blockers1 = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(blockers1.len(), 1, "first park creates exactly one blocker");
-    let first_blocker_id = blockers1[0].task_id.clone();
+    let arbs_after_1 = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(arbs_after_1.len(), 2, "cycle 0 + cycle 1");
+    assert!(arbs_after_1.iter().any(|a| a.hold_cycle == 0 && a.state == "consumed"));
+    assert!(arbs_after_1.iter().any(|a| a.hold_cycle == 1 && a.state == "unconsumed"));
 
-    // The second arbitration (cycle 1) is created by the first park.
-    // Mark it consumed so the second park call also takes the consumed path.
-    let cycle1_arbs = arb_repo.list_for_task(&task.id).await.unwrap();
-    let latest_cycle = cycle1_arbs.iter().map(|a| a.hold_cycle).max().unwrap();
-    arb_repo
-        .mark_consumed(&task.id, latest_cycle)
-        .await
-        .unwrap();
+    // Mark cycle 1 consumed (simulate arbiter completing).
+    arb_repo.mark_consumed(&task.id, 1).await.unwrap();
 
-    // Second park: must NOT stack a duplicate blocker.
+    // Second intervention: advances from consumed cycle 1 to cycle 2.
+    // Task is in needs_lead_intervention from first dispatch; refresh.
+    let refreshed = repo.get(&task.id).await.unwrap().unwrap();
     let handled2 = actor
-        .route_planner_intervention(&task, "worker", "second consumed reentry", None, 5)
+        .route_planner_intervention(&refreshed, "worker", "second consumed reentry", None, 5)
         .await;
     assert!(handled2, "second consumed re-entry must be handled");
 
-    let blockers2 = repo.list_blockers(&task.id).await.unwrap();
-    assert_eq!(
-        blockers2.len(),
-        1,
-        "second park must NOT create a duplicate human-review blocker"
+    let arbs_after_2 = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(arbs_after_2.len(), 3, "cycle 0 + cycle 1 + cycle 2");
+    assert!(
+        arbs_after_2.iter().any(|a| a.hold_cycle == 2 && a.state == "unconsumed"),
+        "cycle 2 must be unconsumed"
     );
-    assert_eq!(
-        blockers2[0].task_id, first_blocker_id,
-        "the single blocker must be the original one"
+
+    // No duplicate rows for any cycle.
+    let mut cycles: Vec<i32> = arbs_after_2.iter().map(|a| a.hold_cycle).collect();
+    cycles.sort();
+    cycles.dedup();
+    assert_eq!(cycles.len(), 3, "each cycle must appear exactly once");
+
+    // No human-review blockers.
+    let blockers = repo.list_blockers(&task.id).await.unwrap();
+    assert!(
+        blockers.is_empty(),
+        "dispatch path must NOT create human-review blockers"
+    );
+}
+
+/// `try_create` must return `AlreadyExistsConsumed` when a consumed row
+/// already exists at the same `(task_id, hold_cycle)`.  This is the
+/// race-condition safety net that `route_planner_intervention` uses to park
+/// rather than double-dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_create_returns_already_exists_consumed_for_consumed_row() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+    // Create and consume a row at cycle 0.
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: Some(&serde_json::json!({"kind": "arbiter_consumed_dossier"})),
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+    arb_repo.mark_consumed(&task.id, 0).await.unwrap();
+
+    // Calling try_create at the same cycle must return AlreadyExistsConsumed.
+    let result = arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+
+    match result {
+        djinn_db::repositories::task_arbitration::TryCreateResult::AlreadyExistsConsumed(record) => {
+            assert_eq!(record.state, "consumed");
+            // The stored dossier is available for the re-entry dossier path.
+            let dossier = record
+                .dossier
+                .as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_default();
+            assert!(
+                dossier.contains("arbiter_consumed_dossier"),
+                "stored dossier must be available; got: {dossier}"
+            );
+        }
+        other => panic!(
+            "expected AlreadyExistsConsumed, got: {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+}
+
+/// `try_create` must return `AlreadyExistsFailed` when a failed row
+/// already exists at the same `(task_id, hold_cycle)`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_create_returns_already_exists_failed_for_failed_row() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+    // Create and fail a row at cycle 0.
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: Some("sha1"),
+            github_head_sha: Some("sha2"),
+            pr_url: Some("https://github.com/x/y/pull/1"),
+            failing_ci_job_ids: &serde_json::json!([42]),
+            dossier: Some(&serde_json::json!({"kind": "arbiter_consumed_dossier", "state": "failed"})),
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+    arb_repo.mark_failed(&task.id, 0).await.unwrap();
+
+    // Calling try_create at the same cycle must return AlreadyExistsFailed.
+    let result = arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &serde_json::json!([]),
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &serde_json::json!([]),
+        })
+        .await
+        .unwrap();
+
+    match result {
+        djinn_db::repositories::task_arbitration::TryCreateResult::AlreadyExistsFailed(record) => {
+            assert_eq!(record.state, "failed");
+            assert!(record.dossier.is_some(), "stored dossier must be present");
+        }
+        other => panic!(
+            "expected AlreadyExistsFailed, got: {:?}",
+            std::mem::discriminant(&other)
+        ),
+    }
+}
+
+/// The park reason (`compute_park_reason`) must never emit the old static
+/// "same acceptance criteria kept failing" template when post-intervention
+/// history is available.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn park_reason_never_uses_old_static_template() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+
+    // Create a task with enough reopens that `compute_park_reason` is
+    // exercised.  We use the `make_task_with_reopen_count` helper and seed
+    // terminated post-intervention sessions to exercise the history-based
+    // reason path.
+    let task =
+        make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // Build the post-intervention history and compute the park reason.
+    let actor = coordinator_actor_for_tests(&db, &tx);
+    let history = actor.post_intervention_history(&task).await;
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        !reason.contains("same acceptance criteria kept failing"),
+        "park reason must NEVER contain the old static template; got: {reason}"
+    );
+    assert!(
+        !reason.is_empty(),
+        "park reason must not be empty"
     );
 }
