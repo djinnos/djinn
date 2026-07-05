@@ -2,7 +2,14 @@
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
+use djinn_db::{CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository};
+use djinn_slot::RunningTaskInfo;
 use tracing::Instrument as _;
+
+use super::liveness::{
+    ActivitySignal, ClassificationResult, DbSessionStatus, DbTaskStatus, LivenessEvidence,
+    PodPhase,
+};
 
 /// A `running`, zero-token session older than this has slipped past the
 /// 180s fast-path stall breaker — its in-memory tracking has drifted. Reap it
@@ -1648,6 +1655,213 @@ impl CoordinatorActor {
             )
             .await;
     }
+
+    // ── Liveness classifier foundation entrypoint ────────────────────────
+
+    /// Non-mutating liveness-classification entrypoint near session recovery.
+    ///
+    /// Gathers normalized pool activity and DB state for `task_id`, maps them
+    /// into [`LivenessEvidence`], invokes the pure classifier from
+    /// [`super::liveness::classify`], and optionally persists the structured
+    /// result via [`LivenessRepository`].
+    ///
+    /// **Side-effect contract:** this method does NOT mutate task status,
+    /// extend claims, kill pods, or increment attempts. It only records
+    /// classifier evidence for later consumer epics (`vbgl`, `jk7v`, `ptvg`).
+    /// Terminal task races are recorded as noop/idempotent outcomes.
+    #[allow(dead_code)]
+    #[tracing::instrument(
+        name = "djinn.session_recovery.classify_liveness",
+        skip(self),
+        fields(task_id = %task_id)
+    )]
+    pub(crate) async fn classify_task_liveness(
+        &self,
+        task_id: &str,
+    ) -> Option<ClassificationResult> {
+        // ── 1. Load DB state ──────────────────────────────────────────
+        let liveness_repo = LivenessRepository::new(self.db.clone());
+        let db_state = match liveness_repo.load_current_state(task_id).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "classify_task_liveness: failed to load current state"
+                );
+                return None;
+            }
+        };
+
+        // ── 2. Load pool activity ────────────────────────────────────
+        let pool_info = match self.pool.session_for_task(task_id).await {
+            Ok(Some(info)) => Some(info),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    error = %e,
+                    "classify_task_liveness: pool query failed (continuing with DB-only evidence)"
+                );
+                None
+            }
+        };
+
+        // ── 3. Build evidence and classify ───────────────────────────
+        let evidence = build_liveness_evidence(pool_info.as_ref(), &db_state);
+        let result = super::liveness::classify(&evidence);
+
+        tracing::info!(
+            task_id = %task_id,
+            verdict = %result.verdict,
+            outcome = ?result.outcome,
+            reason = ?result.reason,
+            extension_eligible = %result.extension_eligible,
+            "classify_task_liveness: classification complete"
+        );
+
+        // ── 4. Persist evidence via ts1j repository helper ───────────
+        // Persist whenever an active session exists — the repository is
+        // append-only and terminal-task races are recorded as noop/
+        // idempotent outcomes (the verdict is KillNoop, not a mutation).
+        if let Some(ref session_id) = db_state.active_session_id {
+            let snapshot = LivenessEvidenceSnapshot {
+                session_id: session_id.clone(),
+                task_id: Some(task_id.to_owned()),
+                task_run_id: db_state.latest_task_run_id.clone(),
+                verdict: result.verdict.as_str().to_owned(),
+                outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+                outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+                evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+            };
+            match liveness_repo.persist_evidence(&snapshot).await {
+                Ok(evidence_id) => {
+                    tracing::debug!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        evidence_id = %evidence_id,
+                        verdict = %result.verdict,
+                        "classify_task_liveness: evidence persisted"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session_id,
+                        error = %e,
+                        "classify_task_liveness: failed to persist evidence"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                task_id = %task_id,
+                verdict = %result.verdict,
+                "classify_task_liveness: no active session — evidence logged only (not persisted)"
+            );
+        }
+
+        Some(result)
+    }
+}
+
+/// Map normalized pool activity and DB state into a [`LivenessEvidence`]
+/// packet for the pure classifier.
+///
+/// This is a standalone pure helper (no `&self`) so it can be unit-tested
+/// without constructing a full [`CoordinatorActor`].
+fn build_liveness_evidence(
+    pool_info: Option<&RunningTaskInfo>,
+    db_state: &CurrentLivenessState,
+) -> LivenessEvidence {
+    // ── Pod phase ─────────────────────────────────────────────────────
+    let pod_phase = match pool_info {
+        Some(_) => PodPhase::Running,
+        None => PodPhase::Absent,
+    };
+
+    // ── Activity signal ──────────────────────────────────────────────
+    let activity = match pool_info {
+        Some(info) => {
+            if !info.activity_tracked {
+                ActivitySignal::NeverActive
+            } else if info.idle_seconds > ZOMBIE_HARD_CAP_SECS {
+                ActivitySignal::Idle
+            } else {
+                ActivitySignal::Active
+            }
+        }
+        None => ActivitySignal::Idle,
+    };
+
+    // ── DB session status ────────────────────────────────────────────
+    let db_session_status = db_state
+        .active_session_status
+        .as_deref()
+        .map(|s| match s {
+            "running" => DbSessionStatus::Running,
+            "completed" => DbSessionStatus::Completed,
+            "interrupted" => DbSessionStatus::Interrupted,
+            "failed" => DbSessionStatus::Failed,
+            "paused" => DbSessionStatus::Paused,
+            _ => DbSessionStatus::Running,
+        });
+
+    // ── DB task status ───────────────────────────────────────────────
+    let db_task_status = db_state.task_status.as_deref().map(|s| match s {
+        "open" => DbTaskStatus::Open,
+        "in_progress" => DbTaskStatus::InProgress,
+        "needs_task_review" => DbTaskStatus::NeedsTaskReview,
+        "in_task_review" => DbTaskStatus::InTaskReview,
+        "approved" => DbTaskStatus::Approved,
+        "pr_draft" => DbTaskStatus::PrDraft,
+        "pr_review" => DbTaskStatus::PrReview,
+        "needs_lead_intervention" => DbTaskStatus::NeedsLeadIntervention,
+        "in_lead_intervention" => DbTaskStatus::InLeadIntervention,
+        "closed" => DbTaskStatus::Closed,
+        _ => DbTaskStatus::Open,
+    });
+
+    // ── Claim TTL remaining ──────────────────────────────────────────
+    // Derive remaining claim TTL from session duration vs zombie hard cap.
+    let claim_ttl_remaining = db_state
+        .session_started_at
+        .as_deref()
+        .and_then(parse_iso_elapsed)
+        .map(|elapsed| {
+            if elapsed >= ZOMBIE_HARD_CAP_SECS {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(ZOMBIE_HARD_CAP_SECS - elapsed)
+            }
+        });
+
+    // ── Hard runtime deadline ────────────────────────────────────────
+    let hard_runtime_deadline_exceeded = db_state
+        .task_run_started_at
+        .as_deref()
+        .and_then(parse_iso_elapsed)
+        .map(|elapsed| elapsed >= ZOMBIE_HARD_CAP_SECS)
+        .unwrap_or(false);
+
+    // ── Extension budget (derive from existing reaper thresholds) ────
+    // The current system does not have an explicit extension budget counter;
+    // sessions beyond the zombie hard cap are already dead, so the budget is
+    // implicitly exhausted when claim_ttl_remaining is zero.
+    let extension_budget_exhausted = claim_ttl_remaining
+        .map(|t| t.is_zero())
+        .unwrap_or(false);
+
+    LivenessEvidence {
+        pod_phase: Some(pod_phase),
+        activity,
+        db_session_status,
+        db_task_status,
+        claim_ttl_remaining,
+        extension_budget_exhausted,
+        hard_runtime_deadline_exceeded,
+        exit_code: None,
+    }
 }
 
 /// Parse an ISO-8601 datetime string from the DB (e.g. "2026-03-27T13:52:47.231Z"
@@ -1677,4 +1891,362 @@ fn session_predates_task_status(session_started_at: &str, task_updated_at: &str)
     let session_elapsed = parse_iso_elapsed(session_started_at)?;
     let task_updated_elapsed = parse_iso_elapsed(task_updated_at)?;
     Some(session_elapsed > task_updated_elapsed)
+}
+
+// ─── Liveness foundation tests ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod liveness_foundation_tests {
+    use super::*;
+    use djinn_db::CurrentLivenessState;
+    use djinn_slot::RunningTaskInfo;
+    use time::OffsetDateTime;
+    use time::Duration as TimeDuration;
+
+    /// Format an `OffsetDateTime` as an ISO-8601 string matching the DB format.
+    fn format_iso(dt: OffsetDateTime) -> String {
+        dt.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_else(|_| "2026-01-01T00:00:00.000Z".to_owned())
+    }
+
+    /// Helper to build a `CurrentLivenessState` for a running, non-terminal
+    /// task with a recently-started session and task_run.
+    fn running_db_state() -> CurrentLivenessState {
+        // Use a timestamp 60 seconds ago so the session is well within the
+        // zombie hard cap.
+        let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
+        let ts = format_iso(recent);
+        CurrentLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_id: Some("sess-1".to_owned()),
+            active_session_status: Some("running".to_owned()),
+            latest_task_run_id: Some("run-1".to_owned()),
+            latest_task_run_status: Some("running".to_owned()),
+            session_liveness_verdict: None,
+            session_liveness_outcome_kind: None,
+            session_liveness_outcome_reason: None,
+            session_liveness_evidence: None,
+            task_run_liveness_outcome_kind: None,
+            task_run_liveness_outcome_reason: None,
+            task_run_liveness_evidence: None,
+            task_created_at: Some(ts.clone()),
+            session_started_at: Some(ts.clone()),
+            task_run_started_at: Some(ts),
+            task_run_ended_at: None,
+        }
+    }
+
+    /// Helper to build a `RunningTaskInfo` that represents a healthy,
+    /// recently-active in-memory session.
+    fn healthy_pool_info() -> RunningTaskInfo {
+        RunningTaskInfo {
+            task_id: "task-1".to_owned(),
+            model_id: "test/mock".to_owned(),
+            slot_id: 0,
+            duration_seconds: 60,
+            idle_seconds: 5,
+            activity_tracked: true,
+            project_id: Some("proj-1".to_owned()),
+            token_count: 1000,
+            turn_count: 5,
+            no_progress_streak: 0,
+        }
+    }
+
+    // ── AC 3: live activity evidence mapping ──────────────────────────────
+
+    #[test]
+    fn live_activity_maps_to_live_verdict() {
+        let pool = healthy_pool_info();
+        let db = running_db_state();
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Active);
+        assert_eq!(evidence.db_session_status, Some(DbSessionStatus::Running));
+        assert_eq!(evidence.db_task_status, Some(DbTaskStatus::InProgress));
+        assert!(evidence.claim_ttl_remaining.is_some());
+        assert!(!evidence.hard_runtime_deadline_exceeded);
+        assert!(!evidence.extension_budget_exhausted);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Live);
+        assert_eq!(result.outcome, None);
+        assert!(!result.extension_eligible);
+    }
+
+    // ── AC 3: missing/failed pod + stale DB activity ──────────────────────
+
+    #[test]
+    fn absent_pod_with_idle_session_maps_to_dead() {
+        // No pool info (absent pod) and the DB session is running but idle.
+        let mut db = running_db_state();
+        // Session started long ago (beyond zombie hard cap).
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        let old_ts = format_iso(old);
+        db.session_started_at = Some(old_ts);
+        // Keep task_run_started_at recent so hard_runtime_deadline_exceeded
+        // doesn't fire (that's precedence 2, tested separately).
+
+        let evidence = build_liveness_evidence(None, &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Absent));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+        assert_eq!(evidence.db_session_status, Some(DbSessionStatus::Running));
+        assert!(!evidence.hard_runtime_deadline_exceeded);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::DeadReclaimed)
+        );
+    }
+
+    #[test]
+    fn failed_pod_idle_stale_session_is_dead() {
+        // Session is old and no pool activity — absent pod + idle → Dead.
+        // Keep task_run_started_at recent so hard_runtime_deadline_exceeded
+        // doesn't fire first.
+        let mut db = running_db_state();
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.session_started_at = Some(format_iso(old));
+
+        // No pool info → absent pod + idle → Dead.
+        let evidence = build_liveness_evidence(None, &db);
+        assert!(!evidence.hard_runtime_deadline_exceeded);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::DeadReclaimed)
+        );
+    }
+
+    // ── AC 3: hard runtime cap ────────────────────────────────────────────
+
+    #[test]
+    fn hard_runtime_cap_produces_dead_timeout() {
+        let pool = healthy_pool_info();
+        let mut db = running_db_state();
+        // Task run started long ago, exceeding zombie hard cap.
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.task_run_started_at = Some(format_iso(old));
+
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert!(evidence.hard_runtime_deadline_exceeded);
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::Timeout)
+        );
+        assert_eq!(
+            result.reason,
+            Some(super::super::liveness::LivenessReason::HardRuntimeExceeded)
+        );
+        assert!(!result.extension_eligible);
+    }
+
+    // ── AC 3: protocol-violation outcome metadata ─────────────────────────
+
+    #[test]
+    fn clean_exit_nonterminal_produces_protocol_violation() {
+        // Directly build evidence that represents a succeeded pod with running
+        // session — this tests the classifier protocol-violation path.
+        // Directly build evidence that represents a succeeded pod with running
+        // session — this tests the classifier protocol-violation path.
+        let evidence = LivenessEvidence {
+            pod_phase: Some(PodPhase::Succeeded),
+            activity: ActivitySignal::Idle,
+            db_session_status: Some(DbSessionStatus::Running),
+            db_task_status: Some(DbTaskStatus::InProgress),
+            claim_ttl_remaining: Some(Duration::from_secs(600)),
+            extension_budget_exhausted: false,
+            hard_runtime_deadline_exceeded: false,
+            exit_code: Some(0),
+        };
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(
+            result.verdict,
+            super::super::liveness::Verdict::ProtocolViolation
+        );
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::Success)
+        );
+        assert_eq!(
+            result.reason,
+            Some(super::super::liveness::LivenessReason::CleanExitNonterminal)
+        );
+        assert!(!result.extension_eligible);
+    }
+
+    #[test]
+    fn nonzero_exit_nonterminal_produces_protocol_violation_crash() {
+        let evidence = LivenessEvidence {
+            pod_phase: Some(PodPhase::Failed),
+            activity: ActivitySignal::Idle,
+            db_session_status: Some(DbSessionStatus::Running),
+            db_task_status: Some(DbTaskStatus::InProgress),
+            claim_ttl_remaining: Some(Duration::from_secs(600)),
+            extension_budget_exhausted: false,
+            hard_runtime_deadline_exceeded: false,
+            exit_code: Some(137),
+        };
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(
+            result.verdict,
+            super::super::liveness::Verdict::ProtocolViolation
+        );
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::Crash)
+        );
+        assert_eq!(
+            result.reason,
+            Some(super::super::liveness::LivenessReason::NonzeroExitNonterminal)
+        );
+    }
+
+    // ── Foundation persistence shape: terminal task → noop ────────────────
+
+    #[test]
+    fn terminal_task_produces_kill_noop_outcome() {
+        let pool = healthy_pool_info();
+        let mut db = running_db_state();
+        db.task_status = Some("closed".to_owned());
+        db.task_is_terminal = true;
+
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+        assert_eq!(evidence.db_task_status, Some(DbTaskStatus::Closed));
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::KillNoop)
+        );
+        // The verdict is Live (moot for terminal tasks) — the important
+        // thing is the KillNoop outcome which tells persistence to record
+        // an idempotent noop instead of mutating task state.
+        assert!(!result.extension_eligible);
+    }
+
+    // ── Evidence snapshot serialization shape ─────────────────────────────
+
+    #[test]
+    fn evidence_snapshot_round_trips_through_json() {
+        let pool = healthy_pool_info();
+        let db = running_db_state();
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+        let result = super::super::liveness::classify(&evidence);
+
+        let snapshot = LivenessEvidenceSnapshot {
+            session_id: "sess-1".to_owned(),
+            task_id: Some("task-1".to_owned()),
+            task_run_id: Some("run-1".to_owned()),
+            verdict: result.verdict.as_str().to_owned(),
+            outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            evidence: serde_json::to_value(&result.evidence).unwrap(),
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let back: LivenessEvidenceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.verdict, "live");
+        assert_eq!(back.outcome_kind, None);
+        assert_eq!(back.session_id, "sess-1");
+        assert!(back.evidence.is_object());
+    }
+
+    #[test]
+    fn dead_evidence_snapshot_has_expected_shape() {
+        let mut db = running_db_state();
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.session_started_at = Some(format_iso(old));
+        // Keep task_run_started_at recent so hard_runtime_deadline doesn't fire.
+
+        let evidence = build_liveness_evidence(None, &db);
+        let result = super::super::liveness::classify(&evidence);
+
+        let snapshot = LivenessEvidenceSnapshot {
+            session_id: "sess-1".to_owned(),
+            task_id: Some("task-1".to_owned()),
+            task_run_id: Some("run-1".to_owned()),
+            verdict: result.verdict.as_str().to_owned(),
+            outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            evidence: serde_json::to_value(&result.evidence).unwrap(),
+        };
+
+        assert_eq!(snapshot.verdict, "dead");
+        assert_eq!(snapshot.outcome_kind.as_deref(), Some("dead_reclaimed"));
+        // Evidence blob should be a JSON object with the expected fields.
+        let ev = &snapshot.evidence;
+        assert!(ev.get("pod_phase").is_some());
+        assert!(ev.get("activity").is_some());
+        assert!(ev.get("db_task_status").is_some());
+    }
+
+    // ── Slow verdict evidence mapping ─────────────────────────────────────
+
+    #[test]
+    fn running_pod_with_idle_activity_maps_to_slow() {
+        let mut pool = healthy_pool_info();
+        pool.idle_seconds = ZOMBIE_HARD_CAP_SECS + 1;
+        pool.activity_tracked = true;
+
+        let db = running_db_state();
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
+        assert!(result.extension_eligible);
+    }
+
+    // ── No pool info + DB-only evidence ───────────────────────────────────
+
+    #[test]
+    fn no_pool_info_with_no_db_session_still_classifies() {
+        let db = CurrentLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_id: None,
+            active_session_status: None,
+            latest_task_run_id: None,
+            latest_task_run_status: None,
+            session_liveness_verdict: None,
+            session_liveness_outcome_kind: None,
+            session_liveness_outcome_reason: None,
+            session_liveness_evidence: None,
+            task_run_liveness_outcome_kind: None,
+            task_run_liveness_outcome_reason: None,
+            task_run_liveness_evidence: None,
+            task_created_at: None,
+            session_started_at: None,
+            task_run_started_at: None,
+            task_run_ended_at: None,
+        };
+
+        let evidence = build_liveness_evidence(None, &db);
+        // No pool → Absent pod, no activity → Idle
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Absent));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+        // No session/task statuses resolved
+        assert_eq!(evidence.db_session_status, None);
+        assert_eq!(evidence.db_task_status, Some(DbTaskStatus::InProgress));
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+    }
 }
