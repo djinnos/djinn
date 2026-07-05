@@ -22,9 +22,7 @@ use std::path::Path;
 
 /// Matching strategies, ordered strict → loose. The matcher consults them in
 /// `STRATEGY_ORDER` and returns the result of the first strategy that produces
-/// any candidate (unique match or ambiguity). Future waves will extend this
-/// enum with `escape_normalized`, `trimmed_boundary`, `unicode_normalized`,
-/// `block_anchor`, and `context_aware` — see [[design/c77e-roadmap]].
+/// any candidate (unique match or ambiguity).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchStrategy {
@@ -103,10 +101,7 @@ pub(super) enum MatchOutcome {
     GuardRejected,
 }
 
-/// Placeholder for grapheme-safe Unicode splice status. Populated only by the
-/// Unicode-normalized strategy in a later wave; Wave 1 strategies always leave
-/// this as `None`, signalling no Unicode splice was performed. Conceptual
-/// design only — no third-party source (e.g. Hermes) is vendored or copied.
+/// Grapheme-safe Unicode splice status.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnicodeSpliceStatus {
@@ -131,14 +126,8 @@ pub(super) struct LineRange {
     pub end: usize,
 }
 
-/// Typed metadata produced by the matcher for a single consultation of the
-/// strategy chain. The compatibility wrapper `fuzzy_replace` translates this
-/// into the existing string notes/errors so `call_edit` is unchanged until
-/// sibling handler/schema epics consume richer metadata.
-//
-// The `unicode_splice` field is an intentional placeholder for future-wave
-// Unicode strategy work. The `#[allow(dead_code)]` silences the `-D warnings`
-// gate until the Unicode-normalized strategy consumes it.
+/// Typed metadata from a single strategy-chain run. `fuzzy_replace` translates
+/// this into the existing string surface for `call_edit`.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct MatchMetadata {
@@ -754,10 +743,7 @@ fn try_escape_normalized(content: &str, old_text: &str) -> Option<MatchMetadata>
         "escape backslash balance mismatch",
     );
     if let Some(reason) = quote_reason.or(backslash_reason) {
-        return Some(guard_rejected_metadata(
-            MatchStrategy::EscapeNormalized,
-            reason,
-        ));
+        return Some(reject_metadata(MatchStrategy::EscapeNormalized, reason));
     }
 
     Some(success_metadata(
@@ -824,38 +810,10 @@ fn trim_boundary_lines(s: &str) -> String {
     lines[first_content..last_content].join("\n")
 }
 
-/// Metadata constructor for guard-rejected outcomes.
-fn guard_rejected_metadata(strategy: MatchStrategy, reason: &'static str) -> MatchMetadata {
-    MatchMetadata {
-        strategy,
-        outcome: MatchOutcome::GuardRejected,
-        candidate_count: 1,
-        byte_range: None,
-        line_range: None,
-        nearest_miss: None,
-        reindented: false,
-        guard_rejected_reason: Some(reason),
-        unicode_splice: None,
-    }
-}
+// ── Unicode normalization helpers (NFKC + confusables) ────────────────────
 
-// ════════════════════════════════════════════════════════════════════════════
-// Unicode normalization helpers (NFKC + explicit confusables)
-// ════════════════════════════════════════════════════════════════════════════
-
-/// Build a combined confusable + NFKD (compatibility decomposition) form of
-/// `s`, with a byte-level position map back to the original string.
-///
-/// Returns `(normalised_string, byte_map)` where `byte_map[i]` is the byte
-/// offset in the *original* `s` that corresponds to the `i`-th byte of the
-/// normalised output. A single original code-point may map to more than one
-/// normalised byte (e.g. the ﬁ ligature decomposes to `fi` under NFKD).
-///
-/// **Design note:** Conceptual design only — no third-party source (e.g.
-/// Hermes) is vendored or copied. NFKD decomposition is used via the
-/// `unicode-normalization` crate (Apache-2.0/MIT) for correctness; the
-/// explicit confusable table covers only characters that NFKD does *not*
-/// decompose (curly/straight quotes, typographic dashes, minus sign).
+/// NFKD + confusable normalization with byte-level position map.
+/// Conceptual design only — no third-party source is vendored or copied.
 fn normalize_with_confusables(s: &str) -> (String, Vec<usize>) {
     // Characters that NFKD does NOT decompose but are visually confusable
     // with common ASCII punctuation.
