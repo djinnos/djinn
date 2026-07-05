@@ -431,21 +431,17 @@ impl K8sGraphWarmer {
 
 /// Best-effort lookup of the project's `origin/main` tip inside the
 /// server's bare-mirror root. Returns `None` on any error (missing
-/// mirror, `git` failure, mal-parsed output). The `K8sGraphWarmer`
+/// mirror, `git` failure, invalid UTF-8, or empty output). The `K8sGraphWarmer`
 /// treats `None` as "cache unknown" → it proceeds to trigger + wait.
 async fn discover_mirror_main_tip(project_id: &str) -> Option<String> {
     let mirror_path = djinn_workspace::mirror_path_for(project_id);
-    let output = tokio::process::Command::new("git")
-        .current_dir(&mirror_path)
-        .args(["rev-parse", "refs/heads/main"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8(output.stdout).ok()?;
-    let sha = raw.trim().to_string();
+    let output = djinn_git::run_git_command_in(
+        &mirror_path,
+        vec!["rev-parse".into(), "refs/heads/main".into()],
+    )
+    .await
+    .ok()?;
+    let sha = output.stdout.trim().to_string();
     if sha.is_empty() { None } else { Some(sha) }
 }
 

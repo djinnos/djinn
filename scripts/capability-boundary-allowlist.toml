@@ -17,7 +17,7 @@
 #
 # At least one of "expires" or "cleanup_issue" must be present.
 #
-# Verification commands used after the Wave 1 migrations (cgcl, 58ml, x8y8, 7chr):
+# Verification commands used after the Wave 3 migrations (6eaw, zgjk, ap5u):
 #   find server -name '*.rs' | sh scripts/check-git-boundary.sh --files-from-stdin
 #   find server -name '*.rs' | sh scripts/check-http-boundary.sh --files-from-stdin
 #   find server -name '*.rs' | sh scripts/check-k8s-boundary.sh --files-from-stdin
@@ -35,17 +35,20 @@ capability = "git"
 	rationale = "Synthetic allowlist fixture for the shared guard self-test."
 	expires = "2099-12-31"
 
-# ── Remaining git baseline after Wave 1 migrations ────────────────────────
-# Wave 1 (cgcl, 58ml, and the related graph migrations) moved djinn-graph's
-# canonical_graph.rs and coupling_index.rs shell-outs behind djinn-git. The
-# remaining non-owner git usage falls into three categories:
-#   1. Intentional / test-local helpers that create temporary git repos in unit
-#      tests (e.g. coordinator, slot, agent, workspace, supervisor tests).
-#   2. Still-pending owner-crate migrations that should eventually route
-#      through djinn-git (control-plane tools, workspace runtime, agent-worker
-#      test helpers, djinn-stack detection, k8s graph warmer, coordinator retry).
-#   3. Production call sites that are too large to migrate in this wave and
-#      are tracked by epic/fztz.
+# ── Remaining git baseline after Wave 3 migrations ────────────────────────
+# Wave 3 (6eaw, zgjk, ap5u) completed the remaining owner-crate migrations:
+#   - 6eaw tightened the agent-worker checkpoint durability test helper to be
+#     explicitly test-local.
+#   - zgjk moved reviewer prompt-context rev-parse/merge-base lookups behind
+#     djinn-git.
+#   - ap5u routed the k8s graph-warmer mirror-tip rev-parse lookup through
+#     djinn-git.
+# The remaining non-owner git usage is now only:
+#   1. Test-local helpers that create temporary git repos in unit/integration
+#      tests (agent-worker, agent, coordinator, slot, supervisor, workspace).
+#   2. The structural exception in djinn-stack/src/detect.rs: djinn-stack is a
+#      leaf crate constrained by the leaf-stack-imports-no-djinn-crate boundary
+#      rule and cannot depend on djinn-git, so it inlines small git2 helpers.
 
 [[entries]]
 capability = "git"
@@ -97,14 +100,6 @@ capability = "git"
 
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-k8s/src/graph_warmer.rs"
-	matcher = "tokio::process::Command::new(\"git\")"
-	owner = "team/k8s"
-	rationale = "Still-pending owner-crate migration: k8s graph warmer shells out to git to warm repository graphs. Should be routed through djinn-git once an async helper exists for this call pattern."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-slot/src/finalize_handlers_fingerprint_tests.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/slot"
@@ -143,18 +138,19 @@ capability = "git"
 	rationale = "Test-local helper for creating temporary git repos in workspace smoke tests. Not used by production workspace logic."
 	cleanup_issue = "epic/fztz"
 
-# ── Remaining HTTP baseline after Wave 1 migrations ───────────────────────
+# ── Remaining HTTP baseline after Wave 2 migrations ───────────────────────
 # Wave 1 (x8y8) moved control-plane toolchain-version HTTP client construction
 # behind djinn-provider. Wave 2 (srqd) moved the server GitHub/auth/org-sync
 # outbound clients behind djinn-provider. The remaining non-owner HTTP usage
 # is limited to status/error-value-only usage inside owner crates and tests
 # where the detector does not flag it.
 
-# ── Remaining K8s baseline after Wave 1 migrations ────────────────────────
-# Wave 1 (7chr) routed token-review Kubernetes access through djinn-k8s. The
-# remaining non-owner K8s usage is the image-controller (large deferred
-# migration); the server state module was migrated (ouss) and its entry
-# removed.
+# ── Remaining K8s baseline after Wave 2 migrations ────────────────────────
+# Wave 1 (7chr) routed token-review Kubernetes access through djinn-k8s.
+# Wave 2 (ouss) routed server state Kubernetes client/config wiring through
+# djinn-k8s and removed the corresponding state entry. Wave 2 (ubno) kept the
+# large image-controller migration as a documented, narrow exception set. The
+# remaining non-owner K8s usage is the image-controller, tracked by epic/fztz.
 #
 # The image-controller entries are intentionally narrow (exact file + matcher)
 # and point to the committed inventory at
