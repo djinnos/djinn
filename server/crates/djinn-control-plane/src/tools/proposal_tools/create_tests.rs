@@ -261,6 +261,47 @@ mod body_excerpt_tests {
         assert!(truncated);
     }
 
+    /// Multibyte Unicode scalars are not clipped at byte boundaries.
+    #[test]
+    fn excerpt_preserves_multibyte_scalars() {
+        use crate::tools::proposal_ops::body_excerpt;
+
+        // 511 emojis + 1 trailing scalar = 512 total; should not truncate.
+        let prefix: String = "🦀".repeat(511);
+        let body = format!("{prefix}α");
+        assert_eq!(body.chars().count(), 512);
+        let (ex, truncated) = body_excerpt(&body);
+        assert_eq!(ex.chars().count(), 512);
+        assert_eq!(ex, body);
+        assert!(!truncated);
+
+        // 512 emojis + 1 trailing scalar = 513; should truncate at 512.
+        let prefix: String = "🦀".repeat(512);
+        let body = format!("{prefix}α");
+        assert_eq!(body.chars().count(), 513);
+        let (ex, truncated) = body_excerpt(&body);
+        assert_eq!(ex.chars().count(), 512);
+        assert!(truncated);
+        // The last scalar must be the emoji (4 bytes), not a split fragment.
+        assert!(ex.ends_with("🦀"));
+    }
+
+    /// Exact boundary at 512 scalars: not truncated; 513 is truncated.
+    #[test]
+    fn excerpt_boundary_exact_512_vs_513() {
+        use crate::tools::proposal_ops::body_excerpt;
+
+        let body_512 = "★".repeat(512);
+        let (ex, truncated) = body_excerpt(&body_512);
+        assert_eq!(ex, body_512);
+        assert!(!truncated);
+
+        let body_513 = "★".repeat(513);
+        let (ex, truncated) = body_excerpt(&body_513);
+        assert_eq!(ex, "★".repeat(512));
+        assert!(truncated);
+    }
+
     /// Default `proposal_list` rows omit full body, include excerpt + truncated.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn default_list_omits_full_body() {
@@ -428,6 +469,332 @@ mod body_excerpt_tests {
         // Rows carry excerpt fields.
         assert!(rows[0].get("body_excerpt").is_some());
         assert!(rows[0].get("body_truncated").is_some());
+    }
+
+    // ── proposal_show field / revision body mode tests ───────────────────────
+
+    /// `proposal_show` default revision output uses excerpts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_default_revision_excerpt() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "a".repeat(2000);
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Excerpt",
+                body: &body,
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let show = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
+        let revs = show["revisions"].as_array().expect("revisions present");
+        assert!(!revs.is_empty());
+        let rev = &revs[0];
+        assert!(rev.get("body").is_none(), "default revision body should be omitted");
+        assert!(rev["body_excerpt"].is_string());
+        assert!(rev["body_truncated"].as_bool().unwrap());
+        assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
+    }
+
+    /// `revision_bodies: "full"` restores full revision bodies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_revision_bodies_full() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let body = "b".repeat(2000);
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Full",
+                body: &body,
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let show = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                    "revision_bodies": "full",
+                }),
+            )
+            .await
+            .unwrap();
+        let revs = show["revisions"].as_array().expect("revisions present");
+        let rev = &revs[0];
+        assert_eq!(rev["body"].as_str().unwrap(), &body);
+        assert_eq!(rev["body_excerpt"].as_str().unwrap().chars().count(), 512);
+        assert!(rev["body_truncated"].as_bool().unwrap());
+    }
+
+    /// `revision_bodies: "omit"` removes all revision body text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_revision_bodies_omit() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Omit",
+                body: "some body content",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let show = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                    "revision_bodies": "omit",
+                }),
+            )
+            .await
+            .unwrap();
+        let revs = show["revisions"].as_array().expect("revisions present");
+        let rev = &revs[0];
+        assert!(rev.get("body").is_none());
+        assert!(rev.get("body_excerpt").is_none());
+        assert!(rev.get("body_truncated").is_none());
+    }
+
+    /// Invalid `fields` returns an error naming the invalid value and accepted values.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_invalid_fields_error() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Invalid Fields",
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let err = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["unknown_field"],
+                }),
+            )
+            .await
+            .expect_err("invalid fields should fail");
+        assert!(err.contains("invalid field: \"unknown_field\""), "err: {err}");
+        assert!(err.contains("accepted: proposal, targets, feedback, signoffs, revisions, debate, epics, gate_status"), "err: {err}");
+    }
+
+    /// Invalid `revision_bodies` returns an error naming the invalid value and accepted values.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_invalid_revision_bodies_error() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Invalid Revision Bodies",
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let err = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                    "revision_bodies": "compressed",
+                }),
+            )
+            .await
+            .expect_err("invalid revision_bodies should fail");
+        assert!(err.contains("invalid revision_bodies: \"compressed\""), "err: {err}");
+        assert!(err.contains("accepted: excerpt, full, omit"), "err: {err}");
+    }
+
+    /// `revision_bodies` is ignored when `fields` omits `revisions`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_revision_bodies_ignored_without_revisions_field() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Ignored Revision Bodies",
+                body: "body",
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        let show = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["proposal"],
+                    "revision_bodies": "full",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(show.get("error").is_none(), "show failed: {:?}", show.get("error"));
+        assert!(show.get("revisions").is_none(), "revisions should not be present");
+    }
+
+    // ── Payload budget tests ─────────────────────────────────────────────────
+
+    /// 50 list rows with 4,096-char bodies stay <= 64 KiB serialized by default,
+    /// and `include_bodies: true` exposes the full body strings.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_payload_budget_default() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        const BUDGET_KIB: usize = 64;
+        const BUDGET_BYTES: usize = BUDGET_KIB * 1024;
+        const BODY_LEN: usize = 4096;
+
+        let body = "p".repeat(BODY_LEN);
+        for i in 0..50 {
+            repo.create(ProposalCreateInput {
+                title: &format!("Budget {i}"),
+                body: &body,
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let list = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 100 }))
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&list).expect("list serializes");
+        assert!(
+            json.len() <= BUDGET_BYTES,
+            "default list payload {} bytes exceeds {} KiB budget",
+            json.len(),
+            BUDGET_KIB
+        );
+        assert!(list["proposals"].as_array().unwrap().iter().all(|r| r.get("body").is_none()));
+
+        let full = server
+            .dispatch_tool("proposal_list", serde_json::json!({ "limit": 100, "include_bodies": true }))
+            .await
+            .unwrap();
+        assert!(
+            full["proposals"].as_array().unwrap().iter().all(|r| r["body"].as_str() == Some(&body)),
+            "include_bodies should expose the full body strings"
+        );
+    }
+
+    /// proposal_show with 25 revisions of 4,096-char bodies is <= 64 KiB by default,
+    /// and `revision_bodies: "full"` exposes all full revision bodies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn show_payload_budget_default() {
+        let (server, db) = test_server().await;
+        let repo = ProposalRepository::new(db.clone(), EventBus::noop());
+        const BUDGET_KIB: usize = 64;
+        const BUDGET_BYTES: usize = BUDGET_KIB * 1024;
+        const BODY_LEN: usize = 4096;
+
+        let body = "s".repeat(BODY_LEN);
+        let proposal = repo
+            .create(ProposalCreateInput {
+                title: "Revision Budget",
+                body: &body,
+                acceptance_criteria: None,
+                status: None,
+                body_format: None,
+            })
+            .await
+            .unwrap();
+
+        // Create 24 additional material revisions so the total is 25.
+        for i in 0..24 {
+            let updated = format!("{body}\nrev {i}");
+            repo.update(
+                &proposal.id,
+                djinn_db::ProposalUpdateInput {
+                    title: &proposal.title,
+                    body: &updated,
+                    acceptance_criteria: &proposal.acceptance_criteria,
+                    status: &proposal.status,
+                    superseded_by: proposal.superseded_by.as_deref(),
+                    body_format: Some(&proposal.body_format),
+                    event_metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let show = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                }),
+            )
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&show).expect("show serializes");
+        assert!(
+            json.len() <= BUDGET_BYTES,
+            "default show payload {} bytes exceeds {} KiB budget",
+            json.len(),
+            BUDGET_KIB
+        );
+
+        let full = server
+            .dispatch_tool(
+                "proposal_show",
+                serde_json::json!({
+                    "id": proposal.id,
+                    "fields": ["revisions"],
+                    "revision_bodies": "full",
+                }),
+            )
+            .await
+            .unwrap();
+        let revs = full["revisions"].as_array().expect("revisions present");
+        assert_eq!(revs.len(), 25);
+        assert!(
+            revs.iter().all(|r| r["body"].as_str().map(|b| b.len() >= BODY_LEN).unwrap_or(false)),
+            "full revision bodies should be available"
+        );
     }
 }
 
