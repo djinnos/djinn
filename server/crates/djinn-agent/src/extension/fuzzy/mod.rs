@@ -948,6 +948,48 @@ fn try_context_aware(content: &str, old_text: &str) -> Option<MatchMetadata> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Typed match application (crate-internal helper for call_edit)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Apply a successful typed match to produce the new file content.
+///
+/// Extracts the byte range from `metadata` (which must be `Success`), applies
+/// reindentation when `metadata.reindented` is set, and splices `new_text` into
+/// `content` at the matched range.  Panics if `metadata.outcome` is not
+/// `Success` — callers must match on the outcome first.
+pub(super) fn apply_match(content: &str, new_text: &str, metadata: &MatchMetadata) -> String {
+    assert!(
+        metadata.outcome == MatchOutcome::Success,
+        "apply_match called with non-Success outcome: {:?}",
+        metadata.outcome
+    );
+    let byte_range = metadata
+        .byte_range
+        .expect("success metadata must carry a byte range");
+    let start = byte_range.start;
+    let end = byte_range.end;
+
+    let replacement = if metadata.reindented {
+        let matched_block = &content[start..end];
+        let reindented = reindent_replacement(matched_block, new_text);
+        let needs_trailing_newline = content[..end].ends_with('\n') && !reindented.ends_with('\n');
+        let mut r = reindented;
+        if needs_trailing_newline {
+            r.push('\n');
+        }
+        r
+    } else {
+        new_text.to_string()
+    };
+
+    let mut result = String::with_capacity(content.len() + replacement.len());
+    result.push_str(&content[..start]);
+    result.push_str(&replacement);
+    result.push_str(&content[end..]);
+    result
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Compatibility wrapper (preserves the call_edit contract)
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -964,6 +1006,7 @@ fn try_context_aware(content: &str, old_text: &str) -> Option<MatchMetadata> {
 /// Returns `(new_content, optional_match_note)`. Internally delegates to the
 /// typed `find_match` core and translates its metadata into the existing
 /// string surface so `call_edit` continues to behave as before.
+#[allow(dead_code)] // retained for test backward compatibility
 pub(super) fn fuzzy_replace(
     content: &str,
     old_text: &str,
@@ -1045,6 +1088,7 @@ pub(super) fn match_note_for(strategy: MatchStrategy) -> Option<String> {
 
 /// Ambiguity qualifier used in the error message. Matches the pre-refactor
 /// user-visible phrasing.
+#[allow(dead_code)] // retained for test backward compatibility
 pub(super) fn ambiguity_phrase(strategy: MatchStrategy) -> &'static str {
     match strategy {
         MatchStrategy::Exact => "in file",
