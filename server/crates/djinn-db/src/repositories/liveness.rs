@@ -363,4 +363,61 @@ impl LivenessRepository {
             task_run_ended_at,
         })
     }
+
+    // ── Test / assertion helpers ───────────────────────────────────────────
+
+    /// Fetch the denormalized `liveness_verdict` and `liveness_outcome_kind`
+    /// columns from a session row.
+    ///
+    /// Intended for test assertions that need to verify evidence was persisted
+    /// to the session without introducing raw SQL outside `djinn-db`.
+    pub async fn get_session_liveness_fields(
+        &self,
+        session_id: &str,
+    ) -> DbResult<(Option<String>, Option<String>)> {
+        self.db.ensure_initialized().await?;
+
+        let row: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT liveness_verdict, liveness_outcome_kind FROM sessions WHERE id = $1",
+        )
+        .bind(session_id)
+        .fetch_one(self.db.pool())
+        .await?;
+
+        Ok(row)
+    }
+
+    /// Count rows in the `liveness_evidence` table for a session, optionally
+    /// filtered by `outcome_kind`.
+    ///
+    /// When `outcome_kind` is `None`, all evidence rows for the session are
+    /// counted. Intended for test assertions.
+    pub async fn count_evidence_for_session(
+        &self,
+        session_id: &str,
+        outcome_kind: Option<&str>,
+    ) -> DbResult<i64> {
+        self.db.ensure_initialized().await?;
+
+        let count: i64 = match outcome_kind {
+            Some(kind) => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM liveness_evidence \
+                     WHERE session_id = $1 AND outcome_kind = $2",
+                )
+                .bind(session_id)
+                .bind(kind)
+                .fetch_one(self.db.pool())
+                .await?
+            }
+            None => {
+                sqlx::query_scalar("SELECT COUNT(*) FROM liveness_evidence WHERE session_id = $1")
+                    .bind(session_id)
+                    .fetch_one(self.db.pool())
+                    .await?
+            }
+        };
+
+        Ok(count)
+    }
 }
