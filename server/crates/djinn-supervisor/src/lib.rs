@@ -4743,12 +4743,7 @@ mod tests {
             .await
             .expect("clone ephemeral workspace");
         let tb = "djinn/push-fail";
-        tokio::process::Command::new("git")
-            .args(["checkout", "-b", tb])
-            .current_dir(ws.path())
-            .output()
-            .await
-            .expect("create task branch");
+        run_git(ws.path(), &["checkout", "-b", tb]);
         tokio::fs::write(ws.path().join("work.txt"), "real worker output")
             .await
             .expect("write fixture file");
