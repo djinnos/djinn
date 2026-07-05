@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO code_chunk_meta\n                (id, project_id, content_hash, model_version, embedded_at, extension_state)\n               VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "175b8f7124a65eb8fcca53a7b9667e9300690495cad15a4c8624c4f6abbecbc2"
+}

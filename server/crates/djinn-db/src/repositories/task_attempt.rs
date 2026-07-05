@@ -1,3 +1,4 @@
+// djinn:allow-oversize — lifecycle repository: dispatch-start through infra-death log-tail persistence; split when touched substantively.
 use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
