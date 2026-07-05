@@ -5,6 +5,12 @@
 //! the coordinator's in-process liveness surfaces report no live slot/session
 //! and no connected worker for that task. It is intentionally read-only; the
 //! existing DB-truth zombie reaper owns mutation/recovery.
+//!
+//! This implementation aligns its finding evidence with the 5ric persisted
+//! liveness classifier semantics. Raw slot/RPC/pod signals are still captured
+//! for diagnosis, but the resolver output and finding evidence now surface the
+//! same verdict/outcome/reason concepts that session recovery persists via
+//! [`djinn_db::LivenessRepository`].
 
 use std::sync::Arc;
 
@@ -12,10 +18,13 @@ use djinn_core::doctor::{
     DoctorCheck, DoctorCheckCadence, DoctorResult, Finding, FindingSeverity, ResolverSnapshot,
 };
 use djinn_core::models::SessionRecord;
+use djinn_db::{CurrentLivenessState, LivenessRepository};
 use djinn_supervisor::ConnectionRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
+
+use crate::dispatch::liveness::{LivenessOutcome, Verdict};
 
 use djinn_slot::SlotPoolHandle;
 
@@ -24,8 +33,9 @@ pub const ZOMBIE_RUNNING_SESSION_CHECK_NAME: &str = "zombie_running_session";
 /// Read-only source for already-collected zombie-session candidates.
 ///
 /// The doctor framework's `DoctorCheck::run` is synchronous, so production code
-/// snapshots DB/slot/RPC state before constructing the check. Tests can provide a
-/// pure in-memory source directly, keeping the resolver hermetic and cluster-free.
+/// snapshots DB/slot/RPC/liveness state before constructing the check. Tests
+/// can provide a pure in-memory source directly, keeping the resolver hermetic
+/// and cluster-free.
 pub trait ZombieRunningSessionSource: Send + Sync {
     fn candidates(&self) -> Vec<ZombieRunningSessionCandidate>;
 }
@@ -44,6 +54,33 @@ pub struct ZombieRunningSessionCandidate {
     pub slot_pool_session_present: bool,
     pub worker_connected: bool,
     pub pod_present: bool,
+    /// Task/session liveness state loaded from the persisted classifier.
+    pub liveness_state: Option<ZombieRunningSessionLivenessState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ZombieRunningSessionLivenessState {
+    pub task_status: Option<String>,
+    pub task_is_terminal: bool,
+    pub active_session_status: Option<String>,
+    pub liveness_verdict: Option<String>,
+    pub liveness_outcome_kind: Option<String>,
+    pub liveness_outcome_reason: Option<String>,
+    pub liveness_evidence: Option<serde_json::Value>,
+}
+
+impl From<&CurrentLivenessState> for ZombieRunningSessionLivenessState {
+    fn from(state: &CurrentLivenessState) -> Self {
+        Self {
+            task_status: state.task_status.clone(),
+            task_is_terminal: state.task_is_terminal,
+            active_session_status: state.active_session_status.clone(),
+            liveness_verdict: state.session_liveness_verdict.clone(),
+            liveness_outcome_kind: state.session_liveness_outcome_kind.clone(),
+            liveness_outcome_reason: state.session_liveness_outcome_reason.clone(),
+            liveness_evidence: state.session_liveness_evidence.clone(),
+        }
+    }
 }
 
 impl ZombieRunningSessionCandidate {
@@ -53,6 +90,7 @@ impl ZombieRunningSessionCandidate {
         slot_pool_session_present: bool,
         worker_connected: bool,
         pod_present: bool,
+        liveness_state: Option<ZombieRunningSessionLivenessState>,
     ) -> Self {
         Self {
             session_id: session.id.clone(),
@@ -67,6 +105,7 @@ impl ZombieRunningSessionCandidate {
             slot_pool_session_present,
             worker_connected,
             pod_present,
+            liveness_state,
         }
     }
 }
@@ -82,6 +121,7 @@ pub struct ZombieRunningSessionInputs {
     pub tokens_in: i64,
     pub tokens_out: i64,
     pub live_state: ZombieRunningSessionLiveState,
+    pub liveness_state: Option<ZombieRunningSessionLivenessState>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,13 +132,19 @@ pub struct ZombieRunningSessionLiveState {
     pub pod_present: bool,
 }
 
+/// Local reason for the resolver decision. This is **not** the persisted
+/// liveness reason; it describes why the doctor check did or did not emit a
+/// zombie finding. The classifier-aligned outcome/reason/evidence live in
+/// [`ZombieRunningSessionOutputs`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ZombieRunningSessionReason {
-    Zombie,
+    ClassifierDead,
     NotRunning,
     ChatSession,
     NoTaskId,
+    TerminalTask,
+    KnownSuccessOutcome,
     LiveSlotOrSessionState,
     LiveWorkerConnection,
     LivePod,
@@ -108,51 +154,103 @@ pub enum ZombieRunningSessionReason {
 pub struct ZombieRunningSessionOutputs {
     pub is_zombie: bool,
     pub reason: ZombieRunningSessionReason,
+    /// Liveness verdict aligned with the 5ric classifier (e.g. `dead`).
+    pub liveness_verdict: Option<String>,
+    /// Liveness outcome kind aligned with the 5ric classifier (e.g.
+    /// `dead_reclaimed`).
+    pub liveness_outcome: Option<String>,
+    /// Liveness reason aligned with the 5ric classifier (e.g.
+    /// `nonzero_exit_nonterminal`).
+    pub liveness_reason: Option<String>,
 }
 
 fn resolve_zombie_running_session(
     inputs: &ZombieRunningSessionInputs,
 ) -> ZombieRunningSessionOutputs {
+    // Helper: echo persisted classifier fields into the output.
+    let persisted = |is_zombie: bool, reason: ZombieRunningSessionReason| {
+        ZombieRunningSessionOutputs {
+            is_zombie,
+            reason,
+            liveness_verdict: inputs.liveness_state.as_ref().and_then(|s| s.liveness_verdict.clone()),
+            liveness_outcome: inputs
+                .liveness_state
+                .as_ref()
+                .and_then(|s| s.liveness_outcome_kind.clone()),
+            liveness_reason: inputs
+                .liveness_state
+                .as_ref()
+                .and_then(|s| s.liveness_outcome_reason.clone()),
+        }
+    };
+
     if inputs.db_status != "running" {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::NotRunning,
-        };
+        return persisted(false, ZombieRunningSessionReason::NotRunning);
     }
     if inputs.agent_type == "chat" {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::ChatSession,
-        };
+        return persisted(false, ZombieRunningSessionReason::ChatSession);
     }
     if inputs.task_id.is_none() {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::NoTaskId,
-        };
-    }
-    if inputs.live_state.slot_pool_has_session || inputs.live_state.slot_pool_session_present {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::LiveSlotOrSessionState,
-        };
-    }
-    if inputs.live_state.worker_connected {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::LiveWorkerConnection,
-        };
-    }
-    if inputs.live_state.pod_present {
-        return ZombieRunningSessionOutputs {
-            is_zombie: false,
-            reason: ZombieRunningSessionReason::LivePod,
-        };
+        return persisted(false, ZombieRunningSessionReason::NoTaskId);
     }
 
+    // Terminal task state wins over raw-signal zombie detection: a task that
+    // has already finished should not produce a misleading zombie finding.
+    if inputs
+        .liveness_state
+        .as_ref()
+        .is_some_and(|s| s.task_is_terminal)
+    {
+        return persisted(false, ZombieRunningSessionReason::TerminalTask);
+    }
+
+    // Persisted non-zombie success/noop outcomes suppress the finding: the
+    // classifier has already resolved this session to a known-good terminal
+    // state. This avoids duplicating the reaper's verdict.
+    if let Some(ZombieRunningSessionLivenessState {
+        liveness_outcome_kind: Some(ref outcome),
+        ..
+    }) = inputs.liveness_state
+    {
+        match outcome.as_str() {
+            "success" | "kill_noop" | "slow_extended" => {
+                return persisted(false, ZombieRunningSessionReason::KnownSuccessOutcome);
+            }
+            _ => {}
+        }
+    }
+
+    if inputs.live_state.slot_pool_has_session || inputs.live_state.slot_pool_session_present {
+        return persisted(false, ZombieRunningSessionReason::LiveSlotOrSessionState);
+    }
+    if inputs.live_state.worker_connected {
+        return persisted(false, ZombieRunningSessionReason::LiveWorkerConnection);
+    }
+    if inputs.live_state.pod_present {
+        return persisted(false, ZombieRunningSessionReason::LivePod);
+    }
+
+    // No live signals and no persisted non-zombie classifier outcome: report
+    // a zombie finding using the 5ric classifier vocabulary. If the persisted
+    // classifier already produced an outcome (e.g. `crash`), echo it rather
+    // than overriding it with the generic `dead_reclaimed` default.
     ZombieRunningSessionOutputs {
         is_zombie: true,
-        reason: ZombieRunningSessionReason::Zombie,
+        reason: ZombieRunningSessionReason::ClassifierDead,
+        liveness_verdict: inputs
+            .liveness_state
+            .as_ref()
+            .and_then(|s| s.liveness_verdict.clone())
+            .or(Some(Verdict::Dead.as_str().to_owned())),
+        liveness_outcome: inputs
+            .liveness_state
+            .as_ref()
+            .and_then(|s| s.liveness_outcome_kind.clone())
+            .or(Some(LivenessOutcome::DeadReclaimed.as_str().to_owned())),
+        liveness_reason: inputs
+            .liveness_state
+            .as_ref()
+            .and_then(|s| s.liveness_outcome_reason.clone()),
     }
 }
 
@@ -182,6 +280,7 @@ impl<S: ZombieRunningSessionSource> ZombieRunningSessionCheck<S> {
                 worker_connected: candidate.worker_connected,
                 pod_present: candidate.pod_present,
             },
+            liveness_state: candidate.liveness_state,
         }
     }
 
@@ -236,6 +335,17 @@ impl<S: ZombieRunningSessionSource> ZombieRunningSessionCheck<S> {
                 "worker_connected": inputs.live_state.worker_connected,
                 "pod_present": inputs.live_state.pod_present,
             },
+            "classifier": {
+                "verdict": outputs.liveness_verdict,
+                "outcome": outputs.liveness_outcome,
+                "reason": outputs.liveness_reason,
+                "task_status": inputs.liveness_state.as_ref().and_then(|s| s.task_status.clone()),
+                "task_is_terminal": inputs.liveness_state.as_ref().map(|s| s.task_is_terminal).unwrap_or(false),
+                "active_session_status": inputs.liveness_state.as_ref().and_then(|s| s.active_session_status.clone()),
+                "persisted_verdict": inputs.liveness_state.as_ref().and_then(|s| s.liveness_verdict.clone()),
+                "persisted_outcome_kind": inputs.liveness_state.as_ref().and_then(|s| s.liveness_outcome_kind.clone()),
+                "persisted_outcome_reason": inputs.liveness_state.as_ref().and_then(|s| s.liveness_outcome_reason.clone()),
+            },
             "resolver_outputs": outputs_json,
         });
 
@@ -262,7 +372,7 @@ impl<S: ZombieRunningSessionSource + Send + Sync> DoctorCheck for ZombieRunningS
     }
 
     fn description(&self) -> &'static str {
-        "Flags DB-running task sessions whose coordinator slot/session, worker connection, and pod liveness are all missing"
+        "Flags DB-running task sessions whose coordinator slot/session, worker connection, and pod liveness are all missing, using 5ric classifier evidence"
     }
 
     fn cadence(&self) -> DoctorCheckCadence {
@@ -297,13 +407,23 @@ impl SnapshotZombieRunningSessionSource {
     ) -> djinn_db::Result<Self> {
         let session_repo =
             djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(events_tx));
+        let liveness_repo = LivenessRepository::new(db.clone());
         let sessions = session_repo.list_active().await?;
         let mut candidates = Vec::new();
 
         for session in sessions {
+            let liveness_state = match session.task_id.as_deref() {
+                Some(task_id) => liveness_repo
+                    .load_current_state(task_id)
+                    .await
+                    .ok()
+                    .map(|s| ZombieRunningSessionLivenessState::from(&s)),
+                None => None,
+            };
+
             let Some(task_id) = session.task_id.as_deref() else {
                 candidates.push(ZombieRunningSessionCandidate::from_session(
-                    &session, false, false, false, false,
+                    &session, false, false, false, false, liveness_state,
                 ));
                 continue;
             };
@@ -327,6 +447,7 @@ impl SnapshotZombieRunningSessionSource {
                 slot_pool_session_present,
                 worker_connected,
                 pod_present,
+                liveness_state,
             ));
         }
 
@@ -344,7 +465,7 @@ impl ZombieRunningSessionSource for SnapshotZombieRunningSessionSource {
 /// state snapshot.
 ///
 /// This is the importable seam the coordinator leader-tick helper uses: it
-/// collects the async DB/slot/RPC liveness signals once, then returns a
+/// collects the async DB/slot/RPC/liveness signals once, then returns a
 /// synchronous [`DoctorCheck`] whose `run()` is hermetic and read-only. Pod
 /// liveness is deliberately represented by the snapshotted candidate state so
 /// tests can keep using the in-process coordinator fixture without a real k8s
@@ -369,6 +490,18 @@ pub async fn check_from_coordinator_state(
 mod tests {
     use super::*;
 
+    fn liveness_state_for_running_task() -> Option<ZombieRunningSessionLivenessState> {
+        Some(ZombieRunningSessionLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_status: Some("running".to_owned()),
+            liveness_verdict: None,
+            liveness_outcome_kind: None,
+            liveness_outcome_reason: None,
+            liveness_evidence: None,
+        })
+    }
+
     fn zombie_candidate() -> ZombieRunningSessionCandidate {
         ZombieRunningSessionCandidate {
             session_id: "session-zombie".to_owned(),
@@ -383,6 +516,7 @@ mod tests {
             slot_pool_session_present: false,
             worker_connected: false,
             pod_present: false,
+            liveness_state: liveness_state_for_running_task(),
         }
     }
 
@@ -428,7 +562,7 @@ mod tests {
             Some("task-zombie")
         );
         assert_eq!(finding.evidence["db_row"]["status"], "running");
-        assert_eq!(finding.evidence["resolver_outputs"]["reason"], "zombie");
+        assert_eq!(finding.evidence["resolver_outputs"]["reason"], "classifier_dead");
         assert!(
             !finding.evidence["live_state"]["slot_pool_has_session"]
                 .as_bool()
@@ -449,6 +583,9 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+        // Classifier-aligned evidence is present and uses 5ric vocabulary.
+        assert_eq!(finding.evidence["classifier"]["verdict"], "dead");
+        assert_eq!(finding.evidence["classifier"]["outcome"], "dead_reclaimed");
         assert_eq!(
             finding.resolver_snapshot.resolver,
             "resolve_zombie_running_session"
@@ -470,7 +607,12 @@ mod tests {
             finding.resolver_snapshot.inputs["live_state"]["pod_present"],
             false
         );
-        assert_eq!(finding.resolver_snapshot.outputs["reason"], "zombie");
+        assert_eq!(finding.resolver_snapshot.outputs["reason"], "classifier_dead");
+        assert_eq!(finding.resolver_snapshot.outputs["liveness_verdict"], "dead");
+        assert_eq!(
+            finding.resolver_snapshot.outputs["liveness_outcome"],
+            "dead_reclaimed"
+        );
     }
 
     #[test]
@@ -501,5 +643,63 @@ mod tests {
         let mut candidate = zombie_candidate();
         candidate.task_id = None;
         assert!(run_one(candidate).is_empty());
+    }
+
+    #[test]
+    fn terminal_task_suppresses_finding() {
+        let mut candidate = zombie_candidate();
+        candidate.liveness_state = Some(ZombieRunningSessionLivenessState {
+            task_status: Some("closed".to_owned()),
+            task_is_terminal: true,
+            active_session_status: Some("running".to_owned()),
+            liveness_verdict: None,
+            liveness_outcome_kind: None,
+            liveness_outcome_reason: None,
+            liveness_evidence: None,
+        });
+        assert!(run_one(candidate).is_empty());
+    }
+
+    #[test]
+    fn persisted_success_outcome_suppresses_finding() {
+        let mut candidate = zombie_candidate();
+        candidate.liveness_state = Some(ZombieRunningSessionLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_status: Some("running".to_owned()),
+            liveness_verdict: Some("live".to_owned()),
+            liveness_outcome_kind: Some("success".to_owned()),
+            liveness_outcome_reason: Some("clean_exit_nonterminal".to_owned()),
+            liveness_evidence: Some(json!({"exit_code": 0})),
+        });
+        assert!(run_one(candidate).is_empty());
+    }
+
+    #[test]
+    fn persisted_classifier_evidence_is_echoed_in_finding() {
+        let mut candidate = zombie_candidate();
+        candidate.liveness_state = Some(ZombieRunningSessionLivenessState {
+            task_status: Some("in_progress".to_owned()),
+            task_is_terminal: false,
+            active_session_status: Some("running".to_owned()),
+            liveness_verdict: Some("dead".to_owned()),
+            liveness_outcome_kind: Some("crash".to_owned()),
+            liveness_outcome_reason: Some("nonzero_exit_nonterminal".to_owned()),
+            liveness_evidence: Some(json!({"exit_code": 137})),
+        });
+        let findings = run_one(candidate);
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.evidence["classifier"]["verdict"], "dead");
+        assert_eq!(finding.evidence["classifier"]["outcome"], "crash");
+        assert_eq!(
+            finding.evidence["classifier"]["reason"],
+            "nonzero_exit_nonterminal"
+        );
+        assert_eq!(finding.evidence["classifier"]["persisted_verdict"], "dead");
+        assert_eq!(
+            finding.evidence["classifier"]["persisted_outcome_kind"],
+            "crash"
+        );
     }
 }

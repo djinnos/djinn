@@ -165,6 +165,16 @@ async fn zombie_running_session_doctor_e2e() {
         !finding.detail.is_empty(),
         "finding detail must be non-empty"
     );
+    // Classifier-aligned evidence: 5ric verdict/outcome/reason concepts.
+    assert_eq!(
+        finding.evidence["classifier"]["verdict"],
+        "dead",
+        "finding must carry a 5ric-aligned liveness verdict"
+    );
+    assert!(
+        !finding.evidence["classifier"]["outcome"].as_str().unwrap_or("").is_empty(),
+        "finding must carry a 5ric-aligned liveness outcome"
+    );
 
     // ── 7. Assertion block 2: persistence row ──────────────────────────
     let rows = DoctorFindingRepository::new(db.clone())
