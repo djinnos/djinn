@@ -96,7 +96,9 @@ ignore = true
 # workspace crate from directly pulling in a capability-owner crate. They are
 # NOT a proof that call sites are confined to the owner crate. The source
 # capability-boundary scripts (`scripts/check_boundaries.py`,
-# `scripts/check-capability-*.sh`) and their allowlist remain the authority for
+# `scripts/check-capability-boundaries.sh`,
+# `scripts/check-git-boundary.sh`, `scripts/check-http-boundary.sh`,
+# `scripts/check-k8s-boundary.sh`) and their allowlist remain the authority for
 # shell-outs, direct API calls, and transitive-call-site ownership.
 #
 # `workspace-hack` is included in each `wrappers` list where hakari generates
@@ -159,7 +161,7 @@ deny = [
 	# Once the HTTP-capability migration narrows direct reqwest usage to
 	# djinn-provider (and adapter crates with explicit justification), a wrapper
 	# ratchet becomes useful. Until then, the source capability-boundary script
-	# for outbound HTTP (`scripts/check-capability-http.sh`) and its allowlist
+	# for outbound HTTP (`scripts/check-http-boundary.sh`) and its allowlist
 	# are the authority for call-site confinement.
 
 	# kube and k8s-openapi: the Kubernetes client capability owner crate is
