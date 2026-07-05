@@ -10,6 +10,7 @@ doctest = false
 [dependencies]
 djinn-core = { path = "../djinn-core" }
 djinn-db = { path = "../djinn-db" }
+djinn-git = { path = "../djinn-git" }
 djinn-runtime = { path = "../djinn-runtime" }
 djinn-stack = { path = "../djinn-stack" }
 djinn-supervisor = { path = "../djinn-supervisor" }

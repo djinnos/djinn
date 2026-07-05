@@ -43,7 +43,7 @@ capability = "git"
 #      tests (e.g. coordinator, slot, agent, workspace, supervisor tests).
 #   2. Still-pending owner-crate migrations that should eventually route
 #      through djinn-git (control-plane tools, workspace runtime, agent-worker
-#      test helpers, djinn-stack detection, k8s graph warmer, coordinator retry).
+#      test helpers, djinn-stack detection, coordinator retry).
 #   3. Production call sites that are too large to migrate in this wave and
 #      are tracked by epic/fztz.
 
@@ -101,14 +101,6 @@ capability = "git"
 	matcher = "Command::new(\"git\")"
 	owner = "team/coordinator"
 	rationale = "Test-local helper for creating temporary git repos in coordinator unit tests. Not used by production coordinator logic."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
-	path = "server/crates/djinn-k8s/src/graph_warmer.rs"
-	matcher = "tokio::process::Command::new(\"git\")"
-	owner = "team/k8s"
-	rationale = "Still-pending owner-crate migration: k8s graph warmer shells out to git to warm repository graphs. Should be routed through djinn-git once an async helper exists for this call pattern."
 	cleanup_issue = "epic/fztz"
 
 [[entries]]
