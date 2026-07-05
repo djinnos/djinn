@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.project_id, s.task_id, s.model_id, s.agent_type,\n                    s.started_at, s.ended_at,\n                    s.status AS \"status!\", s.tokens_in, s.tokens_out,\n                    s.cache_read_tokens, s.cache_write_tokens,\n                    s.task_run_id, s.title,\n                    s.parked_reason AS \"parked_reason?\",\n                    s.cost_usd, s.input_price_per_million_snapshot,\n                    s.output_price_per_million_snapshot,\n                    s.cache_read_price_per_million_snapshot,\n                    s.cache_write_price_per_million_snapshot,\n                    s.cost_basis,\n                    s.billing_source\n             FROM sessions s\n             LEFT JOIN (\n                SELECT session_id, MAX(created_at) AS last_at\n                FROM session_messages\n                GROUP BY session_id\n             ) m ON m.session_id = s.id\n             WHERE s.agent_type = 'chat' AND s.created_by_user_id = $1\n             ORDER BY COALESCE(m.last_at, s.started_at) DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 1,
+        "name": "project_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "model_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "agent_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "started_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "ended_at",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "status!",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "tokens_in",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "tokens_out",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "cache_read_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "cache_write_tokens",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "task_run_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "title",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "parked_reason?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "cost_usd",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 16,
+        "name": "input_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 17,
+        "name": "output_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 18,
+        "name": "cache_read_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 19,
+        "name": "cache_write_price_per_million_snapshot",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 20,
+        "name": "cost_basis",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 21,
+        "name": "billing_source",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "13f6b787ec8aae947e34b1c700fbc209530420a2f2ce8e8faf2b3826f5a6dc8a"
+}

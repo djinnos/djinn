@@ -1,7 +1,7 @@
 use djinn_core::models::task_attempt::{
-    GuardDecision, GuardReason, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
-    TaskAttemptPromptSummary, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
-    TASK_ATTEMPT_SUMMARY_MAX_LEN,
+    GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
+    TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
+    TaskAttemptPromptSummary,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -103,12 +103,12 @@ impl TaskAttemptRepository {
     }
 
     fn validate_bounded_field(name: &str, value: Option<&str>, max: usize) -> Result<()> {
-        if let Some(v) = value {
-            if v.len() > max {
-                return Err(DbError::InvalidData(format!(
-                    "{name} exceeds max length of {max}"
-                )));
-            }
+        if let Some(v) = value
+            && v.len() > max
+        {
+            return Err(DbError::InvalidData(format!(
+                "{name} exceeds max length of {max}"
+            )));
         }
         Ok(())
     }
@@ -149,12 +149,12 @@ impl TaskAttemptRepository {
     ) -> Result<TaskAttempt> {
         self.db.ensure_initialized().await?;
         Self::validate_dispatch_key(params.dispatch_key)?;
-        if let Some(seq) = params.attempt_seq {
-            if seq <= 0 {
-                return Err(DbError::InvalidData(
-                    "attempt_seq must be positive".to_owned(),
-                ));
-            }
+        if let Some(seq) = params.attempt_seq
+            && seq <= 0
+        {
+            return Err(DbError::InvalidData(
+                "attempt_seq must be positive".to_owned(),
+            ));
         }
 
         let attempt_seq = match params.attempt_seq {
@@ -243,7 +243,7 @@ impl TaskAttemptRepository {
                    mirror_head_sha = COALESCE(mirror_head_sha, $4),
                    github_head_sha = COALESCE(github_head_sha, $5),
                    summary = COALESCE(summary, $6),
-                   summary_json = COALESCE(summary_json, $7::jsonb),
+                   summary_json = COALESCE(summary_json, $7::text::jsonb),
                    log_tail = COALESCE(log_tail, $8)
                WHERE id = $1
                  AND outcome IN ('pending', 'submitted')"#,
@@ -303,7 +303,7 @@ impl TaskAttemptRepository {
                    mirror_head_sha = COALESCE(mirror_head_sha, $6),
                    github_head_sha = COALESCE(github_head_sha, $7),
                    summary = COALESCE(summary, $8),
-                   summary_json = COALESCE(summary_json, $9::jsonb),
+                   summary_json = COALESCE(summary_json, $9::text::jsonb),
                    log_tail = COALESCE(log_tail, $10)
                WHERE id = $1
                  AND (outcome IN ('pending', 'submitted')
@@ -350,7 +350,7 @@ impl TaskAttemptRepository {
             r#"INSERT INTO task_attempts
                 (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
                  guard_decision, guard_reason, summary, summary_json, log_tail, terminal_at)
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10::jsonb, $11,
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10::text::jsonb, $11,
                      to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
              ON CONFLICT (dispatch_key) DO NOTHING"#,
             params.id,
@@ -377,10 +377,7 @@ impl TaskAttemptRepository {
     /// Fill previously-null refs/SHAs/summary/log_tail without changing outcome.
     /// Only non-null provided values are applied, and only when the current
     /// column value is NULL.  This is safe to call on terminal rows.
-    pub async fn fill_nullable_fields(
-        &self,
-        params: FillTaskAttemptParams<'_>,
-    ) -> Result<()> {
+    pub async fn fill_nullable_fields(&self, params: FillTaskAttemptParams<'_>) -> Result<()> {
         self.db.ensure_initialized().await?;
         Self::validate_summary(params.summary)?;
         Self::validate_log_tail(params.log_tail)?;
@@ -394,7 +391,7 @@ impl TaskAttemptRepository {
                    mirror_head_sha = COALESCE(mirror_head_sha, $5),
                    github_head_sha = COALESCE(github_head_sha, $6),
                    summary = COALESCE(summary, $7),
-                   summary_json = COALESCE(summary_json, $8::jsonb),
+                   summary_json = COALESCE(summary_json, $8::text::jsonb),
                    log_tail = COALESCE(log_tail, $9),
                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                WHERE id = $1"#,
@@ -826,7 +823,11 @@ mod tests {
         assert_eq!(submitted.submit_ref.as_deref(), Some("submit-1"));
         assert_eq!(submitted.checkpoint_ref.as_deref(), Some("cp-1"));
         assert_eq!(submitted.summary.as_deref(), Some("summary"));
-        assert_eq!(submitted.summary_json.as_deref(), Some(r#"{"key":"value"}"#));
+        // jsonb canonicalizes to a space after the colon on read-back.
+        assert_eq!(
+            submitted.summary_json.as_deref(),
+            Some(r#"{"key": "value"}"#)
+        );
         assert_eq!(submitted.log_tail.as_deref(), Some("log"));
 
         // Idempotent: same call again returns same row.
@@ -936,10 +937,12 @@ mod tests {
             })
             .await
             .unwrap();
-        // Reopened is a terminal outcome; SQL allows it because it is a terminal
-        // outcome name. The test is mainly about non-terminal -> terminal and
-        // idempotent duplicate terminal calls.
-        assert_eq!(backward.outcome, "reopened");
+        // Forward-only: once a row is terminal (`completed`), the SQL predicate
+        // only permits an idempotent same-outcome move, so a switch to a
+        // different terminal outcome (`reopened`) is a no-op and the row keeps
+        // its existing `completed` outcome. The test is mainly about
+        // non-terminal -> terminal and idempotent duplicate terminal calls.
+        assert_eq!(backward.outcome, "completed");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -998,7 +1001,7 @@ mod tests {
         assert_eq!(filled.mirror_head_sha.as_deref(), Some("mirror-fill"));
         assert_eq!(filled.github_head_sha.as_deref(), Some("github-fill"));
         assert_eq!(filled.summary.as_deref(), Some("summary-fill"));
-        assert_eq!(filled.summary_json.as_deref(), Some(r#"{"filled":true}"#));
+        assert_eq!(filled.summary_json.as_deref(), Some(r#"{"filled": true}"#));
         assert_eq!(filled.log_tail.as_deref(), Some("tail-fill"));
     }
 
@@ -1141,7 +1144,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
 
-        let summaries = repo.prompt_summaries_for_task(&task_id, None, 2).await.unwrap();
+        let summaries = repo
+            .prompt_summaries_for_task(&task_id, None, 2)
+            .await
+            .unwrap();
         assert_eq!(summaries.len(), 2);
         assert_eq!(summaries[0].attempt_seq, 3);
         assert_eq!(summaries[1].attempt_seq, 2);

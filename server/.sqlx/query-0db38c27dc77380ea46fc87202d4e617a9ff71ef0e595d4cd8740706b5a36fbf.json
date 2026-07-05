@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO credentials (id, provider_id, key_name, owner_user_id,\n                                              encrypted_value, created_at, updated_at)\n                     VALUES ($1, $2, $3, NULL, $4,\n                             to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),\n                             to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n                     ON CONFLICT (key_name) WHERE owner_user_id IS NULL DO UPDATE SET\n                         provider_id     = EXCLUDED.provider_id,\n                         encrypted_value = EXCLUDED.encrypted_value,\n                         updated_at      = EXCLUDED.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0db38c27dc77380ea46fc87202d4e617a9ff71ef0e595d4cd8740706b5a36fbf"
+}

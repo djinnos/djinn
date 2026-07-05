@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH RECURSIVE reach(id) AS (\n                             SELECT epic_id FROM epic_blockers WHERE blocking_epic_id = $1\n                             UNION\n                             SELECT b.epic_id FROM epic_blockers b JOIN reach r ON b.blocking_epic_id = r.id\n                         )\n                         SELECT EXISTS(SELECT 1 FROM reach WHERE id = $2) AS \"exists!: bool\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!: bool",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9443f4efb96c6e70d1dd5aff89bb1bab125649dc31f7f086c4979e54b8c12d4e"
+}

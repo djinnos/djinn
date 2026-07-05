@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO note_associations\n             (note_a_id, note_b_id, weight, co_access_count, last_co_access)\n             VALUES ($1, $2, 0.01, $3, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))\n             ON CONFLICT (note_a_id, note_b_id) DO UPDATE SET\n                 weight = LEAST(1.0, note_associations.weight * $4),\n                 co_access_count = note_associations.co_access_count + EXCLUDED.co_access_count,\n                 last_co_access = EXCLUDED.last_co_access",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf89c73778377a301139258bae59653440f9e44abe266892c1230eecefb09c2c"
+}
