@@ -769,3 +769,325 @@ async fn reconcile_heals_stale_tasks() {
         "expected reconcile_stale activity entry"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_returns_liveness_outcomes_section() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Create a task + session + liveness evidence row.
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Liveness task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
+
+    let evidence_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO liveness_evidence \
+         (id, session_id, task_id, verdict, outcome_kind, evidence, created_at) \
+         VALUES ($1, $2, $3, 'dead', 'dead_reclaimed', '{}', \
+                 '2025-06-01T00:00:00.000Z')",
+    )
+    .bind(&evidence_id)
+    .bind(&session.id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let liveness = report
+        .get("liveness_outcomes")
+        .expect("liveness_outcomes field should exist");
+    assert_eq!(liveness["total"], 1);
+    let by_verdict = liveness["by_verdict"].as_object().unwrap();
+    assert_eq!(by_verdict["dead"], 1);
+    let recent = liveness["recent"].as_array().unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["verdict"], "dead");
+    assert_eq!(recent[0]["outcome_kind"], "dead_reclaimed");
+    assert_eq!(recent[0]["task_id"], task.id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_returns_protocol_violations_section() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Protocol violation task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
+
+    let evidence_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO liveness_evidence \
+         (id, session_id, task_id, verdict, outcome_kind, outcome_reason, evidence, created_at) \
+         VALUES ($1, $2, $3, 'protocol_violation', 'protocol_violation', \
+                 'clean_exit_nonterminal', '{}', '2025-06-01T00:00:00.000Z')",
+    )
+    .bind(&evidence_id)
+    .bind(&session.id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let pv = report
+        .get("protocol_violations")
+        .expect("protocol_violations field should exist");
+    assert_eq!(pv["total"], 1);
+    let recent = pv["recent"].as_array().unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0]["verdict"], "protocol_violation");
+    assert_eq!(recent[0]["outcome_reason"], "clean_exit_nonterminal");
+    assert_eq!(recent[0]["task_short_id"], task.short_id.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_detects_stale_open_tasks() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Create an open task (no sessions) and backdate it so it exceeds the
+    // 30-minute stranded-ready threshold.
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Starved open task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+
+    let report = repo.board_health(24).await.unwrap();
+    let sr = report
+        .get("stranded_ready")
+        .expect("stranded_ready field should exist");
+    assert_eq!(sr["total"], 1);
+    assert_eq!(sr["threshold_minutes"], 30);
+    let findings = sr["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["id"], task.id);
+    assert_eq!(findings[0]["short_id"], task.short_id.as_str());
+    assert_eq!(findings[0]["severity"], "error"); // 60m ≥ 2×30 error threshold
+    assert_eq!(findings[0]["unclaimed_since_confidence"], "low"); // no activity log → fallback
+    assert_eq!(findings[0]["threshold"]["warning_minutes"], 30);
+    assert_eq!(findings[0]["threshold"]["error_minutes"], 60);
+    assert_eq!(findings[0]["threshold"]["critical_minutes"], 180);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_excludes_tasks_with_active_sessions() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Create an open task with an active running session.
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Active task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let session = create_test_session(&db, &project.id, &task.id).await;
+    // Mark session as running.
+    sqlx::query("UPDATE sessions SET status = 'running' WHERE id = $1")
+        .bind(&session.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &task.id, "60 minutes").await;
+
+    let report = repo.board_health(24).await.unwrap();
+    let sr = report
+        .get("stranded_ready")
+        .expect("stranded_ready field should exist");
+    let findings = sr["findings"].as_array().unwrap();
+    assert!(
+        findings.is_empty(),
+        "task with active session should not appear in stranded_ready"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_high_confidence_with_activity_log() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Create an open task and insert an activity_log entry showing it was
+    // transitioned to 'open' long ago.
+    let task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Task with activity log",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    // Insert a 'status_changed' → 'open' activity log entry backdated by 2 hours.
+    let activity_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO activity_log \
+         (id, task_id, actor_id, actor_role, event_type, payload, created_at) \
+         VALUES ($1, $2, 'system', 'system', 'status_changed', \
+                 '{\"from_status\": \"in_progress\", \"to_status\": \"open\"}', \
+                 '2025-01-01T00:00:00.000Z')",
+    )
+    .bind(&activity_id)
+    .bind(&task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let report = repo.board_health(24).await.unwrap();
+    let sr = report
+        .get("stranded_ready")
+        .expect("stranded_ready field should exist");
+    let findings = sr["findings"].as_array().unwrap();
+    // At least one finding for this task.
+    let finding = findings
+        .iter()
+        .find(|f| f["id"] == task.id)
+        .expect("task should appear in stranded_ready");
+    assert_eq!(finding["unclaimed_since_confidence"], "high");
+    assert_eq!(finding["unclaimed_since"], "2025-01-01T00:00:00.000Z");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_stranded_ready_severity_escalates_with_elapsed_time() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // Task at 35 minutes: warning (≥1×30, <2×30).
+    let t1 = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Warning task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &t1.id, "35 minutes").await;
+
+    // Task at 65 minutes: error (≥2×30, <6×30).
+    let t2 = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Error task",
+            "desc",
+            "design",
+            "task",
+            2,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &t2.id, "65 minutes").await;
+
+    // Task at 200 minutes: critical (≥6×30).
+    let t3 = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Critical task",
+            "desc",
+            "design",
+            "task",
+            3,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &t3.id, "200 minutes").await;
+
+    let report = repo.board_health(24).await.unwrap();
+    let findings = report["stranded_ready"]["findings"].as_array().unwrap();
+
+    let f1 = findings.iter().find(|f| f["id"] == t1.id).unwrap();
+    assert_eq!(f1["severity"], "warning");
+
+    let f2 = findings.iter().find(|f| f["id"] == t2.id).unwrap();
+    assert_eq!(f2["severity"], "error");
+
+    let f3 = findings.iter().find(|f| f["id"] == t3.id).unwrap();
+    assert_eq!(f3["severity"], "critical");
+}
