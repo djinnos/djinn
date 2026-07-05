@@ -7,6 +7,7 @@ pub mod doctor_tools;
 pub mod epic_ops;
 pub mod epic_tools;
 pub mod execution_tools;
+pub mod git_ops;
 pub mod github_app_tools;
 pub mod github_tools;
 pub mod graph_exclusions;
