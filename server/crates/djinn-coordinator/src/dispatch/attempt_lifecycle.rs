@@ -6,7 +6,10 @@
 //! delivered by epic `u74z`.
 
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
-use djinn_db::{CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository};
+use djinn_db::{
+    CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+    TerminalTaskAttemptParams,
+};
 
 /// Record the start of a dispatch attempt.
 ///
@@ -160,11 +163,11 @@ pub async fn advance_to_submitted(db: &djinn_db::Database, params: SubmitAdvance
     }
 }
 
-/// Parameters for the coordinator-side terminal outcome helper.
+/// Parameters for the coordinator-side terminal advancement helper.
 #[allow(dead_code)]
-pub struct TerminalizeAttemptParams<'a> {
+pub struct TerminalAdvancementParams<'a> {
     pub task_id: &'a str,
-    pub role: Option<&'a str>,
+    pub role: &'a str,
     pub outcome: TaskAttemptOutcome,
     pub pr_url: Option<&'a str>,
     pub submit_ref: Option<&'a str>,
@@ -176,44 +179,48 @@ pub struct TerminalizeAttemptParams<'a> {
     pub log_tail: Option<&'a str>,
 }
 
-/// Terminalize the latest pending or submitted attempt for a task.
+/// Advance the latest pending/submitted attempt for a task+role to a terminal
+/// outcome, filling available refs, summary fields, and log tail.
 ///
-/// Looks up via `latest_pending_or_submitted` with the supplied role filter,
-/// then advances to the requested terminal outcome.  Best-effort: errors are
-/// logged and never propagated.  Idempotent: repeated calls with the same
-/// outcome are no-ops; calls with a different outcome are rejected by the
-/// repository's forward-only guard and logged at debug.
+/// Looks up the matching attempt via `latest_pending_or_submitted`; if no live
+/// attempt exists (e.g. the dispatch-start write failed, or the attempt is
+/// already terminal), this is a no-op.
+///
+/// Best-effort: lookup/write errors are logged and never propagated.
 #[allow(dead_code)]
-pub async fn terminalize_attempt(
+pub async fn advance_latest_to_terminal(
     db: &djinn_db::Database,
-    params: TerminalizeAttemptParams<'_>,
+    params: TerminalAdvancementParams<'_>,
 ) {
-    use djinn_db::TerminalTaskAttemptParams;
-    let repo = djinn_db::TaskAttemptRepository::new(db.clone());
+    let repo = TaskAttemptRepository::new(db.clone());
+    let requested_outcome = params.outcome;
     let attempt = match repo
-        .latest_pending_or_submitted(params.task_id, params.role)
+        .latest_pending_or_submitted(params.task_id, Some(params.role))
         .await
     {
         Ok(Some(a)) => a,
         Ok(None) => {
             tracing::debug!(
                 task_id = %params.task_id,
-                role = ?params.role,
-                "attempt_lifecycle: no pending/submitted attempt found for terminalization; skipping"
+                role = %params.role,
+                requested_outcome = %requested_outcome,
+                "attempt_lifecycle: no pending/submitted attempt found for terminal advancement; skipping"
             );
             return;
         }
         Err(e) => {
             tracing::warn!(
                 task_id = %params.task_id,
-                role = ?params.role,
+                role = %params.role,
+                requested_outcome = %requested_outcome,
                 error = %e,
-                "attempt_lifecycle: failed to look up attempt for terminalization"
+                "attempt_lifecycle: failed to look up attempt for terminal advancement"
             );
             return;
         }
     };
 
+    let current_outcome = attempt.outcome.clone();
     match repo
         .advance_to_terminal(TerminalTaskAttemptParams {
             id: &attempt.id,
@@ -232,21 +239,25 @@ pub async fn terminalize_attempt(
         Ok(updated) => {
             tracing::info!(
                 task_id = %params.task_id,
-                role = ?params.role,
-                attempt_id = %updated.id,
+                role = %params.role,
+                attempt_id = %attempt.id,
+                dispatch_key = %attempt.dispatch_key,
+                requested_outcome = %requested_outcome,
+                current_outcome = %current_outcome,
                 outcome = %updated.outcome,
-                terminal_at = ?updated.terminal_at,
-                "attempt_lifecycle: terminal outcome recorded"
+                "attempt_lifecycle: terminal advancement recorded"
             );
         }
         Err(e) => {
             tracing::warn!(
                 task_id = %params.task_id,
-                role = ?params.role,
+                role = %params.role,
                 attempt_id = %attempt.id,
-                desired_outcome = %params.outcome,
+                dispatch_key = %attempt.dispatch_key,
+                requested_outcome = %requested_outcome,
+                current_outcome = %current_outcome,
                 error = %e,
-                "attempt_lifecycle: failed to terminalize attempt (best-effort)"
+                "attempt_lifecycle: failed to advance attempt to terminal (best-effort)"
             );
         }
     }
@@ -546,5 +557,194 @@ mod tests {
             Some("done"),
             "must not overwrite terminal summary"
         );
+    }
+
+    // ─── advance_latest_to_terminal tests ────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_advancement_records_all_terminal_fields() {
+        let db = test_db();
+        let task = create_task(&db).await;
+        let dk = make_dispatch_key(&task.id, "worker");
+        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: Some("https://github.example/pr/1"),
+                submit_ref: Some("refs/submitted/1"),
+                checkpoint_ref: Some("refs/checkpoints/1"),
+                mirror_head_sha: Some("mirror-sha-1"),
+                github_head_sha: Some("github-sha-1"),
+                summary: Some("completed summary"),
+                summary_json: Some(r#"{"status": "completed"}"#),
+                log_tail: Some("last log lines"),
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "completed");
+        assert!(attempt.terminal_at.is_some());
+        assert_eq!(
+            attempt.pr_url.as_deref(),
+            Some("https://github.example/pr/1")
+        );
+        assert_eq!(attempt.submit_ref.as_deref(), Some("refs/submitted/1"));
+        assert_eq!(
+            attempt.checkpoint_ref.as_deref(),
+            Some("refs/checkpoints/1")
+        );
+        assert_eq!(attempt.mirror_head_sha.as_deref(), Some("mirror-sha-1"));
+        assert_eq!(attempt.github_head_sha.as_deref(), Some("github-sha-1"));
+        assert_eq!(attempt.summary.as_deref(), Some("completed summary"));
+        assert_eq!(
+            attempt.summary_json.as_deref(),
+            Some(r#"{"status": "completed"}"#)
+        );
+        assert_eq!(attempt.log_tail.as_deref(), Some("last log lines"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_advancement_is_idempotent_and_does_not_create_rows() {
+        let db = test_db();
+        let task = create_task(&db).await;
+        let dk = make_dispatch_key(&task.id, "worker");
+        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            advance_latest_to_terminal(
+                &db,
+                TerminalAdvancementParams {
+                    task_id: &task.id,
+                    role: "worker",
+                    outcome: TaskAttemptOutcome::Completed,
+                    pr_url: Some("https://github.example/pr/1"),
+                    submit_ref: Some("submit-ref"),
+                    checkpoint_ref: None,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    summary: Some("done"),
+                    summary_json: None,
+                    log_tail: None,
+                },
+            )
+            .await;
+        }
+
+        let repo = TaskAttemptRepository::new(db);
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "duplicate terminalization must not create rows"
+        );
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "completed");
+        assert_eq!(
+            attempt.pr_url.as_deref(),
+            Some("https://github.example/pr/1")
+        );
+        assert_eq!(attempt.submit_ref.as_deref(), Some("submit-ref"));
+        assert_eq!(attempt.summary.as_deref(), Some("done"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_advancement_does_not_move_completed_backward_or_overwrite_fields() {
+        let db = test_db();
+        let task = create_task(&db).await;
+        let dk = make_dispatch_key(&task.id, "worker");
+        let attempt_id = record_dispatch_start(&db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: Some("https://github.example/pr/original"),
+                submit_ref: Some("submit-original"),
+                checkpoint_ref: Some("checkpoint-original"),
+                mirror_head_sha: Some("mirror-original"),
+                github_head_sha: Some("github-original"),
+                summary: Some("original summary"),
+                summary_json: Some(r#"{"status":"original"}"#),
+                log_tail: Some("original logs"),
+            },
+        )
+        .await;
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::Reopened,
+                pr_url: Some("https://github.example/pr/late"),
+                submit_ref: Some("submit-late"),
+                checkpoint_ref: Some("checkpoint-late"),
+                mirror_head_sha: Some("mirror-late"),
+                github_head_sha: Some("github-late"),
+                summary: Some("late summary"),
+                summary_json: Some(r#"{"status":"late"}"#),
+                log_tail: Some("late logs"),
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "completed");
+        assert_eq!(
+            attempt.pr_url.as_deref(),
+            Some("https://github.example/pr/original")
+        );
+        assert_eq!(attempt.submit_ref.as_deref(), Some("submit-original"));
+        assert_eq!(
+            attempt.checkpoint_ref.as_deref(),
+            Some("checkpoint-original")
+        );
+        assert_eq!(attempt.mirror_head_sha.as_deref(), Some("mirror-original"));
+        assert_eq!(attempt.github_head_sha.as_deref(), Some("github-original"));
+        assert_eq!(attempt.summary.as_deref(), Some("original summary"));
+        assert_eq!(attempt.log_tail.as_deref(), Some("original logs"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_advancement_no_current_attempt_is_noop() {
+        let db = test_db();
+        let task = create_task(&db).await;
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: Some("https://github.example/pr/missing"),
+                submit_ref: Some("missing-submit"),
+                checkpoint_ref: Some("missing-checkpoint"),
+                mirror_head_sha: Some("missing-mirror"),
+                github_head_sha: Some("missing-github"),
+                summary: Some("missing summary"),
+                summary_json: Some(r#"{"status":"missing"}"#),
+                log_tail: Some("missing logs"),
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert!(all.is_empty(), "no-op must not create an attempt row");
     }
 }
