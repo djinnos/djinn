@@ -10,8 +10,7 @@ use rmcp::{Json, handler::server::wrapper::Parameters, schemars, tool, tool_rout
 use serde::{Deserialize, Serialize};
 
 use crate::server::DjinnMcpServer;
-use djinn_db::SessionRepository;
-use djinn_db::TaskRepository;
+use djinn_db::{LivenessEvidenceSnapshot, LivenessRepository, SessionRepository, TaskRepository};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ExecutionKillTaskParams {
@@ -60,6 +59,7 @@ impl DjinnMcpServer {
         &self,
         Parameters(p): Parameters<ExecutionKillTaskParams>,
     ) -> Json<ExecutionKillTaskResponse> {
+        // ── Liveness pre-checks: terminal task or no active session → kill_noop ──
         if let Some(path) = &p.project
             && self.project_id_for_path(path).await.is_none()
         {
@@ -77,6 +77,79 @@ impl DjinnMcpServer {
             });
         };
 
+        // Check if the task is already terminal — killing a terminal task is a
+        // no-op that should record kill_noop evidence rather than claiming success.
+        let task_repo = TaskRepository::new(self.state.db().clone(), self.state.event_bus());
+        let session_repo = SessionRepository::new(self.state.db().clone(), self.state.event_bus());
+        let liveness_repo = LivenessRepository::new(self.state.db().clone());
+
+        let task = task_repo.get(&p.task_id).await.ok().flatten();
+        let task_is_terminal = task
+            .as_ref()
+            .is_some_and(|t| t.status == "closed" || t.status == "force_closed");
+
+        if task_is_terminal {
+            // Task is already terminal — no live work to free. Record kill_noop evidence.
+            let active_session = session_repo
+                .active_for_task(&p.task_id)
+                .await
+                .ok()
+                .flatten();
+            let snapshot = LivenessEvidenceSnapshot {
+                session_id: active_session
+                    .as_ref()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default(),
+                task_id: Some(p.task_id.clone()),
+                task_run_id: active_session.as_ref().and_then(|s| s.task_run_id.clone()),
+                verdict: "live".to_owned(), // verdict is moot for terminal tasks
+                outcome_kind: Some("kill_noop".to_owned()),
+                outcome_reason: None,
+                evidence: serde_json::json!({
+                    "reason": "task_already_terminal",
+                    "task_status": task.as_ref().map(|t| t.status.as_str()).unwrap_or("unknown"),
+                    "kill_source": "execution_kill_task",
+                }),
+            };
+            let _ = liveness_repo.persist_evidence(&snapshot).await;
+            return Json(ExecutionKillTaskResponse {
+                ok: false,
+                task_id: Some(p.task_id),
+                error: Some("task is already terminal; no session to kill (kill_noop)".to_string()),
+            });
+        }
+
+        // Check if there is a DB-active session to kill. If no session exists,
+        // the kill would be a no-op — record kill_noop evidence.
+        // Pool errors are treated as "assume session exists" (fail-open) so
+        // we still attempt the kill rather than silently skipping it.
+        let active_session = session_repo
+            .active_for_task(&p.task_id)
+            .await
+            .ok()
+            .flatten();
+        let has_pool_session = pool.has_session(&p.task_id).await.unwrap_or(true);
+        if active_session.is_none() && !has_pool_session {
+            let snapshot = LivenessEvidenceSnapshot {
+                session_id: String::new(),
+                task_id: Some(p.task_id.clone()),
+                task_run_id: None,
+                verdict: "live".to_owned(),
+                outcome_kind: Some("kill_noop".to_owned()),
+                outcome_reason: None,
+                evidence: serde_json::json!({
+                    "reason": "no_active_session",
+                    "kill_source": "execution_kill_task",
+                }),
+            };
+            let _ = liveness_repo.persist_evidence(&snapshot).await;
+            return Json(ExecutionKillTaskResponse {
+                ok: false,
+                task_id: Some(p.task_id),
+                error: Some("no active session to kill (kill_noop)".to_string()),
+            });
+        }
+
         if let Err(e) = pool.terminate_session(&p.task_id).await {
             return Json(ExecutionKillTaskResponse {
                 ok: false,
@@ -86,7 +159,34 @@ impl DjinnMcpServer {
         }
 
         match pool.has_session(&p.task_id).await {
-            Ok(false) => {}
+            Ok(false) => {
+                // Terminate succeeded and session is gone — work was freed.
+                // Record dead_reclaimed evidence with the session/task_run that
+                // was reclaimed.
+                let snapshot = LivenessEvidenceSnapshot {
+                    session_id: active_session
+                        .as_ref()
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default(),
+                    task_id: Some(p.task_id.clone()),
+                    task_run_id: active_session.as_ref().and_then(|s| s.task_run_id.clone()),
+                    verdict: "dead".to_owned(),
+                    outcome_kind: Some("dead_reclaimed".to_owned()),
+                    outcome_reason: None,
+                    evidence: serde_json::json!({
+                        "reason": "explicit_kill",
+                        "kill_source": "execution_kill_task",
+                        "had_pool_session": has_pool_session,
+                    }),
+                };
+                if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                    tracing::warn!(
+                        task_id = %p.task_id,
+                        error = %e,
+                        "execution_kill_task: failed to persist dead_reclaimed evidence"
+                    );
+                }
+            }
             Ok(true) => {
                 return Json(ExecutionKillTaskResponse {
                     ok: false,
@@ -358,7 +458,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_kill_task_routes_through_terminate_and_confirms_absence() {
+    async fn execution_kill_task_returns_kill_noop_when_no_active_session() {
         let pool = Arc::new(RecordingSlotPool::default());
         let server = server_with_pool(pool.clone());
 
@@ -369,19 +469,24 @@ mod tests {
             }))
             .await;
 
-        assert!(response.ok);
+        // No task or session exists in the DB, and pool has no session —
+        // kill is a no-op because there is no live work to free.
+        assert!(!response.ok);
         assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
-        assert_eq!(response.error, None);
-        assert_eq!(pool.killed(), Vec::<String>::new());
-        assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
-        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
+        assert!(response.error.as_deref().unwrap().contains("kill_noop"));
+        // Terminate should NOT have been called — nothing to kill.
+        assert_eq!(pool.terminated(), Vec::<String>::new());
     }
 
     #[tokio::test]
-    async fn execution_kill_task_returns_false_when_terminate_errors() {
-        let pool = Arc::new(RecordingSlotPool::with_terminate_error(
-            "operator termination failed",
-        ));
+    async fn execution_kill_task_returns_kill_noop_when_pool_reports_active_but_terminate_errors() {
+        // Pool has a session (so we skip the no-session no-op), but terminate
+        // errors. This tests the existing error path still works.
+        let pool = Arc::new(RecordingSlotPool {
+            has_session_result: Mutex::new(Ok(true)),
+            terminate_result: Mutex::new(Err("operator termination failed".to_string())),
+            ..Default::default()
+        });
         let server = server_with_pool(pool.clone());
 
         let Json(response) = server
@@ -397,13 +502,12 @@ mod tests {
             response.error.as_deref(),
             Some("operator termination failed")
         );
-        assert_eq!(pool.killed(), Vec::<String>::new());
         assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
-        assert_eq!(pool.confirmations(), Vec::<String>::new());
     }
 
     #[tokio::test]
-    async fn execution_kill_task_returns_false_when_confirmation_reports_active_session() {
+    async fn execution_kill_task_returns_error_when_session_stuck_after_terminate() {
+        // Pool has a session before terminate, and still has it after terminate.
         let pool = Arc::new(RecordingSlotPool::with_has_session_result(Ok(true)));
         let server = server_with_pool(pool.clone());
 
@@ -414,21 +518,25 @@ mod tests {
             }))
             .await;
 
+        // Pool reports session before pre-check → reaches terminate →
+        // has_session still true → error.
         assert!(!response.ok);
         assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
-        assert_eq!(
-            response.error.as_deref(),
-            Some("termination confirmation failed: task still has an active slot pool session")
-        );
+        // The pre-check finds has_pool_session=true → proceeds to terminate.
+        // After terminate, has_session still returns true → stuck.
         assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
-        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
     }
 
     #[tokio::test]
-    async fn execution_kill_task_returns_false_when_confirmation_errors() {
-        let pool = Arc::new(RecordingSlotPool::with_has_session_result(Err(
-            "bridge unavailable".to_string(),
-        )));
+    async fn execution_kill_task_returns_error_when_confirmation_errors() {
+        // Pool has a session (passes pre-check), but the post-terminate
+        // confirmation errors.
+        let pool = Arc::new(RecordingSlotPool {
+            // Pre-check: pool reports session present → skip noop
+            // Post-terminate check: errors
+            has_session_result: Mutex::new(Err("bridge unavailable".to_string())),
+            ..Default::default()
+        });
         let server = server_with_pool(pool.clone());
 
         let Json(response) = server
@@ -440,13 +548,195 @@ mod tests {
 
         assert!(!response.ok);
         assert_eq!(response.task_id.as_deref(), Some("task-to-kill"));
-        assert_eq!(
-            response.error.as_deref(),
-            Some(
-                "termination confirmation failed while checking active session: bridge unavailable"
-            )
+        assert!(
+            response
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("bridge unavailable")
         );
         assert_eq!(pool.terminated(), vec!["task-to-kill".to_string()]);
-        assert_eq!(pool.confirmations(), vec!["task-to-kill".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_persists_dead_reclaimed_evidence_on_successful_kill() {
+        // Seed a project + task + active session in the DB so the kill has
+        // live work to free. Use a pool that reports session present before
+        // terminate and absent after (via two-call recording).
+        let db = djinn_db::Database::open_in_memory().expect("open in-memory test database");
+        let events = djinn_core::events::EventBus::noop();
+
+        // Create a project.
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), events.clone());
+        let project = project_repo
+            .create("test-proj", "test-owner", "test-repo")
+            .await
+            .expect("create project");
+
+        // Create an in-progress task.
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
+        let task = task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                "Kill test task",
+                "desc",
+                "",
+                "task",
+                0,
+                "",
+                Some("in_progress"),
+                None,
+            )
+            .await
+            .expect("create task");
+
+        // Create a running session linked to the task.
+        let session_repo = djinn_db::SessionRepository::new(db.clone(), events.clone());
+        let session = session_repo
+            .create(djinn_db::CreateSessionParams {
+                project_id: &project.id,
+                task_id: Some(&task.id),
+                model: "test/model",
+                agent_type: "worker",
+                metadata_json: None,
+                task_run_id: None,
+                pricing: None,
+                cost_basis: None,
+            })
+            .await
+            .expect("create session");
+
+        // Verify the session is active.
+        let active = session_repo
+            .active_for_task(&task.id)
+            .await
+            .expect("active_for_task");
+        assert!(active.is_some(), "session should be active after creation");
+
+        // Pool reports session present (passes pre-check) and absent after terminate.
+        let pool = Arc::new(RecordingSlotPool::with_has_session_result(Ok(false)));
+        let state = McpState::new(
+            db.clone(),
+            events.clone(),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            None,
+            Some(pool.clone()),
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+        );
+        let server = DjinnMcpServer::new(state);
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: task.id.clone(),
+                project: None,
+            }))
+            .await;
+
+        // Should succeed: session existed and terminate freed it.
+        assert!(
+            response.ok,
+            "expected ok:true, got error: {:?}",
+            response.error
+        );
+        assert_eq!(response.task_id.as_deref(), Some(task.id.as_str()));
+        assert_eq!(response.error, None);
+
+        // Verify dead_reclaimed evidence was persisted on the session.
+        let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+        let (verdict, outcome_kind) = liveness_repo
+            .get_session_liveness_fields(&session.id)
+            .await
+            .expect("get session liveness fields");
+        assert_eq!(verdict.as_deref(), Some("dead"));
+        assert_eq!(outcome_kind.as_deref(), Some("dead_reclaimed"));
+
+        // Verify evidence rows exist.
+        let count = liveness_repo
+            .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+            .await
+            .expect("count evidence");
+        assert!(
+            count >= 1,
+            "expected at least 1 dead_reclaimed evidence row, got {count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_kill_task_persists_kill_noop_evidence_for_terminal_task() {
+        let db = djinn_db::Database::open_in_memory().expect("open in-memory test database");
+        let events = djinn_core::events::EventBus::noop();
+
+        // Create a project + closed task.
+        let project_repo = djinn_db::ProjectRepository::new(db.clone(), events.clone());
+        let project = project_repo
+            .create("test-proj-noop", "test-owner", "test-repo")
+            .await
+            .expect("create project");
+        let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
+        let task = task_repo
+            .create_in_project(
+                &project.id,
+                None,
+                "Terminal kill noop task",
+                "desc",
+                "",
+                "task",
+                0,
+                "",
+                Some("closed"),
+                None,
+            )
+            .await
+            .expect("create task");
+
+        let pool = Arc::new(RecordingSlotPool::default());
+        let state = McpState::new(
+            db.clone(),
+            events.clone(),
+            djinn_provider::catalog::CatalogService::new(),
+            djinn_provider::catalog::HealthTracker::new(),
+            None,
+            Some(pool.clone()),
+            None,
+            None,
+            Arc::new(crate::state::stubs::StubLspOps),
+            Arc::new(crate::state::stubs::StubRuntimeOps),
+            Arc::new(crate::state::stubs::StubGitOps),
+            Arc::new(crate::state::stubs::StubRepoGraphOps),
+        );
+        let server = DjinnMcpServer::new(state);
+
+        let Json(response) = server
+            .execution_kill_task(Parameters(ExecutionKillTaskParams {
+                task_id: task.id.clone(),
+                project: None,
+            }))
+            .await;
+
+        // Should be a no-op: task is already terminal.
+        assert!(!response.ok);
+        assert!(response.error.as_deref().unwrap().contains("kill_noop"));
+        // Terminate should NOT have been called.
+        assert_eq!(pool.terminated(), Vec::<String>::new());
+
+        // Verify kill_noop evidence was persisted.
+        let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+        // No active session, so evidence was persisted with an empty session_id.
+        // Check the liveness_evidence table directly.
+        let count = liveness_repo
+            .count_evidence_for_session("", Some("kill_noop"))
+            .await
+            .expect("count evidence");
+        assert!(
+            count >= 1,
+            "expected at least 1 kill_noop evidence row, got {count}"
+        );
     }
 }

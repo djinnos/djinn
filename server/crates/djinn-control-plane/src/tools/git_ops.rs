@@ -59,10 +59,8 @@ pub async fn git_log_for_file(file_path: &str, limit: i64) -> Vec<djinn_memory::
 /// On any failure returns `"unknown"` so the response remains well-formed.
 pub async fn resolve_base_commit(project_path: &str) -> String {
     let path = std::path::Path::new(project_path);
-    let fut = djinn_git::run_git_command_in(
-        path,
-        vec!["rev-parse".to_string(), "HEAD".to_string()],
-    );
+    let fut =
+        djinn_git::run_git_command_in(path, vec!["rev-parse".to_string(), "HEAD".to_string()]);
 
     match timeout(GIT_CMD_TIMEOUT, fut).await {
         Ok(Ok(out)) => {
@@ -100,7 +98,11 @@ pub async fn resolve_base_commit(project_path: &str) -> String {
 pub async fn git_fetch_in(path: &str) -> Result<(), String> {
     let fut = djinn_git::run_git_command_in(
         std::path::Path::new(path),
-        vec!["fetch".to_string(), "--all".to_string(), "--prune".to_string()],
+        vec![
+            "fetch".to_string(),
+            "--all".to_string(),
+            "--prune".to_string(),
+        ],
     );
     let output = timeout(GIT_CMD_TIMEOUT, fut)
         .await
@@ -151,10 +153,7 @@ pub async fn git_config_set(clone_path: &str, key: &str, value: &str) -> Result<
         .map_err(|e| format!("git config {key} failed: {e}"))?;
 
     if output.code != 0 {
-        return Err(format!(
-            "git config {key} failed: {}",
-            output.stderr.trim()
-        ));
+        return Err(format!("git config {key} failed: {}", output.stderr.trim()));
     }
     Ok(())
 }
@@ -166,7 +165,11 @@ pub async fn git_config_set(clone_path: &str, key: &str, value: &str) -> Result<
 pub async fn git_current_branch(path: &str) -> Result<Option<String>, String> {
     let fut = djinn_git::run_git_command_in(
         std::path::Path::new(path),
-        vec!["rev-parse".to_string(), "--abbrev-ref".to_string(), "HEAD".to_string()],
+        vec![
+            "rev-parse".to_string(),
+            "--abbrev-ref".to_string(),
+            "HEAD".to_string(),
+        ],
     );
     let output = timeout(GIT_CMD_TIMEOUT, fut)
         .await
