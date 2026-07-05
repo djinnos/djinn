@@ -51,6 +51,18 @@ pub trait LiveMoverSource: Send + Sync {
     fn active_tasks(&self) -> Vec<ActiveTask>;
 }
 
+/// No-op live-mover source used until the production evidence-collector adapter
+/// (T5) is wired. It returns an empty task list, so the `live_mover_predicate`
+/// check produces no findings but remains registered in the doctor registry.
+#[derive(Default, Clone)]
+pub struct NoOpLiveMoverSource;
+
+impl LiveMoverSource for NoOpLiveMoverSource {
+    fn active_tasks(&self) -> Vec<ActiveTask> {
+        Vec::new()
+    }
+}
+
 /// One active task and its already-collected live-mover evidence.
 #[derive(Clone, Debug)]
 pub struct ActiveTask {

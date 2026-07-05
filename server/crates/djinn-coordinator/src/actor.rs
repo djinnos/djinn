@@ -105,6 +105,13 @@ pub(super) struct CoordinatorActor {
     pub(super) dispatch_failure_streak: HashMap<String, u32>,
     /// Shared tracker for in-flight background tasks.
     pub(super) background_work_tracker: BackgroundWorkTracker,
+    /// Cached source for the stranded-ready doctor check. Refreshed each tick
+    /// before the cheap doctor subset runs, so the check sees a bounded DB view
+    /// without blocking the synchronous `DoctorCheck::run` seam. `None` in tests
+    /// that construct the actor directly and do not need the stranded check.
+    pub(super) stranded_ready_source: Option<
+        Arc<crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource>,
+    >,
     /// Per-task state of the PR poller's offloaded clean-merge fast path. The
     /// heavy mechanical merge (fetch + ephemeral clone + merge + push) runs in a
     /// spawned background task instead of inline on this tick; the poller reads
@@ -423,6 +430,23 @@ impl CoordinatorActor {
         let events = events_tx.subscribe();
         let mut tick = time::interval(STUCK_INTERVAL);
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+        // Wire the coordinator-side doctor checks into the global registry. The
+        // stranded-ready source is cached here and refreshed each tick before the
+        // cheap subset runs; the live-mover source is a no-op until the production
+        // evidence-collector adapter (T5) is wired.
+        let stranded_ready_source = Arc::new(
+            crate::doctor::stranded_ready::TaskRepositoryStrandedReadySource::new(
+                db.clone(),
+                events_tx.clone(),
+            ),
+        );
+        crate::doctor::register_doctor_checks(
+            djinn_core::doctor::registry(),
+            Arc::new(crate::doctor::live_mover::NoOpLiveMoverSource),
+            Arc::clone(&stranded_ready_source) as Arc<dyn crate::doctor::StrandedReadySource>,
+        );
+
         Self {
             receiver,
             events,
@@ -446,6 +470,9 @@ impl CoordinatorActor {
             dispatch_cooldowns: HashMap::new(),
             dispatch_failure_streak: HashMap::new(),
             background_work_tracker,
+            stranded_ready_source: Some(Arc::clone(
+                &stranded_ready_source
+            )),
             auto_merge_tracker: Arc::new(std::sync::Mutex::new(HashMap::new())),
             consolidation_runner: consolidation_runner
                 .unwrap_or_else(|| Arc::new(DbConsolidationRunner::new(db.clone()))),
@@ -747,6 +774,9 @@ impl CoordinatorActor {
         //
         // The run_id is monotonic per-tick so a future `doctor_list_findings`
         // call can scope its query back to one leader-tick invocation.
+        if let Some(source) = self.stranded_ready_source.as_ref() {
+            source.refresh().await;
+        }
         let doctor_run_id = format!("leader-tick-{}", self.prune_tick_counter.wrapping_add(1));
         crate::doctor::leader_tick::run_cheap_doctor_checks(
             djinn_core::doctor::registry(),
