@@ -57,6 +57,9 @@ pub use repositories::{
     events::EventsRepository,
     git_settings::GitSettingsRepository,
     image::{Image, ImageRepository, ImageStatus},
+    liveness::{
+        ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
+    },
     models::ModelsRepository,
     note::{
         AnchorProposerKind, BackfillRetrievalAnchorOptions, BackfillRetrievalAnchorReport,
