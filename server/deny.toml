@@ -90,22 +90,33 @@ confidence-threshold = 0.8
 ignore = true
 
 # ---------------------------------------------------------------------------
-# Bans — green ratchet for sqlx direct wrappers.
+# Bans — direct-dependency wrapper ratchets for capability-owner crates.
 #
-# Only the workspace crates listed in `wrappers` may declare a direct
-# dependency on `sqlx`.  Any new crate that adds `sqlx` to its own
-# [dependencies] will fail this check.
+# The `[bans]` entries below are intentionally narrow: they only stop a NEW
+# workspace crate from directly pulling in a capability-owner crate. They are
+# NOT a proof that call sites are confined to the owner crate. The source
+# capability-boundary scripts (`scripts/check_boundaries.py`,
+# `scripts/check-capability-*.sh`) and their allowlist remain the authority for
+# shell-outs, direct API calls, and transitive-call-site ownership.
 #
-# sqlx helper crates (sqlx-core, sqlx-macros, sqlx-macros-core, sqlx-mysql,
-# sqlx-postgres) are transitive dependencies pulled in by the allowed
-# wrappers and are intentionally NOT banned — the ratchet targets direct
-# wrapper crates only.
+# `workspace-hack` is included in each `wrappers` list because it mirrors the
+# unified dependency graph via hakari and is not a normal consumer of the
+# capability. Any crate that is an allowed wrapper must appear by its Cargo
+# package name.
+#
+# Helper crates (e.g. sqlx-core, sqlx-macros, libgit2-sys, hyper, etc.) are
+# transitive dependencies pulled in by the allowed wrappers and are
+# intentionally NOT banned — the ratchets target direct declarations only.
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
 
 deny = [
+    # sqlx: only database-owner crates may declare it directly. The live
+    # workspace currently has djinn-server, djinn-agent, djinn-control-plane,
+    # djinn-core, djinn-db, djinn-memory, and djinn-provider as direct
+    # dependents; workspace-hack is included for hakari unification.
     { crate = "sqlx", wrappers = [
         "djinn-server",
         "djinn-agent",
@@ -115,5 +126,75 @@ deny = [
         "djinn-memory",
         "djinn-provider",
         "workspace-hack",
+    ] },
+
+    # git2: the git-capability owner crate is djinn-git. Only crates that are
+    # allowed to touch libgit2 directly are listed here as first-party
+    # wrappers. In the current workspace these are djinn-git, djinn-agent,
+    # djinn-image-controller, djinn-stack, djinn-workspace, and djinn-server
+    # (for the `vendored` feature flag that forwards git2 features).
+    # workspace-hack is included for hakari unification.
+    #
+    # NOTE: This ratchet does NOT catch git shell-outs (e.g. `git clone`,
+    # `git rev-parse`); the source capability-boundary script for git is the
+    # authority for shell-outs and call-site confinement.
+    { crate = "git2", wrappers = [
+        "djinn-git",
+        "djinn-agent",
+        "djinn-image-controller",
+        "djinn-stack",
+        "djinn-workspace",
+        "djinn-server",
+        "workspace-hack",
+    ] },
+
+    # reqwest: the outbound-HTTP owner crate is djinn-provider. The current
+    # workspace has many crates directly depending on reqwest, both as
+    # first-party wrappers (djinn-server, djinn-agent, djinn-control-plane,
+    # djinn-coordinator, and djinn-provider) and as transitive third-party
+    # crates (opentelemetry-otlp/opentelemetry-http, hf-hub, rmcp). We can only
+    # ratchet the first-party direct declarations; third-party reqwest pulls
+    # are listed below as `wrappers` so the existing graph stays green while
+    # new first-party direct dependencies are still rejected.
+    #
+    # NOTE: This ratchet does NOT catch lower-level HTTP clients (e.g. hyper,
+    # kube-client) or network shells-outs; the source capability-boundary
+    # script for outbound HTTP is the authority for shell-outs and call-site
+    # confinement.
+    { crate = "reqwest", wrappers = [
+        "djinn-server",
+        "djinn-agent",
+        "djinn-control-plane",
+        "djinn-coordinator",
+        "djinn-provider",
+        "opentelemetry-otlp",
+        "opentelemetry-http",
+        "hf-hub",
+        "rmcp",
+        "workspace-hack",
+    ] },
+
+    # kube and k8s-openapi: the Kubernetes client capability owner crate is
+    # djinn-k8s. Only djinn-k8s and djinn-image-controller are first-party
+    # wrappers that directly declare these crates. kube-runtime, kube-core, and
+    # kube-client are kube-internal transitive dependencies listed below as
+    # wrappers so the existing graph stays green; new first-party direct
+    # dependencies are still rejected.
+    #
+    # NOTE: These ratchets do NOT catch in-cluster API calls through raw HTTP
+    # clients, kubectl shell-outs, or other Kubernetes-adjacent libraries; the
+    # source capability-boundary script for Kubernetes is the authority for
+    # shell-outs and call-site confinement.
+    { crate = "kube", wrappers = [
+        "djinn-k8s",
+        "djinn-image-controller",
+    ] },
+    { crate = "k8s-openapi", wrappers = [
+        "djinn-k8s",
+        "djinn-image-controller",
+        "kube",
+        "kube-runtime",
+        "kube-core",
+        "kube-client",
     ] },
 ]
