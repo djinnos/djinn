@@ -1873,6 +1873,18 @@ impl CoordinatorActor {
                     )
                     .await;
                     self.dispatched += 1;
+                    // Attempt lifecycle: record the dispatch-start as a
+                    // pending task_attempt row. Best-effort — never fails the
+                    // dispatch path.
+                    let dispatch_key = super::attempt_lifecycle::make_dispatch_key(&task.id, role);
+                    super::attempt_lifecycle::record_dispatch_start(
+                        &self.db,
+                        &task.id,
+                        role,
+                        None,
+                        &dispatch_key,
+                    )
+                    .await;
                     // Bump the per-user running count for the model actually
                     // used (the first health-available one — the elastic pool
                     // accepts it), so further same-creator+model tasks in THIS

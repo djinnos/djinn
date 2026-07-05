@@ -1515,27 +1515,78 @@ impl TaskRunSupervisor {
                         // PVC so the refspec `task_branch:task_branch` is cheap
                         // and idempotent when there's nothing new to push.
                         //
-                        // Loud on failure (error!, not warn!) — a push failure
-                        // here is the durability seam: the worker's progress is
-                        // at risk of loss on kill. Still best-effort: the run
-                        // keeps going (open_pr retries the push), it's just
-                        // visible now.
-                        if let Err(e) = workspace.push_to_origin(&spec.task_branch).await {
-                            tracing::error!(
-                                task_id = %task.short_id,
-                                task_run_id = %run_id,
-                                role = %role_kind.as_str(),
-                                branch = %spec.task_branch,
-                                error = %e,
-                                "supervisor: post-stage push_to_origin failed — worker progress not yet durable in mirror (open_pr will retry)"
-                            );
-                        } else {
+                        // Retry with backoff: a persistent push failure means
+                        // the worker's progress never reached the mirror and
+                        // will be lost when the ephemeral Pod exits. We must
+                        // NOT proceed to submit_task_review (which would mark
+                        // the round as durably submitted) — instead, fail the
+                        // run so the coordinator can redispatch with a fresh
+                        // workspace and the push can be retried. A single
+                        // failure is still loud (error! level, structured
+                        // tracing event).
+                        const PUSH_MAX_ATTEMPTS: usize = 3;
+                        const PUSH_INITIAL_BACKOFF: std::time::Duration =
+                            std::time::Duration::from_secs(1);
+
+                        let mut push_succeeded = false;
+                        let mut last_push_err: Option<String> = None;
+                        for attempt in 1..=PUSH_MAX_ATTEMPTS {
+                            match workspace.push_to_origin(&spec.task_branch).await {
+                                Ok(()) => {
+                                    push_succeeded = true;
+                                    if attempt > 1 {
+                                        tracing::info!(
+                                            task_id = %task.short_id,
+                                            task_run_id = %run_id,
+                                            branch = %spec.task_branch,
+                                            attempt,
+                                            "supervisor: push_to_origin succeeded after retry"
+                                        );
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_push_err = Some(e.to_string());
+                                    if attempt < PUSH_MAX_ATTEMPTS {
+                                        tracing::warn!(
+                                            task_id = %task.short_id,
+                                            task_run_id = %run_id,
+                                            branch = %spec.task_branch,
+                                            attempt,
+                                            max_attempts = PUSH_MAX_ATTEMPTS,
+                                            "supervisor: push_to_origin failed; retrying after backoff"
+                                        );
+                                        tokio::time::sleep(PUSH_INITIAL_BACKOFF * attempt as u32)
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                        if push_succeeded {
                             tracing::debug!(
                                 task_id = %task.short_id,
                                 task_run_id = %run_id,
                                 role = %role_kind.as_str(),
                                 branch = %spec.task_branch,
                                 "supervisor: pushed task_branch to mirror after stage (durable)"
+                            );
+                        } else {
+                            let e = last_push_err.as_deref().unwrap_or("unknown error");
+                            // Structured event so pod-log shipper and activity
+                            // search can find every persistent push failure
+                            // without parsing free-form error strings.
+                            tracing::error!(
+                                target: "djinn_supervisor::push_failure",
+                                task_id = %task.short_id,
+                                task_run_id = %run_id,
+                                role = %role_kind.as_str(),
+                                branch = %spec.task_branch,
+                                error = %e,
+                                attempt = PUSH_MAX_ATTEMPTS,
+                                kind = "push_failure",
+                                "supervisor: push_to_origin failed after all retries — \
+                                 worker progress NOT durable in mirror; refusing \
+                                 submit_task_review to prevent phantom submission"
                             );
                         }
                         // Worker finished cleanly → submit_task_review
@@ -1552,7 +1603,40 @@ impl TaskRunSupervisor {
                         // cancelled run — doing so walked tasks all the way to
                         // `approved` with no pushed task_branch (the kw7s
                         // PR-open loop). Leave it in_progress for redispatch.
+                        //
+                        // Also gate on push durability: if the push failed
+                        // after all retries, the round's work is not durable
+                        // and we must NOT mark it as submitted — the task stays
+                        // in_progress for redispatch so a fresh run can retry
+                        // the push.
                         if role_kind == RoleKind::Worker {
+                            if !push_succeeded {
+                                tracing::error!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    "supervisor: skipping submit_task_review — \
+                                     push failed, task stays in_progress for redispatch"
+                                );
+                                result = Some(TaskRunOutcome::Failed {
+                                    stage: "worker".into(),
+                                    reason: format!(
+                                        "push_to_origin failed after {PUSH_MAX_ATTEMPTS} \
+                                         attempts: {}. Worker progress is \
+                                         not durable in the mirror — the round must be \
+                                         retried.",
+                                        last_push_err.as_deref().unwrap_or("unknown error")
+                                    ),
+                                    provider_failure: None,
+                                    error_class: None,
+                                    hint: Some(
+                                        "Check mirror PVC permissions and disk space. \
+                                         The task will be redispatched by the coordinator."
+                                            .into(),
+                                    ),
+                                    body_excerpt: None,
+                                });
+                                break;
+                            }
                             if self.services.cancel().is_cancelled() {
                                 tracing::debug!(
                                     task_run_id = %run_id,
@@ -4616,5 +4700,330 @@ mod tests {
             reason.contains("missing_target_ref"),
             "fallback reason must identify the missing-target case, got: {reason}"
         );
+    }
+
+    /// Regression: a persistent push_to_origin failure after WorkerDone must
+    /// prevent `submit_task_review` from being fired and must produce a
+    /// `TaskRunOutcome::Failed` — NOT a `WorkerSubmitted` that would mark the
+    /// round as durably submitted while nothing was persisted to the mirror.
+    ///
+    /// This covers the lke3-era incident where three consecutive remediation
+    /// rounds reached `work_submitted` but every mirror push failed with
+    /// "unable to create temporary object directory / permission denied",
+    /// leaving the task branch frozen at the CI-failing v1 head while the
+    /// activity log showed phantom progress.
+    ///
+    /// The test creates a real mirror + ephemeral workspace, writes a file,
+    /// then deletes the mirror's `objects/` directory so `git push` fails
+    /// with a transport error (cannot read/write objects). The supervisor's
+    /// `WorkerDone` flow must see the push failure, emit a structured
+    /// `push_failure` tracing event, and refuse to advance the task.
+    #[tokio::test]
+    async fn push_failure_prevents_submit_task_review_and_fails_run() {
+        use std::sync::Mutex;
+        use std::sync::atomic::AtomicBool;
+
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let project_id = "project-push-fail";
+        let task_id = "task-push-fail";
+        let mirror = Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        // Create an ephemeral workspace and write a file so the auto-commit
+        // produces a real diff that needs pushing.
+        let ws = mirror
+            .clone_ephemeral(project_id, "main")
+            .await
+            .expect("clone ephemeral workspace");
+        let tb = "djinn/push-fail";
+        run_git(ws.path(), &["checkout", "-b", tb]);
+        tokio::fs::write(ws.path().join("work.txt"), "real worker output")
+            .await
+            .expect("write fixture file");
+        drop(ws); // release workspace before supervisor creates its own
+
+        // Set up log capture so we can assert on structured push_failure events.
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(logs.clone())
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_target(true)
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        // Corrupt the mirror so `git push` will fail: install a
+        // pre-receive hook that always rejects. Local bare repos run
+        // hooks during `git push`, so this deterministically fails the
+        // supervisor's post-stage push while keeping the mirror intact
+        // for cloning. Simulates the production "remote unpack failed:
+        // unable to create temporary object directory / permission denied".
+        let mirror_path = mirror.mirror_path(project_id);
+        assert!(
+            mirror_path.exists(),
+            "mirror must exist before installing push-rejection hook"
+        );
+        let hooks_dir = mirror_path.join("hooks");
+        tokio::fs::create_dir_all(&hooks_dir)
+            .await
+            .expect("create hooks dir");
+        let hook_path = hooks_dir.join("pre-receive");
+        tokio::fs::write(&hook_path, "#!/bin/sh\nexit 1\n")
+            .await
+            .expect("write pre-receive hook");
+        // Make the hook executable (chmod +x).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+                .await
+                .expect("chmod pre-receive hook");
+        }
+
+        let transition_calls: Arc<Mutex<Vec<TransitionCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let submit_task_review_called = Arc::new(AtomicBool::new(false));
+
+        let tc = transition_calls.clone();
+        let stc = submit_task_review_called.clone();
+        let services: Arc<dyn SupervisorServices> = Arc::new(PushFailTestServices {
+            cancel: CancellationToken::new(),
+            task: fixture_task(task_id, project_id),
+            transition_calls: tc,
+            submit_task_review_called: stc,
+        });
+        let supervisor = TaskRunSupervisor::new(Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: "run-push-fail".into(),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: tb.into(),
+            flow: SupervisorFlow::NewTask,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // The run MUST fail — not WorkerSubmitted, not Interrupted.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Failed { .. }),
+            "persistent push failure must produce TaskRunOutcome::Failed, \
+             got: {:?}",
+            report.outcome
+        );
+
+        // submit_task_review MUST NOT have been called — the task must
+        // stay in_progress for redispatch.
+        assert!(
+            !submit_task_review_called.load(std::sync::atomic::Ordering::SeqCst),
+            "submit_task_review must NOT be called when push_to_origin failed — \
+             the round was not durably submitted"
+        );
+
+        // The supervisor should still record the worker stage as completed
+        // (the stage itself ran; it was the push that failed).
+        assert_eq!(report.stages_completed, vec![RoleKind::Worker]);
+
+        // Verify structured tracing event was emitted.
+        let captured = logs.take();
+        assert!(
+            captured.contains("push_failure")
+                && captured.contains("djinn_supervisor::push_failure"),
+            "expected structured push_failure tracing event, got:\n{captured}"
+        );
+        assert!(
+            captured.contains("task-push-fail") && captured.contains("run-push-fail"),
+            "push_failure event must carry task and run context, got:\n{captured}"
+        );
+    }
+
+    /// Helper services for the push-failure regression test. Tracks
+    /// `transition_task` calls and records whether `submit_task_review`
+    /// was reached.
+    struct PushFailTestServices {
+        cancel: CancellationToken,
+        task: Task,
+        transition_calls: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        submit_task_review_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SupervisorServices for PushFailTestServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            assert_eq!(task_id, self.task.id);
+            Ok(self.task.clone())
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            _workspace: &Workspace,
+            role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            assert_eq!(role_kind, RoleKind::Worker);
+            Ok(StageOutcome::WorkerDone)
+        }
+
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            panic!("push failure must not reach open_pr")
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            _status: TaskRunStatus,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn create_session(
+            &self,
+            _params: services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised")
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+            _parked_reason: Option<String>,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            Ok(()) // fire-and-forget
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn transition_task(
+            &self,
+            task_id: String,
+            action: String,
+            reason: Option<String>,
+        ) -> Result<(), String> {
+            if action == "submit_task_review" {
+                self.submit_task_review_called
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.transition_calls
+                .lock()
+                .expect("transition_calls mutex poisoned")
+                .push(TransitionCall {
+                    task_id,
+                    action,
+                    reason,
+                });
+            Ok(())
+        }
     }
 }
