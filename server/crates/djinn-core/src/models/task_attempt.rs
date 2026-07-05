@@ -507,7 +507,11 @@ mod tests {
 
     #[test]
     fn guard_decision_round_trip() {
-        for decision in [GuardDecision::Allow, GuardDecision::Defer, GuardDecision::Block] {
+        for decision in [
+            GuardDecision::Allow,
+            GuardDecision::Defer,
+            GuardDecision::Block,
+        ] {
             let s = decision.as_str();
             assert_eq!(format!("{decision}"), s);
             assert_eq!(s.parse::<GuardDecision>().unwrap(), decision);
@@ -581,7 +585,10 @@ mod tests {
             submitted_at: None,
             terminal_at: None,
         };
-        assert_eq!(attempt.outcome_enum().unwrap(), TaskAttemptOutcome::Submitted);
+        assert_eq!(
+            attempt.outcome_enum().unwrap(),
+            TaskAttemptOutcome::Submitted
+        );
         assert!(attempt.is_non_terminal());
         assert!(!attempt.is_terminal());
     }

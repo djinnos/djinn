@@ -130,6 +130,48 @@ async fn edit_twice_without_reread_forces_reread() {
         .expect("edit after re-read should succeed");
 }
 
+/// `call_edit` without any prior read fails with the read-before-edit
+/// guidance and does NOT reach the matcher at all (no file write occurs).
+#[tokio::test]
+async fn edit_without_prior_read_fails_with_guidance() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-noread-");
+    let file = worktree.path().join("svc.rs");
+    tokio::fs::write(&file, "let a = 1;\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    // No read call — jump straight to edit.
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "svc.rs",
+            "old_text": "let a = 1;",
+            "new_text": "let b = 2;",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+    let err = call_edit(&state, &edit_args, worktree.path(), None, None, None)
+        .await
+        .expect_err("edit without prior read must be rejected");
+
+    // Must surface the read-before-edit guidance.
+    assert!(
+        err.contains("must read") || err.contains("read") || err.contains("Read"),
+        "error must include read-before-edit guidance, got: {err}"
+    );
+
+    // File must NOT be modified.
+    let after = tokio::fs::read_to_string(&file).await.expect("read back");
+    assert_eq!(
+        after, "let a = 1;\n",
+        "file must not be modified when no read record exists"
+    );
+}
+
 /// `call_edit` with typed matcher: success response includes `edit_match`
 /// metadata with strategy, byte/line ranges, byte counts, reindented flag,
 /// and match note.
@@ -374,6 +416,69 @@ async fn edit_no_match_does_not_modify_file() {
     assert_eq!(
         after, content,
         "file must not be modified on no-match outcome"
+    );
+}
+
+/// `call_edit` guard-rejected outcome: file is NOT modified, error is
+/// returned with leading compatibility text and structured guard details.
+/// Uses CRLF content with LF old_text to trigger the CRLF preservation guard.
+#[tokio::test]
+async fn edit_guard_rejected_does_not_modify_file() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-guard-");
+    let file = worktree.path().join("svc.rs");
+    // Content uses CRLF line endings.
+    let content = "line one\r\nline two\r\n";
+    tokio::fs::write(&file, content).await.expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "svc.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    // old_text uses \n — whitespace normalization finds the candidate but the
+    // CRLF preservation guard rejects the match.
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "svc.rs",
+            "old_text": "line one\nline two",
+            "new_text": "replaced",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+    let err = call_edit(&state, &edit_args, worktree.path(), None, None, None)
+        .await
+        .expect_err("guard-rejected edit must return error");
+
+    // Leading compatibility text preserved.
+    assert!(
+        err.contains("rejected by safety guard"),
+        "error must contain 'rejected by safety guard', got: {err}"
+    );
+    // Structured details present.
+    assert!(
+        err.contains("\"guard_rejected\""),
+        "error must include structured 'guard_rejected' outcome, got: {err}"
+    );
+    assert!(
+        err.contains("guard_reason"),
+        "error must include guard_reason field, got: {err}"
+    );
+
+    // File must NOT be modified.
+    let after = tokio::fs::read_to_string(&file).await.expect("read back");
+    assert_eq!(
+        after, content,
+        "file must not be modified on guard-rejected outcome"
     );
 }
 
@@ -718,4 +823,253 @@ async fn edit_no_match_emits_telemetry_outcome_only() {
         evt.fields.contains_key("score"),
         "no_match must have score (nearest_miss)"
     );
+}
+
+/// Guard-rejected outcome emits `edit_match_outcome` but NOT
+/// `edit_match_strategy`. Verifies guard and candidate_count fields.
+#[tokio::test]
+async fn edit_guard_rejected_emits_telemetry_outcome_only() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-telem-guard-");
+    let file = worktree.path().join("svc.rs");
+    // CRLF content triggers guard rejection.
+    tokio::fs::write(&file, "line one\r\nline two\r\n")
+        .await
+        .expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "svc.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "svc.rs",
+            "old_text": "line one\nline two",
+            "new_text": "replaced",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let events = with_captured_events(|| async {
+        let _ = call_edit(
+            &state,
+            &edit_args,
+            worktree.path(),
+            None,
+            Some("task-guard"),
+            Some("worker"),
+        )
+        .await;
+    })
+    .await;
+
+    let outcome_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_outcome"))
+        .collect();
+    assert_eq!(
+        outcome_events.len(),
+        1,
+        "expected exactly one edit_match_outcome event for guard-rejected, got {}",
+        outcome_events.len()
+    );
+
+    // No success → no edit_match_strategy event.
+    let strategy_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_strategy"))
+        .collect();
+    assert!(
+        strategy_events.is_empty(),
+        "guard-rejected must NOT emit edit_match_strategy"
+    );
+
+    let evt = &outcome_events[0];
+    assert_eq!(evt.fields["task_id"], "task-guard");
+    assert_eq!(evt.fields["agent_role"], "worker");
+    assert_eq!(evt.fields["tool_name"], "edit");
+    assert_eq!(evt.fields["path_ext"], "rs");
+    assert_eq!(evt.fields["outcome"], "guard_rejected");
+    assert!(
+        evt.fields.contains_key("guard") && !evt.fields["guard"].is_empty(),
+        "guard-rejected must have non-empty guard field"
+    );
+    assert!(
+        evt.fields.contains_key("candidate_count"),
+        "must have candidate_count"
+    );
+}
+
+/// Telemetry events for a successful edit include the `session_id` field
+/// and do NOT leak the full file path or file content.
+#[tokio::test]
+async fn edit_telemetry_success_includes_session_id_and_no_leaks() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-teem-leak-");
+    let file = worktree.path().join("sensitive_data.rs");
+    let content = "const SECRET: &str = \"hunter2\";\n";
+    tokio::fs::write(&file, content).await.expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "sensitive_data.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "sensitive_data.rs",
+            "old_text": "SECRET",
+            "new_text": "TOKEN",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let events = with_captured_events(|| async {
+        let _ = call_edit(
+            &state,
+            &edit_args,
+            worktree.path(),
+            None,
+            Some("task-leak-check"),
+            Some("worker"),
+        )
+        .await;
+    })
+    .await;
+
+    let outcome_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_outcome"))
+        .collect();
+    assert_eq!(outcome_events.len(), 1);
+
+    let evt = &outcome_events[0];
+
+    // session_id field must be present and match the task_id.
+    assert!(
+        evt.fields.contains_key("session_id"),
+        "telemetry must include session_id"
+    );
+    assert_eq!(evt.fields["session_id"], "task-leak-check");
+
+    // No field value should contain the full file path or filename.
+    for (key, value) in &evt.fields {
+        assert!(
+            !value.contains("sensitive_data.rs"),
+            "field '{key}' must not leak file name, got: {value}"
+        );
+        assert!(
+            !value.contains(&file.display().to_string()),
+            "field '{key}' must not leak full path, got: {value}"
+        );
+    }
+
+    // No field value should contain file content.
+    for (key, value) in &evt.fields {
+        assert!(
+            !value.contains("hunter2"),
+            "field '{key}' must not leak file content, got: {value}"
+        );
+    }
+}
+
+/// Telemetry events for a non-success outcome also do NOT leak the full
+/// file path or file content.
+#[tokio::test]
+async fn edit_telemetry_no_match_no_leaks() {
+    let worktree = crate::test_helpers::test_tempdir("djinn-ext-edit-teem-noleak-");
+    let file = worktree.path().join("credentials.rs");
+    let content = "const API_KEY: &str = \"supersecret\";\n";
+    tokio::fs::write(&file, content).await.expect("seed file");
+
+    let state =
+        crate::test_helpers::agent_context_from_db(create_test_db(), CancellationToken::new());
+
+    let read_args = Some(
+        serde_json::json!({ "file_path": "credentials.rs" })
+            .as_object()
+            .expect("obj")
+            .clone(),
+    );
+    call_read(&state, &read_args, worktree.path())
+        .await
+        .expect("read");
+
+    let edit_args = Some(
+        serde_json::json!({
+            "path": "credentials.rs",
+            "old_text": "this text does not exist anywhere",
+            "new_text": "replacement",
+        })
+        .as_object()
+        .expect("obj")
+        .clone(),
+    );
+
+    let events = with_captured_events(|| async {
+        let _ = call_edit(
+            &state,
+            &edit_args,
+            worktree.path(),
+            None,
+            Some("task-noleak"),
+            Some("reviewer"),
+        )
+        .await;
+    })
+    .await;
+
+    let outcome_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.fields.get("event_name").map(|s| s.as_str()) == Some("edit_match_outcome"))
+        .collect();
+    assert_eq!(outcome_events.len(), 1);
+
+    let evt = &outcome_events[0];
+
+    // session_id must be present.
+    assert!(
+        evt.fields.contains_key("session_id"),
+        "telemetry must include session_id"
+    );
+    assert_eq!(evt.fields["session_id"], "task-noleak");
+
+    // No field value should contain the full file path or filename.
+    for (key, value) in &evt.fields {
+        assert!(
+            !value.contains("credentials.rs"),
+            "field '{key}' must not leak file name, got: {value}"
+        );
+        assert!(
+            !value.contains(&file.display().to_string()),
+            "field '{key}' must not leak full path, got: {value}"
+        );
+    }
+
+    // No field value should contain file content.
+    for (key, value) in &evt.fields {
+        assert!(
+            !value.contains("supersecret"),
+            "field '{key}' must not leak file content, got: {value}"
+        );
+    }
 }
