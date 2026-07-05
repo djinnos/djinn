@@ -1190,7 +1190,7 @@ async fn jit_pitfalls_on_edit_first_modification_appends() {
         .expect("obj")
         .clone(),
     );
-    let response = call_edit(&state, &edit_args, worktree.path(), Some(pid))
+    let response = call_edit(&state, &edit_args, worktree.path(), Some(pid), None, None)
         .await
         .expect("edit");
 

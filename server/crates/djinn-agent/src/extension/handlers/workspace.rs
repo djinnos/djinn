@@ -1,3 +1,4 @@
+use super::super::fuzzy::MatchMetadata;
 use super::*;
 
 /// Default interactive-shell timeout (ms) when the caller passes no `timeout_ms`.
@@ -522,11 +523,92 @@ pub(crate) async fn call_write(
         .await
 }
 
+/// Emit bounded-cardinality telemetry for an edit match outcome.
+///
+/// Emits `edit_match_outcome` for all outcomes, and additionally
+/// `edit_match_strategy` for successful matches. Uses structured `tracing`
+/// fields; never logs full file paths or file content.
+///
+/// Telemetry failures are swallowed — this must never make an edit call fail.
+#[allow(clippy::too_many_arguments)]
+fn emit_edit_match_telemetry(
+    metadata: &MatchMetadata,
+    task_id: Option<&str>,
+    session_id: Option<&str>,
+    agent_role: Option<&str>,
+    path_ext: &str,
+    old_bytes: usize,
+    new_bytes: usize,
+    matched_bytes: Option<usize>,
+) {
+    // Swallow any panic so telemetry failures never fail the edit call.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let strategy = metadata.strategy.as_str();
+        let outcome = match metadata.outcome {
+            MatchOutcome::Success => "success",
+            MatchOutcome::Ambiguous => "ambiguous",
+            MatchOutcome::NoMatch => "no_match",
+            MatchOutcome::GuardRejected => "guard_rejected",
+        };
+        let guard = metadata.guard_rejected_reason.unwrap_or("");
+        let score = metadata.nearest_miss;
+        let unicode_splice = metadata.unicode_splice.map(|s| match s {
+            UnicodeSpliceStatus::Clean => "clean",
+            UnicodeSpliceStatus::Adjusted => "adjusted",
+        });
+
+        tracing::info!(
+            event_name = "edit_match_outcome",
+            task_id = task_id.unwrap_or(""),
+            session_id = session_id.unwrap_or(""),
+            agent_role = agent_role.unwrap_or(""),
+            tool_name = "edit",
+            path_ext,
+            strategy,
+            outcome,
+            guard,
+            candidate_count = metadata.candidate_count,
+            score,
+            old_bytes,
+            new_bytes,
+            matched_bytes,
+            reindented = metadata.reindented,
+            unicode_splice,
+            "edit match outcome telemetry"
+        );
+
+        // Additional success-only signal: edit_match_strategy
+        if metadata.outcome == MatchOutcome::Success {
+            tracing::info!(
+                event_name = "edit_match_strategy",
+                task_id = task_id.unwrap_or(""),
+                session_id = session_id.unwrap_or(""),
+                agent_role = agent_role.unwrap_or(""),
+                tool_name = "edit",
+                path_ext,
+                strategy,
+                outcome,
+                guard,
+                candidate_count = metadata.candidate_count,
+                score,
+                old_bytes,
+                new_bytes,
+                matched_bytes,
+                reindented = metadata.reindented,
+                unicode_splice,
+                "edit match strategy success telemetry"
+            );
+        }
+    }));
+}
+
 pub(crate) async fn call_edit(
     state: &AgentContext,
     arguments: &Option<serde_json::Map<String, serde_json::Value>>,
     worktree_path: &Path,
     project_id: Option<&str>,
+    session_task_id: Option<&str>,
+    session_role: Option<&str>,
 ) -> Result<serde_json::Value, String> {
     let p: EditParams = parse_args(arguments)?;
     let path = resolve_path(&p.path, worktree_path);
@@ -567,6 +649,16 @@ pub(crate) async fn call_edit(
 
             let metadata = find_match(&content, &p.old_text);
 
+            // Extract bounded-cardinality path extension for telemetry.
+            let path_ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Compute matched_bytes for telemetry (only meaningful for Success).
+            let matched_bytes = metadata.byte_range.map(|br| br.end - br.start);
+
             match metadata.outcome {
                 MatchOutcome::Success => {
                     let new_content = apply_match(&content, &p.new_text, &metadata);
@@ -598,14 +690,14 @@ pub(crate) async fn call_edit(
 
                     // Structured edit_match metadata.
                     let byte_range = metadata.byte_range.expect("success has byte range");
-                    let matched_bytes = byte_range.end - byte_range.start;
+                    let matched_bytes_val = byte_range.end - byte_range.start;
                     let edit_match = serde_json::json!({
                         "strategy": metadata.strategy.as_str(),
                         "matched_byte_range": [byte_range.start, byte_range.end],
                         "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
                         "old_bytes": p.old_text.len(),
                         "new_bytes": p.new_text.len(),
-                        "matched_bytes": matched_bytes,
+                        "matched_bytes": matched_bytes_val,
                         "reindented": metadata.reindented,
                         "unicode_splice": metadata.unicode_splice.map(|s| match s {
                             UnicodeSpliceStatus::Clean => "clean",
@@ -614,6 +706,18 @@ pub(crate) async fn call_edit(
                         "note": match_note_for(metadata.strategy),
                     });
                     result["edit_match"] = edit_match;
+
+                    // Emit telemetry (edit_match_outcome + edit_match_strategy).
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
 
                     let result = match (project_id, touched_rel.as_deref()) {
                         (Some(pid), Some(rel)) => {
@@ -633,6 +737,18 @@ pub(crate) async fn call_edit(
                     Ok(result)
                 }
                 MatchOutcome::Ambiguous => {
+                    // Emit telemetry before returning error.
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
+
                     // Structured details for ambiguity.
                     let details = serde_json::json!({
                         "edit_match": {
@@ -649,6 +765,18 @@ pub(crate) async fn call_edit(
                     ))
                 }
                 MatchOutcome::NoMatch => {
+                    // Emit telemetry before returning error.
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
+
                     let details = serde_json::json!({
                         "edit_match": {
                             "strategy": metadata.strategy.as_str(),
@@ -663,6 +791,18 @@ pub(crate) async fn call_edit(
                     ))
                 }
                 MatchOutcome::GuardRejected => {
+                    // Emit telemetry before returning error.
+                    emit_edit_match_telemetry(
+                        &metadata,
+                        session_task_id,
+                        session_task_id,
+                        session_role,
+                        &path_ext,
+                        p.old_text.len(),
+                        p.new_text.len(),
+                        matched_bytes,
+                    );
+
                     let details = serde_json::json!({
                         "edit_match": {
                             "strategy": metadata.strategy.as_str(),
