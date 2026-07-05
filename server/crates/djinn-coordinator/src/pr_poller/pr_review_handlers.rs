@@ -836,6 +836,22 @@ fn pr_attempt_summary(
     }
 }
 
+fn pr_attempt_submit_ref(task: &Task) -> String {
+    format!("refs/heads/task/{}", task.short_id)
+}
+
+fn pr_attempt_conflict_context(reason: Option<&str>, task: &Task) -> Option<serde_json::Value> {
+    if let Some(raw) = reason.and_then(|r| r.strip_prefix("merge_conflict:"))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+    {
+        return Some(value);
+    }
+
+    task.merge_conflict_metadata
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+}
+
 impl CoordinatorActor {
     /// Best-effort terminalize the latest pending/submitted worker attempt for a
     /// PR-driven outcome.  Fills `pr_url` and any head SHA/refs available from the
@@ -864,6 +880,8 @@ impl CoordinatorActor {
         let action_name = action.map(pr_transition_action_name);
         let reason_code = pr_attempt_reason_code(action, outcome);
         let summary = pr_attempt_summary(action_name, reason, outcome);
+        let submit_ref = pr_attempt_submit_ref(&task);
+        let conflict_context = pr_attempt_conflict_context(reason, &task);
         let summary_json = serde_json::json!({
             "source": "pr_poller",
             "action": action_name,
@@ -871,8 +889,11 @@ impl CoordinatorActor {
             "message": reason,
             "pr_url": task.pr_url,
             "github_head_sha": task.ci_head_sha,
+            "submit_ref": submit_ref,
             "pr_number": task.ci_pr_number,
             "status": task.status,
+            "merge_commit_sha": task.merge_commit_sha,
+            "conflict": conflict_context,
         })
         .to_string();
 
@@ -883,7 +904,7 @@ impl CoordinatorActor {
                 role: "worker",
                 outcome,
                 pr_url: task.pr_url.as_deref(),
-                submit_ref: None,
+                submit_ref: Some(&submit_ref),
                 checkpoint_ref: None,
                 mirror_head_sha: None,
                 github_head_sha: task.ci_head_sha.as_deref(),
