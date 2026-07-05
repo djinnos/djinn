@@ -924,6 +924,86 @@ impl CoordinatorActor {
                 "CoordinatorActor: reaping zombie session (no live worker, past hard cap)"
             );
 
+            // ── Liveness classifier gate (Dead verdict) ──────────────
+            // Consult the shared liveness classifier before reclaim. The
+            // existing guards (RPC registry, activity tracker, zombie age)
+            // have already narrowed to sessions that look dead, but the
+            // classifier is the authoritative gate: a `Live` or `Slow`
+            // verdict suppresses reclaim, and a terminal-task `KillNoop`
+            // prevents reopening a task that is already finished.
+            let classification = self.classify_task_liveness(task_id).await;
+            if let Some(ref result) = classification {
+                match result.verdict {
+                    Verdict::Live | Verdict::Slow => {
+                        tracing::info!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            verdict = %result.verdict,
+                            "CoordinatorActor: liveness classifier spared zombie session"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+                // Terminal task race: task became terminal concurrently.
+                // Record noop evidence and skip destructive reclaim.
+                if result.outcome == Some(LivenessOutcome::KillNoop) {
+                    let liveness_repo = LivenessRepository::new(self.db.clone());
+                    let snapshot = LivenessEvidenceSnapshot {
+                        session_id: session.id.clone(),
+                        task_id: Some(task_id.to_owned()),
+                        task_run_id: session.task_run_id.clone(),
+                        verdict: result.verdict.as_str().to_owned(),
+                        outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
+                        outcome_reason: None,
+                        evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+                    };
+                    let _ = liveness_repo.persist_evidence(&snapshot).await;
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        "CoordinatorActor: zombie session — task already terminal; recording KillNoop"
+                    );
+                    continue;
+                }
+            }
+
+            // Persist DeadReclaimed evidence before destructive reclaim.
+            {
+                let liveness_repo = LivenessRepository::new(self.db.clone());
+                let dead_evidence = match &classification {
+                    Some(result) => serde_json::to_value(&result.evidence).unwrap_or_default(),
+                    None => serde_json::json!({
+                        "reason": "classification_unavailable",
+                        "age_seconds": age,
+                        "status_overrides_token_skip": status_overrides_token_skip,
+                    }),
+                };
+                let snapshot = LivenessEvidenceSnapshot {
+                    session_id: session.id.clone(),
+                    task_id: Some(task_id.to_owned()),
+                    task_run_id: session.task_run_id.clone(),
+                    verdict: Verdict::Dead.as_str().to_owned(),
+                    outcome_kind: Some(LivenessOutcome::DeadReclaimed.as_str().to_owned()),
+                    outcome_reason: None,
+                    evidence: dead_evidence,
+                };
+                if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        error = %e,
+                        "CoordinatorActor: failed to persist dead_reclaimed evidence"
+                    );
+                } else {
+                    tracing::info!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        "CoordinatorActor: persisted dead_reclaimed liveness evidence"
+                    );
+                }
+            }
+
             let token_info = if session.tokens_in != 0 || session.tokens_out != 0 {
                 format!(
                     "{} tokens (in={}, out={})",
@@ -1067,34 +1147,73 @@ impl CoordinatorActor {
             // it up again. Mirrors the orphan reconciler's status→action map,
             // but does not depend on `has_session` (which is exactly the gate
             // that drifted).
+            //
+            // Terminal-task race guard: re-read the task status to detect
+            // concurrent finalization. If the task became terminal between
+            // our initial read and now, persist KillNoop metadata and skip
+            // the release — do not reopen a finished task.
             match task_row {
-                Ok(Some(task)) => {
-                    let release = match task.status.as_str() {
-                        "in_progress" => Some((TransitionAction::Release, "open")),
-                        "in_task_review" => {
-                            Some((TransitionAction::ReleaseTaskReview, "needs_task_review"))
+                Ok(Some(_)) => {
+                    // Re-read for concurrent terminal check.
+                    let fresh_task = task_repo.get(task_id).await;
+                    match fresh_task {
+                        Ok(Some(ref task))
+                            if task.status == "closed" || task.status == "force_closed" =>
+                        {
+                            let liveness_repo = LivenessRepository::new(self.db.clone());
+                            let snapshot = LivenessEvidenceSnapshot {
+                                session_id: session.id.clone(),
+                                task_id: Some(task_id.to_owned()),
+                                task_run_id: session.task_run_id.clone(),
+                                verdict: Verdict::Dead.as_str().to_owned(),
+                                outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
+                                outcome_reason: None,
+                                evidence: serde_json::json!({
+                                    "reason": "task_became_terminal_concurrently",
+                                    "task_status": task.status,
+                                }),
+                            };
+                            let _ = liveness_repo.persist_evidence(&snapshot).await;
+                            tracing::info!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                status = %task.status,
+                                "CoordinatorActor: zombie task already terminal — skipping release (KillNoop)"
+                            );
                         }
-                        "in_lead_intervention" => Some((
-                            TransitionAction::LeadInterventionRelease,
-                            "needs_lead_intervention",
-                        )),
-                        _ => None,
-                    };
-                    if let Some((action, release_to)) = release
-                        && let Err(e) = task_repo
-                            .transition(
-                                &task.id,
-                                action,
-                                "coordinator",
-                                "system",
-                                Some(
-                                    "Recovered by coordinator: zombie session reaped (no live worker, past hard cap)",
-                                ),
-                                None,
-                            )
-                            .await
-                    {
-                        tracing::warn!(task_id = %task_id, to = release_to, error = %e, "CoordinatorActor: failed to release task after zombie reap");
+                        Ok(Some(task)) => {
+                            let release = match task.status.as_str() {
+                                "in_progress" => Some((TransitionAction::Release, "open")),
+                                "in_task_review" => {
+                                    Some((TransitionAction::ReleaseTaskReview, "needs_task_review"))
+                                }
+                                "in_lead_intervention" => Some((
+                                    TransitionAction::LeadInterventionRelease,
+                                    "needs_lead_intervention",
+                                )),
+                                _ => None,
+                            };
+                            if let Some((action, release_to)) = release
+                                && let Err(e) = task_repo
+                                    .transition(
+                                        &task.id,
+                                        action,
+                                        "coordinator",
+                                        "system",
+                                        Some(
+                                            "Recovered by coordinator: zombie session reaped (no live worker, past hard cap)",
+                                        ),
+                                        None,
+                                    )
+                                    .await
+                            {
+                                tracing::warn!(task_id = %task_id, to = release_to, error = %e, "CoordinatorActor: failed to release task after zombie reap");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to re-read task for zombie reap terminal race check")
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -1275,6 +1394,53 @@ impl CoordinatorActor {
                         continue;
                     }
 
+                    // ── Liveness classifier gate for stale ready-state orphan ──
+                    // Consult the classifier before finalizing the running
+                    // session. A stale ready-state orphan has no live pod
+                    // (verified by has_session and background-work checks
+                    // above), so the classifier will normally return Dead.
+                    // If the task is already terminal, record KillNoop.
+                    let classification = self.classify_task_liveness(&task.id).await;
+                    if let Some(ref result) = classification {
+                        if result.outcome == Some(LivenessOutcome::KillNoop) {
+                            let liveness_repo = LivenessRepository::new(self.db.clone());
+                            let snapshot = LivenessEvidenceSnapshot {
+                                session_id: running_session.id.clone(),
+                                task_id: Some(task.id.clone()),
+                                task_run_id: running_session.task_run_id.clone(),
+                                verdict: result.verdict.as_str().to_owned(),
+                                outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
+                                outcome_reason: None,
+                                evidence: serde_json::to_value(&result.evidence)
+                                    .unwrap_or_default(),
+                            };
+                            let _ = liveness_repo.persist_evidence(&snapshot).await;
+                            tracing::info!(
+                                task_id = %task.short_id,
+                                session_id = %running_session.id,
+                                "CoordinatorActor: stale ready-state orphan — task already terminal; recording KillNoop"
+                            );
+                            continue;
+                        }
+                        // Persist dead_reclaimed evidence before finalizing.
+                        if result.verdict == Verdict::Dead {
+                            let liveness_repo = LivenessRepository::new(self.db.clone());
+                            let snapshot = LivenessEvidenceSnapshot {
+                                session_id: running_session.id.clone(),
+                                task_id: Some(task.id.clone()),
+                                task_run_id: running_session.task_run_id.clone(),
+                                verdict: Verdict::Dead.as_str().to_owned(),
+                                outcome_kind: Some(
+                                    LivenessOutcome::DeadReclaimed.as_str().to_owned(),
+                                ),
+                                outcome_reason: None,
+                                evidence: serde_json::to_value(&result.evidence)
+                                    .unwrap_or_default(),
+                            };
+                            let _ = liveness_repo.persist_evidence(&snapshot).await;
+                        }
+                    }
+
                     match session_repo.interrupt_running_for_task(&task.id).await {
                         Ok(interrupted) if interrupted > 0 => {
                             tracing::warn!(
@@ -1329,6 +1495,46 @@ impl CoordinatorActor {
                 };
                 if has_background_work {
                     continue;
+                }
+
+                // ── Liveness classifier gate for execution-state orphan ──
+                // The task is in an execution state but has no slot session
+                // and no background work. Consult the classifier to confirm
+                // this is a dead-orphan reclaim, and to detect concurrent
+                // terminal transitions.
+                let classification = self.classify_task_liveness(&task.id).await;
+                if let Some(ref result) = classification {
+                    if result.outcome == Some(LivenessOutcome::KillNoop) {
+                        let liveness_repo = LivenessRepository::new(self.db.clone());
+                        let snapshot = LivenessEvidenceSnapshot {
+                            session_id: String::new(),
+                            task_id: Some(task.id.clone()),
+                            task_run_id: None,
+                            verdict: result.verdict.as_str().to_owned(),
+                            outcome_kind: Some(LivenessOutcome::KillNoop.as_str().to_owned()),
+                            outcome_reason: None,
+                            evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+                        };
+                        let _ = liveness_repo.persist_evidence(&snapshot).await;
+                        tracing::info!(
+                            task_id = %task.short_id,
+                            "CoordinatorActor: execution-state orphan — task already terminal; recording KillNoop"
+                        );
+                        continue;
+                    }
+                    if result.verdict == Verdict::Dead {
+                        let liveness_repo = LivenessRepository::new(self.db.clone());
+                        let snapshot = LivenessEvidenceSnapshot {
+                            session_id: String::new(),
+                            task_id: Some(task.id.clone()),
+                            task_run_id: None,
+                            verdict: Verdict::Dead.as_str().to_owned(),
+                            outcome_kind: Some(LivenessOutcome::DeadReclaimed.as_str().to_owned()),
+                            outcome_reason: None,
+                            evidence: serde_json::to_value(&result.evidence).unwrap_or_default(),
+                        };
+                        let _ = liveness_repo.persist_evidence(&snapshot).await;
+                    }
                 }
 
                 let (release_action, release_to) = match task.status.as_str() {
