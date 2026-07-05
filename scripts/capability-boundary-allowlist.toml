@@ -73,14 +73,6 @@ capability = "git"
 
 [[entries]]
 capability = "git"
-	path = "server/crates/djinn-agent/src/actors/slot/lifecycle/prompt_context.rs"
-	matcher = "Command::new(\"git\")"
-	owner = "team/agent"
-	rationale = "Still-pending owner-crate migration: prompt-context assembly uses direct git shell-outs to collect repo state. Should be routed through djinn-git once the helper surface supports this use case."
-	cleanup_issue = "epic/fztz"
-
-[[entries]]
-capability = "git"
 	path = "server/crates/djinn-agent/tests/phase1_supervisor.rs"
 	matcher = "Command::new(\"git\")"
 	owner = "team/agent"
