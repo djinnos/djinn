@@ -2951,12 +2951,13 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
         .await
         .expect("dispatch should create a slot mapping");
 
-    // Age the activity tracker so idle > ZOMBIE_HARD_CAP_SECS but
-    // activity_tracked is still true. The classifier sees Running pod +
-    // Idle → Slow verdict with extension_eligible=true.
+    // Age the activity tracker so idle exceeds the 30-minute stall threshold
+    // (STALL_TIMEOUT_SECS) and the liveness classifier gate is reached. The
+    // classifier sees Running pod + Idle → Slow verdict with
+    // extension_eligible=true.
     let old = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().saturating_sub(20 * 60))
+        .map(|d| d.as_secs().saturating_sub(35 * 60))
         .unwrap_or(0);
     {
         let guard = active_tasks.lock().expect("active_tasks mutex");
