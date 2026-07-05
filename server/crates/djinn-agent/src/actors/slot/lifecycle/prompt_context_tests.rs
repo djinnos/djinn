@@ -2,7 +2,11 @@ use super::*;
 
 use djinn_core::events::EventBus;
 use djinn_core::models::ActivityEntry;
-use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository};
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_db::{
+    CompletedParentSummary, CreateTaskAttemptParams, Database, EpicRepository, ProposalCreateInput,
+    ProposalRepository, TaskAttemptRepository, TerminalTaskAttemptParams,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::{LeadRole, WorkerRole};
@@ -633,4 +637,342 @@ fn format_mcp_instructions_renders_sorted_subsections() {
         ],
     );
     assert_ordered(&result, &["### alpha", "### beta"]);
+}
+
+// ── Attempt-context loading tests (4x3v / 20at) ─────────────────────
+
+/// Create a terminal worker attempt for `task_id` with the given outcome and summary.
+async fn seed_terminal_attempt(
+    repo: &TaskAttemptRepository,
+    task_id: &str,
+    dispatch_key: &str,
+    outcome: TaskAttemptOutcome,
+    summary: Option<&str>,
+) {
+    let id = uuid::Uuid::now_v7().to_string();
+    let attempt = repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &id,
+            task_id,
+            role: "worker",
+            dispatch_key,
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .expect("create pending attempt");
+    repo.advance_to_terminal(TerminalTaskAttemptParams {
+        id: &attempt.id,
+        outcome,
+        pr_url: None,
+        submit_ref: None,
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary,
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .expect("advance to terminal");
+    // Small delay so terminal_at timestamps are distinct and ordering is deterministic.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+}
+
+#[tokio::test]
+async fn load_prior_attempts_returns_terminal_newest_first_bounded_to_three() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Attempt epic", "Attempt task").await;
+    let repo = TaskAttemptRepository::new(db);
+
+    // Seed 4 terminal attempts; only the 3 newest should be returned.
+    for i in 1..=4 {
+        seed_terminal_attempt(
+            &repo,
+            &task.id,
+            &format!("dk-prior-{i}"),
+            TaskAttemptOutcome::Completed,
+            Some(&format!("summary {i}")),
+        )
+        .await;
+    }
+
+    let attempts = attempt_context::load_prior_attempts(&task, &repo)
+        .await
+        .expect("should return Some");
+    assert_eq!(attempts.len(), 3, "bounded to 3 newest");
+    // Newest-first: seq 4, 3, 2.
+    assert_eq!(attempts[0].attempt_seq, 4);
+    assert_eq!(attempts[1].attempt_seq, 3);
+    assert_eq!(attempts[2].attempt_seq, 2);
+    // Each carries the summary from the DTO.
+    assert_eq!(attempts[0].summary.as_deref(), Some("summary 4"));
+    // The DTO does not have a log_tail field — verify outcome is exposed.
+    assert_eq!(attempts[0].outcome, "completed");
+    assert_eq!(attempts[0].role, "worker");
+}
+
+#[tokio::test]
+async fn load_prior_attempts_excludes_non_terminal_rows() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Filter epic", "Filter task").await;
+    let repo = TaskAttemptRepository::new(db);
+
+    // One terminal attempt.
+    seed_terminal_attempt(
+        &repo,
+        &task.id,
+        "dk-term-1",
+        TaskAttemptOutcome::Completed,
+        Some("terminal summary"),
+    )
+    .await;
+
+    // One pending attempt (not advanced to terminal).
+    let pending_id = uuid::Uuid::now_v7().to_string();
+    repo.create_or_get_pending(CreateTaskAttemptParams {
+        id: &pending_id,
+        task_id: &task.id,
+        role: "worker",
+        dispatch_key: "dk-pending-1",
+        session_id: None,
+        attempt_seq: None,
+    })
+    .await
+    .expect("create pending");
+
+    // One submitted (non-terminal) attempt.
+    let submitted_id = uuid::Uuid::now_v7().to_string();
+    let submitted = repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &submitted_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "dk-submitted-1",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .expect("create pending");
+    repo.advance_to_submitted(djinn_db::SubmitTaskAttemptParams {
+        id: &submitted.id,
+        submit_ref: None,
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary: Some("submitted summary"),
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .expect("advance to submitted");
+
+    let attempts = attempt_context::load_prior_attempts(&task, &repo)
+        .await
+        .expect("should return Some");
+    assert_eq!(attempts.len(), 1, "only the terminal attempt is included");
+    assert_eq!(attempts[0].summary.as_deref(), Some("terminal summary"));
+}
+
+#[tokio::test]
+async fn load_prior_attempts_returns_none_when_empty() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
+    let repo = TaskAttemptRepository::new(db);
+    assert!(
+        attempt_context::load_prior_attempts(&task, &repo)
+            .await
+            .is_none(),
+        "no attempt rows should yield None"
+    );
+}
+
+#[tokio::test]
+async fn load_prior_attempts_exposes_dto_fields_without_log_tail() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "DTO epic", "DTO task").await;
+    let repo = TaskAttemptRepository::new(db);
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let attempt = repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "dk-dto-1",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .expect("create pending");
+    repo.advance_to_terminal(TerminalTaskAttemptParams {
+        id: &attempt.id,
+        outcome: TaskAttemptOutcome::Crashed,
+        pr_url: Some("https://example.com/pr/42"),
+        submit_ref: Some("refs/heads/task/dto"),
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary: Some("crashed with panic"),
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .expect("advance to terminal");
+
+    let attempts = attempt_context::load_prior_attempts(&task, &repo)
+        .await
+        .expect("should return Some");
+    assert_eq!(attempts.len(), 1);
+    let s = &attempts[0];
+    assert_eq!(s.outcome, "crashed");
+    assert_eq!(s.role, "worker");
+    assert_eq!(s.summary.as_deref(), Some("crashed with panic"));
+    assert_eq!(s.pr_url.as_deref(), Some("https://example.com/pr/42"));
+    assert_eq!(s.submit_ref.as_deref(), Some("refs/heads/task/dto"));
+    assert!(s.terminal_at.is_some(), "terminal timestamp should be set");
+    // The DTO struct itself has no log_tail field — the type system guarantees absence.
+    assert!(
+        std::any::type_name::<djinn_core::models::task_attempt::TaskAttemptPromptSummary>()
+            .contains("TaskAttemptPromptSummary"),
+        "load_prior_attempts must return the TaskAttemptPromptSummary DTO"
+    );
+}
+
+#[tokio::test]
+async fn load_completed_dependency_parents_returns_none_when_no_blockers() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "No-dep epic", "No-dep task").await;
+    let repo = TaskAttemptRepository::new(db);
+    assert!(
+        attempt_context::load_completed_dependency_parents(&task, &repo)
+            .await
+            .is_none(),
+        "no completed blocker parents should yield None"
+    );
+}
+
+#[tokio::test]
+async fn load_completed_dependency_parents_includes_closed_blocker_with_completed_attempt() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let project = create_test_project(&db).await;
+    let epic = create_epic(&db, &events, &project.id, "Dep epic", "Dep.", None).await;
+    let task = create_task(&db, &events, &epic.id, "Dependent task", None).await;
+    // Closed blocker parent with a completed attempt.
+    let parent = create_task(&db, &events, &epic.id, "Parent task", Some("closed")).await;
+    // The repository's `create` does not stamp `closed_at` even for `closed`
+    // status, so set it explicitly with an untyped query.
+    sqlx::query("UPDATE tasks SET closed_at = '2025-06-01T00:00:00Z' WHERE id = $1")
+        .bind(&parent.id)
+        .execute(db.pool())
+        .await
+        .expect("set closed_at on parent");
+    let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
+    task_repo
+        .update_blockers_atomic(&task.id, &[parent.id.clone()], &[])
+        .await
+        .expect("wire blocker");
+
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    seed_terminal_attempt(
+        &attempt_repo,
+        &parent.id,
+        "dk-parent-1",
+        TaskAttemptOutcome::Completed,
+        Some("parent completed summary"),
+    )
+    .await;
+
+    let parents = attempt_context::load_completed_dependency_parents(&task, &attempt_repo)
+        .await
+        .expect("should return Some");
+    assert_eq!(parents.len(), 1);
+    let p: &CompletedParentSummary = &parents[0];
+    assert_eq!(p.task_id, parent.id);
+    assert_eq!(p.title, "Parent task");
+    let latest = p
+        .latest_completed_attempt
+        .as_ref()
+        .expect("latest completed attempt should be present");
+    assert_eq!(latest.summary.as_deref(), Some("parent completed summary"));
+    assert_eq!(latest.outcome, "completed");
+}
+
+#[tokio::test]
+async fn load_completed_dependency_parents_excludes_open_blocker() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let project = create_test_project(&db).await;
+    let epic = create_epic(&db, &events, &project.id, "Excl epic", "Excl.", None).await;
+    let task = create_task(&db, &events, &epic.id, "Dependent task 2", None).await;
+    // Open blocker parent — should be excluded.
+    let open_parent = create_task(&db, &events, &epic.id, "Open parent", None).await;
+    let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
+    task_repo
+        .update_blockers_atomic(&task.id, &[open_parent.id.clone()], &[])
+        .await
+        .expect("wire blocker");
+
+    let attempt_repo = TaskAttemptRepository::new(db);
+    assert!(
+        attempt_context::load_completed_dependency_parents(&task, &attempt_repo)
+            .await
+            .is_none(),
+        "open blocker parent should be excluded"
+    );
+}
+
+#[tokio::test]
+async fn assemble_prompt_context_loads_attempt_context_non_fatally() {
+    // End-to-end: assemble_prompt_context should populate prior_attempts and
+    // completed_dependency_parents, and remain non-fatal when rows are absent.
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Assemble epic", "Assemble task").await;
+
+    // Seed one terminal attempt for the task.
+    let repo = TaskAttemptRepository::new(db.clone());
+    seed_terminal_attempt(
+        &repo,
+        &task.id,
+        "dk-assemble-1",
+        TaskAttemptOutcome::Completed,
+        Some("assemble summary"),
+    )
+    .await;
+
+    let ctx = lead_prompt_context(db, &task).await;
+    let attempts = ctx
+        .prior_attempts
+        .as_ref()
+        .expect("prior_attempts should be populated");
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].summary.as_deref(), Some("assemble summary"));
+    // No dependency parents → completed_dependency_parents is None, but assembly did not fail.
+    assert!(ctx.completed_dependency_parents.is_none());
+    // The prompt was still assembled successfully.
+    assert!(!ctx.system_prompt.is_empty());
+}
+
+#[tokio::test]
+async fn assemble_prompt_context_omits_attempt_context_when_no_rows() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "No-attempt epic", "No-attempt task").await;
+    let ctx = lead_prompt_context(db, &task).await;
+    assert!(
+        ctx.prior_attempts.is_none(),
+        "no attempt rows should yield None prior_attempts"
+    );
+    assert!(ctx.completed_dependency_parents.is_none());
+    assert!(
+        !ctx.system_prompt.is_empty(),
+        "prompt assembly is non-fatal"
+    );
 }

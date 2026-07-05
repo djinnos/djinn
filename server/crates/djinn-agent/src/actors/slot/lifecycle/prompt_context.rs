@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use djinn_core::models::Task;
+use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
@@ -39,7 +40,7 @@ pub(crate) struct PromptContext {
     /// sa4x: promoted BLOCKING directive for red required CI.
     pub ci_blocking_directive: Option<String>,
     /// 4x3v / jteh: durable prior attempt history for the current task.
-    pub prior_attempts: Option<Vec<djinn_db::CompletedParentSummary>>,
+    pub prior_attempts: Option<Vec<TaskAttemptPromptSummary>>,
     /// 4x3v / jteh: completed dependency-parent summaries from blocker parents.
     pub completed_dependency_parents: Option<Vec<djinn_db::CompletedParentSummary>>,
     /// y8pv / 48ru: one-line resume note for worker dispatch.
