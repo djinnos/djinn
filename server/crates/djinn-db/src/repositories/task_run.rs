@@ -269,6 +269,21 @@ impl TaskRunRepository {
         .fetch_all(self.db.pool())
         .await?)
     }
+
+    /// Backdate the `started_at` timestamp of a task_run by the given SQL
+    /// interval (e.g. "20 minutes"). Used by coordinator liveness tests to
+    /// simulate a task_run whose hard runtime deadline has been exceeded.
+    pub async fn backdate_started_at(&self, id: &str, interval: &str) -> Result<()> {
+        self.db.ensure_initialized().await?;
+        sqlx::query(&format!(
+            "UPDATE task_runs SET started_at = datetime('now', '-{}') WHERE id = $1",
+            interval
+        ))
+        .bind(id)
+        .execute(self.db.pool())
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
