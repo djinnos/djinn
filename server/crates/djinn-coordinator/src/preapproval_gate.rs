@@ -12,11 +12,12 @@
 //!
 //! [`SERVER_CHECK_SET`] mirrors the PR-level `server`-scope jobs in
 //! `.github/workflows/quality-gate.yml` (clippy `--all-targets`, the Server Size
-//! Guard, the Raw-SQL Boundary check, the sqlx offline-cache check, and a
-//! test-target build). Each check delegates to the **same repo script / cargo
-//! command** CI runs, so there is no second command registry to drift. Whenever
-//! the workflow's server-scope check set changes, update [`SERVER_CHECK_SET`]
-//! (a `check_set_scripts_exist` test asserts the referenced scripts are present).
+//! Guard, the Raw-SQL Boundary check, the Server Capability Boundaries check,
+//! the sqlx offline-cache check, and a test-target build). Each check delegates
+//! to the **same repo script / cargo command** CI runs, so there is no second
+//! command registry to drift. Whenever the workflow's server-scope check set
+//! changes, update [`SERVER_CHECK_SET`] (a `check_set_scripts_exist` test
+//! asserts the referenced scripts are present).
 //!
 //! ## Caching
 //!
@@ -92,9 +93,10 @@ pub(crate) struct PreApprovalCheck {
 /// The PR-level `server`-scope Quality-Gate check set.
 ///
 /// Mirrors `.github/workflows/quality-gate.yml`: `server-clippy`,
-/// `server-size-guard`, `server-raw-sql-boundary`, `server-sqlx-cache`, and a
-/// test-target build (the `warm-cache-test` / merge-queue `server-test`
-/// compile). `SQLX_OFFLINE=true` matches the workflow's offline consumers.
+/// `server-size-guard`, `server-raw-sql-boundary`, `server-capability-boundaries`,
+/// `server-sqlx-cache`, and a test-target build (the `warm-cache-test` /
+/// merge-queue `server-test` compile). `SQLX_OFFLINE=true` matches the workflow's
+/// offline consumers.
 pub(crate) const SERVER_CHECK_SET: &[PreApprovalCheck] = &[
     PreApprovalCheck {
         name: "clippy_all_targets",
@@ -110,6 +112,15 @@ pub(crate) const SERVER_CHECK_SET: &[PreApprovalCheck] = &[
     PreApprovalCheck {
         name: "raw_sql_boundary",
         command: "./scripts/check-raw-sql-boundary.sh",
+    },
+    PreApprovalCheck {
+        name: "capability_boundaries",
+        // Self-tests first, then the live per-capability detector scripts. The
+        // shell self-tests run the detectors against synthetic fixtures so a
+        // detector or allowlist regression fails loudly before the live scan.
+        // No BASE_SHA is injected here; the scripts fall back to origin/main for
+        // the diff, keeping the command deterministic and repository-local.
+        command: "./scripts/test-capability-boundaries.sh && ./scripts/check-git-boundary.sh && ./scripts/check-http-boundary.sh && ./scripts/check-k8s-boundary.sh",
     },
     PreApprovalCheck {
         name: "sqlx_offline_cache",
@@ -183,6 +194,12 @@ pub(crate) fn path_is_server_scope(path: &str) -> bool {
         "scripts/check_boundaries.py",
         "server/rust-toolchain.toml",
         ".github/workflows/quality-gate.yml",
+        "scripts/test-capability-boundaries.sh",
+        "scripts/check-capability-boundaries.sh",
+        "scripts/check-git-boundary.sh",
+        "scripts/check-http-boundary.sh",
+        "scripts/check-k8s-boundary.sh",
+        "scripts/capability-boundary-allowlist.toml",
     ];
     if EXACT.contains(&p) {
         return true;
@@ -657,6 +674,12 @@ mod tests {
             "server/.sqlx/query-abc.json",
             "scripts/check_boundaries.py",
             ".github/workflows/quality-gate.yml",
+            "scripts/test-capability-boundaries.sh",
+            "scripts/check-capability-boundaries.sh",
+            "scripts/check-git-boundary.sh",
+            "scripts/check-http-boundary.sh",
+            "scripts/check-k8s-boundary.sh",
+            "scripts/capability-boundary-allowlist.toml",
         ] {
             assert!(path_is_server_scope(server), "{server} is server-scope");
         }
@@ -706,6 +729,10 @@ mod tests {
             "scripts/check-file-size.sh",
             "scripts/check-raw-sql-boundary.sh",
             ".github/workflows/quality-gate.yml",
+            "scripts/test-capability-boundaries.sh",
+            "scripts/check-git-boundary.sh",
+            "scripts/check-http-boundary.sh",
+            "scripts/check-k8s-boundary.sh",
         ] {
             assert!(
                 repo_root.join(rel).exists(),
@@ -713,6 +740,13 @@ mod tests {
                 repo_root.join(rel).display()
             );
         }
+        // The capability-boundary shared plumbing is sourced by the wrapper
+        // scripts and is listed as a server-scope path, so it must exist too.
+        assert!(
+            repo_root
+                .join("scripts/check-capability-boundaries.sh")
+                .exists()
+        );
         // The required check names are the coverage contract.
         assert_eq!(
             required_check_names(),
@@ -720,6 +754,7 @@ mod tests {
                 "clippy_all_targets",
                 "size_guard",
                 "raw_sql_boundary",
+                "capability_boundaries",
                 "sqlx_offline_cache",
                 "test_target_build"
             ]
