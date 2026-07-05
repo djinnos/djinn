@@ -82,6 +82,9 @@ const STRATEGY_ORDER: &[MatchStrategy] = &[
     MatchStrategy::IndentationFlexible,
     MatchStrategy::EscapeNormalized,
     MatchStrategy::TrimmedBoundary,
+    MatchStrategy::UnicodeNormalized,
+    MatchStrategy::BlockAnchor,
+    MatchStrategy::ContextAware,
 ];
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -206,9 +209,12 @@ fn run_strategy(strategy: MatchStrategy, content: &str, old_text: &str) -> Optio
         MatchStrategy::IndentationFlexible => try_indentation_flexible(content, old_text),
         MatchStrategy::EscapeNormalized => try_escape_normalized(content, old_text),
         MatchStrategy::TrimmedBoundary => try_trimmed_boundary(content, old_text),
-        MatchStrategy::UnicodeNormalized
-        | MatchStrategy::BlockAnchor
-        | MatchStrategy::ContextAware => None,
+        MatchStrategy::UnicodeNormalized => {
+            // Unicode-normalized matching is serialized behind task gww0.
+            None
+        }
+        MatchStrategy::BlockAnchor => try_block_anchor(content, old_text),
+        MatchStrategy::ContextAware => try_context_aware(content, old_text),
     }
 }
 
@@ -919,9 +925,9 @@ fn match_note_for(strategy: MatchStrategy) -> Option<String> {
         }
         MatchStrategy::EscapeNormalized => Some("(matched with escape normalization)".to_string()),
         MatchStrategy::TrimmedBoundary => Some("(matched with trimmed boundary lines)".to_string()),
-        MatchStrategy::UnicodeNormalized
-        | MatchStrategy::BlockAnchor
-        | MatchStrategy::ContextAware => None,
+        MatchStrategy::UnicodeNormalized => None, // placeholder: gww0
+        MatchStrategy::BlockAnchor => Some("(matched with block anchor)".to_string()),
+        MatchStrategy::ContextAware => Some("(matched with context-aware scoring)".to_string()),
     }
 }
 
@@ -935,10 +941,328 @@ fn ambiguity_phrase(strategy: MatchStrategy) -> &'static str {
         MatchStrategy::IndentationFlexible => "after stripping indentation",
         MatchStrategy::EscapeNormalized => "after escape normalization",
         MatchStrategy::TrimmedBoundary => "after trimming boundary lines",
-        MatchStrategy::UnicodeNormalized
-        | MatchStrategy::BlockAnchor
-        | MatchStrategy::ContextAware => "with future strategy",
+        MatchStrategy::UnicodeNormalized => "with Unicode normalization",
+        MatchStrategy::BlockAnchor => "with block anchor matching",
+        MatchStrategy::ContextAware => "with context-aware matching",
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Block-anchor & context-aware strategy constants
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Maximum number of lines allowed in a block-anchor span. Exceeding this
+/// triggers a guard rejection to prevent overly broad matches.
+const BLOCK_ANCHOR_MAX_SPAN_LINES: usize = 100;
+
+/// Minimum context-aware score (0.0..=1.0) for a candidate to be accepted.
+const CONTEXT_AWARE_MIN_SCORE: f64 = 0.7;
+
+/// Margin within which two candidates are considered a tie (rejected as
+/// ambiguous).
+const CONTEXT_AWARE_TIE_MARGIN: f64 = 0.05;
+
+/// Block-anchor strategy: use the first and last non-empty lines of `old_text`
+/// as "anchor" lines. Find each anchor in `content`; when both anchors appear
+/// exactly once and bound a span of at most `BLOCK_ANCHOR_MAX_SPAN_LINES`
+/// lines, the inner content between them is the candidate. The full candidate
+/// range is then compared against the full normalized `old_text` so that
+/// whitespace/indentation differences within the block do not prevent a match.
+fn try_block_anchor(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let start_anchor = first_non_empty_line(old_text);
+    let end_anchor = last_non_empty_line(old_text);
+
+    if start_anchor.is_empty() {
+        return None;
+    }
+
+    // Single-line old_text: both anchors are the same line. The block
+    // approach adds no value because there is no interior to span. Skip
+    // so the later context_aware strategy (or earlier strategies) can
+    // handle it.
+    if start_anchor == end_anchor {
+        return None;
+    }
+
+    // Find start anchor (exact substring in content).
+    let start_positions: Vec<usize> = content
+        .match_indices(start_anchor)
+        .map(|(pos, _)| pos)
+        .collect();
+
+    if start_positions.is_empty() {
+        return None;
+    }
+    if start_positions.len() > 1 {
+        return Some(ambiguous_metadata(
+            MatchStrategy::BlockAnchor,
+            start_positions.len(),
+        ));
+    }
+    let block_start = start_positions[0];
+
+    // Find end anchor (exact substring in content).
+    let end_positions: Vec<usize> = content
+        .match_indices(end_anchor)
+        .map(|(pos, _)| pos)
+        .collect();
+
+    if end_positions.is_empty() {
+        return None;
+    }
+    if end_positions.len() > 1 {
+        return Some(ambiguous_metadata(
+            MatchStrategy::BlockAnchor,
+            end_positions.len(),
+        ));
+    }
+    let end_anchor_start = end_positions[0];
+    let block_end = end_anchor_start + end_anchor.len();
+
+    // The end anchor must appear after the start anchor.
+    if block_end <= block_start {
+        return None;
+    }
+
+    // Guard: block span must not exceed the maximum line limit.
+    let span_lines = content[block_start..block_end].matches('\n').count();
+    if span_lines > BLOCK_ANCHOR_MAX_SPAN_LINES {
+        return Some(reject_metadata(
+            MatchStrategy::BlockAnchor,
+            "block anchor span exceeds maximum line limit",
+        ));
+    }
+
+    // The candidate text in content is the block between (inclusive of) the
+    // two anchors.
+    let candidate = &content[block_start..block_end];
+
+    // Compare normalized forms: collapse whitespace runs to single spaces for
+    // both the candidate and old_text so minor indentation/spacing differences
+    // do not prevent a match.
+    let (norm_candidate, _) = normalize_whitespace_with_map(candidate);
+    let (norm_old, _) = normalize_whitespace_with_map(old_text);
+
+    if norm_candidate != norm_old {
+        return None;
+    }
+
+    // Safety guards on the original byte range.
+    if let Err(reason) = guard_utf8_boundary(content, block_start, block_end) {
+        return Some(reject_metadata(MatchStrategy::BlockAnchor, reason));
+    }
+    if let Err(reason) = guard_crlf_preservation(content, block_start, block_end) {
+        return Some(reject_metadata(MatchStrategy::BlockAnchor, reason));
+    }
+    if let Err(reason) = guard_line_boundary(content, block_start, block_end, candidate) {
+        return Some(reject_metadata(MatchStrategy::BlockAnchor, reason));
+    }
+
+    Some(success_metadata(
+        MatchStrategy::BlockAnchor,
+        ByteRange {
+            start: block_start,
+            end: block_end,
+        },
+        line_range_for(content, block_start, block_end),
+    ))
+}
+
+/// Context-aware strategy: locate candidate regions by searching for the first
+/// non-empty line of `old_text` as a substring in `content`. For each match
+/// position, score the surrounding context by comparing subsequent normalized
+/// lines of `old_text` against the corresponding lines in `content` at that
+/// position. Accept only when:
+///
+/// - The best score meets `CONTEXT_AWARE_MIN_SCORE`.
+/// - The best score exceeds the second-best score by at least
+///   `CONTEXT_AWARE_TIE_MARGIN`.
+///
+/// This strategy is deliberately the last in the chain and is more permissive
+/// than earlier strategies — it accepts partial line-level matches — but its
+/// scoring and tie-rejection keep false positives low.
+fn try_context_aware(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let old_lines: Vec<&str> = old_text.split('\n').collect();
+    let content_lines: Vec<&str> = content.split('\n').collect();
+
+    if old_lines.is_empty() {
+        return None;
+    }
+
+    // Use the first non-empty trimmed line as an anchor to locate candidate
+    // regions in the content.
+    let anchor = old_lines
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim())
+        .unwrap_or("");
+    if anchor.is_empty() {
+        return None;
+    }
+
+    // Find every occurrence of the anchor line (whitespace-trimmed) in the
+    // content. We work at the line level so we can score surrounding context.
+    let anchor_normalized = collapse_whitespace(anchor);
+    let mut candidate_starts: Vec<usize> = Vec::new();
+    for (i, line) in content_lines.iter().enumerate() {
+        if collapse_whitespace(line.trim()) == anchor_normalized {
+            candidate_starts.push(i);
+        }
+    }
+
+    if candidate_starts.is_empty() {
+        return None;
+    }
+
+    // Score each candidate: count the number of consecutive old_lines that
+    // match (after whitespace normalization) at the corresponding position in
+    // content_lines.
+    let old_normalized: Vec<String> = old_lines
+        .iter()
+        .map(|l| collapse_whitespace(l.trim()))
+        .collect();
+
+    struct Candidate {
+        content_line_start: usize,
+        matched_lines: usize,
+        score: f64,
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+
+    for &line_start in &candidate_starts {
+        let remaining = content_lines.len().saturating_sub(line_start);
+        let compare_count = old_lines.len().min(remaining);
+        let mut matched = 0usize;
+        for j in 0..compare_count {
+            let content_norm = collapse_whitespace(content_lines[line_start + j].trim());
+            if content_norm == old_normalized[j] {
+                matched += 1;
+            } else {
+                break; // Stop at first mismatch — sequential match only.
+            }
+        }
+        if matched == 0 {
+            continue;
+        }
+        let score = matched as f64 / old_lines.len() as f64;
+        candidates.push(Candidate {
+            content_line_start: line_start,
+            matched_lines: matched,
+            score,
+        });
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Sort by score descending, then by matched_lines descending.
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.matched_lines.cmp(&a.matched_lines))
+    });
+
+    let best = &candidates[0];
+
+    // Reject if below the minimum score threshold.
+    if best.score < CONTEXT_AWARE_MIN_SCORE {
+        return Some(reject_metadata(
+            MatchStrategy::ContextAware,
+            "context-aware score below threshold",
+        ));
+    }
+
+    // Tie rejection: if the second-best score is within the tie margin of the
+    // best, reject as ambiguous.
+    if candidates.len() > 1 {
+        let second = &candidates[1];
+        if (best.score - second.score).abs() < CONTEXT_AWARE_TIE_MARGIN {
+            return Some(ambiguous_metadata(
+                MatchStrategy::ContextAware,
+                candidates.len(),
+            ));
+        }
+    }
+
+    // Compute the byte range for the best candidate.
+    let mut byte_start = 0usize;
+    for line in &content_lines[..best.content_line_start] {
+        byte_start += line.len() + 1; // +1 for '\n'
+    }
+    let mut byte_end = byte_start;
+    for (i, line) in content_lines[best.content_line_start..]
+        .iter()
+        .enumerate()
+        .take(old_lines.len())
+    {
+        byte_end += line.len();
+        if best.content_line_start + i + 1 < content_lines.len() {
+            byte_end += 1; // +1 for '\n'
+        }
+    }
+    byte_end = byte_end.min(content.len());
+
+    // Safety guards on the byte range.
+    if let Err(reason) = guard_utf8_boundary(content, byte_start, byte_end) {
+        return Some(reject_metadata(MatchStrategy::ContextAware, reason));
+    }
+    if let Err(reason) = guard_crlf_preservation(content, byte_start, byte_end) {
+        return Some(reject_metadata(MatchStrategy::ContextAware, reason));
+    }
+    // Note: context_aware intentionally allows partial-line matches (unlike
+    // earlier strategies), so we do NOT apply the line-boundary guard here.
+
+    Some(success_metadata(
+        MatchStrategy::ContextAware,
+        ByteRange {
+            start: byte_start,
+            end: byte_end,
+        },
+        line_range_for(content, byte_start, byte_end),
+    ))
+}
+
+/// Return the first non-empty (after trimming) line of `s`.
+fn first_non_empty_line(s: &str) -> &str {
+    for line in s.split('\n') {
+        if !line.trim().is_empty() {
+            return line;
+        }
+    }
+    ""
+}
+
+/// Return the last non-empty (after trimming) line of `s`.
+fn last_non_empty_line(s: &str) -> &str {
+    for line in s.split('\n').rev() {
+        if !line.trim().is_empty() {
+            return line;
+        }
+    }
+    ""
+}
+
+/// Collapse all runs of whitespace (spaces and tabs) in `s` to a single space,
+/// without any normalization map. Used for lightweight context comparison in
+/// the context-aware strategy.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for ch in s.chars() {
+        if ch == ' ' || ch == '\t' {
+            if !in_ws {
+                out.push(' ');
+                in_ws = true;
+            }
+        } else {
+            in_ws = false;
+            out.push(ch);
+        }
+    }
+    out
 }
 
 // ════════════════════════════════════════════════════════════════════════════
