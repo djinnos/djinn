@@ -558,40 +558,11 @@ async fn resolve_reviewer_diff_shas(
             _ => "main".to_string(),
         }
     };
-    let head_sha = git_rev_parse(worktree_path, "HEAD").ok();
-    let base_sha = git_merge_base(worktree_path, &target_branch, "HEAD").ok();
+    let head_sha = djinn_git::rev_parse(worktree_path, "HEAD").await.ok();
+    let base_sha = djinn_git::merge_base(worktree_path, &target_branch, "HEAD")
+        .await
+        .ok();
     (base_sha, head_sha)
-}
-
-fn git_rev_parse(worktree_path: &Path, rev: &str) -> std::io::Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("rev-parse")
-        .arg(rev)
-        .current_dir(worktree_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "git rev-parse {rev} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_merge_base(worktree_path: &Path, a: &str, b: &str) -> std::io::Result<String> {
-    let output = std::process::Command::new("git")
-        .arg("merge-base")
-        .arg(a)
-        .arg(b)
-        .current_dir(worktree_path)
-        .output()?;
-    if !output.status.success() {
-        return Err(std::io::Error::other(format!(
-            "git merge-base {a} {b} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Only the worker role receives resume context.
