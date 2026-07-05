@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE task_attempts\n               SET outcome = $2,\n                   terminal_at = COALESCE(terminal_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')),\n                   updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'),\n                   pr_url = COALESCE(pr_url, $3),\n                   submit_ref = COALESCE(submit_ref, $4),\n                   checkpoint_ref = COALESCE(checkpoint_ref, $5),\n                   mirror_head_sha = COALESCE(mirror_head_sha, $6),\n                   github_head_sha = COALESCE(github_head_sha, $7),\n                   summary = COALESCE(summary, $8),\n                   summary_json = COALESCE(summary_json, $9::text::jsonb),\n                   log_tail = COALESCE(log_tail, $10)\n               WHERE id = $1\n                 AND (outcome IN ('pending', 'submitted')\n                      OR outcome = ANY($11))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a066bdd9ac040cc03784aadab9e7114028731022b68ed88bd8a62bb76f7971e4"
+}
