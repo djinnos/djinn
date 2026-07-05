@@ -28,6 +28,8 @@ pub mod settings;
 pub mod task;
 pub mod task_arbitration;
 pub mod task_attempt;
+#[cfg(test)]
+pub mod task_attempt_tests;
 pub mod task_run;
 pub mod test_support;
 pub mod usage_analytics;

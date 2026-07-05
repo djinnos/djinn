@@ -3,6 +3,7 @@ use super::*;
 use djinn_core::events::EventBus;
 use djinn_core::models::ActivityEntry;
 use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_db::test_support::close_task_at;
 use djinn_db::{
     CompletedParentSummary, CreateTaskAttemptParams, Database, EpicRepository, ProposalCreateInput,
     ProposalRepository, TaskAttemptRepository, TerminalTaskAttemptParams,
@@ -866,16 +867,10 @@ async fn load_completed_dependency_parents_includes_closed_blocker_with_complete
     let task = create_task(&db, &events, &epic.id, "Dependent task", None).await;
     // Closed blocker parent with a completed attempt.
     let parent = create_task(&db, &events, &epic.id, "Parent task", Some("closed")).await;
-    // The repository's `create` does not stamp `closed_at` even for `closed`
-    // status, so set it explicitly with an untyped query.
-    sqlx::query("UPDATE tasks SET closed_at = '2025-06-01T00:00:00Z' WHERE id = $1")
-        .bind(&parent.id)
-        .execute(db.pool())
-        .await
-        .expect("set closed_at on parent");
+    close_task_at(&db, &parent.id, "2025-06-01T00:00:00Z").await;
     let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
     task_repo
-        .update_blockers_atomic(&task.id, &[parent.id.clone()], &[])
+        .update_blockers_atomic(&task.id, std::slice::from_ref(&parent.id), &[])
         .await
         .expect("wire blocker");
 
@@ -915,7 +910,7 @@ async fn load_completed_dependency_parents_excludes_open_blocker() {
     let open_parent = create_task(&db, &events, &epic.id, "Open parent", None).await;
     let task_repo = djinn_db::TaskRepository::new(db.clone(), events.clone());
     task_repo
-        .update_blockers_atomic(&task.id, &[open_parent.id.clone()], &[])
+        .update_blockers_atomic(&task.id, std::slice::from_ref(&open_parent.id), &[])
         .await
         .expect("wire blocker");
 
