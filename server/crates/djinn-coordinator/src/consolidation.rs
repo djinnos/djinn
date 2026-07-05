@@ -486,6 +486,7 @@ mod tests {
             stall_killed: std::collections::HashSet::new(),
             stall_progress_watermark: std::collections::HashMap::new(),
             stall_cancel_streak: std::collections::HashMap::new(),
+            stall_extension_count: std::collections::HashMap::new(),
             provider_failure_streak: std::collections::HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,

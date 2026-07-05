@@ -1,6 +1,6 @@
 use super::{
-    MatchOutcome, MatchStrategy, ambiguity_phrase, find_match, fuzzy_replace, line_range_for,
-    match_note_for, nearest_miss_score, reindent_replacement,
+    MatchOutcome, MatchStrategy, UnicodeSpliceStatus, ambiguity_phrase, find_match, fuzzy_replace,
+    line_range_for, match_note_for, nearest_miss_score, reindent_replacement,
 };
 use std::path::Path;
 
@@ -228,7 +228,7 @@ fn ambiguity_phrases_match_legacy_wording() {
     );
     assert_eq!(
         ambiguity_phrase(MatchStrategy::UnicodeNormalized),
-        "with Unicode normalization"
+        "after Unicode normalization"
     );
     assert_eq!(
         ambiguity_phrase(MatchStrategy::BlockAnchor),
@@ -850,4 +850,168 @@ fn match_note_for_block_anchor_and_context_aware() {
         match_note_for(MatchStrategy::ContextAware),
         Some("(matched with context-aware scoring)".to_string())
     );
+}
+
+// ── Unicode-normalized strategy tests ─────────────────────────────────────
+
+#[test]
+fn unicode_normalized_nfkc_equivalence_ligature() {
+    // fi ligature (U+FB01, 3 bytes) is NFKC-decomposed to "fi".
+    // Earlier strategies fail because the literal "fix" substring is not in
+    // content; UnicodeNormalized matches via confusable expansion.
+    let content = "let\u{FB01}x = 1;";
+    let old_text = "letfix = 1;";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    // "let" = 3 bytes, fi ligature = 3 bytes, rest = 5 bytes → range 0..11
+    assert_eq!(br.start, 0);
+    assert_eq!(br.end, content.len());
+    assert_eq!(m.unicode_splice, Some(UnicodeSpliceStatus::Clean));
+}
+
+#[test]
+fn unicode_normalized_fullwidth_letter() {
+    // Fullwidth A (U+FF21, 3 bytes) → ASCII 'A' via confusable mapping.
+    // Earlier strategies fail because the literal "A " substring is not in
+    // content; UnicodeNormalized matches.
+    let content = "\u{FF21} B";
+    let old_text = "A B";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    // Fullwidth A (3 bytes) + space (1 byte) + B (1 byte) = 5 bytes total
+    assert_eq!(&content[br.start..br.end], content);
+    assert_eq!(m.unicode_splice, Some(UnicodeSpliceStatus::Clean));
+}
+
+#[test]
+fn unicode_normalized_fullwidth_digit() {
+    // Fullwidth zero (U+FF10, 3 bytes) → ASCII '0' via confusable mapping.
+    let content = "x\u{FF10}y";
+    let old_text = "x0y";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    assert_eq!(&content[br.start..br.end], content);
+    assert_eq!(m.unicode_splice, Some(UnicodeSpliceStatus::Clean));
+}
+
+#[test]
+fn unicode_normalized_confusable_smart_quotes() {
+    // Content uses curly quotes and em-dash; old_text uses straight quote and
+    // regular hyphen. Earlier strategies fail; UnicodeNormalized matches.
+    let content = "let s = \u{201C}hello\u{201D}; // \u{2014} note";
+    let old_text = "let s = \"hello\"; // - note";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    // The range should cover the entire content.
+    assert_eq!(&content[br.start..br.end], content);
+    assert_eq!(m.unicode_splice, Some(UnicodeSpliceStatus::Clean));
+}
+
+#[test]
+fn unicode_normalized_preserves_surrounding_unicode_bytes() {
+    // Content: emoji + space + smart-quoted text + space + CJK.
+    // old_text: ASCII equivalents. Replacement should leave surrounding
+    // multi-byte characters untouched.
+    let content = "\u{1F600} \u{201C}ok\u{201D} \u{4E16}";
+    let old_text = "\"ok\"";
+    let new_text = "\"done\"";
+
+    let (updated, note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs")).unwrap();
+
+    // Emoji preserved at start, CJK preserved at end.
+    assert!(updated.starts_with('\u{1F600}'));
+    assert!(updated.ends_with('\u{4E16}'));
+    // Replacement applied.
+    assert!(updated.contains("\"done\""));
+    assert_eq!(
+        note.as_deref(),
+        Some("(matched with Unicode normalization)")
+    );
+}
+
+#[test]
+fn unicode_normalized_nfkc_handles_decomposed_content() {
+    // Content uses NFD form (e + combining acute); old_text uses precomposed
+    // NFC form (é). NFKC normalises both to the same canonical form, so they
+    // should match.
+    let content = "cafe\u{0301} au lait";
+    let old_text = "caf\u{e9}";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    // "cafe\u{0301}" = 6 bytes (c=1, a=1, f=1, e=1, combining acute=2)
+    assert_eq!(&content[br.start..br.end], "cafe\u{0301}");
+    assert_eq!(m.unicode_splice, Some(UnicodeSpliceStatus::Clean));
+}
+
+#[test]
+fn unicode_normalized_does_not_match_combining_without_base() {
+    // Content has accent but old_text does not (different strings).
+    // NFKC does not make unrelated strings equivalent.
+    let content = "h\u{e9}llo";
+    let old_text = "hello";
+
+    let m = find_match(content, old_text);
+
+    // "hello" is not in "héllo" exactly (exact fails), and NFKC doesn't
+    // remove accent marks, so the unicode_normalized strategy also fails.
+    assert_eq!(m.outcome, MatchOutcome::NoMatch);
+}
+
+#[test]
+fn unicode_normalized_ambiguity_reports_duplicates() {
+    // Content contains two occurrences of a confusable sequence;
+    // UnicodeNormalized finds both and reports ambiguity.
+    let content = "\u{201C}x\u{201D} \u{201C}x\u{201D}";
+    let old_text = "\"x\"";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::UnicodeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+    assert_eq!(m.candidate_count, 2);
+}
+
+#[test]
+fn unicode_normalized_match_note_and_ambiguity_phrase() {
+    assert_eq!(
+        match_note_for(MatchStrategy::UnicodeNormalized),
+        Some("(matched with Unicode normalization)".to_string())
+    );
+    assert_eq!(
+        ambiguity_phrase(MatchStrategy::UnicodeNormalized),
+        "after Unicode normalization"
+    );
+}
+
+#[test]
+fn unicode_normalized_grapheme_boundary_no_match_without_combining() {
+    // Content: "e" followed by combining acute, then "x".
+    // old_text: "ex". After NFKC the combining mark stays, so "ex" is a
+    // proper substring of the 3-char normalised "e\u{0301}x". NFKC does not
+    // strip bare combining marks, so the match fails.
+    let content = "e\u{0301}x";
+    let old_text = "ex";
+
+    let m = find_match(content, old_text);
+    assert_eq!(m.outcome, MatchOutcome::NoMatch);
 }

@@ -2,13 +2,15 @@
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
-use djinn_db::{CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository};
+use djinn_db::{
+    ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
+};
 use djinn_slot::RunningTaskInfo;
 use tracing::Instrument as _;
 
 use super::liveness::{
     ActivitySignal, ClassificationResult, DbSessionStatus, DbTaskStatus, LivenessEvidence,
-    PodPhase,
+    LivenessOutcome, PodPhase, Verdict,
 };
 
 /// A `running`, zero-token session older than this has slipped past the
@@ -84,6 +86,8 @@ impl CoordinatorActor {
         // left `list_active()` will never be evaluated again, so its watermark
         // is dead weight (and a redispatched successor gets a fresh session id).
         self.stall_progress_watermark
+            .retain(|id, _| active_session_ids.contains(id));
+        self.stall_extension_count
             .retain(|id, _| active_session_ids.contains(id));
 
         /// First-call short-circuit: a session that has never shown a sign of
@@ -464,6 +468,133 @@ impl CoordinatorActor {
                     "CoordinatorActor: stall backstop spared session — DB token progress advanced despite silent activity tracker"
                 );
                 continue;
+            }
+
+            // ── Liveness classifier gate (Slow/Live extension) ─────────
+            // Before killing, consult the shared liveness classifier. A
+            // `Slow` verdict (pod running but idle, below hard cap) extends
+            // the claim instead of killing. A `Live` verdict spares the
+            // session. `Dead`/`ProtocolViolation`/hard-cap-exceeded fall
+            // through to the existing kill path.
+            let slow_ext = &self.worker_lifecycle_config.slow_extension;
+            if slow_ext.enabled {
+                let classification = self.classify_task_liveness(task_id).await;
+                if let Some(ref result) = classification {
+                    match result.verdict {
+                        Verdict::Live => {
+                            tracing::info!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                verdict = %result.verdict,
+                                idle_seconds = idle,
+                                "CoordinatorActor: liveness classifier spared session (Live verdict)"
+                            );
+                            continue;
+                        }
+                        Verdict::Slow if result.extension_eligible => {
+                            let ext_count = self
+                                .stall_extension_count
+                                .entry(session.id.clone())
+                                .or_insert(0);
+                            if *ext_count < slow_ext.max_extensions {
+                                let budget_before = *ext_count;
+                                *ext_count += 1;
+                                let budget_after = *ext_count;
+
+                                // Persist slow_extended evidence.
+                                let liveness_repo = LivenessRepository::new(self.db.clone());
+                                let evidence_snapshot = LivenessEvidenceSnapshot {
+                                    session_id: session.id.clone(),
+                                    task_id: Some(task_id.to_owned()),
+                                    task_run_id: session.task_run_id.clone(),
+                                    verdict: Verdict::Slow.as_str().to_owned(),
+                                    outcome_kind: Some(
+                                        LivenessOutcome::SlowExtended.as_str().to_owned(),
+                                    ),
+                                    outcome_reason: None,
+                                    evidence: serde_json::to_value(&result.evidence)
+                                        .unwrap_or_default(),
+                                };
+                                let evidence_id = liveness_repo
+                                    .persist_evidence(&evidence_snapshot)
+                                    .await
+                                    .ok();
+
+                                // Record claim extension metadata.
+                                let project_id = session.project_id.clone().unwrap_or_default();
+                                let extension_record = ClaimExtensionRecord {
+                                    session_id: session.id.clone(),
+                                    task_run_id: session.task_run_id.clone(),
+                                    project_id,
+                                    liveness_evidence_id: evidence_id,
+                                    granted: true,
+                                    extension_budget_before: budget_before as i32,
+                                    extension_budget_after: budget_after as i32,
+                                    metadata: serde_json::json!({
+                                        "quantum_secs": slow_ext.quantum_secs,
+                                        "idle_seconds": idle,
+                                        "threshold_secs": applied_threshold,
+                                        "reason": "slow_verdict_stall_extension",
+                                    }),
+                                };
+                                if let Err(e) = liveness_repo
+                                    .record_claim_extension(&extension_record)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        session_id = %session.id,
+                                        error = %e,
+                                        "CoordinatorActor: failed to record claim extension"
+                                    );
+                                }
+
+                                tracing::info!(
+                                    task_id = %task_id,
+                                    session_id = %session.id,
+                                    verdict = %result.verdict,
+                                    extension_count = budget_after,
+                                    max_extensions = slow_ext.max_extensions,
+                                    quantum_secs = slow_ext.quantum_secs,
+                                    idle_seconds = idle,
+                                    "CoordinatorActor: liveness classifier extended claim (Slow verdict)"
+                                );
+                                continue;
+                            }
+                            // Budget exhausted — fall through to kill.
+                            tracing::info!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                verdict = %result.verdict,
+                                extension_count = *ext_count,
+                                max_extensions = slow_ext.max_extensions,
+                                "CoordinatorActor: slow extension budget exhausted — falling through to kill"
+                            );
+                        }
+                        Verdict::Slow => {
+                            // Slow but not extension-eligible (hard cap exceeded
+                            // or budget exhausted via classifier). Fall through.
+                            tracing::info!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                verdict = %result.verdict,
+                                extension_eligible = false,
+                                reason = ?result.reason,
+                                "CoordinatorActor: liveness classifier Slow verdict not extension-eligible — killing"
+                            );
+                        }
+                        Verdict::Dead | Verdict::ProtocolViolation => {
+                            tracing::info!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                verdict = %result.verdict,
+                                outcome = ?result.outcome,
+                                reason = ?result.reason,
+                                "CoordinatorActor: liveness classifier returned kill-worthy verdict"
+                            );
+                        }
+                    }
+                }
             }
 
             let kill_task_id = task_id.to_owned();
@@ -1669,7 +1800,6 @@ impl CoordinatorActor {
     /// extend claims, kill pods, or increment attempts. It only records
     /// classifier evidence for later consumer epics (`vbgl`, `jk7v`, `ptvg`).
     /// Terminal task races are recorded as noop/idempotent outcomes.
-    #[allow(dead_code)]
     #[tracing::instrument(
         name = "djinn.session_recovery.classify_liveness",
         skip(self),
@@ -1795,17 +1925,14 @@ fn build_liveness_evidence(
     };
 
     // ── DB session status ────────────────────────────────────────────
-    let db_session_status = db_state
-        .active_session_status
-        .as_deref()
-        .map(|s| match s {
-            "running" => DbSessionStatus::Running,
-            "completed" => DbSessionStatus::Completed,
-            "interrupted" => DbSessionStatus::Interrupted,
-            "failed" => DbSessionStatus::Failed,
-            "paused" => DbSessionStatus::Paused,
-            _ => DbSessionStatus::Running,
-        });
+    let db_session_status = db_state.active_session_status.as_deref().map(|s| match s {
+        "running" => DbSessionStatus::Running,
+        "completed" => DbSessionStatus::Completed,
+        "interrupted" => DbSessionStatus::Interrupted,
+        "failed" => DbSessionStatus::Failed,
+        "paused" => DbSessionStatus::Paused,
+        _ => DbSessionStatus::Running,
+    });
 
     // ── DB task status ───────────────────────────────────────────────
     let db_task_status = db_state.task_status.as_deref().map(|s| match s {
@@ -1848,9 +1975,7 @@ fn build_liveness_evidence(
     // The current system does not have an explicit extension budget counter;
     // sessions beyond the zombie hard cap are already dead, so the budget is
     // implicitly exhausted when claim_ttl_remaining is zero.
-    let extension_budget_exhausted = claim_ttl_remaining
-        .map(|t| t.is_zero())
-        .unwrap_or(false);
+    let extension_budget_exhausted = claim_ttl_remaining.map(|t| t.is_zero()).unwrap_or(false);
 
     LivenessEvidence {
         pod_phase: Some(pod_phase),
@@ -1900,8 +2025,8 @@ mod liveness_foundation_tests {
     use super::*;
     use djinn_db::CurrentLivenessState;
     use djinn_slot::RunningTaskInfo;
-    use time::OffsetDateTime;
     use time::Duration as TimeDuration;
+    use time::OffsetDateTime;
 
     /// Format an `OffsetDateTime` as an ISO-8601 string matching the DB format.
     fn format_iso(dt: OffsetDateTime) -> String {
@@ -2248,5 +2373,150 @@ mod liveness_foundation_tests {
 
         let result = super::super::liveness::classify(&evidence);
         assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+    }
+
+    // ── AC: Slow verdict extension eligibility and hard-cap precedence ──
+
+    #[test]
+    fn slow_verdict_below_hard_cap_is_extension_eligible() {
+        // A running pod that has gone idle, with the task run started
+        // recently (below ZOMBIE_HARD_CAP_SECS), should classify as
+        // Slow with extension_eligible = true.
+        let mut pool = healthy_pool_info();
+        pool.idle_seconds = ZOMBIE_HARD_CAP_SECS + 1;
+        pool.activity_tracked = true;
+
+        let db = running_db_state(); // task_run_started 60s ago → below hard cap
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+        assert!(!evidence.hard_runtime_deadline_exceeded);
+        assert!(!evidence.extension_budget_exhausted);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
+        assert!(result.extension_eligible);
+        // Slow with budget available: no outcome/reason yet (action pending)
+        assert_eq!(result.outcome, None);
+        assert_eq!(result.reason, None);
+    }
+
+    #[test]
+    fn slow_verdict_with_exhausted_extension_budget_is_not_eligible() {
+        // Same as above but extension_budget_exhausted = true.
+        // Classifier returns Slow but extension_eligible = false.
+        let mut pool = healthy_pool_info();
+        pool.idle_seconds = ZOMBIE_HARD_CAP_SECS + 1;
+        pool.activity_tracked = true;
+
+        let mut db = running_db_state();
+        // Force extension budget exhausted (claim_ttl_remaining = 0)
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.session_started_at = Some(format_iso(old));
+
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+        assert!(evidence.extension_budget_exhausted);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
+        assert!(!result.extension_eligible);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::SlowExtended)
+        );
+        assert_eq!(
+            result.reason,
+            Some(super::super::liveness::LivenessReason::SlowExtensionBudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn hard_runtime_exceeded_produces_dead_timeout_no_extension() {
+        // When the task run has exceeded ZOMBIE_HARD_CAP_SECS, the
+        // classifier must return Dead with Timeout regardless of pod
+        // activity state. extension_eligible must be false.
+        let pool = healthy_pool_info();
+        let mut db = running_db_state();
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.task_run_started_at = Some(format_iso(old));
+
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert!(evidence.hard_runtime_deadline_exceeded);
+        // Pod is running and activity is active (pool has recent activity),
+        // but hard cap takes precedence.
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Active);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::Timeout)
+        );
+        assert_eq!(
+            result.reason,
+            Some(super::super::liveness::LivenessReason::HardRuntimeExceeded)
+        );
+        assert!(!result.extension_eligible);
+    }
+
+    #[test]
+    fn hard_runtime_exceeded_overrides_slow_signals() {
+        // Even when all signals point to Slow (running pod, idle activity,
+        // no budget exhaustion), the hard runtime cap has unconditional
+        // precedence.
+        let mut pool = healthy_pool_info();
+        pool.idle_seconds = ZOMBIE_HARD_CAP_SECS + 1;
+        pool.activity_tracked = true;
+
+        let mut db = running_db_state();
+        // task_run started long ago → hard cap exceeded
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.task_run_started_at = Some(format_iso(old));
+        // session started recently → claim TTL not exhausted
+        let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
+        db.session_started_at = Some(format_iso(recent));
+
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert!(evidence.hard_runtime_deadline_exceeded);
+        assert!(!evidence.extension_budget_exhausted);
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::Idle);
+
+        let result = super::super::liveness::classify(&evidence);
+        // Hard cap wins → Dead/Timeout, NOT Slow
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::Timeout)
+        );
+        assert!(!result.extension_eligible);
+    }
+
+    #[test]
+    fn never_active_running_pod_is_slow_not_dead() {
+        // A pod that has never shown activity (first-call hung) but is
+        // still running in the pool should be Slow, not Dead. The pod
+        // phase Running prevents the Dead classification.
+        let mut pool = healthy_pool_info();
+        pool.activity_tracked = false;
+        pool.idle_seconds = 400; // past FIRST_CALL_STALL_SECS but pod still running
+
+        let db = running_db_state();
+        let evidence = build_liveness_evidence(Some(&pool), &db);
+
+        assert_eq!(evidence.pod_phase, Some(PodPhase::Running));
+        assert_eq!(evidence.activity, ActivitySignal::NeverActive);
+        assert!(!evidence.hard_runtime_deadline_exceeded);
+
+        let result = super::super::liveness::classify(&evidence);
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
+        assert!(result.extension_eligible);
     }
 }

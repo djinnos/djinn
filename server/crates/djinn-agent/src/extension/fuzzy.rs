@@ -22,9 +22,7 @@ use std::path::Path;
 
 /// Matching strategies, ordered strict → loose. The matcher consults them in
 /// `STRATEGY_ORDER` and returns the result of the first strategy that produces
-/// any candidate (unique match or ambiguity). Future waves will extend this
-/// enum with `escape_normalized`, `trimmed_boundary`, `unicode_normalized`,
-/// `block_anchor`, and `context_aware` — see [[design/c77e-roadmap]].
+/// any candidate (unique match or ambiguity).
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MatchStrategy {
@@ -105,10 +103,7 @@ pub(super) enum MatchOutcome {
     GuardRejected,
 }
 
-/// Placeholder for grapheme-safe Unicode splice status. Populated only by the
-/// Unicode-normalized strategy in a later wave; Wave 1 strategies always leave
-/// this as `None`, signalling no Unicode splice was performed. Conceptual
-/// design only — no third-party source (e.g. Hermes) is vendored or copied.
+/// Grapheme-safe Unicode splice status.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnicodeSpliceStatus {
@@ -133,14 +128,8 @@ pub(super) struct LineRange {
     pub end: usize,
 }
 
-/// Typed metadata produced by the matcher for a single consultation of the
-/// strategy chain. The compatibility wrapper `fuzzy_replace` translates this
-/// into the existing string notes/errors so `call_edit` is unchanged until
-/// sibling handler/schema epics consume richer metadata.
-//
-// The `unicode_splice` field is an intentional placeholder for future-wave
-// Unicode strategy work. The `#[allow(dead_code)]` silences the `-D warnings`
-// gate until the Unicode-normalized strategy consumes it.
+/// Typed metadata from a single strategy-chain run. `fuzzy_replace` translates
+/// this into the existing string surface for `call_edit`.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) struct MatchMetadata {
@@ -209,10 +198,7 @@ fn run_strategy(strategy: MatchStrategy, content: &str, old_text: &str) -> Optio
         MatchStrategy::IndentationFlexible => try_indentation_flexible(content, old_text),
         MatchStrategy::EscapeNormalized => try_escape_normalized(content, old_text),
         MatchStrategy::TrimmedBoundary => try_trimmed_boundary(content, old_text),
-        MatchStrategy::UnicodeNormalized => {
-            // Unicode-normalized matching is serialized behind task gww0.
-            None
-        }
+        MatchStrategy::UnicodeNormalized => try_unicode_normalized(content, old_text),
         MatchStrategy::BlockAnchor => try_block_anchor(content, old_text),
         MatchStrategy::ContextAware => try_context_aware(content, old_text),
     }
@@ -297,7 +283,15 @@ fn line_range_for(content: &str, start: usize, end: usize) -> LineRange {
     // For the end line, count newlines strictly inside [start, end-1): a
     // trailing `\n` at byte end-1 closes the last matched line rather than
     // opening a new one.
-    let last_byte = end.max(start).saturating_sub(1);
+    let mut last_byte = end.max(start).saturating_sub(1);
+    // Adjust to the nearest preceding char boundary. When the matched range
+    // ends immediately after a multi-byte character, `end - 1` may land
+    // inside that character. Walking backward at most 3 bytes is safe for
+    // line counting because `\n` is always a single-byte ASCII character and
+    // no UTF-8 continuation byte equals 0x0A.
+    while last_byte > start && !content.is_char_boundary(last_byte) {
+        last_byte -= 1;
+    }
     let prefix = &content[..last_byte];
     let line_end = prefix.matches('\n').count() + 1;
     LineRange {
@@ -752,10 +746,7 @@ fn try_escape_normalized(content: &str, old_text: &str) -> Option<MatchMetadata>
         "escape backslash balance mismatch",
     );
     if let Some(reason) = quote_reason.or(backslash_reason) {
-        return Some(guard_rejected_metadata(
-            MatchStrategy::EscapeNormalized,
-            reason,
-        ));
+        return Some(reject_metadata(MatchStrategy::EscapeNormalized, reason));
     }
 
     Some(success_metadata(
@@ -822,18 +813,204 @@ fn trim_boundary_lines(s: &str) -> String {
     lines[first_content..last_content].join("\n")
 }
 
-/// Metadata constructor for guard-rejected outcomes.
-fn guard_rejected_metadata(strategy: MatchStrategy, reason: &'static str) -> MatchMetadata {
+// ── Unicode normalization helpers (NFKC + confusables) ────────────────────
+
+/// NFKD + confusable normalization with byte-level position map.
+/// Conceptual design only — no third-party source is vendored or copied.
+fn normalize_with_confusables(s: &str) -> (String, Vec<usize>) {
+    // Characters that NFKD does NOT decompose but are visually confusable
+    // with common ASCII punctuation.
+    let confusable: fn(char) -> Option<char> = |c| match c {
+        // Smart / curly ASCII quotes → straight equivalents
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2032}' => Some('\''), // ' ' ' '
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => Some('"'),  // " " " "
+        // Typographic dashes → ASCII minus
+        '\u{2013}' => Some('-'), // en dash
+        '\u{2014}' => Some('-'), // em dash
+        '\u{2012}' => Some('-'), // figure dash
+        '\u{2212}' => Some('-'), // minus sign
+        // Ellipsis
+        '\u{2026}' => Some('.'),
+        // Non-breaking space variants → regular space
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' | '\u{2060}' => Some(' '),
+        _ => None,
+    };
+
+    let mut map: Vec<usize> = Vec::with_capacity(s.len());
+    let mut norm = String::with_capacity(s.len());
+    let mut orig_pos: usize = 0;
+
+    for orig_ch in s.chars() {
+        // Step 1: apply explicit confusable substitution (char → char).
+        let mapped = confusable(orig_ch).unwrap_or(orig_ch);
+        // Step 2: apply NFKD compatibility decomposition.
+        // `decompose_compatible` yields 0..N chars that are the NFKD
+        // decomposition of `mapped` (handles ligatures, fullwidth letters,
+        // superscripts/subscripts, precomposed → decomposed, etc.).
+        use unicode_normalization::char::decompose_compatible;
+        decompose_compatible(mapped, |decomp_ch| {
+            norm.push(decomp_ch);
+            // Push one map entry per *byte* of the decomposed char so
+            // byte-indexed lookups work for multi-byte normalised chars.
+            for _ in 0..decomp_ch.len_utf8() {
+                map.push(orig_pos);
+            }
+        });
+        orig_pos += orig_ch.len_utf8();
+    }
+    // Sentinel: map[len] == orig.len() for boundary indexing.
+    map.push(orig_pos);
+    (norm, map)
+}
+
+/// Returns `true` when `b` is the first byte of a Unicode code-point whose
+/// canonical combining class is non-zero (common combining marks).
+///
+/// Covers U+0300..U+036F (Combining Diacritical Marks) and U+FE20..U+FE2F
+/// (Combining Half Marks). Ranges checked via the UTF-8 byte pattern of the
+/// leading byte.
+#[inline]
+fn is_combining_start_byte(b: u8) -> bool {
+    // 0xCC/0xCD lead code-points U+0300..U+037F (Combining Diacritical Marks).
+    // 0xEF leads U+FE00..U+FE2F (Variation Selectors & Combining Half Marks).
+    matches!(b, 0xCC | 0xCD)
+}
+
+/// Walk backward from byte position `pos` (which must be a `char` boundary)
+/// in `content` so that the returned position is the first byte of the
+/// *grapheme cluster* containing `pos`. If `pos` is already a grapheme
+/// boundary, returns `pos` unchanged.
+fn adjusted_grapheme_start(content: &str, pos: usize) -> usize {
+    let mut p = pos;
+    loop {
+        if p == 0 || !content.is_char_boundary(p) {
+            return p;
+        }
+        let b = content.as_bytes()[p];
+        if !is_combining_start_byte(b) {
+            return p;
+        }
+        // Current position is a combining mark — walk backward past it.
+        let ch_start = p;
+        // Find start of the previous char.
+        let mut prev = ch_start;
+        while prev > 0 {
+            prev -= 1;
+            if content.is_char_boundary(prev) {
+                break;
+            }
+        }
+        p = prev;
+    }
+}
+
+/// Walk forward from byte position `pos` (which must be a `char` boundary)
+/// in `content` so that the returned position is the first byte *after* the
+/// grapheme cluster containing `pos`. If `pos` is already a grapheme
+/// boundary, returns `pos` unchanged.
+fn adjusted_grapheme_end(content: &str, pos: usize) -> usize {
+    let mut p = pos;
+    loop {
+        if p >= content.len() || !content.is_char_boundary(p) {
+            return p;
+        }
+        let b = content.as_bytes()[p];
+        if !is_combining_start_byte(b) {
+            return p;
+        }
+        // Current position is a combining mark — walk forward past it.
+        p += 1;
+        while p < content.len() && !content.is_char_boundary(p) {
+            p += 1;
+        }
+    }
+}
+
+/// Unicode-normalised match. Differences limited to NFKC-equivalent text and
+/// explicit confusables (smart quotes, typographic dashes, Latin ligatures,
+/// fullwidth ASCII, and superscript/subscript digits) are tolerated. The
+/// replacement is spliced at grapheme-safe boundaries and unchanged original
+/// Unicode bytes outside the edited range are preserved byte-for-byte.
+fn try_unicode_normalized(content: &str, old_text: &str) -> Option<MatchMetadata> {
+    let (norm_content, content_map) = normalize_with_confusables(content);
+    let (norm_old, _) = normalize_with_confusables(old_text);
+
+    if norm_old.is_empty() {
+        return None;
+    }
+
+    let count = norm_content.matches(norm_old.as_str()).count();
+    if count == 0 {
+        return None;
+    }
+    if count > 1 {
+        return Some(ambiguous_metadata(MatchStrategy::UnicodeNormalized, count));
+    }
+
+    let norm_start = norm_content.find(norm_old.as_str())?;
+    let norm_end = norm_start + norm_old.len();
+
+    // Map normalised byte range back to original byte range.
+    let orig_start = content_map[norm_start];
+    let orig_end = if norm_end >= content_map.len() {
+        content.len()
+    } else {
+        content_map[norm_end]
+    };
+
+    // Grapheme-boundary adjustment: snap both boundaries to grapheme clusters.
+    let adj_start = adjusted_grapheme_start(content, orig_start);
+    let adj_end = adjusted_grapheme_end(content, orig_end);
+    let clean = adj_start == orig_start && adj_end == orig_end;
+    let splice_status = if clean {
+        UnicodeSpliceStatus::Clean
+    } else {
+        UnicodeSpliceStatus::Adjusted
+    };
+
+    // Safety guard: UTF-8 boundaries.
+    if let Err(reason) = guard_utf8_boundary(content, adj_start, adj_end) {
+        return Some(reject_metadata(MatchStrategy::UnicodeNormalized, reason));
+    }
+    // Safety guard: CRLF preservation.
+    if let Err(reason) = guard_crlf_preservation(content, adj_start, adj_end) {
+        return Some(reject_metadata(MatchStrategy::UnicodeNormalized, reason));
+    }
+    // Safety guard: line boundaries for multi-line matches.
+    // Use the *original* normalised match text (not the adjusted range) for
+    // the multi-line check, because the grapheme adjustment may extend the
+    // range by combining marks rather than newlines.
+    let matched_text = &content[adj_start..adj_end];
+    if let Err(reason) = guard_line_boundary(content, adj_start, adj_end, matched_text) {
+        return Some(reject_metadata(MatchStrategy::UnicodeNormalized, reason));
+    }
+
+    Some(success_metadata_unicode(
+        ByteRange {
+            start: adj_start,
+            end: adj_end,
+        },
+        line_range_for(content, adj_start, adj_end),
+        splice_status,
+    ))
+}
+
+/// Success metadata with Unicode splice status populated.
+fn success_metadata_unicode(
+    byte_range: ByteRange,
+    line_range: LineRange,
+    splice: UnicodeSpliceStatus,
+) -> MatchMetadata {
     MatchMetadata {
-        strategy,
-        outcome: MatchOutcome::GuardRejected,
+        strategy: MatchStrategy::UnicodeNormalized,
+        outcome: MatchOutcome::Success,
         candidate_count: 1,
-        byte_range: None,
-        line_range: None,
+        byte_range: Some(byte_range),
+        line_range: Some(line_range),
         nearest_miss: None,
         reindented: false,
-        guard_rejected_reason: Some(reason),
-        unicode_splice: None,
+        guard_rejected_reason: None,
+        unicode_splice: Some(splice),
     }
 }
 
@@ -925,7 +1102,9 @@ fn match_note_for(strategy: MatchStrategy) -> Option<String> {
         }
         MatchStrategy::EscapeNormalized => Some("(matched with escape normalization)".to_string()),
         MatchStrategy::TrimmedBoundary => Some("(matched with trimmed boundary lines)".to_string()),
-        MatchStrategy::UnicodeNormalized => None, // placeholder: gww0
+        MatchStrategy::UnicodeNormalized => {
+            Some("(matched with Unicode normalization)".to_string())
+        }
         MatchStrategy::BlockAnchor => Some("(matched with block anchor)".to_string()),
         MatchStrategy::ContextAware => Some("(matched with context-aware scoring)".to_string()),
     }
@@ -941,7 +1120,7 @@ fn ambiguity_phrase(strategy: MatchStrategy) -> &'static str {
         MatchStrategy::IndentationFlexible => "after stripping indentation",
         MatchStrategy::EscapeNormalized => "after escape normalization",
         MatchStrategy::TrimmedBoundary => "after trimming boundary lines",
-        MatchStrategy::UnicodeNormalized => "with Unicode normalization",
+        MatchStrategy::UnicodeNormalized => "after Unicode normalization",
         MatchStrategy::BlockAnchor => "with block anchor matching",
         MatchStrategy::ContextAware => "with context-aware matching",
     }
