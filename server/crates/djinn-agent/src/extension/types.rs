@@ -289,6 +289,17 @@ pub(super) struct WriteParams {
     pub content: String,
 }
 
+/// Edit tool input parameters. Fields are unchanged from the original schema;
+/// callers still provide exact `old_text`, but the matcher may rescue common
+/// whitespace, indentation, escape, boundary, and Unicode drift automatically.
+///
+/// **Response surface (dynamic JSON):** success returns `{ok, path, diagnostics}`
+/// plus optional `match_note` and `edit_match` (strategy, byte/line ranges,
+/// reindented, unicode_splice, note). Failure returns an error string containing
+/// an `edit_match` JSON fragment with strategy and outcome-specific fields
+/// (candidate_count for ambiguous; nearest_miss for no_match; guard_reason for
+/// guard_rejected). Existing callers that only parse `ok`, `path`, and
+/// `diagnostics` remain fully compatible.
 #[derive(Deserialize)]
 pub(super) struct EditParams {
     pub path: String,

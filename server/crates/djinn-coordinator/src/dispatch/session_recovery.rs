@@ -235,6 +235,33 @@ impl CoordinatorActor {
                 // Mark this session as killed so we don't re-kill on subsequent ticks.
                 self.stall_killed.insert(session.id.clone());
 
+                // ── Liveness evidence: persist dead_reclaimed for ceiling kill ──
+                {
+                    let liveness_repo = LivenessRepository::new(self.db.clone());
+                    let snapshot = LivenessEvidenceSnapshot {
+                        session_id: session.id.clone(),
+                        task_id: Some(task_id.to_owned()),
+                        task_run_id: session.task_run_id.clone(),
+                        verdict: "dead".to_owned(),
+                        outcome_kind: Some("dead_reclaimed".to_owned()),
+                        outcome_reason: None,
+                        evidence: serde_json::json!({
+                            "reason": "ceiling_kill",
+                            "token_count": token_count,
+                            "turn_count": turn_count,
+                            "kill_source": "session_recovery_ceiling",
+                        }),
+                    };
+                    if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            error = %e,
+                            "CoordinatorActor: failed to persist ceiling-kill dead_reclaimed evidence"
+                        );
+                    }
+                }
+
                 // ── Preservation gate: request checkpoint before terminal transition ──
                 // The ceiling kill is a controlled termination; request or record
                 // preservation of potentially dirty worker output before proceeding.
@@ -412,6 +439,33 @@ impl CoordinatorActor {
                         continue;
                     }
                     self.stall_killed.insert(session.id.clone());
+
+                    // ── Liveness evidence: persist dead_reclaimed for no-progress kill ──
+                    {
+                        let liveness_repo = LivenessRepository::new(self.db.clone());
+                        let snapshot = LivenessEvidenceSnapshot {
+                            session_id: session.id.clone(),
+                            task_id: Some(task_id.to_owned()),
+                            task_run_id: session.task_run_id.clone(),
+                            verdict: "dead".to_owned(),
+                            outcome_kind: Some("dead_reclaimed".to_owned()),
+                            outcome_reason: None,
+                            evidence: serde_json::json!({
+                                "reason": "no_progress_kill",
+                                "no_progress_streak": no_progress_streak,
+                                "kill_source": "session_recovery_no_progress",
+                            }),
+                        };
+                        if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                session_id = %session.id,
+                                error = %e,
+                                "CoordinatorActor: failed to persist no-progress-kill dead_reclaimed evidence"
+                            );
+                        }
+                    }
+
                     tracing::warn!(
                         task_id = %task_id,
                         session_id = %session.id,
@@ -476,123 +530,127 @@ impl CoordinatorActor {
             // the claim instead of killing. A `Live` verdict spares the
             // session. `Dead`/`ProtocolViolation`/hard-cap-exceeded fall
             // through to the existing kill path.
+            //
+            // Classification runs unconditionally so the result is available
+            // for dead_reclaimed / kill_noop evidence persistence after the
+            // kill, regardless of whether slow-extension is enabled.
+            let classification = self.classify_task_liveness(task_id).await;
             let slow_ext = &self.worker_lifecycle_config.slow_extension;
-            if slow_ext.enabled {
-                let classification = self.classify_task_liveness(task_id).await;
-                if let Some(ref result) = classification {
-                    match result.verdict {
-                        Verdict::Live => {
+            if slow_ext.enabled
+                && let Some(ref result) = classification
+            {
+                match result.verdict {
+                    Verdict::Live => {
+                        tracing::info!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            verdict = %result.verdict,
+                            idle_seconds = idle,
+                            "CoordinatorActor: liveness classifier spared session (Live verdict)"
+                        );
+                        continue;
+                    }
+                    Verdict::Slow if result.extension_eligible => {
+                        let ext_count = self
+                            .stall_extension_count
+                            .entry(session.id.clone())
+                            .or_insert(0);
+                        if *ext_count < slow_ext.max_extensions {
+                            let budget_before = *ext_count;
+                            *ext_count += 1;
+                            let budget_after = *ext_count;
+
+                            // Persist slow_extended evidence.
+                            let liveness_repo = LivenessRepository::new(self.db.clone());
+                            let evidence_snapshot = LivenessEvidenceSnapshot {
+                                session_id: session.id.clone(),
+                                task_id: Some(task_id.to_owned()),
+                                task_run_id: session.task_run_id.clone(),
+                                verdict: Verdict::Slow.as_str().to_owned(),
+                                outcome_kind: Some(
+                                    LivenessOutcome::SlowExtended.as_str().to_owned(),
+                                ),
+                                outcome_reason: None,
+                                evidence: serde_json::to_value(&result.evidence)
+                                    .unwrap_or_default(),
+                            };
+                            let evidence_id = liveness_repo
+                                .persist_evidence(&evidence_snapshot)
+                                .await
+                                .ok();
+
+                            // Record claim extension metadata.
+                            let project_id = session.project_id.clone().unwrap_or_default();
+                            let extension_record = ClaimExtensionRecord {
+                                session_id: session.id.clone(),
+                                task_run_id: session.task_run_id.clone(),
+                                project_id,
+                                liveness_evidence_id: evidence_id,
+                                granted: true,
+                                extension_budget_before: budget_before as i32,
+                                extension_budget_after: budget_after as i32,
+                                metadata: serde_json::json!({
+                                    "quantum_secs": slow_ext.quantum_secs,
+                                    "idle_seconds": idle,
+                                    "threshold_secs": applied_threshold,
+                                    "reason": "slow_verdict_stall_extension",
+                                }),
+                            };
+                            if let Err(e) = liveness_repo
+                                .record_claim_extension(&extension_record)
+                                .await
+                            {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    session_id = %session.id,
+                                    error = %e,
+                                    "CoordinatorActor: failed to record claim extension"
+                                );
+                            }
+
                             tracing::info!(
                                 task_id = %task_id,
                                 session_id = %session.id,
                                 verdict = %result.verdict,
+                                extension_count = budget_after,
+                                max_extensions = slow_ext.max_extensions,
+                                quantum_secs = slow_ext.quantum_secs,
                                 idle_seconds = idle,
-                                "CoordinatorActor: liveness classifier spared session (Live verdict)"
+                                "CoordinatorActor: liveness classifier extended claim (Slow verdict)"
                             );
                             continue;
                         }
-                        Verdict::Slow if result.extension_eligible => {
-                            let ext_count = self
-                                .stall_extension_count
-                                .entry(session.id.clone())
-                                .or_insert(0);
-                            if *ext_count < slow_ext.max_extensions {
-                                let budget_before = *ext_count;
-                                *ext_count += 1;
-                                let budget_after = *ext_count;
-
-                                // Persist slow_extended evidence.
-                                let liveness_repo = LivenessRepository::new(self.db.clone());
-                                let evidence_snapshot = LivenessEvidenceSnapshot {
-                                    session_id: session.id.clone(),
-                                    task_id: Some(task_id.to_owned()),
-                                    task_run_id: session.task_run_id.clone(),
-                                    verdict: Verdict::Slow.as_str().to_owned(),
-                                    outcome_kind: Some(
-                                        LivenessOutcome::SlowExtended.as_str().to_owned(),
-                                    ),
-                                    outcome_reason: None,
-                                    evidence: serde_json::to_value(&result.evidence)
-                                        .unwrap_or_default(),
-                                };
-                                let evidence_id = liveness_repo
-                                    .persist_evidence(&evidence_snapshot)
-                                    .await
-                                    .ok();
-
-                                // Record claim extension metadata.
-                                let project_id = session.project_id.clone().unwrap_or_default();
-                                let extension_record = ClaimExtensionRecord {
-                                    session_id: session.id.clone(),
-                                    task_run_id: session.task_run_id.clone(),
-                                    project_id,
-                                    liveness_evidence_id: evidence_id,
-                                    granted: true,
-                                    extension_budget_before: budget_before as i32,
-                                    extension_budget_after: budget_after as i32,
-                                    metadata: serde_json::json!({
-                                        "quantum_secs": slow_ext.quantum_secs,
-                                        "idle_seconds": idle,
-                                        "threshold_secs": applied_threshold,
-                                        "reason": "slow_verdict_stall_extension",
-                                    }),
-                                };
-                                if let Err(e) = liveness_repo
-                                    .record_claim_extension(&extension_record)
-                                    .await
-                                {
-                                    tracing::warn!(
-                                        task_id = %task_id,
-                                        session_id = %session.id,
-                                        error = %e,
-                                        "CoordinatorActor: failed to record claim extension"
-                                    );
-                                }
-
-                                tracing::info!(
-                                    task_id = %task_id,
-                                    session_id = %session.id,
-                                    verdict = %result.verdict,
-                                    extension_count = budget_after,
-                                    max_extensions = slow_ext.max_extensions,
-                                    quantum_secs = slow_ext.quantum_secs,
-                                    idle_seconds = idle,
-                                    "CoordinatorActor: liveness classifier extended claim (Slow verdict)"
-                                );
-                                continue;
-                            }
-                            // Budget exhausted — fall through to kill.
-                            tracing::info!(
-                                task_id = %task_id,
-                                session_id = %session.id,
-                                verdict = %result.verdict,
-                                extension_count = *ext_count,
-                                max_extensions = slow_ext.max_extensions,
-                                "CoordinatorActor: slow extension budget exhausted — falling through to kill"
-                            );
-                        }
-                        Verdict::Slow => {
-                            // Slow but not extension-eligible (hard cap exceeded
-                            // or budget exhausted via classifier). Fall through.
-                            tracing::info!(
-                                task_id = %task_id,
-                                session_id = %session.id,
-                                verdict = %result.verdict,
-                                extension_eligible = false,
-                                reason = ?result.reason,
-                                "CoordinatorActor: liveness classifier Slow verdict not extension-eligible — killing"
-                            );
-                        }
-                        Verdict::Dead | Verdict::ProtocolViolation => {
-                            tracing::info!(
-                                task_id = %task_id,
-                                session_id = %session.id,
-                                verdict = %result.verdict,
-                                outcome = ?result.outcome,
-                                reason = ?result.reason,
-                                "CoordinatorActor: liveness classifier returned kill-worthy verdict"
-                            );
-                        }
+                        // Budget exhausted — fall through to kill.
+                        tracing::info!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            verdict = %result.verdict,
+                            extension_count = *ext_count,
+                            max_extensions = slow_ext.max_extensions,
+                            "CoordinatorActor: slow extension budget exhausted — falling through to kill"
+                        );
+                    }
+                    Verdict::Slow => {
+                        // Slow but not extension-eligible (hard cap exceeded
+                        // or budget exhausted via classifier). Fall through.
+                        tracing::info!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            verdict = %result.verdict,
+                            extension_eligible = false,
+                            reason = ?result.reason,
+                            "CoordinatorActor: liveness classifier Slow verdict not extension-eligible — killing"
+                        );
+                    }
+                    Verdict::Dead | Verdict::ProtocolViolation => {
+                        tracing::info!(
+                            task_id = %task_id,
+                            session_id = %session.id,
+                            verdict = %result.verdict,
+                            outcome = ?result.outcome,
+                            reason = ?result.reason,
+                            "CoordinatorActor: liveness classifier returned kill-worthy verdict"
+                        );
                     }
                 }
             }
@@ -631,6 +689,52 @@ impl CoordinatorActor {
             // Mark this session as killed so we don't re-kill and re-log on
             // subsequent ticks while its DB row drains.
             self.stall_killed.insert(session.id.clone());
+
+            // ── Liveness evidence: persist dead_reclaimed for stall kill ──
+            // The stall kill frees a running session — persist evidence so
+            // the kill is recorded as a real reclaim rather than silently
+            // swallowed. Use the classification result from the slow-
+            // extension gate if available; otherwise build fallback evidence.
+            {
+                let liveness_repo = LivenessRepository::new(self.db.clone());
+                let (verdict_str, outcome_kind, evidence_json) =
+                    if let Some(ref result) = classification {
+                        (
+                            result.verdict.as_str().to_owned(),
+                            Some(LivenessOutcome::DeadReclaimed.as_str().to_owned()),
+                            serde_json::to_value(&result.evidence).unwrap_or_default(),
+                        )
+                    } else {
+                        (
+                            "dead".to_owned(),
+                            Some("dead_reclaimed".to_owned()),
+                            serde_json::json!({
+                                "reason": "stall_kill",
+                                "idle_seconds": idle,
+                                "threshold_secs": applied_threshold,
+                                "never_active": never_active,
+                                "classification_unavailable": true,
+                            }),
+                        )
+                    };
+                let snapshot = LivenessEvidenceSnapshot {
+                    session_id: session.id.clone(),
+                    task_id: Some(task_id.to_owned()),
+                    task_run_id: session.task_run_id.clone(),
+                    verdict: verdict_str,
+                    outcome_kind,
+                    outcome_reason: None,
+                    evidence: evidence_json,
+                };
+                if let Err(e) = liveness_repo.persist_evidence(&snapshot).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        session_id = %session.id,
+                        error = %e,
+                        "CoordinatorActor: failed to persist stall-kill dead_reclaimed evidence"
+                    );
+                }
+            }
 
             // ── Preservation gate: request checkpoint before terminal transition ──
             // The stall kill is a controlled termination; request or record
@@ -2911,6 +3015,107 @@ mod liveness_foundation_tests {
         let result = super::super::liveness::classify(&evidence);
         assert_eq!(result.verdict, super::super::liveness::Verdict::Slow);
         assert!(result.extension_eligible);
+    }
+
+    // ── Kill evidence: kill_noop for terminal task ──────────────────────────
+
+    /// When a task is already terminal, the classifier returns KillNoop.
+    /// This test verifies the evidence snapshot shape that would be persisted
+    /// by `execution_kill_task` or the coordinator stall/ceiling kill paths.
+    #[test]
+    fn kill_noop_evidence_snapshot_has_expected_shape() {
+        let mut db = running_db_state();
+        db.task_status = Some("closed".to_owned());
+        db.task_is_terminal = true;
+
+        let evidence = build_liveness_evidence(Some(&healthy_pool_info()), &db);
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::KillNoop)
+        );
+
+        // Build the snapshot as the kill path would.
+        let snapshot = LivenessEvidenceSnapshot {
+            session_id: db.active_session_id.clone().unwrap_or_default(),
+            task_id: Some("task-1".to_owned()),
+            task_run_id: db.latest_task_run_id.clone(),
+            verdict: result.verdict.as_str().to_owned(),
+            outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            evidence: serde_json::to_value(&result.evidence).unwrap(),
+        };
+
+        assert_eq!(snapshot.verdict, "live"); // verdict is moot for terminal tasks
+        assert_eq!(snapshot.outcome_kind.as_deref(), Some("kill_noop"));
+        assert!(snapshot.evidence.get("pod_phase").is_some());
+        assert!(snapshot.evidence.get("db_task_status").is_some());
+    }
+
+    // ── Kill evidence: dead_reclaimed for absent pod (stall kill) ───────────
+
+    /// When a session has an absent pod and no activity (the state just
+    /// before a stall kill frees it), the classifier returns Dead with
+    /// DeadReclaimed. This verifies the evidence shape persisted by the
+    /// stall kill path.
+    #[test]
+    fn stall_kill_dead_reclaimed_evidence_snapshot_has_expected_shape() {
+        let mut db = running_db_state();
+        // Session started long ago — well past the zombie hard cap.
+        let old = OffsetDateTime::now_utc() - TimeDuration::seconds(700);
+        db.session_started_at = Some(format_iso(old));
+        // Keep task_run recent so hard_runtime check doesn't interfere.
+        let recent = OffsetDateTime::now_utc() - TimeDuration::seconds(60);
+        db.task_run_started_at = Some(format_iso(recent));
+
+        // No pool info → absent pod, idle activity.
+        let evidence = build_liveness_evidence(None, &db);
+        let result = super::super::liveness::classify(&evidence);
+
+        assert_eq!(result.verdict, super::super::liveness::Verdict::Dead);
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::DeadReclaimed)
+        );
+
+        // Build snapshot as the stall kill path would.
+        let snapshot = LivenessEvidenceSnapshot {
+            session_id: db.active_session_id.clone().unwrap_or_default(),
+            task_id: Some("task-1".to_owned()),
+            task_run_id: db.latest_task_run_id.clone(),
+            verdict: result.verdict.as_str().to_owned(),
+            outcome_kind: result.outcome.map(|o| o.as_str().to_owned()),
+            outcome_reason: result.reason.map(|r| r.as_str().to_owned()),
+            evidence: serde_json::to_value(&result.evidence).unwrap(),
+        };
+
+        assert_eq!(snapshot.verdict, "dead");
+        assert_eq!(snapshot.outcome_kind.as_deref(), Some("dead_reclaimed"));
+        assert!(snapshot.evidence.get("pod_phase").is_some());
+        assert!(snapshot.evidence.get("activity").is_some());
+    }
+
+    /// Verify that a kill_noop does NOT falsely close or reopen the task.
+    /// The evidence records the task's terminal status, and the task state
+    /// is unchanged.
+    #[test]
+    fn kill_noop_preserves_task_state() {
+        let mut db = running_db_state();
+        db.task_status = Some("closed".to_owned());
+        db.task_is_terminal = true;
+
+        let evidence = build_liveness_evidence(None, &db);
+        let result = super::super::liveness::classify(&evidence);
+
+        // KillNoop: the classifier does not recommend any task state change.
+        assert_eq!(
+            result.outcome,
+            Some(super::super::liveness::LivenessOutcome::KillNoop)
+        );
+        assert!(!result.extension_eligible);
+        // The evidence reflects the terminal task status — no mutation.
+        assert_eq!(evidence.db_task_status, Some(DbTaskStatus::Closed));
     }
 }
 

@@ -53,16 +53,19 @@ mod create;
 pub(crate) mod feedback;
 mod lifecycle;
 mod mdx;
+mod params;
 pub(crate) mod signoff;
 
-// Re-export CRUD tool parameter/response types so the public module path
+// Re-export CRUD tool parameter types from `params.rs` so the public module path
 // `crate::tools::proposal_tools::{...}` stays stable for existing dispatch and
 // MCP-extension consumers.
-pub use create::{
+pub use params::{
     ProposalCreateParams, ProposalDeleteParams, ProposalExportParams, ProposalImportParams,
-    ProposalListParams, ProposalListResponse, ProposalShowParams, ProposalTargetParams,
-    ProposalUpdateParams,
+    ProposalListParams, ProposalShowParams, ProposalTargetParams, ProposalUpdateParams,
 };
+
+// Re-export the list response type (still defined in `create.rs`).
+pub use create::ProposalListResponse;
 
 // Re-export feedback parameter types so `crate::tools::proposal_tools::...`
 // stays stable for dispatch.rs and MCP-extension consumers.

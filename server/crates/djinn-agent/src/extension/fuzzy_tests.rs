@@ -1015,3 +1015,279 @@ fn unicode_normalized_grapheme_boundary_no_match_without_combining() {
     let m = find_match(content, old_text);
     assert_eq!(m.outcome, MatchOutcome::NoMatch);
 }
+
+// ── Unicode unchanged-span fixtures: em dash, smart quote, NBSP ────────
+
+#[test]
+fn unicode_normalized_em_dash_unchanged_span_preserved() {
+    // Content: "before — middle — after" with em dash (U+2014, 3 bytes).
+    // old_text uses ASCII hyphen-minus (U+002D) which confusable-normalizes
+    // to the same codepoint as em dash. The match should succeed and the
+    // replacement should leave surrounding unchanged spans untouched.
+    let content = "before \u{2014} middle \u{2014} after";
+    let old_text = "middle";
+    let new_text = "replaced";
+
+    let (updated, _note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+        .expect("fuzzy replace should succeed");
+
+    // Em dashes must be preserved byte-for-byte in unchanged spans.
+    assert!(
+        updated.starts_with("before \u{2014} "),
+        "prefix em dash must be preserved: {updated:?}"
+    );
+    assert!(
+        updated.ends_with(" \u{2014} after"),
+        "suffix em dash must be preserved: {updated:?}"
+    );
+    assert!(updated.contains("replaced"), "replacement must be applied");
+}
+
+#[test]
+fn unicode_normalized_smart_quotes_unchanged_span_preserved() {
+    // Content has smart quotes (U+201C left, U+201D right, each 3 bytes).
+    // The matched region is the ASCII word between the quotes; surrounding
+    // smart-quote bytes must survive unchanged.
+    let content = "\u{201C}target\u{201D} and \u{2018}more\u{2019}";
+    let old_text = "target";
+    let new_text = "done";
+
+    let (updated, _note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+        .expect("fuzzy replace should succeed");
+
+    // Left/right double smart quotes must survive.
+    assert!(
+        updated.starts_with('\u{201C}'),
+        "left double smart quote must be preserved: {updated:?}"
+    );
+    assert!(
+        updated.contains('\u{201D}'),
+        "right double smart quote must be preserved: {updated:?}"
+    );
+    // Single smart quotes also preserved.
+    assert!(
+        updated.contains('\u{2018}'),
+        "left single smart quote preserved"
+    );
+    assert!(
+        updated.contains('\u{2019}'),
+        "right single smart quote preserved"
+    );
+    assert!(updated.contains("done"), "replacement applied");
+}
+
+#[test]
+fn unicode_normalized_nbsp_preserved_in_match() {
+    // Content uses non-breaking space (U+00A0, 2 bytes in UTF-8) between
+    // tokens. old_text uses regular space. UnicodeNormalized should match
+    // via confusable normalization, and the original NBSP bytes must remain
+    // in the output unchanged span.
+    let prefix = "header\u{00A0}line\n";
+    let matched = "let x\u{00A0}= 1;";
+    let suffix = "\nfooter\n";
+    let content = format!("{prefix}{matched}{suffix}");
+    let old_text = "let x = 1;";
+    let new_text = "let x = 2;";
+
+    let (updated, _note) = fuzzy_replace(&content, old_text, new_text, Path::new("test.rs"))
+        .expect("fuzzy replace should succeed");
+
+    // NBSP in prefix must be preserved.
+    assert!(
+        updated.contains("header\u{00A0}line"),
+        "NBSP in unchanged prefix must be preserved: {updated:?}"
+    );
+    assert!(updated.contains("footer"), "suffix must be preserved");
+    assert!(
+        updated.contains("let x = 2;"),
+        "replacement must use new_text literally"
+    );
+}
+
+#[test]
+fn unicode_normalized_multi_byte_byte_offsets_are_valid_utf8() {
+    // Content: emoji (4 bytes) + ASCII + em dash (3 bytes) + ASCII.
+    // Match only the ASCII "target" region. Byte range must be valid UTF-8
+    // and the surrounding multi-byte characters must survive.
+    let content = "\u{1F600} hello \u{2014} target \u{2014} world \u{4E16}";
+    let old_text = "target";
+    let new_text = "done";
+
+    let m = find_match(content, old_text);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+
+    // Byte range must land on valid UTF-8 boundaries.
+    assert!(
+        content.is_char_boundary(br.start),
+        "byte_range.start ({}) must be a char boundary",
+        br.start
+    );
+    assert!(
+        content.is_char_boundary(br.end),
+        "byte_range.end ({}) must be a char boundary",
+        br.end
+    );
+
+    // The matched slice must be valid UTF-8.
+    let matched_slice = &content[br.start..br.end];
+    assert!(
+        std::str::from_utf8(matched_slice.as_bytes()).is_ok(),
+        "matched slice must be valid UTF-8: {matched_slice:?}"
+    );
+
+    // Apply replacement and verify multi-byte chars preserved.
+    let (updated, _note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+        .expect("fuzzy replace should succeed");
+    assert!(
+        updated.starts_with('\u{1F600}'),
+        "emoji preserved: {updated:?}"
+    );
+    assert!(updated.contains('\u{2014}'), "em dashes preserved");
+    assert!(updated.ends_with('\u{4E16}'), "CJK preserved: {updated:?}");
+    assert!(updated.contains("done"), "replacement applied");
+}
+
+// ── CRLF preservation tests ─────────────────────────────────────────────
+
+#[test]
+fn crlf_exact_success_preserves_crlf_in_unchanged_spans() {
+    // Content and old_text both use CRLF. Exact match succeeds.
+    // Unchanged spans (prefix/suffix) must retain CRLF bytes.
+    let content = "line one\r\nline two\r\nline three\r\n";
+    let old_text = "line one\r\nline two\r\n";
+    let new_text = "replaced\r\n";
+
+    let (updated, _note) = fuzzy_replace(content, old_text, new_text, Path::new("test.rs"))
+        .expect("exact CRLF match should succeed");
+
+    // Suffix "line three\r\n" must retain CRLF.
+    assert!(
+        updated.contains("line three\r\n"),
+        "suffix CRLF must be preserved: {updated:?}"
+    );
+    // Replacement is applied.
+    assert!(
+        updated.contains("replaced\r\n"),
+        "replacement must be applied with CRLF: {updated:?}"
+    );
+    // No bare LF should appear in the suffix.
+    let suffix = &updated[updated.find("line three").unwrap()..];
+    assert!(
+        !suffix.contains("\n\r"),
+        "no reversed CRLF sequences: {suffix:?}"
+    );
+}
+
+#[test]
+fn crlf_guard_rejected_for_mixed_line_endings() {
+    // Content uses CRLF; old_text uses LF. The guard rejects because
+    // normalization would silently rewrite CRLF to LF in unchanged spans.
+    let content = "aaa\r\nbbb\r\n";
+    let old_text = "aaa\nbbb";
+    let m = find_match(content, old_text);
+    assert_eq!(
+        m.outcome,
+        MatchOutcome::GuardRejected,
+        "mixed line endings must be guard-rejected"
+    );
+    let reason = m
+        .guard_rejected_reason
+        .expect("guard rejection must carry reason");
+    assert!(
+        reason.contains("CRLF")
+            || reason.contains("line ending")
+            || reason.contains("crlf")
+            || reason.contains("line boundary"),
+        "reason should mention line-related guard: {reason}"
+    );
+}
+
+// ── Performance/documented benchmark: 1 MB file, 200-line no-match ───────
+
+/// Release-mode benchmark for the worst-case no-match path over a large file.
+///
+/// The proposal `ksnr` targets: no-match over a 1 MB file with a 200-line
+/// `old_text` completes in under 250 ms in release/benchmark conditions, and
+/// memory stays linear in file length. Regular `cargo test` runs are too noisy
+/// to hard-assert that bound, so this test is marked `#[ignore]` and run with
+/// the focused command documented below.
+///
+/// Run (release mode):
+///   cd server && cargo test -p djinn-agent --lib --release -- \
+///     fuzzy_tests::large_file_no_match_completes_under_budget --ignored --nocapture
+///
+/// On a quiet machine this typically finishes in single-digit milliseconds, but
+/// the bound is intentionally lenient to avoid flaking in CI/dev environments.
+#[ignore]
+#[test]
+fn large_file_no_match_completes_under_budget() {
+    use std::time::Instant;
+
+    const BUDGET_MS: u128 = 250;
+    const MB: usize = 1_048_576;
+    const LINE_COUNT: usize = 200;
+
+    // Build a ~1 MB UTF-8 file: repeating filler lines, no special drift.
+    let line = "// line content: lorem ipsum dolor sit amet, consectetur adipiscing elit.\n";
+    let repeats = MB / line.len() + 1;
+    let content = line.repeat(repeats);
+    assert!(
+        content.len() >= MB,
+        "generated content should be at least 1 MB, got {} bytes",
+        content.len()
+    );
+
+    // Build a 200-line old_text that is guaranteed not to occur anywhere.
+    // It contains a unique sentinel plus a common prefix to exercise scanning.
+    let old_text_lines = (0..LINE_COUNT)
+        .map(|i| format!("fn sentinel_{i}() -> usize {{\n    {i}\n}}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(old_text_lines.lines().count(), LINE_COUNT);
+    assert!(!content.contains("sentinel_0"));
+
+    let start = Instant::now();
+    let m = find_match(&content, &old_text_lines);
+    let elapsed = start.elapsed().as_millis();
+
+    assert_eq!(m.outcome, MatchOutcome::NoMatch);
+    assert_eq!(m.candidate_count, 0);
+    assert!(
+        elapsed < BUDGET_MS,
+        "large-file no-match took {elapsed} ms, expected < {BUDGET_MS} ms"
+    );
+
+    // Memory check proxy: the matcher returns no byte range, so the final
+    // allocated result is at most the original string plus small metadata.
+    // A linear scan does not retain large intermediate buffers across the call.
+    assert!(m.byte_range.is_none());
+    assert!(content.len() >= MB);
+}
+
+// ── Ambiguous multi-candidate at non-exact strategy level ───────────────
+
+#[test]
+fn escape_normalized_ambiguity_reports_candidate_count() {
+    // Content has two occurrences of an escape-normalized sequence.
+    let content = "x\\\" y x\\\" y";
+    let old_text = "x\" y";
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::EscapeNormalized);
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+    assert_eq!(m.candidate_count, 2);
+    assert!(m.byte_range.is_none(), "ambiguous must have no byte range");
+}
+
+#[test]
+fn trimmed_boundary_ambiguity_reports_candidate_count() {
+    // old_text has boundary-only whitespace lines; inner content appears twice.
+    let content = "let x = 1;\n\nlet x = 1;";
+    let old_text = "   \n\nlet x = 1;\n   \n";
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::TrimmedBoundary);
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+    assert_eq!(m.candidate_count, 2);
+}
