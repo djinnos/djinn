@@ -413,15 +413,15 @@ mod body_excerpt_tests {
             .unwrap();
         }
 
-        // Pagination works.
+        // Pagination works. Metadata fields are serialized at the top level
+        // (not nested under a "meta" key) per `serialize_named_list_response`.
         let list = server
             .dispatch_tool("proposal_list", serde_json::json!({ "limit": 2, "offset": 0 }))
             .await
             .unwrap();
-        let meta = &list["meta"];
-        assert_eq!(meta["limit"].as_i64().unwrap(), 2);
-        assert_eq!(meta["total_count"].as_i64().unwrap(), 3);
-        assert!(meta["has_more"].as_bool().unwrap());
+        assert_eq!(list["limit"].as_i64().unwrap(), 2);
+        assert_eq!(list["total_count"].as_i64().unwrap(), 3);
+        assert!(list["has_more"].as_bool().unwrap());
 
         let rows = list["proposals"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
