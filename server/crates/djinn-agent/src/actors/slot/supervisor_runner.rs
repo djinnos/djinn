@@ -7,11 +7,13 @@ use tracing::Instrument;
 
 use djinn_core::models::Task;
 use djinn_core::models::{TaskRunStatus, TaskRunTrigger};
+use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 use djinn_db::repositories::task_run::TaskRunRepository;
 use djinn_db::{TaskRepository, task_branch_name};
 use djinn_runtime::{
-    BiStream, LoopGuardKind, ProviderFailureClass, ResolvedCredentials, ResumeLifecycleMetadata,
-    SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport, TestRuntime,
+    BiStream, InfraDeathLogTailCapture, LoopGuardKind, ProviderFailureClass, ResolvedCredentials,
+    ResumeLifecycleMetadata, SessionRuntime, StreamEvent, TaskRunOutcome, TaskRunReport,
+    TestRuntime,
 };
 
 use crate::actors::slot::lifecycle::model_resolution::resolve_role_model_preference;
@@ -178,6 +180,68 @@ async fn finalize_infra_death_session(
             task_id = %task.short_id,
             error = %e,
             "supervisor dispatch: failed to finalize session row after infra death"
+        ),
+    }
+}
+
+/// Best-effort persist infra-death log-tail capture on the latest
+/// pending/submitted attempt for the task.  Failures are logged and swallowed —
+/// this is purely diagnostic enrichment and must never block teardown.
+async fn persist_infra_death_on_attempt(
+    app_state: &AgentContext,
+    task: &Task,
+    reason: &str,
+    capture: &InfraDeathLogTailCapture,
+) {
+    let attempt_repo = TaskAttemptRepository::new(app_state.db.clone());
+    let attempt = match attempt_repo
+        .latest_pending_or_submitted(&task.id, None)
+        .await
+    {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            tracing::debug!(
+                task_id = %task.short_id,
+                "supervisor dispatch: no pending/submitted attempt for infra-death log-tail persist; skipping"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "supervisor dispatch: failed to look up attempt for infra-death log-tail persist"
+            );
+            return;
+        }
+    };
+
+    let meta = serde_json::json!({
+        "infra_death_log_tail": {
+            "fetched": capture.log_tail.is_some(),
+            "fetch_error_class": capture.fetch_error_class,
+            "fetch_error_detail": capture.fetch_error_detail,
+            "death_reason": reason,
+        }
+    })
+    .to_string();
+
+    match attempt_repo
+        .persist_infra_death_log_tail(&attempt.id, capture.log_tail.as_deref(), &meta)
+        .await
+    {
+        Ok(_) => tracing::info!(
+            task_id = %task.short_id,
+            attempt_id = %attempt.id,
+            has_log_tail = capture.log_tail.is_some(),
+            error_class = ?capture.fetch_error_class,
+            "supervisor dispatch: persisted infra-death log-tail on attempt"
+        ),
+        Err(e) => tracing::warn!(
+            task_id = %task.short_id,
+            attempt_id = %attempt.id,
+            error = %e,
+            "supervisor dispatch: failed to persist infra-death log-tail on attempt"
         ),
     }
 }
@@ -372,6 +436,7 @@ pub(super) async fn dispatch_task_runtime(
         teardown,
         handshake_timed_out,
         infra_death,
+        infra_death_log_tail,
         presession_timeout,
     } = execute_runtime_report_phase(
         runtime.clone(),
@@ -395,6 +460,13 @@ pub(super) async fn dispatch_task_runtime(
     }
     if let Some(reason) = infra_death.as_deref() {
         finalize_infra_death_session(&task_repo, &task, &app_state, reason).await;
+        // Best-effort: persist infra-death log-tail capture on the matching
+        // attempt.  This is purely diagnostic enrichment — it does not change
+        // the attempt's outcome or prevent a real terminal report from being
+        // authoritative.
+        if let Some(capture) = &infra_death_log_tail {
+            persist_infra_death_on_attempt(&app_state, &task, reason, capture).await;
+        }
     }
     if let Some(timeout) = presession_timeout {
         let PreSessionTimeout { step, elapsed_secs } = &timeout;
@@ -512,6 +584,7 @@ struct RuntimeExecutionOutcome {
     teardown: Result<TaskRunReport, djinn_runtime::RuntimeError>,
     handshake_timed_out: bool,
     infra_death: Option<String>,
+    infra_death_log_tail: Option<InfraDeathLogTailCapture>,
     presession_timeout: Option<PreSessionTimeout>,
 }
 
@@ -550,6 +623,12 @@ async fn execute_runtime_report_phase(
         attach_and_await_terminal_report(runtime.clone(), &handle, app_state, spec, task, kill)
             .await;
     abort_runtime_cancel_watcher(cancel_task).await;
+    // Best-effort: capture pod log tail before teardown deletes the Job.
+    let infra_death_log_tail = if await_outcome.infra_death.is_some() {
+        runtime.capture_infra_death_log_tail(&handle).await
+    } else {
+        None
+    };
     let teardown = runtime.teardown(handle).await;
     let reap_status = select_orphan_reap_status(&await_outcome.presession_timeout, &teardown);
     reap_orphan_task_run(app_state, &task.id, reap_status).await;
@@ -559,6 +638,7 @@ async fn execute_runtime_report_phase(
         teardown,
         handshake_timed_out: await_outcome.handshake_timed_out,
         infra_death: await_outcome.infra_death,
+        infra_death_log_tail,
         presession_timeout: await_outcome.presession_timeout,
     })
 }

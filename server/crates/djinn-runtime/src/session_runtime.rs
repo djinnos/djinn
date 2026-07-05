@@ -69,6 +69,22 @@ pub enum RuntimeError {
     DevcontainerMissing(String),
 }
 
+/// Best-effort result of capturing a worker Pod's last log lines after an
+/// infra-death.  Carries the bounded log tail plus structured fetch metadata
+/// so callers can persist both on the matching `task_attempt`.
+#[derive(Clone, Debug)]
+pub struct InfraDeathLogTailCapture {
+    /// The captured log tail, already truncated to the DB bound.
+    /// `None` when capture failed or the Pod had no logs.
+    pub log_tail: Option<String>,
+    /// Machine-readable error class when capture failed
+    /// (e.g. `"pod_not_found"`, `"timeout"`, `"empty_logs"`).
+    /// `None` when capture succeeded.
+    pub fetch_error_class: Option<String>,
+    /// Human-readable detail for logging / debugging.
+    pub fetch_error_detail: Option<String>,
+}
+
 /// Object-safe lifecycle interface every runtime backend implements.
 ///
 /// Implementations own any per-run state (container ids, socket paths,
@@ -130,6 +146,27 @@ pub trait SessionRuntime: Send + Sync {
     /// restarting — so a legitimate in-flight run is never declared dead.
     async fn watch_infra_death(&self, _handle: &RunHandle) -> String {
         std::future::pending().await
+    }
+
+    /// Best-effort capture of the worker Pod's last log lines after an
+    /// infra-death has been detected.  Called once between
+    /// `watch_infra_death` resolving and `teardown` deleting the Job, so
+    /// the Pod may still exist on the apiserver.
+    ///
+    /// The default implementation returns `None` (no capture).  Only the
+    /// Kubernetes backend overrides this.
+    ///
+    /// Implementations MUST:
+    /// - Use a short timeout (≤ 10 s) so the capture never blocks teardown.
+    /// - Truncate the captured tail to the DB bound (~16 KiB).
+    /// - Return `None` on any failure — log-tail capture is best-effort
+    ///   diagnostic enrichment and must never prevent teardown or task
+    ///   finalization.
+    async fn capture_infra_death_log_tail(
+        &self,
+        _handle: &RunHandle,
+    ) -> Option<InfraDeathLogTailCapture> {
+        None
     }
 }
 
