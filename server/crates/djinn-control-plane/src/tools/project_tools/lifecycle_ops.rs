@@ -314,7 +314,9 @@ impl DjinnMcpServer {
         );
 
         if !std::path::Path::new(&clone_path).join(".git").exists() {
-            if let Err(e) = crate::tools::git_ops::git_clone_blob_none(&remote_url, &clone_path).await {
+            if let Err(e) =
+                crate::tools::git_ops::git_clone_blob_none(&remote_url, &clone_path).await
+            {
                 return Json(ProjectAddResponse {
                     status: format!("error: {e}"),
                     project: ProjectInfo::unknown(display_name),
@@ -337,12 +339,7 @@ impl DjinnMcpServer {
                 ("user.name", "djinn-bot[bot]"),
                 ("user.email", email.as_str()),
             ] {
-                if let Err(e) = crate::tools::git_ops::git_config_set(
-                    &clone_path,
-                    key,
-                    value,
-                )
-                .await
+                if let Err(e) = crate::tools::git_ops::git_config_set(&clone_path, key, value).await
                 {
                     tracing::warn!(
                         path = %clone_path, key, error = %e,
