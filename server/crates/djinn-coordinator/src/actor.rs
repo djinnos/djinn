@@ -234,6 +234,14 @@ pub(super) struct CoordinatorActor {
     /// Planner intervention instead of blindly redispatching a third time.
     /// Reset when the task's status advances or it leaves execution.
     pub(super) stall_cancel_streak: HashMap<String, StallCancelStreak>,
+    /// Restart-safe-to-lose: per-session slow-extension count. When the
+    /// liveness classifier produces a `Slow` verdict for a stalled session,
+    /// the coordinator extends the claim instead of killing. This counter
+    /// tracks how many times each session has been extended; after
+    /// `SlowExtensionConfig::max_extensions` is reached, the session falls
+    /// through to the kill path. Pruned alongside `stall_killed` when the
+    /// session leaves `list_active()`.
+    pub(super) stall_extension_count: HashMap<String, u32>,
     /// Restart-safe-to-lose: consecutive provider-error FAILED sessions per TASK
     /// id with no durable task-status progress between them. A task whose
     /// session dies on a terminal provider error (e.g. a poisoned transcript
@@ -463,6 +471,7 @@ impl CoordinatorActor {
             stall_killed: HashSet::new(),
             stall_progress_watermark: HashMap::new(),
             stall_cancel_streak: HashMap::new(),
+            stall_extension_count: HashMap::new(),
             provider_failure_streak: HashMap::new(),
             last_idle_consolidation: None,
             idle_consolidation_cancel: None,
@@ -1165,11 +1174,33 @@ impl CoordinatorActor {
             // ADR-051 §7 — exit recheck.  When a planner session ends, look
             // up the epic its task was attached to and recheck whether an
             // auto-dispatch should fire (now that the guard no longer skips).
+            // Also: classify session exit for protocol-violation detection
+            // on ALL session types (not just planner). A status-0 worker
+            // exit while the task remains nonterminal is a protocol
+            // violation and must count as a failed attempt for retry
+            // accounting.
             ("session", "completed" | "interrupted" | "failed") => {
                 let Some(session) = envelope.parse_payload::<djinn_core::models::SessionRecord>()
                 else {
                     return;
                 };
+                // ── Protocol-violation classification (all session types) ──
+                // When a session ends and the task is still nonterminal,
+                // classify the exit and persist structured evidence. This
+                // ensures protocol violations are recorded and count as
+                // failed attempts. Slow extensions never reach this path
+                // (they extend the claim without ending the session).
+                if let Some(task_id) = session.task_id.as_deref() {
+                    let _ = self
+                        .classify_session_exit_liveness(
+                            &session.id,
+                            task_id,
+                            session.task_run_id.as_deref(),
+                            &session.status,
+                        )
+                        .await;
+                }
+                // Existing planner-specific epic recheck.
                 self.handle_planner_session_ended(&session).await;
             }
             ("task", "created") | ("task", "updated") => {
