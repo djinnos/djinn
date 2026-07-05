@@ -565,42 +565,122 @@ pub(crate) async fn call_edit(
                 .await
                 .map_err(|e| format!("read failed: {e}"))?;
 
-            let (new_content, match_note) =
-                fuzzy_replace(&content, &p.old_text, &p.new_text, &path)?;
-            tokio::fs::write(&path, &new_content)
-                .await
-                .map_err(|e| format!("write failed: {e}"))?;
+            let metadata = find_match(&content, &p.old_text);
 
-            // Invalidate the read record so a subsequent edit must re-read
-            // first — see the matching note in `call_write`. Prevents the
-            // apply_patch/edit "context mismatch" loop where the model patches
-            // against its pre-edit view of the file.
-            state
-                .file_time
-                .invalidate(&worktree_path.display().to_string(), &path)
-                .await;
+            match metadata.outcome {
+                MatchOutcome::Success => {
+                    let new_content = apply_match(&content, &p.new_text, &metadata);
+                    tokio::fs::write(&path, &new_content)
+                        .await
+                        .map_err(|e| format!("write failed: {e}"))?;
 
-            state.lsp.touch_file(worktree_path, &path, true).await;
-            let diag_xml = state.lsp.diagnostics_xml(worktree_path).await;
+                    // Invalidate the read record so a subsequent edit must re-read
+                    // first — see the matching note in `call_write`. Prevents the
+                    // apply_patch/edit "context mismatch" loop where the model patches
+                    // against its pre-edit view of the file.
+                    state
+                        .file_time
+                        .invalidate(&worktree_path.display().to_string(), &path)
+                        .await;
 
-            let mut result = serde_json::json!({
-                "ok": true,
-                "path": path.display().to_string(),
-                "diagnostics": diag_xml,
-            });
-            if let Some(note) = match_note {
-                result["match_note"] = serde_json::Value::String(note);
-            }
-            let result = match (project_id, touched_rel.as_deref()) {
-                (Some(pid), Some(rel)) => {
-                    enrich_with_related_files(result, state, pid, &[rel.to_string()]).await
+                    state.lsp.touch_file(worktree_path, &path, true).await;
+                    let diag_xml = state.lsp.diagnostics_xml(worktree_path).await;
+
+                    let match_note = match_note_for(metadata.strategy);
+                    let mut result = serde_json::json!({
+                        "ok": true,
+                        "path": path.display().to_string(),
+                        "diagnostics": diag_xml,
+                    });
+                    if let Some(note) = match_note {
+                        result["match_note"] = serde_json::Value::String(note);
+                    }
+
+                    // Structured edit_match metadata.
+                    let byte_range = metadata.byte_range.expect("success has byte range");
+                    let matched_bytes = byte_range.end - byte_range.start;
+                    let edit_match = serde_json::json!({
+                        "strategy": metadata.strategy.as_str(),
+                        "matched_byte_range": [byte_range.start, byte_range.end],
+                        "matched_line_range": metadata.line_range.map(|lr| [lr.start, lr.end]),
+                        "old_bytes": p.old_text.len(),
+                        "new_bytes": p.new_text.len(),
+                        "matched_bytes": matched_bytes,
+                        "reindented": metadata.reindented,
+                        "unicode_splice": metadata.unicode_splice.map(|s| match s {
+                            UnicodeSpliceStatus::Clean => "clean",
+                            UnicodeSpliceStatus::Adjusted => "adjusted",
+                        }),
+                        "note": match_note_for(metadata.strategy),
+                    });
+                    result["edit_match"] = edit_match;
+
+                    let result = match (project_id, touched_rel.as_deref()) {
+                        (Some(pid), Some(rel)) => {
+                            enrich_with_related_files(result, state, pid, &[rel.to_string()]).await
+                        }
+                        _ => result,
+                    };
+                    let touched: Vec<String> = touched_rel.iter().cloned().collect();
+                    let result = maybe_append_pitfall_hint(
+                        result,
+                        state,
+                        worktree_path,
+                        project_id,
+                        &touched,
+                    )
+                    .await;
+                    Ok(result)
                 }
-                _ => result,
-            };
-            let touched: Vec<String> = touched_rel.iter().cloned().collect();
-            let result =
-                maybe_append_pitfall_hint(result, state, worktree_path, project_id, &touched).await;
-            Ok(result)
+                MatchOutcome::Ambiguous => {
+                    // Structured details for ambiguity.
+                    let details = serde_json::json!({
+                        "edit_match": {
+                            "strategy": metadata.strategy.as_str(),
+                            "outcome": "ambiguous",
+                            "candidate_count": metadata.candidate_count,
+                        }
+                    });
+                    Err(format!(
+                        "old_text appears {} times in file (must be unique): {} {}",
+                        metadata.candidate_count,
+                        path.display(),
+                        details,
+                    ))
+                }
+                MatchOutcome::NoMatch => {
+                    let details = serde_json::json!({
+                        "edit_match": {
+                            "strategy": metadata.strategy.as_str(),
+                            "outcome": "no_match",
+                            "nearest_miss": metadata.nearest_miss,
+                        }
+                    });
+                    Err(format!(
+                        "old_text not found in file: {} {}",
+                        path.display(),
+                        details,
+                    ))
+                }
+                MatchOutcome::GuardRejected => {
+                    let details = serde_json::json!({
+                        "edit_match": {
+                            "strategy": metadata.strategy.as_str(),
+                            "outcome": "guard_rejected",
+                            "guard_reason": metadata.guard_rejected_reason,
+                        }
+                    });
+                    Err(format!(
+                        "old_text match rejected by safety guard{}: {} {}",
+                        metadata
+                            .guard_rejected_reason
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default(),
+                        path.display(),
+                        details,
+                    ))
+                }
+            }
         })
         .await
 }
