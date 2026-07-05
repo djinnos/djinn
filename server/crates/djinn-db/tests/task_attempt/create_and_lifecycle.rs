@@ -231,8 +231,12 @@ async fn advance_to_terminal_is_forward_only_and_idempotent() {
     // pr_url should remain filled from first terminal call.
     assert_eq!(terminal2.pr_url.as_deref(), Some("http://pr"));
 
-    // Forward-only: a higher-rank terminal outcome overwrites a lower one.
-    let advanced = repo
+    // First-terminal-wins: once a row is terminal (`completed`), the SQL
+    // predicate only permits an idempotent same-outcome move, so switching to a
+    // *different* terminal outcome (`handoff`) is a no-op. The row keeps its
+    // existing `completed` outcome, its original terminal_at, and its filled
+    // fields (no overwrite, no rollback).
+    let switched = repo
         .advance_to_terminal(TerminalTaskAttemptParams {
             id: &attempt.id,
             outcome: TaskAttemptOutcome::Handoff,
@@ -247,16 +251,18 @@ async fn advance_to_terminal_is_forward_only_and_idempotent() {
         })
         .await
         .unwrap();
-    assert_eq!(advanced.outcome, "handoff");
-    // Previously filled fields remain (fill-forward, no rollback).
-    assert_eq!(advanced.pr_url.as_deref(), Some("http://pr"));
-    assert_eq!(advanced.summary.as_deref(), Some("done"));
+    assert_eq!(switched.outcome, "completed");
+    assert_eq!(switched.terminal_at, first_terminal_at);
+    // Previously filled fields remain (no rollback).
+    assert_eq!(switched.pr_url.as_deref(), Some("http://pr"));
+    assert_eq!(switched.summary.as_deref(), Some("done"));
 
-    // Weaker terminal calls cannot overwrite a higher-rank terminal outcome.
-    let weaker = repo
+    // A second different terminal outcome (`force_closed`) is likewise a no-op:
+    // the frozen `completed` outcome is preserved.
+    let switched_again = repo
         .advance_to_terminal(TerminalTaskAttemptParams {
             id: &attempt.id,
-            outcome: TaskAttemptOutcome::Completed,
+            outcome: TaskAttemptOutcome::ForceClosed,
             pr_url: None,
             submit_ref: None,
             checkpoint_ref: None,
@@ -268,8 +274,8 @@ async fn advance_to_terminal_is_forward_only_and_idempotent() {
         })
         .await
         .unwrap();
-    assert_eq!(weaker.outcome, "handoff");
-    assert_eq!(weaker.pr_url.as_deref(), Some("http://pr"));
+    assert_eq!(switched_again.outcome, "completed");
+    assert_eq!(switched_again.pr_url.as_deref(), Some("http://pr"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

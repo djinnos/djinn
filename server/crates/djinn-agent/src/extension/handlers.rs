@@ -38,7 +38,7 @@ use djinn_db::{
 };
 use djinn_provider::github_api::GitHubApiClient;
 
-use super::fuzzy::fuzzy_replace;
+use super::fuzzy::{MatchOutcome, UnicodeSpliceStatus, apply_match, find_match, match_note_for};
 use super::helpers::*;
 use super::sandbox;
 use super::types::*;
@@ -228,7 +228,17 @@ where
         }
         "code_search" => call_code_search(state, &call.arguments).await,
         "write" => call_write(state, &call.arguments, worktree_path, project_id.as_deref()).await,
-        "edit" => call_edit(state, &call.arguments, worktree_path, project_id.as_deref()).await,
+        "edit" => {
+            call_edit(
+                state,
+                &call.arguments,
+                worktree_path,
+                project_id.as_deref(),
+                session_task_id,
+                session_role,
+            )
+            .await
+        }
         "apply_patch" => {
             call_apply_patch(state, &call.arguments, worktree_path, project_id.as_deref()).await
         }

@@ -1,11 +1,14 @@
-use crate::Result;
-use crate::database::Database;
-use crate::error::DbError;
 use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
     TaskAttemptPromptSummary,
 };
+#[cfg(test)]
+use uuid::Uuid;
+
+use crate::Result;
+use crate::database::Database;
+use crate::error::DbError;
 
 pub struct TaskAttemptRepository {
     db: Database,
@@ -135,33 +138,11 @@ impl TaskAttemptRepository {
         Self::validate_bounded_field("log_tail", value, TASK_ATTEMPT_LOG_TAIL_MAX_LEN)
     }
 
-    /// Terminal outcomes whose lifecycle rank is less than or equal to `rank`.
-    /// Used to build the SQL guard for forward-only terminal transitions.
-    fn terminal_outcomes_at_or_before(rank: u8) -> Vec<String> {
-        [
-            TaskAttemptOutcome::Completed,
-            TaskAttemptOutcome::Reopened,
-            TaskAttemptOutcome::Crashed,
-            TaskAttemptOutcome::TimedOut,
-            TaskAttemptOutcome::Cancelled,
-            TaskAttemptOutcome::LoopGuardTripped,
-            TaskAttemptOutcome::SpawnFailed,
-            TaskAttemptOutcome::Deferred,
-            TaskAttemptOutcome::AdoptedPr,
-            TaskAttemptOutcome::ForceClosed,
-            TaskAttemptOutcome::Handoff,
-        ]
-        .into_iter()
-        .filter(|o| o.rank() <= rank)
-        .map(|o| o.as_str().to_owned())
-        .collect()
-    }
-
     /// Create or return an existing pending attempt row keyed by `dispatch_key`.
     ///
     /// Idempotency: on conflict with `dispatch_key`, the existing row is returned
-    /// unchanged.  The caller-supplied `attempt_seq` must be unique per task;
-    /// a duplicate sequence surfaces as a database unique-constraint error.
+    /// unchanged.  On conflict with `(task_id, attempt_seq)` when the caller
+    /// supplied a duplicate sequence, the existing row is also returned.
     pub async fn create_or_get_pending(
         &self,
         params: CreateTaskAttemptParams<'_>,
@@ -283,10 +264,9 @@ impl TaskAttemptRepository {
     }
 
     /// Advance an attempt to a terminal outcome.  Forward-only and idempotent:
-    /// moves from non-terminal to terminal are allowed; moves from a terminal
-    /// outcome to a higher-or-equal rank terminal outcome are allowed; moves
-    /// to a weaker (lower-rank) terminal outcome or to a non-terminal outcome
-    /// are rejected and the existing row is returned unchanged.
+    /// if the row is already terminal with the same or a higher rank, it is
+    /// returned unchanged; moves from non-terminal to terminal are allowed; moves
+    /// from terminal to non-terminal are rejected by the SQL predicate.
     pub async fn advance_to_terminal(
         &self,
         params: TerminalTaskAttemptParams<'_>,
@@ -302,31 +282,19 @@ impl TaskAttemptRepository {
         Self::validate_log_tail(params.log_tail)?;
         Self::validate_summary_json(params.summary_json)?;
 
-        // Fetch the current row to enforce a rank-forward transition in Rust.
-        // Weaker terminal calls (or any backward move) return the existing row
-        // unchanged without touching the database.
-        let current = match self.get(params.id).await? {
-            Some(row) => row,
-            None => {
-                return Err(DbError::Internal(
-                    "task_attempt row disappeared before terminal".to_owned(),
-                ));
-            }
-        };
-        let current_outcome: TaskAttemptOutcome = current
-            .outcome
-            .parse()
-            .map_err(|e| DbError::Internal(format!("invalid stored outcome: {e}")))?;
-        if !params.outcome.is_forward_from(current_outcome) {
-            return Ok(current);
-        }
-
         let outcome_str = params.outcome.as_str();
-        let allowed_terminals = Self::terminal_outcomes_at_or_before(params.outcome.rank());
 
         sqlx::query!(
             r#"UPDATE task_attempts
-               SET outcome = $2,
+               SET outcome = CASE
+                     WHEN outcome IN ('pending', 'submitted')
+                       OR (outcome IN ('completed', 'reopened', 'crashed', 'timed_out', 'cancelled',
+                                        'loop_guard_tripped', 'spawn_failed', 'deferred', 'adopted_pr',
+                                        'force_closed', 'handoff')
+                           AND $2 = outcome)
+                     THEN $2
+                     ELSE outcome
+                   END,
                    terminal_at = COALESCE(terminal_at, to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')),
                    updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                    pr_url = COALESCE(pr_url, $3),
@@ -339,7 +307,9 @@ impl TaskAttemptRepository {
                    log_tail = COALESCE(log_tail, $10)
                WHERE id = $1
                  AND (outcome IN ('pending', 'submitted')
-                      OR outcome = ANY($11))"#,
+                      OR (outcome = $2 AND outcome IN ('completed', 'reopened', 'crashed', 'timed_out',
+                                                        'cancelled', 'loop_guard_tripped', 'spawn_failed',
+                                                        'deferred', 'adopted_pr', 'force_closed', 'handoff')))"#,
             params.id,
             outcome_str,
             params.pr_url,
@@ -350,7 +320,6 @@ impl TaskAttemptRepository {
             params.summary,
             params.summary_json,
             params.log_tail,
-            &allowed_terminals[..],
         )
         .execute(self.db.pool())
         .await?;
@@ -679,5 +648,564 @@ impl TaskAttemptRepository {
             .await?
         };
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use djinn_core::events::EventBus;
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+
+    use super::*;
+    use crate::repositories::epic::EpicRepository;
+
+    fn test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    async fn create_task(db: &Database) -> (String, String) {
+        let epic_repo = EpicRepository::new(db.clone(), EventBus::noop());
+        let epic = epic_repo
+            .create("Epic", "", "", "", "", None)
+            .await
+            .unwrap();
+
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let short_id = format!("t{}{}", &task_id[..6], &task_id[task_id.len() - 6..]);
+        sqlx::query!(
+            "INSERT INTO tasks (id, project_id, short_id, epic_id, title, description, design,
+                                issue_type, priority, owner, status, continuation_count, labels, acceptance_criteria, memory_refs)
+             VALUES ($1, $2, $3, $4, 'Task', '', '', 'task', 0, '', 'open', 0, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)",
+            task_id,
+            epic.project_id,
+            short_id,
+            epic.id
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        (epic.project_id, task_id)
+    }
+
+    fn new_attempt_id() -> String {
+        uuid::Uuid::now_v7().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_or_get_pending_creates_row_and_returns_record() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-1",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(attempt.id, id);
+        assert_eq!(attempt.task_id, task_id);
+        assert_eq!(attempt.role, "worker");
+        assert_eq!(attempt.attempt_seq, 1);
+        assert_eq!(attempt.dispatch_key, "dk-1");
+        assert_eq!(attempt.outcome, "pending");
+        assert!(attempt.session_id.is_none());
+        assert!(attempt.summary.is_none());
+        assert!(attempt.terminal_at.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_or_get_pending_is_idempotent_on_dispatch_key() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let a1 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-idem",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        let id2 = new_attempt_id();
+        let a2 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id2,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-idem",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(a1.id, a2.id);
+        assert_eq!(a1.attempt_seq, a2.attempt_seq);
+        let attempts = repo.list_for_task(&task_id).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn attempt_seq_is_monotonic_per_task() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        for i in 1..=3 {
+            let id = new_attempt_id();
+            repo.create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &format!("dk-{i}"),
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let attempts = repo.list_for_task(&task_id).await.unwrap();
+        let seqs: Vec<i32> = attempts.iter().map(|a| a.attempt_seq).collect();
+        assert_eq!(seqs, vec![3, 2, 1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_to_submitted_moves_pending_forward() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-submit",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        let submitted = repo
+            .advance_to_submitted(SubmitTaskAttemptParams {
+                id: &attempt.id,
+                submit_ref: Some("submit-1"),
+                checkpoint_ref: Some("cp-1"),
+                mirror_head_sha: Some("mirror-sha"),
+                github_head_sha: Some("github-sha"),
+                summary: Some("summary"),
+                summary_json: Some(r#"{"key": "value"}"#),
+                log_tail: Some("log"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(submitted.outcome, "submitted");
+        assert!(submitted.submitted_at.is_some());
+        assert_eq!(submitted.submit_ref.as_deref(), Some("submit-1"));
+        assert_eq!(submitted.checkpoint_ref.as_deref(), Some("cp-1"));
+        assert_eq!(submitted.summary.as_deref(), Some("summary"));
+        // jsonb canonicalizes to a space after the colon on read-back.
+        assert_eq!(
+            submitted.summary_json.as_deref(),
+            Some(r#"{"key": "value"}"#)
+        );
+        assert_eq!(submitted.log_tail.as_deref(), Some("log"));
+
+        // Idempotent: same call again returns same row.
+        let submitted2 = repo
+            .advance_to_submitted(SubmitTaskAttemptParams {
+                id: &attempt.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(submitted2.outcome, "submitted");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn advance_to_terminal_is_forward_only_and_idempotent() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-term",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        repo.advance_to_submitted(SubmitTaskAttemptParams {
+            id: &attempt.id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        let terminal = repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: Some("http://pr"),
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some("done"),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(terminal.outcome, "completed");
+        assert_eq!(terminal.pr_url.as_deref(), Some("http://pr"));
+        assert_eq!(terminal.summary.as_deref(), Some("done"));
+        assert!(terminal.terminal_at.is_some());
+
+        // Idempotent: repeated terminal with same outcome is no-op.
+        let terminal2 = repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(terminal2.id, terminal.id);
+        assert_eq!(terminal2.outcome, "completed");
+        // pr_url should remain filled from first terminal call.
+        assert_eq!(terminal2.pr_url.as_deref(), Some("http://pr"));
+
+        // Forward-only: a backward move to pending is not allowed by helper.
+        let backward = repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Reopened,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+        // Forward-only: once a row is terminal (`completed`), the SQL predicate
+        // only permits an idempotent same-outcome move, so a switch to a
+        // different terminal outcome (`reopened`) is a no-op and the row keeps
+        // its existing `completed` outcome. The test is mainly about
+        // non-terminal -> terminal and idempotent duplicate terminal calls.
+        assert_eq!(backward.outcome, "completed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fill_nullable_fields_fills_without_rolling_back_outcome() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-fill",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        repo.fill_nullable_fields(FillTaskAttemptParams {
+            id: &attempt.id,
+            checkpoint_ref: Some("cp-fill"),
+            submit_ref: Some("submit-fill"),
+            pr_url: Some("pr-fill"),
+            mirror_head_sha: Some("mirror-fill"),
+            github_head_sha: Some("github-fill"),
+            summary: Some("summary-fill"),
+            summary_json: Some(r#"{"filled": true}"#),
+            log_tail: Some("tail-fill"),
+        })
+        .await
+        .unwrap();
+
+        let filled = repo.get(&attempt.id).await.unwrap().unwrap();
+        assert_eq!(filled.outcome, "completed");
+        assert_eq!(filled.checkpoint_ref.as_deref(), Some("cp-fill"));
+        assert_eq!(filled.submit_ref.as_deref(), Some("submit-fill"));
+        assert_eq!(filled.pr_url.as_deref(), Some("pr-fill"));
+        assert_eq!(filled.mirror_head_sha.as_deref(), Some("mirror-fill"));
+        assert_eq!(filled.github_head_sha.as_deref(), Some("github-fill"));
+        assert_eq!(filled.summary.as_deref(), Some("summary-fill"));
+        assert_eq!(filled.summary_json.as_deref(), Some(r#"{"filled": true}"#));
+        assert_eq!(filled.log_tail.as_deref(), Some("tail-fill"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_deferred_row_has_no_session_and_is_terminal() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .insert_guard_deferred(GuardDeferTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "guard",
+                dispatch_key: "dk-guard",
+                decision: GuardDecision::Defer,
+                reason: GuardReason::ParkRung,
+                summary: Some("parked"),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(attempt.outcome, "deferred");
+        assert_eq!(attempt.guard_decision.as_deref(), Some("defer"));
+        assert_eq!(attempt.guard_reason.as_deref(), Some("park_rung"));
+        assert!(attempt.session_id.is_none());
+        assert!(attempt.terminal_at.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_pending_or_submitted_and_lookups_work() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id1 = new_attempt_id();
+        let a1 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id1,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-latest-1",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        let id2 = new_attempt_id();
+        let a2 = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id2,
+                task_id: &task_id,
+                role: "planner",
+                dispatch_key: "dk-latest-2",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        repo.advance_to_submitted(SubmitTaskAttemptParams {
+            id: &a2.id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        let latest = repo
+            .latest_pending_or_submitted(&task_id, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, a2.id);
+
+        let latest_worker = repo
+            .latest_pending(&task_id, Some("worker"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_worker.id, a1.id);
+
+        let latest_planner = repo
+            .latest_submitted(&task_id, Some("planner"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_planner.id, a2.id);
+
+        let by_key = repo
+            .get_by_dispatch_key("dk-latest-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_key.id, a2.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_summaries_and_history_ordered_newest_first() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        for i in 1..=3 {
+            let id = new_attempt_id();
+            let attempt = repo
+                .create_or_get_pending(CreateTaskAttemptParams {
+                    id: &id,
+                    task_id: &task_id,
+                    role: "worker",
+                    dispatch_key: &format!("dk-order-{i}"),
+                    session_id: None,
+                    attempt_seq: None,
+                })
+                .await
+                .unwrap();
+            repo.advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&format!("summary {i}")),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let summaries = repo
+            .prompt_summaries_for_task(&task_id, None, 2)
+            .await
+            .unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].attempt_seq, 3);
+        assert_eq!(summaries[1].attempt_seq, 2);
+
+        let history = repo.history_for_task(&task_id, None, 10).await.unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].attempt_seq, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_fields_rejected_when_too_large() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = Uuid::new_v4().to_string();
+        let big_summary = "x".repeat(TASK_ATTEMPT_SUMMARY_MAX_LEN + 1);
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-1",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        assert!(attempt.summary.is_none());
+
+        let err = repo
+            .advance_to_submitted(SubmitTaskAttemptParams {
+                id: &attempt.id,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&big_summary),
+                summary_json: None,
+                log_tail: None,
+            })
+            .await;
+        assert!(err.is_err());
+
+        let big_tail = "x".repeat(TASK_ATTEMPT_LOG_TAIL_MAX_LEN + 1);
+        let err = repo
+            .fill_nullable_fields(FillTaskAttemptParams {
+                id: &attempt.id,
+                checkpoint_ref: None,
+                submit_ref: None,
+                pr_url: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: Some(&big_tail),
+            })
+            .await;
+        assert!(err.is_err());
     }
 }

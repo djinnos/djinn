@@ -176,7 +176,7 @@ async fn advance_to_terminal_rejects_non_terminal_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn weaker_terminal_cannot_overwrite_completed() {
+async fn terminal_outcome_is_frozen_after_first_terminal() {
     let db = test_db();
     let (_pid, task_id) = create_task(&db).await;
     let repo = TaskAttemptRepository::new(db);
@@ -187,14 +187,14 @@ async fn weaker_terminal_cannot_overwrite_completed() {
             id: &id,
             task_id: &task_id,
             role: "worker",
-            dispatch_key: "dk-weaker",
+            dispatch_key: "dk-frozen",
             session_id: None,
             attempt_seq: None,
         })
         .await
         .unwrap();
 
-    // Move to completed.
+    // First terminal wins: move to completed.
     repo.advance_to_terminal(TerminalTaskAttemptParams {
         id: &attempt.id,
         outcome: TaskAttemptOutcome::Completed,
@@ -209,19 +209,22 @@ async fn weaker_terminal_cannot_overwrite_completed() {
     })
     .await
     .unwrap();
+    let after_completed = repo.get(&attempt.id).await.unwrap().unwrap();
+    let frozen_terminal_at = after_completed.terminal_at.clone();
+    assert!(frozen_terminal_at.is_some());
 
-    // Try to overwrite with crashed (rank 32 > 30, so this IS forward).
-    // But let's test the case where we go to a HIGHER terminal and then
-    // try to go back.
+    // A different terminal outcome (`force_closed`) is a no-op once terminal:
+    // the SQL predicate only matches non-terminal rows or an identical terminal
+    // outcome, so the frozen `completed` outcome is preserved (no rank ordering).
     repo.advance_to_terminal(TerminalTaskAttemptParams {
         id: &attempt.id,
         outcome: TaskAttemptOutcome::ForceClosed,
-        pr_url: None,
+        pr_url: Some("http://other-pr"),
         submit_ref: None,
         checkpoint_ref: None,
         mirror_head_sha: None,
         github_head_sha: None,
-        summary: None,
+        summary: Some("clobber"),
         summary_json: None,
         log_tail: None,
     })
@@ -229,10 +232,39 @@ async fn weaker_terminal_cannot_overwrite_completed() {
     .unwrap();
 
     let after_force = repo.get(&attempt.id).await.unwrap().unwrap();
-    assert_eq!(after_force.outcome, "force_closed");
+    assert_eq!(
+        after_force.outcome, "completed",
+        "a different terminal outcome must not overwrite the first terminal"
+    );
+    // No fields were touched: neither the outcome, terminal_at, nor the
+    // already-filled pr_url/summary changed.
+    assert_eq!(after_force.terminal_at, frozen_terminal_at);
+    assert_eq!(after_force.pr_url.as_deref(), Some("http://pr"));
+    assert_eq!(after_force.summary.as_deref(), Some("done"));
 
-    // Now try to go back to completed (weaker terminal).
-    let weaker = repo
+    // Another different terminal (`handoff`) is likewise a no-op.
+    let handoff = repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: TaskAttemptOutcome::Handoff,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        handoff.outcome, "completed",
+        "the first terminal outcome stays frozen across further terminal calls"
+    );
+
+    // The same terminal outcome remains idempotent (no error, no change).
+    let idem = repo
         .advance_to_terminal(TerminalTaskAttemptParams {
             id: &attempt.id,
             outcome: TaskAttemptOutcome::Completed,
@@ -247,10 +279,8 @@ async fn weaker_terminal_cannot_overwrite_completed() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        weaker.outcome, "force_closed",
-        "weaker terminal must not overwrite stronger"
-    );
+    assert_eq!(idem.outcome, "completed");
+    assert_eq!(idem.terminal_at, frozen_terminal_at);
 }
 
 // ── AC3: nullable guard-only rows, fill-forward, lookups, ordering ──

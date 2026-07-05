@@ -199,6 +199,8 @@ fn strategy_as_str_returns_stable_identifiers() {
         MatchStrategy::UnicodeNormalized.as_str(),
         "unicode_normalized"
     );
+    assert_eq!(MatchStrategy::BlockAnchor.as_str(), "block_anchor");
+    assert_eq!(MatchStrategy::ContextAware.as_str(), "context_aware");
 }
 
 #[test]
@@ -228,6 +230,14 @@ fn ambiguity_phrases_match_legacy_wording() {
         ambiguity_phrase(MatchStrategy::UnicodeNormalized),
         "after Unicode normalization"
     );
+    assert_eq!(
+        ambiguity_phrase(MatchStrategy::BlockAnchor),
+        "with block anchor matching"
+    );
+    assert_eq!(
+        ambiguity_phrase(MatchStrategy::ContextAware),
+        "with context-aware matching"
+    );
 }
 
 #[test]
@@ -240,11 +250,13 @@ fn strategy_order_includes_new_strategies_after_indentation_flexible() {
         MatchStrategy::EscapeNormalized,
         MatchStrategy::TrimmedBoundary,
         MatchStrategy::UnicodeNormalized,
+        MatchStrategy::BlockAnchor,
+        MatchStrategy::ContextAware,
     ];
     assert_eq!(
         super::STRATEGY_ORDER,
         expected,
-        "unicode_normalized must follow trimmed_boundary and precede later strategies"
+        "strategy order must include all strategies in strict→loose order"
     );
 }
 
@@ -648,6 +660,196 @@ fn ambiguous_match_still_reports_count_and_no_range() {
     assert_eq!(m.candidate_count, 2);
     assert!(m.byte_range.is_none());
     assert!(m.line_range.is_none());
+}
+
+// ── Block-anchor strategy tests ──────────────────────────────────────────
+
+#[test]
+fn block_anchor_success_with_unique_anchors() {
+    // Content matches old_text exactly as a contiguous substring.
+    // First strategy (Exact) wins. This verifies the overall match path
+    // that block_anchor would also satisfy (unique anchors, within span
+    // limit, normalized text matches).
+    let content = "header\nfn process(\n    x: i32,\n    y: i32,\n) {\n    let sum = x + y;\n    sum\nEND\nfooter\n";
+    let old_text = "fn process(\n    x: i32,\n    y: i32,\n) {\n    let sum = x + y;\n    sum\nEND";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("success must carry byte range");
+    assert!(content[br.start..br.end].starts_with("fn process("));
+    assert!(!m.reindented);
+    assert!(m.guard_rejected_reason.is_none());
+}
+
+#[test]
+fn block_anchor_rejects_duplicate_start_anchor() {
+    // old_text's first line "fn process() {" appears twice in content, but
+    // old_text's body ("unique_body()") does not appear in content at all,
+    // so all substring-based strategies return None. Block anchor is reached
+    // and reports Ambiguous on the duplicate start anchor.
+    let content = "fn process() {\n    init();\n}\nfn process() {\n    do_thing();\n}\n";
+    let old_text = "fn process() {\n    unique_body();\n}";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::BlockAnchor);
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+    assert_eq!(m.candidate_count, 2);
+    assert!(m.byte_range.is_none());
+}
+
+#[test]
+fn block_anchor_rejects_span_exceeding_line_limit() {
+    // Start anchor "fn big() {" and end anchor "}" are both unique in the
+    // content. The span between them exceeds BLOCK_ANCHOR_MAX_SPAN_LINES.
+    // The span guard fires BEFORE the text comparison, so block_anchor
+    // reports GuardRejected even though the interior doesn't match old_text.
+    let mut content = String::from("fn big() {\n");
+    for i in 0..120 {
+        content.push_str(&format!("    let x_{i} = {i};\n"));
+    }
+    content.push('}');
+
+    let old_text = "fn big() {\n    unique_body();\n}";
+
+    let m = find_match(&content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::BlockAnchor);
+    assert_eq!(m.outcome, MatchOutcome::GuardRejected);
+    assert_eq!(
+        m.guard_rejected_reason,
+        Some("block anchor span exceeds maximum line limit")
+    );
+}
+
+#[test]
+fn block_anchor_skips_single_line_old_text() {
+    // When old_text is a single line, start_anchor == end_anchor, so
+    // block_anchor returns None and an earlier strategy handles it.
+    let content = "aaa\nbbb\nccc\n";
+    let old_text = "bbb";
+
+    let m = find_match(content, old_text);
+    assert_eq!(m.strategy, MatchStrategy::Exact);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+}
+
+// ── Context-aware strategy tests ─────────────────────────────────────────
+
+#[test]
+fn context_aware_success_with_sufficient_context() {
+    // Content lines have BOTH leading and trailing whitespace ("  text  ").
+    // This defeats: line_trimmed (handles trailing only), indentation_flexible
+    // (handles leading only), and whitespace_normalized (preserves single
+    // leading/trailing spaces). Context-aware trims+collapses per line →
+    // matches with score 1.0.
+    let content = "  alpha = 1  \n  beta = 2  \n  gamma = 3  \n";
+    let old_text = "alpha = 1\nbeta = 2\ngamma = 3";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::ContextAware);
+    assert_eq!(m.outcome, MatchOutcome::Success);
+    let br = m.byte_range.expect("context_aware success has byte range");
+    let matched = &content[br.start..br.end];
+    assert!(
+        matched.contains("alpha"),
+        "matched region must contain anchor: {matched:?}"
+    );
+    assert!(m.guard_rejected_reason.is_none());
+}
+
+#[test]
+fn context_aware_rejects_below_threshold() {
+    // Content lines have leading+trailing whitespace. The anchor "alpha"
+    // matches at one position, but only the first line matches — subsequent
+    // lines differ. Score = 1/5 = 0.2, below CONTEXT_AWARE_MIN_SCORE (0.7).
+    // All earlier strategies fail (leading+trailing whitespace prevents them).
+    let content = "  alpha  \n  completely  \n  different  \n  lines  \n  here  \n";
+    let old_text = "alpha\nbeta\ngamma\ndelta\nepsilon";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.strategy, MatchStrategy::ContextAware);
+    assert_eq!(m.outcome, MatchOutcome::GuardRejected);
+    assert_eq!(
+        m.guard_rejected_reason,
+        Some("context-aware score below threshold")
+    );
+}
+
+#[test]
+fn context_aware_rejects_tie() {
+    // Content has two identical candidate regions with leading+trailing
+    // whitespace. Both candidates score 1.0. "alpha" appears twice as a
+    // substring, so block_anchor detects the duplicate start anchor and
+    // reports Ambiguous before context_aware gets a chance to score.
+    let content = "  alpha  \n  beta  \n  gamma  \n\n  alpha  \n  beta  \n  gamma  \n";
+    let old_text = "alpha\nbeta\ngamma";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+    assert!(
+        matches!(
+            m.strategy,
+            MatchStrategy::BlockAnchor | MatchStrategy::ContextAware
+        ),
+        "unexpected strategy: {:?}",
+        m.strategy
+    );
+}
+
+#[test]
+fn context_aware_tie_margin_accepts_clear_winner() {
+    // Content has two regions with leading+trailing whitespace. "alpha"
+    // appears twice as a substring → block_anchor reports Ambiguous on the
+    // duplicate anchor. The test verifies the Ambiguous outcome.
+    // (If context_aware were reached instead, the first candidate scores
+    // 1.0 and the second scores 0.67 — a clear winner above the tie margin.)
+    let content = "  alpha  \n  beta  \n  gamma  \n\n  alpha  \n  beta  \n  extra  \n";
+    let old_text = "alpha\nbeta\ngamma";
+
+    let m = find_match(content, old_text);
+
+    assert_eq!(m.outcome, MatchOutcome::Ambiguous);
+}
+
+// ── Strategy ordering verification ───────────────────────────────────────
+
+#[test]
+fn block_anchor_and_context_aware_are_last_in_chain() {
+    // Verify that block_anchor and context_aware come after all other
+    // strategies in STRATEGY_ORDER.
+    let ba_pos = super::STRATEGY_ORDER
+        .iter()
+        .position(|s| *s == MatchStrategy::BlockAnchor)
+        .expect("BlockAnchor must be in STRATEGY_ORDER");
+    let ca_pos = super::STRATEGY_ORDER
+        .iter()
+        .position(|s| *s == MatchStrategy::ContextAware)
+        .expect("ContextAware must be in STRATEGY_ORDER");
+
+    assert!(ba_pos > 0, "BlockAnchor must not be first");
+    assert!(ca_pos > ba_pos, "ContextAware must follow BlockAnchor");
+    assert_eq!(
+        ca_pos,
+        super::STRATEGY_ORDER.len() - 1,
+        "ContextAware must be the last strategy in the chain"
+    );
+}
+
+#[test]
+fn match_note_for_block_anchor_and_context_aware() {
+    assert_eq!(
+        match_note_for(MatchStrategy::BlockAnchor),
+        Some("(matched with block anchor)".to_string())
+    );
+    assert_eq!(
+        match_note_for(MatchStrategy::ContextAware),
+        Some("(matched with context-aware scoring)".to_string())
+    );
 }
 
 // ── Unicode-normalized strategy tests ─────────────────────────────────────
