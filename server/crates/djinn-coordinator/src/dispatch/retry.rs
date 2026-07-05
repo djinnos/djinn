@@ -7,7 +7,7 @@ use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
 use djinn_db::repositories::task_arbitration::{
-    CreateArbitrationParams, TaskArbitrationRepository, TryCreateResult,
+    CreateArbitrationParams, TaskArbitrationRecord, TaskArbitrationRepository, TryCreateResult,
 };
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
@@ -983,7 +983,7 @@ impl CoordinatorActor {
             // new unconsumed row can be created, dispatch the source to the
             // Lead arbiter.  On any arbitration/hold-cycle DB uncertainty or
             // a consumed/failed cycle, fail closed to the human-review hold
-            // path.
+            // path with a structured re-entry dossier.
             let arbiter_repo = TaskArbitrationRepository::new(self.db.clone());
             let hold_cycle = match arbiter_repo.resolve_current_hold_cycle(&task.id).await {
                 Ok((cycle, Some(_existing))) => {
@@ -1002,7 +1002,13 @@ impl CoordinatorActor {
                         "CoordinatorActor: second-strike — failed to resolve current hold cycle; failing closed to human review"
                     );
                     return self
-                        .park_source_human_review(task, &reason, quality_strikes)
+                        .park_source_human_review_with_dossier(
+                            task,
+                            &reason,
+                            quality_strikes,
+                            None,
+                            &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                        )
                         .await;
                 }
             };
@@ -1027,6 +1033,7 @@ impl CoordinatorActor {
             let directive = serde_json::json!({
                 "kind": "lead_arbiter",
                 "goal": "Forensic review of the current hold cycle after repeated planner interventions",
+                "verification_command": None::<String>,
             });
             let deadline = {
                 let now = time::OffsetDateTime::now_utc();
@@ -1077,7 +1084,13 @@ impl CoordinatorActor {
                         "CoordinatorActor: second-strike — failed to create arbitration row; failing closed to human review"
                     );
                     return self
-                        .park_source_human_review(task, &reason, quality_strikes)
+                        .park_source_human_review_with_dossier(
+                            task,
+                            &reason,
+                            quality_strikes,
+                            None,
+                            &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                        )
                         .await;
                 }
             };
@@ -1151,7 +1164,13 @@ impl CoordinatorActor {
                                  needs_lead_intervention; failing closed to human review"
                             );
                             return self
-                                .park_source_human_review(task, &reason, quality_strikes)
+                                .park_source_human_review_with_dossier(
+                                    task,
+                                    &reason,
+                                    quality_strikes,
+                                    None,
+                                    &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                                )
                                 .await;
                         }
                     }
@@ -1184,15 +1203,23 @@ impl CoordinatorActor {
                     }
                     return true;
                 }
-                TryCreateResult::AlreadyExistsConsumed(_)
-                | TryCreateResult::AlreadyExistsFailed(_) => {
+                TryCreateResult::AlreadyExistsConsumed(record)
+                | TryCreateResult::AlreadyExistsFailed(record) => {
                     tracing::warn!(
                         task_id = %task.short_id,
                         hold_cycle,
                         "CoordinatorActor: second-strike — current hold cycle arbitration already consumed/failed; failing closed to human review"
                     );
+                    let stored_dossier =
+                        record.dossier.clone().or_else(|| record.directive.clone());
                     return self
-                        .park_source_human_review(task, &reason, quality_strikes)
+                        .park_source_human_review_with_dossier(
+                            task,
+                            &reason,
+                            quality_strikes,
+                            stored_dossier,
+                            &Self::reentry_consumed_dossier(&reason, role, task, &history, &record),
+                        )
                         .await;
                 }
             }
@@ -1371,6 +1398,90 @@ impl CoordinatorActor {
             superseded,
             task.reopen_count,
         );
+    }
+
+    fn arbiter_failure_dossier(
+        base_reason: &str,
+        role: &str,
+        task: &djinn_core::models::Task,
+        history: &PostInterventionHistory,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "arbiter_failure_dossier",
+            "summary": "Arbitration state could not be read or written for this hold cycle; the task is held on human review as a fail-closed fallback.",
+            "base_reason": base_reason,
+            "role": role,
+            "intervention_count": task.intervention_count,
+            "total_reopen_count": task.total_reopen_count,
+            "reopen_count": task.reopen_count,
+            "post_intervention_history": {
+                "any_submitted": history.any_submitted,
+                "non_attempt_models": history.non_attempt_models,
+                "non_attempt_session_labels": history.non_attempt_session_labels,
+                "submission_pending_review": history.submission_pending_review,
+                "latest_submission_at": history.latest_submission_at,
+            },
+        })
+    }
+
+    fn reentry_consumed_dossier(
+        base_reason: &str,
+        role: &str,
+        task: &djinn_core::models::Task,
+        history: &PostInterventionHistory,
+        record: &TaskArbitrationRecord,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "arbiter_consumed_dossier",
+            "summary": format!(
+                "Arbitration for hold cycle {} was already {} when re-entry was attempted; the task is held on human review.",
+                record.hold_cycle,
+                record.state,
+            ),
+            "base_reason": base_reason,
+            "role": role,
+            "hold_cycle": record.hold_cycle,
+            "arbitration_state": record.state,
+            "decision_failure_count": record.decision_failure_count,
+            "infra_retry_count": record.infra_retry_count,
+            "mirror_head_sha": record.mirror_head_sha,
+            "github_head_sha": record.github_head_sha,
+            "pr_url": record.pr_url,
+            "failing_ci_job_ids": record.failing_ci_job_ids,
+            "consumed_at": record.consumed_at,
+            "intervention_count": task.intervention_count,
+            "total_reopen_count": task.total_reopen_count,
+            "reopen_count": task.reopen_count,
+            "post_intervention_history": {
+                "any_submitted": history.any_submitted,
+                "non_attempt_models": history.non_attempt_models,
+                "non_attempt_session_labels": history.non_attempt_session_labels,
+                "submission_pending_review": history.submission_pending_review,
+                "latest_submission_at": history.latest_submission_at,
+            },
+        })
+    }
+
+    /// Structured human-review hold path that prefers a stored arbitration
+    /// dossier when available, otherwise uses a generated dossier from actual
+    /// post-intervention history. Never falls back to the old static repeated-AC
+    /// template.
+    async fn park_source_human_review_with_dossier(
+        &mut self,
+        task: &djinn_core::models::Task,
+        reason: &str,
+        quality_strikes: i64,
+        stored_dossier: Option<serde_json::Value>,
+        generated_dossier: &serde_json::Value,
+    ) -> bool {
+        let dossier = stored_dossier.unwrap_or_else(|| generated_dossier.clone());
+        let mut enriched_reason = reason.to_string();
+        if let Ok(dossier_text) = serde_json::to_string_pretty(&dossier) {
+            enriched_reason.push_str("\n\nArbiter re-entry / failure dossier:\n");
+            enriched_reason.push_str(&dossier_text);
+        }
+        self.park_source_human_review(task, &enriched_reason, quality_strikes)
+            .await
     }
 
     /// Fail-closed human-review park path for the second-strike rung.
