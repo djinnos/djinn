@@ -759,7 +759,6 @@ impl CoordinatorActor {
             action,
             TransitionAction::PrCiFailed
                 | TransitionAction::PrChangesRequested
-                | TransitionAction::PrConflict
                 | TransitionAction::TaskReviewReject
                 | TransitionAction::TaskReviewRejectStale
                 | TransitionAction::TaskReviewRejectConflict
@@ -956,7 +955,7 @@ pub(crate) fn pick_conflict_blocker_sibling(task_id: &str, siblings: &[Task]) ->
 pub(crate) fn is_racing_unmerged_status(status: &str) -> bool {
     matches!(
         status,
-        "pr_draft" | "pr_review" | "needs_task_review" | "in_progress"
+        "approved" | "pr_draft" | "pr_review" | "needs_task_review"
     )
 }
 
@@ -970,12 +969,7 @@ pub(crate) fn effective_review_decision(reviews: &[PrReview]) -> (bool, bool) {
     let mut latest: std::collections::HashMap<&str, (&str, &str)> =
         std::collections::HashMap::new();
     for r in reviews {
-        let Some(state) = Some(r.state.as_str()) else {
-            continue;
-        };
-        if state == "COMMENTED" || state == "DISMISSED" || state == "PENDING" {
-            continue;
-        }
+        let state = r.state.as_str();
         let Some(login) = r.user.as_ref().map(|u| u.login.as_str()) else {
             continue;
         };
