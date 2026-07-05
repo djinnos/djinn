@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 /// repository layer can compute quality-strike counts without re-deriving
 /// semantics from the action/status pair.  Historical activity rows that lack
 /// the field are read as [`ReopenClass::Other`] (conservative default).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenClass {
     /// Reviewer rejected the implementation (TaskReviewReject,
@@ -27,6 +27,7 @@ pub enum ReopenClass {
     Superseded,
     /// Catch-all for reopen events whose specific class is unknown or
     /// missing from the activity payload (historical default).
+    #[default]
     Other,
 }
 

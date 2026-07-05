@@ -9,7 +9,7 @@ pub(crate) use djinn_core::models::{Task, TaskStatus, TransitionAction};
 pub(crate) use djinn_db::Database;
 pub(crate) use djinn_db::EpicRepository;
 pub(crate) use djinn_db::Error;
-pub(crate) use djinn_db::test_support::event_bus_for;
+pub(crate) use djinn_db::test_support::{backdate_task_updated_at, event_bus_for};
 pub(crate) use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, TaskRepository};
 pub(crate) use rstest::rstest;
 pub(crate) use tokio::sync::broadcast;

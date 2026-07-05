@@ -16293,9 +16293,27 @@ expression: signatures
     "input_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "fields": {
+          "default": null,
+          "description": "Select which top-level sections to include in the response.\nAccepted values: `proposal`, `targets`, `feedback`, `signoffs`,\n`revisions`, `debate`, `epics`, `gate_status`.\nDefault: all fields selected. Invalid values return a validation error.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "id": {
           "description": "Proposal UUID or short_id.",
           "type": "string"
+        },
+        "revision_bodies": {
+          "description": "Controls revision body verbosity when `revisions` is selected.\nAccepted values: `excerpt` (default), `full`, `omit`.\nIgnored when `fields` omits `revisions`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -17100,11 +17118,29 @@ expression: signatures
               "type": "array"
             },
             "body": {
-              "type": "string"
+              "description": "Full revision body — present only when `revision_bodies = \"full\"`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "body_excerpt": {
+              "description": "First 512 Unicode scalar values of the revision body.\nPresent when `revision_bodies` is `excerpt` or `full`.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "body_format": {
               "description": "Body encoding: `markdown` (legacy default) or `mdx` (block-aware).",
               "type": "string"
+            },
+            "body_truncated": {
+              "description": "`true` when the original revision body exceeded the 512-scalar cap.\nPresent when `revision_bodies` is `excerpt` or `full`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "created_at": {
               "type": "string"
@@ -17152,7 +17188,6 @@ expression: signatures
             "id",
             "seq",
             "title",
-            "body",
             "body_format",
             "acceptance_criteria",
             "event_kind",
