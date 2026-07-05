@@ -76,6 +76,12 @@ jobs:
               - 'server/crates/**/*.rs'
               - 'server/src/**/*.rs'
               - '.github/workflows/quality-gate.yml'
+              - 'scripts/test-capability-boundaries.sh'
+              - 'scripts/check-capability-boundaries.sh'
+              - 'scripts/check-git-boundary.sh'
+              - 'scripts/check-http-boundary.sh'
+              - 'scripts/check-k8s-boundary.sh'
+              - 'scripts/capability-boundary-allowlist.toml'
             # aarch64 cross-check trigger. The ONLY arch-conditional code
             # (cfg(target_arch) seccomp/landlock syscall constants) lives in
             # djinn-sandbox, so the ~400s cold cross-compile only needs to run
@@ -452,6 +458,43 @@ jobs:
                || '' }}
         run: ./scripts/check-raw-sql-boundary.sh
 
+  # Pure-shell PR-time guard for the git, HTTP, and Kubernetes capability
+  # boundaries.  All direct git usage (git2::, Command::new("git")), outbound
+  # HTTP client construction (reqwest::Client/ClientBuilder/RequestBuilder), and
+  # Kubernetes client access (kube::, k8s_openapi, Command::new("kubectl"))
+  # must live inside the owner crates (djinn-git, djinn-provider, djinn-k8s).
+  # Wired into the Quality Gate below as a hard blocker.
+  server-capability-boundaries:
+    name: Server Capability Boundaries
+    needs: changes
+    if: needs.changes.outputs.server == 'true' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 is required so `git diff` can resolve the merge base
+      # against the PR / merge-queue base SHA.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Self-test capability boundary detectors
+        run: ./scripts/test-capability-boundaries.sh
+
+      - name: Check capability boundaries
+        env:
+          # Pick a base SHA appropriate for the current event:
+          #   pull_request: the PR's base ref HEAD
+          #   merge_group:  the merge-queue base ref HEAD
+          #   workflow_dispatch / other: empty → the detectors fall back to
+          #   origin/main for a full-tree audit.
+          BASE_SHA: >-
+            ${{ github.event.pull_request.base.sha
+               || github.event.merge_group.base_sha
+               || '' }}
+        run: |
+          ./scripts/check-git-boundary.sh
+          ./scripts/check-http-boundary.sh
+          ./scripts/check-k8s-boundary.sh
+
   # Pure-script PR-time guard: architectural layering boundaries.
   # Enforces the forbidden-edge rules in `server/boundary_rules.toml`
   # against the workspace's declared crate dependencies + a source scan
@@ -739,6 +782,7 @@ jobs:
       - server-size-guard
       - server-migrations-guard
       - server-raw-sql-boundary
+      - server-capability-boundaries
       - server-boundaries
       - server-test
       - server-sqlx-cache
@@ -753,6 +797,7 @@ jobs:
             "${{ needs.server-size-guard.result }}"
             "${{ needs.server-migrations-guard.result }}"
             "${{ needs.server-raw-sql-boundary.result }}"
+            "${{ needs.server-capability-boundaries.result }}"
             "${{ needs.server-boundaries.result }}"
             "${{ needs.server-test.result }}"
             "${{ needs.server-sqlx-cache.result }}"
