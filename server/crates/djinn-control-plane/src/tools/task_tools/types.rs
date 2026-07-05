@@ -821,10 +821,10 @@ pub struct BoardHealthLivenessOutcomes {
     /// Count of surfaced outcomes grouped by `verdict` (e.g. `{"live": 12,
     /// "wedged": 3}`). The DB returns `HashMap<String, i64>`; absent keys
     /// are simply omitted from the rollup.
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    #[serde(default)]
     pub by_verdict: HashMap<String, i64>,
     /// Bounded recent evidence rows (newest first).
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default)]
     pub recent: Vec<BoardHealthLivenessOutcomeItem>,
 }
 
@@ -854,7 +854,7 @@ pub struct BoardHealthProtocolViolationItem {
 #[derive(Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct BoardHealthProtocolViolations {
     pub total: i64,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default)]
     pub recent: Vec<BoardHealthProtocolViolationItem>,
 }
 
@@ -950,7 +950,7 @@ pub struct BoardHealthStrandedReady {
     pub total: i64,
     /// Base threshold (30 minutes) used to derive severity.
     pub threshold_minutes: i64,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(default)]
     pub findings: Vec<BoardHealthStrandedReadyFinding>,
 }
 
