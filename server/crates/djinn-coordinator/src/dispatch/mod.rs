@@ -16,6 +16,9 @@ mod task_dispatch;
 mod wave_dispatch;
 
 #[cfg(test)]
+mod wave_dispatch_tests;
+
+#[cfg(test)]
 mod lifecycle_integration_tests;
 
 #[cfg(test)]
