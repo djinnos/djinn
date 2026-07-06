@@ -4182,4 +4182,176 @@ mod failover_chain_tests {
 
         cancel.cancel();
     }
+
+    /// Comprehensive AC2 + AC4 regression: failover-chain traversal with
+    /// restamped ProviderConfig and per-candidate observation/logging.
+    ///
+    /// Scenario: 2 candidates — model-a (breaker-open, skipped) and model-b
+    /// (dispatched). The dispatch closure calls `restamp_provider_config_for_model`
+    /// for model-b, re-resolving model-dependent fields from model-a's source
+    /// config to model-b's target values. The test asserts:
+    ///
+    /// 1. **Restamped config use (AC2)**: The restamped `ProviderConfig` has
+    ///    model-b's `format_family`, `context_window`, and `max_tokens_default`
+    ///    — not model-a's stale values — proving the restamp helper re-resolves
+    ///    model-dependent defaults.
+    /// 2. **Per-candidate observation/logging (AC4)**: `failover_candidate_attempt`
+    ///    is emitted for model-a with `breaker_open` outcome, and
+    ///    `failover_candidate_accepted` is emitted for model-b with
+    ///    `skipped_count=1`. Both records include `total_candidates=2`.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_restamp_and_logging_comprehensive() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Breaker-open model-a; model-b is free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Capture restamped ProviderConfig for the dispatched candidate.
+        let restamped_config: Arc<Mutex<Option<djinn_provider::provider::ProviderConfig>>> =
+            Arc::new(Mutex::new(None));
+        let restamped_clone = restamped_config.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "restamp-log-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "restamp-log-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let restamped = restamped_clone.clone();
+                    async move {
+                        // Simulate the downstream restamp path: build a source
+                        // ProviderConfig for model-a with its own model-dependent
+                        // defaults, then restamp it to the candidate model-b.
+                        // This mirrors what `build_provider_from_resolved` does
+                        // when a failover candidate is selected in production.
+                        let source_config = djinn_provider::provider::ProviderConfig {
+                            base_url: "https://api.example.com".to_owned(),
+                            auth: djinn_provider::provider::AuthMethod::BearerToken(
+                                "test-key".to_owned(),
+                            ),
+                            format_family: djinn_provider::provider::FormatFamily::Anthropic,
+                            model_id: "provider/model-a".to_owned(),
+                            context_window: 100_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(8192),
+                            },
+                            reasoning_effort: None,
+                            tool_schema_compat: None,
+                            telemetry: None,
+                            session_affinity_key: None,
+                            provider_headers: std::collections::HashMap::new(),
+                        };
+
+                        // Restamp to model-b with different model-dependent
+                        // defaults to prove the helper re-resolves them.
+                        let target = djinn_provider::provider::RestampTarget {
+                            model_id: mid.clone(),
+                            format_family: djinn_provider::provider::FormatFamily::OpenAI,
+                            reasoning: false,
+                            context_window: 200_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(32_768),
+                            },
+                            tool_schema_compat: None,
+                        };
+                        let cfg = djinn_provider::provider::restamp_provider_config_for_model(
+                            source_config,
+                            &target,
+                        );
+
+                        // Capture the restamped config for post-dispatch assertion
+                        *restamped.lock().expect("restamp mutex") = Some(cfg.clone());
+
+                        pool.dispatch(&tid, &pp, &mid).await
+                    }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker-open"
+        );
+
+        // ── AC2: Assert restamped ProviderConfig has model-b's model-dependent
+        // values, not model-a's stale values ──────────────────────────────────
+        let captured = restamped_config
+            .lock()
+            .expect("restamp mutex")
+            .take()
+            .expect("dispatch closure must capture restamped config");
+
+        assert_eq!(
+            captured.model_id, "provider/model-b",
+            "restamped config must have the candidate model-b as model_id"
+        );
+        assert_eq!(
+            captured.format_family,
+            djinn_provider::provider::FormatFamily::OpenAI,
+            "restamped config must resolve model-b's format_family (OpenAI), \
+             not carry model-a's stale value (Anthropic)"
+        );
+        assert_eq!(
+            captured.context_window, 200_000,
+            "restamped config must resolve model-b's context_window (200_000), \
+             not carry model-a's stale value (100_000)"
+        );
+        assert_eq!(
+            captured.capabilities.max_tokens_default,
+            Some(32_768),
+            "restamped config must resolve model-b's max_tokens_default (32_768), \
+             not carry model-a's stale value (8192)"
+        );
+        // Transport fields must be preserved from the source config
+        assert_eq!(
+            captured.base_url, "https://api.example.com",
+            "restamped config must preserve transport fields from the source config"
+        );
+
+        // ── AC4: Assert per-candidate observation/logging ─────────────────────
+        // failover_candidate_attempt for the breaker-open model-a
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log failover_candidate_attempt for the breaker-open candidate"
+        );
+        assert!(
+            logs_contain("breaker_open"),
+            "failover_candidate_attempt must include breaker_open outcome for model-a"
+        );
+        assert!(
+            logs_contain("total_candidates=2"),
+            "failover_candidate_attempt must include total_candidates=2"
+        );
+
+        // failover_candidate_accepted for the winning model-b
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log failover_candidate_accepted for the winning candidate"
+        );
+        assert!(
+            logs_contain("skipped_count=1"),
+            "failover_candidate_accepted must report skipped_count=1 \
+             (model-a was skipped before model-b was accepted)"
+        );
+
+        cancel.cancel();
+    }
 }
