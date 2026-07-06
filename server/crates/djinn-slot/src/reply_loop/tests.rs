@@ -4234,6 +4234,63 @@ async fn failed_turn_not_persisted_as_complete_assistant_message() {
     );
 }
 
+/// A stream that emits partial assistant text and then ends without
+/// `StreamEvent::Done` is a truncated provider turn. The observed partial text
+/// may be flushed for resume/timeline durability, but it must not be finalized
+/// into the in-memory conversation as a successful complete assistant turn (nor
+/// duplicated through the normal complete-message persistence path).
+#[tokio::test]
+async fn partial_truncated_stream_not_finalized_as_complete_assistant_turn() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider =
+        test_helpers::FakeProvider::script(vec![vec![StreamEvent::Delta(ContentBlock::Text {
+            text: "partial assistant output".to_string(),
+        })]]);
+    let mut h = ReplyLoopHarness::new().await;
+    let (result, _, _, _, _, _) = h.run_with_model(&provider, &[], "synthetic/glm-4.7").await;
+
+    assert!(result.is_err(), "truncated partial stream must fail");
+    let err = result.unwrap_err();
+    let typed = err
+        .downcast_ref::<ProviderError>()
+        .expect("truncated stream error must carry a typed ProviderError");
+    assert!(
+        matches!(typed, ProviderError::ProviderInternal { .. }),
+        "truncated stream must be classified as provider-internal failure, got: {typed:?}"
+    );
+
+    assert!(
+        h.conv
+            .messages
+            .iter()
+            .all(|message| message.role != Role::Assistant),
+        "partial truncated output must not be finalized as a complete assistant turn"
+    );
+
+    let repo = SessionMessageRepository::new(h.slot_ctx.db.clone(), h.slot_ctx.event_bus.clone());
+    let raw = repo
+        .load_raw_conversation(&h.session_id)
+        .await
+        .expect("load raw conversation");
+    let persisted_assistant = raw
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .count();
+    assert_eq!(
+        persisted_assistant, 1,
+        "only the observed in-flight assistant artifact should be durable; \
+         normal complete-message finalization must not add a duplicate"
+    );
+    assert!(
+        raw.messages
+            .iter()
+            .any(|message| message.text_content().contains("partial assistant output")),
+        "observed partial assistant text should remain durable for resume"
+    );
+}
+
 /// Productive turns ARE still persisted normally (baseline correctness check).
 /// This ensures the persistence guardrails don't break normal operation.
 #[tokio::test]
