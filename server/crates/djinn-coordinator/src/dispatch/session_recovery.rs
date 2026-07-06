@@ -2485,15 +2485,20 @@ fn build_liveness_evidence(
         .unwrap_or(false);
 
     // ── Extension budget ────────────────────────────────────────────
-    // The coordinator tracks slow-extension budget via its own
-    // `stall_extension_count` per session (checked in
-    // `enforce_session_stall_timeout`).  The liveness classifier should
-    // NOT derive exhaustion from `claim_ttl_remaining` because a session
-    // that exceeds the zombie hard cap may still be eligible for a slow
-    // extension (e.g. long tool-run heartbeats).  Default to `false`
-    // here; the coordinator's extension-budget gate handles the real
-    // accounting.
-    let extension_budget_exhausted = false;
+    // A session that has run past its claim lease (`claim_ttl_remaining`
+    // zero, i.e. session age ≥ the zombie hard cap) is egregiously stale:
+    // its budget is exhausted, so the classifier marks it NOT
+    // extension-eligible and the stall path kills it on the first tick
+    // instead of granting a "free" grace extension. A session still WITHIN
+    // its claim window keeps a non-zero TTL, stays extension-eligible, and
+    // gets its one coordinator-gated grace extension (accounted separately
+    // via `stall_extension_count` in `enforce_session_stall_timeout`).
+    //
+    // This restores the immediate-kill fast path for past-TTL sessions.
+    // Hardcoding `false` here removed it: every stalled session — however
+    // stale — was granted a grace extension, delaying its kill by one
+    // extension quantum and breaking the "past-lease → kill now" contract.
+    let extension_budget_exhausted = claim_ttl_remaining.map(|t| t.is_zero()).unwrap_or(false);
 
     LivenessEvidence {
         pod_phase: Some(pod_phase),

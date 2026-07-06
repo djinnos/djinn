@@ -2904,9 +2904,17 @@ async fn slow_extension_granted_with_evidence_and_claim_extension() {
         })
         .await
         .unwrap();
-    // Backdate past the stall threshold (30 min) so the idle check passes.
+    // Keep the session WITHIN its claim window (recent started_at → non-zero
+    // claim TTL → `extension_budget_exhausted == false`), so the classifier
+    // marks it extension-eligible: this is the in-window case that earns the
+    // one coordinator-gated grace extension. The stall itself is driven by the
+    // aged activity tracker below (idle > 30 min), NOT by `started_at`, so the
+    // idle gate still fires. A session past its claim TTL would instead be
+    // egregiously stale and killed on the first tick (see
+    // `slow_extension_budget_exhaustion_falls_through_to_kill` / the stall
+    // teardown tests).
     session_repo
-        .backdate_started_at(&session.id, "40 minutes")
+        .backdate_started_at(&session.id, "2 minutes")
         .await
         .unwrap();
 
