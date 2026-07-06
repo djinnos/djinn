@@ -8,6 +8,7 @@
 pub mod config;
 pub mod env_config;
 pub mod graph_warmer;
+pub mod infra_death_log_tail;
 pub mod job;
 pub mod runtime;
 pub mod secret;

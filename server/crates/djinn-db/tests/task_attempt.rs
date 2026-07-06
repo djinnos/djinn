@@ -15,6 +15,8 @@ pub(crate) use djinn_db::{
 };
 #[path = "task_attempt/create_and_lifecycle.rs"]
 mod create_and_lifecycle;
+#[path = "task_attempt/infra_death_persistence.rs"]
+mod infra_death_persistence;
 #[path = "task_attempt/lookups_and_bounds.rs"]
 mod lookups_and_bounds;
 
