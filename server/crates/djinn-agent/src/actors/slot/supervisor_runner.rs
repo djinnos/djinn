@@ -22,8 +22,8 @@ use crate::runtime_bridge::{RuntimeKind, SupervisorTaskRunner, runtime_kind};
 use crate::supervisor::{RoleKind, SupervisorFlow, TaskRunSpec, services_for_agent_context};
 
 use super::helpers::{
-    conflict_context_for_dispatch, default_target_branch, load_provider_credential, parse_model_id,
-    refresh_oauth_credential_after_401,
+    build_restamp_target, conflict_context_for_dispatch, default_target_branch,
+    load_provider_credential, parse_model_id, refresh_oauth_credential_after_401,
 };
 
 fn supervisor_rpc_span(op: &'static str, session_id: &str, task_id: &str) -> tracing::Span {
@@ -1046,7 +1046,12 @@ async fn resolve_credentials(
                         "supervisor dispatch: load_provider_credential({provider_id}) for role {role:?}: {e}"
                     )
                 })?;
-            credentials.insert(*role, cred.with_model_id(&model_name).to_serializable());
+            // Build a RestampTarget from catalog metadata so OAuth credential
+            // restamp resolves model-dependent defaults (reasoning_effort,
+            // max_tokens_default, etc.) for the target model.
+            let restamp_target =
+                build_restamp_target(&provider_id, &model_name, 0, &app_state.catalog);
+            credentials.insert(*role, cred.with_model_id(&restamp_target).to_serializable());
         }
         Ok::<(), anyhow::Error>(())
     };
