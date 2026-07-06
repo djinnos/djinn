@@ -178,68 +178,10 @@ fn register_test_check() -> (Arc<AtomicBool>, Arc<AtomicU32>) {
     (fix_called, run_count)
 }
 
-/// Ensure the `doctor_findings` table exists in the test database. The test
-/// DB is cloned from `djinn_test_template` which may not include the latest
-/// migration if the template hasn't been rebuilt. This is a no-op if the
-/// table already exists.
-async fn ensure_doctor_findings_schema(db: &djinn_db::Database) {
-    db.ensure_initialized().await.expect("db initialized");
-    // Check if the table exists; create it if not.
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'doctor_findings'",
-    )
-    .fetch_optional(db.pool())
-    .await
-    .expect("check doctor_findings existence");
-
-    if matches!(exists, Some((count,)) if count > 0) {
-        return;
-    }
-
-    // Apply the migration SQL inline. This matches migration 61.
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS doctor_findings (
-            id                VARCHAR(36)  NOT NULL PRIMARY KEY,
-            run_id            VARCHAR(64)  NULL,
-            created_at        VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            check_name        VARCHAR(255) NOT NULL,
-            severity          VARCHAR(16)  NOT NULL,
-            entity_ids        JSONB        NOT NULL DEFAULT '[]'::jsonb,
-            evidence          JSONB        NOT NULL DEFAULT '{}'::jsonb,
-            resolver_snapshot JSONB        NULL,
-            detail            TEXT         NULL,
-            CONSTRAINT doctor_findings_severity_check
-                CHECK (severity IN ('info', 'warn', 'critical'))
-        )"#,
-    )
-    .execute(db.pool())
-    .await
-    .expect("create doctor_findings table");
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_created_at_idx ON doctor_findings (created_at DESC)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_created_at_idx");
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS doctor_findings_check_name_idx ON doctor_findings (check_name)",
-    )
-    .execute(db.pool())
-    .await
-    .expect("create doctor_findings_check_name_idx");
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_check_name_created_at_idx ON doctor_findings (check_name, created_at DESC)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_check_name_created_at_idx");
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_entity_ids_gin_idx ON doctor_findings USING GIN (entity_ids jsonb_path_ops)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_entity_ids_gin_idx");
-}
-
 /// Create a harness and ensure the schema is ready for doctor tests.
 async fn doctor_test_harness() -> McpTestHarness {
     let harness = McpTestHarness::new().await;
-    ensure_doctor_findings_schema(harness.db()).await;
+    djinn_db::test_support::ensure_doctor_findings_schema(harness.db()).await;
     harness
 }
 
@@ -716,4 +658,144 @@ async fn doctor_run_without_check_names_runs_all_registered() {
         run_count.load(Ordering::SeqCst) >= 1,
         "run() should have been called"
     );
+}
+
+/// Exercise the jk7v diagnostic payload shapes through the MCP `doctor_run`
+/// tool path.  This test registers a check that produces a finding with
+/// liveness-classifier evidence (verdict / outcome / reason — the fields
+/// that `board_health` reads from the same DB columns), runs `doctor_run`,
+/// and verifies the persisted finding carries those fields in the shape
+/// the board-health surface expects.
+///
+/// This closes AC 3: "The tests exercise the landed diagnostic fields from
+/// `jk7v` without replacing existing coarse response shape checks."
+#[tokio::test]
+async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
+    const LIVENESS_CHECK: &str = "test.doctor_liveness_jk7v";
+
+    struct LivenessEvidenceCheck;
+
+    impl DoctorCheck for LivenessEvidenceCheck {
+        fn name(&self) -> &'static str {
+            LIVENESS_CHECK
+        }
+        fn description(&self) -> &'static str {
+            "Test check that produces a finding with jk7v-aligned classifier evidence"
+        }
+        fn cadence(&self) -> DoctorCheckCadence {
+            DoctorCheckCadence::Cheap
+        }
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            let inputs = json!({ "session_id": "sess-1", "task_id": "task-1" });
+            let outputs = json!({
+                "verdict": "dead",
+                "outcome": "dead_reclaimed",
+                "reason": "hard_runtime_exceeded",
+            });
+            Ok(vec![
+                Finding::new(
+                    FindingSeverity::Critical,
+                    self.name(),
+                    ResolverSnapshot::new("resolve_liveness", inputs, outputs.clone()),
+                    "zombie session detected with dead verdict",
+                )
+                .with_entity_id("task_id", "task-1")
+                .with_entity_id("session_id", "sess-1")
+                .with_evidence(json!({
+                    "classifier": {
+                        "verdict": "dead",
+                        "outcome": "dead_reclaimed",
+                        "reason": "hard_runtime_exceeded",
+                    },
+                    "pod_phase": "Succeeded",
+                })),
+            ])
+        }
+    }
+
+    let harness = doctor_test_harness().await;
+
+    // Register our liveness-evidence-aware check in the global registry.
+    // We use a fresh AtomicBool to track whether it was found.
+    registry().register(Arc::new(LivenessEvidenceCheck));
+
+    // Run through the MCP tool.
+    let response = harness
+        .call_tool("doctor_run", json!({ "check_names": [LIVENESS_CHECK] }))
+        .await
+        .expect("doctor_run should dispatch");
+    assert_eq!(response["ok"], true);
+
+    let results = response["results"].as_array().expect("results array");
+    let our_result = results
+        .iter()
+        .find(|r| r["check"]["name"] == LIVENESS_CHECK)
+        .expect("our check result");
+    assert_eq!(our_result["ran"], true);
+
+    let findings = our_result["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 1, "must produce exactly one finding");
+
+    let finding = &findings[0];
+    assert_eq!(finding["check_name"], LIVENESS_CHECK);
+    assert_eq!(finding["severity"], "critical");
+
+    // Verify the persisted finding in the DB carries jk7v-aligned evidence.
+    let finding_id = finding["finding_id"]
+        .as_str()
+        .expect("finding_id should be present");
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    let persisted = repo
+        .get(finding_id)
+        .await
+        .expect("repo get")
+        .expect("finding must be persisted");
+
+    // The persisted evidence must carry the classifier object with the
+    // same verdict/outcome/reason fields that board_health reads.
+    let evidence = &persisted.evidence;
+    assert_eq!(
+        evidence["classifier"]["verdict"].as_str(),
+        Some("dead"),
+        "persisted evidence must carry classifier.verdict = dead"
+    );
+    assert_eq!(
+        evidence["classifier"]["outcome"].as_str(),
+        Some("dead_reclaimed"),
+        "persisted evidence must carry classifier.outcome = dead_reclaimed"
+    );
+    assert_eq!(
+        evidence["classifier"]["reason"].as_str(),
+        Some("hard_runtime_exceeded"),
+        "persisted evidence must carry classifier.reason = hard_runtime_exceeded"
+    );
+    assert_eq!(
+        evidence["pod_phase"].as_str(),
+        Some("Succeeded"),
+        "persisted evidence must carry pod_phase"
+    );
+
+    // The entity_ids must reference the same task/session as the finding.
+    assert_eq!(
+        persisted.entity_ids.get("task_id").and_then(|v| v.as_str()),
+        Some("task-1"),
+        "persisted entity_ids must carry task_id"
+    );
+    assert_eq!(
+        persisted
+            .entity_ids
+            .get("session_id")
+            .and_then(|v| v.as_str()),
+        Some("sess-1"),
+        "persisted entity_ids must carry session_id"
+    );
+
+    // The resolver snapshot must carry the liveness resolve outputs.
+    let snapshot = persisted
+        .resolver_snapshot
+        .as_ref()
+        .expect("resolver_snapshot must be persisted");
+    assert_eq!(snapshot["resolver"], "resolve_liveness");
+    assert_eq!(snapshot["outputs"]["verdict"], "dead");
+    assert_eq!(snapshot["outputs"]["outcome"], "dead_reclaimed");
 }
