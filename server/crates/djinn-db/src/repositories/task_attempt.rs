@@ -79,6 +79,22 @@ pub struct GuardDeferTaskAttemptParams<'a> {
     pub log_tail: Option<&'a str>,
 }
 
+/// Parameters for inserting a guard-only adopted-PR attempt row.
+///
+/// Similar to [`GuardDeferTaskAttemptParams`] but uses `outcome = 'adopted_pr'`
+/// instead of `outcome = 'deferred'`. The adopted-PR row is terminal and records
+/// that an existing open PR was adopted rather than spawning a duplicate worker.
+#[derive(Clone, Debug)]
+pub struct GuardAdoptedPrTaskAttemptParams<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub role: &'a str,
+    pub dispatch_key: &'a str,
+    pub pr_url: &'a str,
+    pub summary: Option<&'a str>,
+    pub summary_json: Option<&'a str>,
+}
+
 /// Parameters for filling previously-null refs/SHAs/summary/log_tail without
 /// changing the outcome/lifecycle.
 #[derive(Clone, Debug, Default)]
@@ -382,6 +398,57 @@ impl TaskAttemptRepository {
         let row = self.get_by_dispatch_key(params.dispatch_key).await?;
         row.ok_or_else(|| {
             DbError::Internal("guard_deferred task_attempt row disappeared after insert".to_owned())
+        })
+    }
+
+    /// Insert a guard-only adopted-PR attempt row.  Idempotent on `dispatch_key`.
+    ///
+    /// The row is terminal (`adopted_pr` outcome) and records the existing open PR
+    /// URL that was adopted.  The guard decision is `allow` (the adoption itself is
+    /// the guard's resolution) and the reason is `open_pr_adoption`.
+    pub async fn insert_guard_adopted_pr(
+        &self,
+        params: GuardAdoptedPrTaskAttemptParams<'_>,
+    ) -> Result<TaskAttempt> {
+        self.db.ensure_initialized().await?;
+        Self::validate_dispatch_key(params.dispatch_key)?;
+        Self::validate_summary(params.summary)?;
+        Self::validate_summary_json(params.summary_json)?;
+
+        let outcome_str = TaskAttemptOutcome::AdoptedPr.as_str();
+        let decision_str = GuardDecision::Allow.as_str();
+        let reason_str = GuardReason::OpenPrAdoption.as_str();
+        let attempt_seq = self.next_attempt_seq(params.task_id).await?;
+
+        // Runtime-checked query: avoids sqlx compile-time cache dependency for
+        // this new query.  The column/parameter types mirror `insert_guard_deferred`.
+        sqlx::query(
+            r#"INSERT INTO task_attempts
+                (id, task_id, role, attempt_seq, dispatch_key, session_id, outcome,
+                 guard_decision, guard_reason, pr_url, summary, summary_json, terminal_at)
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, $10, $11::text::jsonb,
+                     to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+             ON CONFLICT (dispatch_key) DO NOTHING"#,
+        )
+        .bind(params.id)
+        .bind(params.task_id)
+        .bind(params.role)
+        .bind(attempt_seq)
+        .bind(params.dispatch_key)
+        .bind(outcome_str)
+        .bind(decision_str)
+        .bind(reason_str)
+        .bind(params.pr_url)
+        .bind(params.summary)
+        .bind(params.summary_json)
+        .execute(self.db.pool())
+        .await?;
+
+        let row = self.get_by_dispatch_key(params.dispatch_key).await?;
+        row.ok_or_else(|| {
+            DbError::Internal(
+                "guard_adopted_pr task_attempt row disappeared after insert".to_owned(),
+            )
         })
     }
 
