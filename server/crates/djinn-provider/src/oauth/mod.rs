@@ -1,6 +1,7 @@
 pub mod codex;
 pub mod copilot;
 pub mod github_app_user;
+pub mod keepalive;
 
 use crate::provider::{AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig};
 
