@@ -864,7 +864,7 @@ impl TaskAttemptRepository {
         // Runtime query: avoids sqlx compile-time cache dependency.
         // Uses the same SELECT columns as existing history/list queries.
         let base = r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
-                outcome, guard_decision, guard_reason, summary, summary_json,
+                outcome, guard_decision, guard_reason, summary, summary_json::text,
                 log_tail, checkpoint_ref, submit_ref, pr_url,
                 mirror_head_sha, github_head_sha,
                 created_at, updated_at, submitted_at, terminal_at
@@ -1631,7 +1631,7 @@ mod tests {
                 task_id: &task_id,
                 role: "worker",
                 dispatch_key: &format!("dk-ledger-{i}"),
-                session_id: Some(&format!("session-{i}")),
+                session_id: None,
                 attempt_seq: None,
             })
             .await
