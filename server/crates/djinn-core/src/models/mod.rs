@@ -37,9 +37,9 @@ pub use task::{
     compute_transition, compute_transition_for_issue_type,
 };
 pub use task_attempt::{
-    GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
-    TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
-    TaskAttemptPromptSummary,
+    GuardDecision, GuardReason, LogTailMeta, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN,
+    TASK_ATTEMPT_LOG_TAIL_MAX_LEN, TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt,
+    TaskAttemptHistoryRow, TaskAttemptLedgerRow, TaskAttemptOutcome, TaskAttemptPromptSummary,
 };
 pub use task_run::{TaskRunRecord, TaskRunStatus, TaskRunTrigger};
 pub use user_settings::{ModelLane, ModelLanes, UserSettings};
