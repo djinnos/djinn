@@ -1655,26 +1655,28 @@ impl CoordinatorActor {
             }
 
             // uv3p Part B: forced model rotation on the post-intervention retry
-            // path. When the human-park rung declined to park because no session
+            // path. When the human-park rung declined to park because no attempt
             // has reached submit_work yet, it redispatches — but a redispatch to
             // the SAME model that just terminated pre-submission (loop-guard trip,
-            // infra death) would loop identically (kibj went back to k2p7 twice).
-            // Drop the models whose post-intervention sessions terminated without
-            // submitting, derived from durable session history so no new state is
-            // needed. Degrades to the unfiltered list when exclusion would empty
-            // it (only one viable model → plan-lane retry, then park at the bound).
+            // infra death) would loop identically. Exclusions are derived from
+            // `task_attempts` rows via `PostInterventionHistory::rotation_excluded_models()`;
+            // only actual model IDs (provider/model) are excluded — outcome
+            // fallback strings from failed session lookups are skipped.
+            // Degrades to the unfiltered list when exclusion would empty it
+            // (only one viable model → plan-lane retry, then park at the bound).
             if role == "worker" && task.intervention_count >= 1 {
                 let history = self.post_intervention_history(&task).await;
-                if !history.non_attempt_models.is_empty() {
+                let rotation_excluded = history.rotation_excluded_models();
+                if !rotation_excluded.is_empty() {
                     let filtered: Vec<String> = model_ids
                         .iter()
-                        .filter(|m| !history.non_attempt_models.contains(m))
+                        .filter(|m| !rotation_excluded.contains(m))
                         .cloned()
                         .collect();
                     if !filtered.is_empty() && filtered.len() < model_ids.len() {
                         tracing::info!(
                             task_id = %task.short_id,
-                            excluded = ?history.non_attempt_models,
+                            excluded = ?rotation_excluded,
                             "uv3p: forcing model rotation on post-intervention redispatch — excluding models that terminated pre-submission"
                         );
                         model_ids = filtered;
