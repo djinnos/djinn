@@ -8,7 +8,7 @@ use crate::message::{ContentBlock, Conversation};
 use crate::provider::client::ApiClient;
 use crate::provider::format::tool_projection::project;
 use crate::provider::{
-    FormatFamily, LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice,
+    FormatFamily, LlmProvider, ProviderConfig, ProviderError, StreamEvent, TokenUsage, ToolChoice,
 };
 
 pub struct GoogleProvider {
@@ -264,24 +264,29 @@ impl LlmProvider for GoogleProvider {
             let raw = self.client.stream_sse(&url, body, &auth, extra_headers);
             let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                 Box::pin(stream! {
-                    let mut emitted_done = false;
+                    let mut seen_terminal = false;
                     let mut raw_stream = raw;
                     while let Some(result) = raw_stream.next().await {
                         match result {
                             Err(e) => { yield Err(e); return; }
                             Ok(line) => {
                                 for event in parse_google_line(&line) {
-                                    let is_done = matches!(event, StreamEvent::Done);
-                                    yield Ok(event);
-                                    if is_done {
-                                        emitted_done = true;
+                                    if matches!(event, StreamEvent::Done) {
+                                        seen_terminal = true;
                                     }
+                                    yield Ok(event);
                                 }
                             }
                         }
                     }
-                    if !emitted_done {
-                        yield Ok(StreamEvent::Done);
+                    // Raw EOF before the Google terminal signal (finishReason) is
+                    // a truncated / stalled stream, not a complete turn. Yield a
+                    // typed retryable failure so the breaker and failover logic
+                    // can react.
+                    if !seen_terminal {
+                        tracing::warn!("google stream ended before terminal signal");
+                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                            .context("stream ended before terminal signal"));
                     }
                 });
             Ok(out)
@@ -296,7 +301,8 @@ mod tests {
     use super::*;
     use crate::message::{Conversation, Message};
     use crate::provider::{
-        AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ToolSchemaCompat,
+        AuthMethod, FormatFamily, ProviderCapabilities, ProviderConfig, ProviderError,
+        ToolSchemaCompat,
     };
     use axum::{Router, routing::post};
     use futures::TryStreamExt;
@@ -682,6 +688,45 @@ mod tests {
             })
         ));
         assert!(matches!(&events[2], StreamEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stream_raw_eof_before_terminal_yields_error() {
+        // A stream that emits data deltas but ends (raw EOF) before any
+        // finishReason must yield a typed retryable Transport error, not
+        // a synthesized StreamEvent::Done.
+        let seen_auth = Arc::new(Mutex::new(None));
+        let body = concat!(
+            "event: response.output_text.delta\\n",
+            "data: {\\\"candidates\\\":[{\\\"content\\\":{\\\"parts\\\":[{\\\"text\\\":\\\"partial\\\"}],\\\"role\\\":\\\"model\\\"}}]}\\n\\n"
+        );
+        let base_url = spawn_sse_server(200, body, seen_auth.clone());
+        let provider = GoogleProvider::new(ProviderConfig {
+            base_url,
+            ..test_google_config()
+        });
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let err = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("raw EOF before terminal must yield Err");
+
+        let pe = err
+            .downcast_ref::<ProviderError>()
+            .expect("typed ProviderError must be downcastable");
+        assert_eq!(*pe, ProviderError::Transport);
+        assert!(pe.retryable(), "truncated stream must be retryable");
+        assert!(
+            err.to_string().contains("terminal signal"),
+            "error message must mention terminal signal: {}",
+            err
+        );
     }
 
     #[tokio::test]

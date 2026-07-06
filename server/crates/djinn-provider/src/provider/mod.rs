@@ -228,6 +228,63 @@ pub fn default_reasoning_effort_for_model(
     }
 }
 
+/// Pre-resolved model-dependent metadata for the target of a provider config
+/// restamp. Callers build this from catalog / builtin-provider lookups before
+/// calling [`restamp_provider_config_for_model`].
+#[derive(Clone, Debug)]
+pub struct RestampTarget {
+    /// Wire model ID to send on requests.
+    pub model_id: String,
+    /// Wire format family for the target provider/model.
+    pub format_family: FormatFamily,
+    /// Whether the target model supports reasoning (from catalog metadata).
+    pub reasoning: bool,
+    /// Context window size in tokens for the target model.
+    pub context_window: u32,
+    /// Provider-level capabilities for the target provider.
+    pub capabilities: ProviderCapabilities,
+    /// Tool-schema compatibility quirk for the target provider/model.
+    pub tool_schema_compat: Option<ToolSchemaCompat>,
+}
+
+/// Stamp a target provider/model onto an existing [`ProviderConfig`] and
+/// re-resolve model-dependent defaults.
+///
+/// This is the central helper for failover / model-restamp paths: instead of
+/// mutating only `model_id` and carrying stale defaults from the previous
+/// model, this re-resolves every model-dependent field from `target`.
+///
+/// Model-dependent fields that are **re-resolved** from `target`:
+/// - `model_id`
+/// - `format_family`
+/// - `context_window`
+/// - `capabilities` (including `max_tokens_default`)
+/// - `reasoning_effort` (via [`default_reasoning_effort_for_model`])
+/// - `tool_schema_compat`
+///
+/// Transport / session fields that are **preserved** from the original config:
+/// - `base_url`
+/// - `auth`
+/// - `telemetry`
+/// - `session_affinity_key`
+/// - `provider_headers`
+pub fn restamp_provider_config_for_model(
+    mut config: ProviderConfig,
+    target: &RestampTarget,
+) -> ProviderConfig {
+    config.model_id = target.model_id.clone();
+    config.format_family = target.format_family;
+    config.context_window = target.context_window;
+    config.capabilities = target.capabilities.clone();
+    config.reasoning_effort = default_reasoning_effort_for_model(
+        target.reasoning,
+        target.format_family,
+        &target.model_id,
+    );
+    config.tool_schema_compat = target.tool_schema_compat;
+    config
+}
+
 // ─── Provider configuration ───────────────────────────────────────────────────
 
 /// Configuration for a single provider instance.
@@ -595,5 +652,249 @@ mod reasoning_effort_override_tests {
                 "{family:?}: native config must default to tool_schema_compat = None"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod restamp_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Build a source config that looks like a non-reasoning OpenAI model
+    /// with no max_tokens default — the "before failover" state.
+    fn openai_source_config() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://custom-proxy.example.test".to_string(),
+            auth: AuthMethod::BearerToken("test-bearer-token".to_string()),
+            format_family: FormatFamily::OpenAI,
+            model_id: "gpt-4o".to_string(),
+            context_window: 128_000,
+            telemetry: Some(TelemetryMeta {
+                task_id: Some("task-42".to_string()),
+                agent_type: Some("worker".to_string()),
+                session_id: Some("sess-99".to_string()),
+                operation: Some("complete".to_string()),
+                user_id: Some("user-7".to_string()),
+            }),
+            session_affinity_key: Some("affinity-key-77".to_string()),
+            provider_headers: {
+                let mut h = HashMap::new();
+                h.insert("chatgpt-account-id".to_string(), "acct-123".to_string());
+                h
+            },
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: None,
+            },
+            reasoning_effort: None,
+            tool_schema_compat: None,
+        }
+    }
+
+    /// Target metadata for an Anthropic reasoning-capable model (e.g.
+    /// Claude Sonnet 4) — the "failover target" state.
+    fn anthropic_reasoning_target() -> RestampTarget {
+        RestampTarget {
+            model_id: "claude-sonnet-4".to_string(),
+            format_family: FormatFamily::Anthropic,
+            reasoning: true,
+            context_window: 200_000,
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            tool_schema_compat: None,
+        }
+    }
+
+    // ── AC 2: restamp resolves target model_id, reasoning_effort, and
+    //          max_tokens_default ──────────────────────────────────────────
+
+    #[test]
+    fn restamp_to_anthropic_reasoning_model_resolves_all_model_defaults() {
+        let result = restamp_provider_config_for_model(
+            openai_source_config(),
+            &anthropic_reasoning_target(),
+        );
+
+        assert_eq!(
+            result.model_id, "claude-sonnet-4",
+            "model_id must be stamped to the target"
+        );
+        assert_eq!(
+            result.reasoning_effort,
+            Some(ReasoningEffort::Medium),
+            "Anthropic-format reasoning-capable model must resolve to Medium"
+        );
+        assert_eq!(
+            result.capabilities.max_tokens_default,
+            Some(64_000),
+            "max_tokens_default must be re-resolved from the target capabilities"
+        );
+        assert_eq!(
+            result.format_family,
+            FormatFamily::Anthropic,
+            "format_family must be stamped to the target"
+        );
+        assert_eq!(
+            result.context_window, 200_000,
+            "context_window must be stamped to the target"
+        );
+    }
+
+    #[test]
+    fn restamp_to_non_reasoning_model_clears_reasoning_effort() {
+        let mut target = anthropic_reasoning_target();
+        target.reasoning = false;
+
+        let result = restamp_provider_config_for_model(openai_source_config(), &target);
+
+        assert_eq!(
+            result.reasoning_effort, None,
+            "non-reasoning target must resolve to None reasoning_effort"
+        );
+        assert_eq!(result.model_id, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn restamp_from_reasoning_to_non_reasoning_target_downgrades_effort() {
+        // Source starts with an explicit strong tier.
+        let mut source = openai_source_config();
+        source.reasoning_effort = Some(ReasoningEffort::High);
+
+        // Target is a non-reasoning OpenAI model.
+        let target = RestampTarget {
+            model_id: "gpt-4.1-mini".to_string(),
+            format_family: FormatFamily::OpenAI,
+            reasoning: false,
+            context_window: 1_000_000,
+            capabilities: ProviderCapabilities::default(),
+            tool_schema_compat: None,
+        };
+
+        let result = restamp_provider_config_for_model(source, &target);
+
+        assert_eq!(
+            result.reasoning_effort, None,
+            "non-reasoning target must not inherit the source's reasoning_effort"
+        );
+        assert_eq!(result.model_id, "gpt-4.1-mini");
+    }
+
+    // ── AC 3: transport / session fields are preserved ───────────────────
+
+    #[test]
+    fn restamp_preserves_auth_base_url_and_session_fields() {
+        let result = restamp_provider_config_for_model(
+            openai_source_config(),
+            &anthropic_reasoning_target(),
+        );
+
+        // base_url
+        assert_eq!(
+            result.base_url, "https://custom-proxy.example.test",
+            "base_url must be preserved"
+        );
+
+        // auth (AuthMethod does not impl PartialEq — pattern-match)
+        match &result.auth {
+            AuthMethod::BearerToken(token) => {
+                assert_eq!(token, "test-bearer-token", "auth must be preserved");
+            }
+            _ => panic!("expected BearerToken auth"),
+        }
+
+        // session_affinity_key
+        assert_eq!(
+            result.session_affinity_key,
+            Some("affinity-key-77".to_string()),
+            "session_affinity_key must be preserved"
+        );
+
+        // provider_headers
+        let mut expected_headers = HashMap::new();
+        expected_headers.insert("chatgpt-account-id".to_string(), "acct-123".to_string());
+        assert_eq!(
+            result.provider_headers, expected_headers,
+            "provider_headers must be preserved"
+        );
+    }
+
+    #[test]
+    fn restamp_preserves_telemetry_metadata() {
+        let result = restamp_provider_config_for_model(
+            openai_source_config(),
+            &anthropic_reasoning_target(),
+        );
+
+        let tel = result
+            .telemetry
+            .as_ref()
+            .expect("telemetry must be preserved");
+        assert_eq!(tel.task_id.as_deref(), Some("task-42"));
+        assert_eq!(tel.agent_type.as_deref(), Some("worker"));
+        assert_eq!(tel.session_id.as_deref(), Some("sess-99"));
+        assert_eq!(tel.operation.as_deref(), Some("complete"));
+        assert_eq!(tel.user_id.as_deref(), Some("user-7"));
+    }
+
+    // ── tool_schema_compat re-resolution ─────────────────────────────────
+
+    #[test]
+    fn restamp_stamps_target_tool_schema_compat() {
+        let mut target = anthropic_reasoning_target();
+        target.tool_schema_compat = Some(ToolSchemaCompat::Moonshot);
+
+        let result = restamp_provider_config_for_model(openai_source_config(), &target);
+
+        assert_eq!(
+            result.tool_schema_compat,
+            Some(ToolSchemaCompat::Moonshot),
+            "tool_schema_compat must be stamped from the target"
+        );
+    }
+
+    #[test]
+    fn restamp_from_quirk_to_identity_clears_tool_schema_compat() {
+        let mut source = openai_source_config();
+        source.tool_schema_compat = Some(ToolSchemaCompat::Moonshot);
+
+        let target = anthropic_reasoning_target(); // tool_schema_compat: None
+
+        let result = restamp_provider_config_for_model(source, &target);
+
+        assert_eq!(
+            result.tool_schema_compat, None,
+            "restamping to identity target must clear a prior quirk"
+        );
+    }
+
+    // ── Round-trip / idempotency ─────────────────────────────────────────
+
+    #[test]
+    fn restamp_is_idempotent_when_target_matches_current_state() {
+        // First restamp: OpenAI source → Anthropic target.
+        let first = restamp_provider_config_for_model(
+            openai_source_config(),
+            &anthropic_reasoning_target(),
+        );
+
+        // Second restamp with the same target should produce the same
+        // model-dependent fields.
+        let second =
+            restamp_provider_config_for_model(first.clone(), &anthropic_reasoning_target());
+
+        assert_eq!(second.model_id, first.model_id);
+        assert_eq!(second.format_family, first.format_family);
+        assert_eq!(second.context_window, first.context_window);
+        assert_eq!(second.reasoning_effort, first.reasoning_effort);
+        assert_eq!(
+            second.capabilities.max_tokens_default,
+            first.capabilities.max_tokens_default
+        );
+        assert_eq!(second.tool_schema_compat, first.tool_schema_compat);
+        // Transport fields also survive the double restamp.
+        assert_eq!(second.base_url, first.base_url);
+        assert_eq!(second.session_affinity_key, first.session_affinity_key);
     }
 }

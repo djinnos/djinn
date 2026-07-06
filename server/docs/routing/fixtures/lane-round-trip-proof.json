@@ -1,0 +1,283 @@
+{
+  "$schema": "lane-round-trip-proof",
+  "$doc": "Deterministic proof that snapshot -> apply -> rollback restores the original lane JSON. No database or production credentials required.",
+  "snapshot_version": 1,
+
+  "pre_snapshot": {
+    "snapshot_version": 1,
+    "captured_at": "2026-07-06T12:00:00.000Z",
+    "description": "Pre-rollout lane snapshot for epic 5wxi lane demotion",
+    "user_settings": {
+      "user-alpha": {
+        "model_lanes": {
+          "plan": ["anthropic/claude-opus-4-7"],
+          "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+          "review": ["anthropic/claude-opus-4-7"]
+        },
+        "captured_at": "2026-07-01T10:00:00.000Z"
+      },
+      "user-beta": {
+        "model_lanes": {
+          "plan": [],
+          "implement": ["anthropic/claude-opus-4-7"],
+          "review": []
+        },
+        "captured_at": "2026-06-15T08:30:00.000Z"
+      },
+      "user-gamma": {
+        "model_lanes": null,
+        "captured_at": "2026-06-01T00:00:00.000Z"
+      }
+    },
+    "org_ai_policy": {
+      "default_lanes": {
+        "plan": ["openai/gpt-5.5"],
+        "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+        "review": ["anthropic/claude-opus-4-7", "openai/gpt-5.5"]
+      },
+      "lock_level": "flexible",
+      "blocked_subscriptions": [],
+      "captured_at": "2026-07-05T14:00:00.000Z"
+    }
+  },
+
+  "apply_payload": {
+    "user_settings": {
+      "user-alpha": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        }
+      },
+      "user-beta": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        }
+      },
+      "user-gamma": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        }
+      }
+    },
+    "org_ai_policy": {
+      "default_lanes": {
+        "plan": [],
+        "implement": [
+          "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+          "zai-coding-plan/glm-5.2",
+          "kimi-for-coding/k2p7",
+          "minimax-coding-plan/MiniMax-M3"
+        ],
+        "review": [
+          "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+          "zai-coding-plan/glm-5.2",
+          "kimi-for-coding/k2p7",
+          "minimax-coding-plan/MiniMax-M3"
+        ]
+      }
+    }
+  },
+
+  "post_apply": {
+    "snapshot_version": 1,
+    "captured_at": "2026-07-06T12:05:00.000Z",
+    "description": "State after apply",
+    "user_settings": {
+      "user-alpha": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        },
+        "captured_at": "2026-07-06T12:05:00.000Z"
+      },
+      "user-beta": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        },
+        "captured_at": "2026-07-06T12:05:00.000Z"
+      },
+      "user-gamma": {
+        "model_lanes": {
+          "plan": [],
+          "implement": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ],
+          "review": [
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            "zai-coding-plan/glm-5.2",
+            "kimi-for-coding/k2p7",
+            "minimax-coding-plan/MiniMax-M3"
+          ]
+        },
+        "captured_at": "2026-07-06T12:05:00.000Z"
+      }
+    },
+    "org_ai_policy": {
+      "default_lanes": {
+        "plan": [],
+        "implement": [
+          "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+          "zai-coding-plan/glm-5.2",
+          "kimi-for-coding/k2p7",
+          "minimax-coding-plan/MiniMax-M3"
+        ],
+        "review": [
+          "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+          "zai-coding-plan/glm-5.2",
+          "kimi-for-coding/k2p7",
+          "minimax-coding-plan/MiniMax-M3"
+        ]
+      },
+      "lock_level": "flexible",
+      "blocked_subscriptions": [],
+      "captured_at": "2026-07-06T12:05:00.000Z"
+    }
+  },
+
+  "rollback_restore": {
+    "$doc": "This section equals pre_snapshot — the operator restores these values during rollback.",
+    "snapshot_version": 1,
+    "captured_at": "2026-07-06T12:00:00.000Z",
+    "description": "Pre-rollout lane snapshot for epic 5wxi lane demotion",
+    "user_settings": {
+      "user-alpha": {
+        "model_lanes": {
+          "plan": ["anthropic/claude-opus-4-7"],
+          "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+          "review": ["anthropic/claude-opus-4-7"]
+        },
+        "captured_at": "2026-07-01T10:00:00.000Z"
+      },
+      "user-beta": {
+        "model_lanes": {
+          "plan": [],
+          "implement": ["anthropic/claude-opus-4-7"],
+          "review": []
+        },
+        "captured_at": "2026-06-15T08:30:00.000Z"
+      },
+      "user-gamma": {
+        "model_lanes": null,
+        "captured_at": "2026-06-01T00:00:00.000Z"
+      }
+    },
+    "org_ai_policy": {
+      "default_lanes": {
+        "plan": ["openai/gpt-5.5"],
+        "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+        "review": ["anthropic/claude-opus-4-7", "openai/gpt-5.5"]
+      },
+      "lock_level": "flexible",
+      "blocked_subscriptions": [],
+      "captured_at": "2026-07-05T14:00:00.000Z"
+    }
+  },
+
+  "post_rollback": {
+    "snapshot_version": 1,
+    "captured_at": "2026-07-06T12:00:00.000Z",
+    "description": "Pre-rollout lane snapshot for epic 5wxi lane demotion",
+    "user_settings": {
+      "user-alpha": {
+        "model_lanes": {
+          "plan": ["anthropic/claude-opus-4-7"],
+          "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+          "review": ["anthropic/claude-opus-4-7"]
+        },
+        "captured_at": "2026-07-01T10:00:00.000Z"
+      },
+      "user-beta": {
+        "model_lanes": {
+          "plan": [],
+          "implement": ["anthropic/claude-opus-4-7"],
+          "review": []
+        },
+        "captured_at": "2026-06-15T08:30:00.000Z"
+      },
+      "user-gamma": {
+        "model_lanes": null,
+        "captured_at": "2026-06-01T00:00:00.000Z"
+      }
+    },
+    "org_ai_policy": {
+      "default_lanes": {
+        "plan": ["openai/gpt-5.5"],
+        "implement": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"],
+        "review": ["anthropic/claude-opus-4-7", "openai/gpt-5.5"]
+      },
+      "lock_level": "flexible",
+      "blocked_subscriptions": [],
+      "captured_at": "2026-07-05T14:00:00.000Z"
+    }
+  },
+
+  "assertions": {
+    "post_rollback_equals_pre_snapshot": true,
+    "apply_changes_implement_index0": "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+    "rollback_restores_implement_index0": "openai/gpt-5.5",
+    "last_resort_indices": [2, 3],
+    "last_resort_models": ["kimi-for-coding/k2p7", "minimax-coding-plan/MiniMax-M3"]
+  }
+}
