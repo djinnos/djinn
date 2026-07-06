@@ -3,6 +3,7 @@ use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -560,9 +561,13 @@ impl CoordinatorActor {
     }
 
     /// uv3p Part B: what the fleet actually did since the current intervention
-    /// (or since a human released a prior hold), computed from durable sessions
-    /// and activity — the source of both the park-vs-redispatch decision and the
+    /// (or since a human released a prior hold), derived from `task_attempts`
+    /// rows — the source of both the park-vs-redispatch decision and the
     /// truthful park reason. Never templated.
+    ///
+    /// Primary source of truth is `task_attempts` rows newer than the evidence
+    /// floor (last intervention or hold release). Activity-log `work_submitted`
+    /// and raw session lists are no longer consulted.
     pub(crate) async fn post_intervention_history(
         &self,
         task: &djinn_core::models::Task,
@@ -571,6 +576,10 @@ impl CoordinatorActor {
         // human-review hold resolution. Sessions/strikes before this floor are
         // pre-intervention (or already-adjudicated pre-release) noise, not
         // evidence the CURRENT remediation was attempted.
+        //
+        // `task_attempts` rows created_at is the dispatch time; `submitted_at`
+        // is the worker submit signal time. Both are compared against the floor
+        // to classify post-intervention evidence.
         let resolved_at = self
             .task_repo()
             .human_review_resolved_at(&task.id)
@@ -588,46 +597,21 @@ impl CoordinatorActor {
 
         // Determine the class of the most recent post-intervention reopen so
         // the reason can truthfully attribute the park to the correct trigger.
-        let most_recent_reopen_class = self
-            .task_repo()
-            .recent_reopen_ledger(&task.id, 1)
-            .await
-            .ok()
-            .and_then(|mut ledger| ledger.pop())
-            .filter(|entry| entry.created_at > floor)
-            .map(|entry| entry.reopen_class)
-            .unwrap_or(djinn_core::models::ReopenClass::Other);
+        // Derives from attempt outcomes rather than the reopen ledger so both
+        // signals stay in sync with the attempt substrate.
+        let mut most_recent_reopen_class = ReopenClass::Other;
 
-        // Did any post-intervention session reach submit_work?
-        let (any_submitted, latest_submission_at) = match self
-            .task_repo()
-            .query_activity(ActivityQuery {
-                task_id: Some(task.id.clone()),
-                event_type: Some("work_submitted".to_string()),
-                actor_role: None,
-                project_id: None,
-                from_time: None,
-                to_time: None,
-                limit: 200,
-                offset: 0,
-            })
-            .await
-        {
-            Ok(entries) => {
-                let latest = entries
-                    .iter()
-                    .filter(|entry| entry.created_at.as_str() > floor.as_str())
-                    .map(|entry| entry.created_at.clone())
-                    .max();
-                (latest.is_some(), latest)
-            }
+        // Primary source of truth: `task_attempts` rows for this task.
+        let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+        let all_attempts = match attempt_repo.list_for_task(&task.id).await {
+            Ok(attempts) => attempts,
             Err(e) => {
-                // Fail safe: without evidence, treat as "attempted" so the caller
-                // parks rather than looping — the conservative direction.
+                // Fail safe: without evidence, treat as "attempted" so the
+                // caller parks rather than looping — the conservative direction.
                 tracing::warn!(
                     task_id = %task.short_id,
                     error = %e,
-                    "uv3p: post-intervention work_submitted lookup failed; treating as attempted"
+                    "uv3p: post-intervention task_attempts lookup failed; treating as attempted"
                 );
                 return PostInterventionHistory {
                     any_submitted: true,
@@ -637,15 +621,60 @@ impl CoordinatorActor {
             }
         };
 
+        // Filter to post-floor worker attempts. Guard-only rows (deferred,
+        // adopted_pr) are excluded from remediation evidence.
+        let post_floor: Vec<_> = all_attempts
+            .iter()
+            .filter(|a| a.role == "worker" && a.created_at.as_str() > floor.as_str())
+            .collect();
+
+        // Track submitted attempts (rows that reached the `submitted` outcome
+        // or have a non-null submitted_at). The newest post-floor `submitted`
+        // row is in-flight and must not count as failed/non-attempt evidence.
+        let any_submitted = post_floor
+            .iter()
+            .any(|a| a.outcome == "submitted" || a.submitted_at.is_some());
+        let latest_submission_at = post_floor
+            .iter()
+            .filter_map(|a| a.submitted_at.as_deref())
+            .max()
+            .map(|s| s.to_string());
+
         if any_submitted {
-            // Check if the submission is still pending review. A post-intervention
-            // session submitted work, but if the task hasn't been reviewed/rejected
-            // yet, the round is still in flight and the park must not fire.
-            // Additionally, CI evidence whose head SHA predates the latest submitted
-            // work (ci_first_seen_at before the submission) is stale and must not
-            // serve as a park-triggering strike.
-            let submission_pending_review =
-                matches!(task.status.as_str(), "needs_task_review" | "in_task_review");
+            // A post-intervention attempt submitted work. Determine whether
+            // the submission is still pending review (no newer terminal
+            // rejection/CI-failure exists) or has been rejected.
+            //
+            // `pending` and `submitted` rows are in-flight and do NOT count as
+            // terminal evidence. Terminal submitted attempts (`reopened`,
+            // `completed`, etc.) count as actual attempted remediation.
+            let submission_pending_review = {
+                // A newer terminal rejection after the latest submission means
+                // the submission concluded (was rejected). If no such terminal
+                // exists, the submission is still pending review.
+                let has_terminal_rejection_after_submission = post_floor
+                    .iter()
+                    .filter(|a| a.is_terminal() && a.submitted_at.is_some())
+                    .any(|a| {
+                        let ts = a.terminal_at.as_deref().unwrap_or(a.created_at.as_str());
+                        ts > latest_submission_at.as_deref().unwrap_or("")
+                    });
+                !has_terminal_rejection_after_submission
+            };
+
+            // Derive reopen class from the newest post-floor terminal
+            // rejection that was a submitted attempt (i.e. it concluded after
+            // submission).
+            if let Some(newest_terminal_rejection) = post_floor
+                .iter()
+                .filter(|a| a.is_terminal() && a.submitted_at.is_some())
+                .max_by_key(|a| a.terminal_at.as_deref().unwrap_or(a.created_at.as_str()))
+                && let Ok(outcome_enum) = newest_terminal_rejection.outcome_enum()
+            {
+                most_recent_reopen_class =
+                    outcome_to_reopen_class(&outcome_enum).unwrap_or(ReopenClass::Other);
+            }
+
             return PostInterventionHistory {
                 any_submitted: true,
                 submission_pending_review,
@@ -655,34 +684,68 @@ impl CoordinatorActor {
             };
         }
 
-        // No submit: enumerate the TERMINATED post-intervention worker sessions
-        // and collect their distinct models (rotation exclusion + non-attempt
-        // bound). `list_for_task` is DESC by started_at; reverse for chronology.
+        // No submit: enumerate the post-floor worker attempts that terminated
+        // pre-submission (crashed, timed_out, cancelled, spawn_failed,
+        // loop_guard_tripped, deferred — no `submitted_at`). These contribute
+        // to non-attempt model/label tracking for the park rung.
+        // `pending` rows are in flight and must not count as failed evidence.
+        //
+        // Look up sessions for the task so we can resolve the model_id for each
+        // pre-submission terminal attempt (the attempt's `session_id` links to
+        // the session that carried the model).
         let session_repo = djinn_db::SessionRepository::new(
             self.db.clone(),
             crate::events::event_bus_for(&self.events_tx),
         );
-        let sessions = session_repo
-            .list_for_task(&task.id)
-            .await
-            .unwrap_or_default();
+        let session_model_map: std::collections::HashMap<String, String> =
+            match session_repo.list_for_task(&task.id).await {
+                Ok(sessions) => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        session_count = sessions.len(),
+                        "uv3p: session model map built from task sessions"
+                    );
+                    sessions
+                        .into_iter()
+                        .map(|s| (s.id.clone(), s.model_id.clone()))
+                        .collect()
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "uv3p: session lookup for model resolution failed; using outcome labels"
+                    );
+                    std::collections::HashMap::new()
+                }
+            };
+
         let mut non_attempt_models: Vec<String> = Vec::new();
         let mut non_attempt_session_labels: Vec<String> = Vec::new();
-        for session in sessions.iter().rev() {
-            if session.agent_type != "worker" {
+        for attempt in post_floor.iter() {
+            if !attempt.is_terminal() {
+                // Pending/in-flight: skip.
                 continue;
             }
-            if session.started_at.as_str() <= floor.as_str() {
+            if attempt.submitted_at.is_some() {
+                // Submitted then terminal: this is an attempted remediation,
+                // not a non-attempt. (We'd have entered the any_submitted
+                // branch above if this existed.)
                 continue;
             }
-            // Still running → an in-flight attempt, not a termination.
-            if session.ended_at.is_none() {
-                continue;
-            }
-            let id8: String = session.id.chars().take(8).collect();
-            non_attempt_session_labels.push(format!("sess {id8} ({})", session.model_id));
-            if !non_attempt_models.contains(&session.model_id) {
-                non_attempt_models.push(session.model_id.clone());
+            // Pre-submission terminal: count toward non-attempt evidence.
+            // Resolve the model_id from the linked session when available,
+            // falling back to the attempt outcome for model-rotation exclusion.
+            let model_label = attempt
+                .session_id
+                .as_deref()
+                .and_then(|sid| session_model_map.get(sid))
+                .map(|m| m.as_str())
+                .unwrap_or(attempt.outcome.as_str());
+            let id8: String = attempt.id.chars().take(8).collect();
+            non_attempt_session_labels.push(format!("attempt {id8} ({model_label})"));
+            if !non_attempt_models.contains(&model_label.to_string()) {
+                non_attempt_models.push(model_label.to_string());
             }
         }
 
@@ -1916,6 +1979,23 @@ impl CoordinatorActor {
                 );
             }
         }
+    }
+}
+
+/// Map a terminal `TaskAttemptOutcome` to a [`ReopenClass`] for truthful park
+/// reason attribution. Returns `None` for guard-only or unknown outcomes.
+fn outcome_to_reopen_class(outcome: &TaskAttemptOutcome) -> Option<ReopenClass> {
+    match outcome {
+        TaskAttemptOutcome::Reopened | TaskAttemptOutcome::ForceClosed => {
+            Some(ReopenClass::ReviewRejected)
+        }
+        TaskAttemptOutcome::Completed => Some(ReopenClass::Other),
+        // Guard-only or not a submission-triggered terminal.
+        TaskAttemptOutcome::Deferred
+        | TaskAttemptOutcome::AdoptedPr
+        | TaskAttemptOutcome::Handoff => None,
+        // Pre-submission terminals and unknown: not a reopen.
+        _ => None,
     }
 }
 

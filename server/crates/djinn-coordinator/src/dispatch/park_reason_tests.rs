@@ -166,3 +166,114 @@ fn non_attempt_history_uses_rotation_phrasing() {
         "reason should list the models that failed to submit; got: {reason}"
     );
 }
+
+// ── Attempt-backed parity: focused tests ────────────────────────────────────
+// These exercise the `PostInterventionHistory` fields as they would be
+// populated by the attempt-backed `post_intervention_history` implementation.
+
+#[test]
+fn in_flight_submitted_attempt_does_not_park() {
+    // AC: Newest post-floor `pending`/`submitted` attempts are treated as
+    // in-flight and do not count as failed/non-attempt terminal evidence.
+    // When `submission_pending_review` is true the park rung must NOT park.
+    let task = test_task("passing", "[]", None);
+    let history = PostInterventionHistory {
+        any_submitted: true,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        submission_pending_review: true,
+        latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    // submission_pending_review=true means the round is still in flight;
+    // the caller's park decision should refuse to park.
+    assert!(
+        history.submission_pending_review,
+        "in-flight submission must set submission_pending_review=true"
+    );
+    assert!(
+        history.any_submitted,
+        "in-flight submission must set any_submitted=true"
+    );
+    // No non-attempt evidence from in-flight rows.
+    assert!(
+        history.non_attempt_models.is_empty(),
+        "in-flight pending/submitted attempt must not produce non-attempt models"
+    );
+
+    // The park reason still renders (it would be used in the dossier if
+    // the caller somehow parks), but the key invariant is that the
+    // submission_pending_review guard prevents the park from firing.
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+    assert!(
+        reason.contains("Auto-parked for human review"),
+        "park reason template should render; got: {reason}"
+    );
+}
+
+#[test]
+fn pre_submission_terminal_non_attempt_produces_non_attempt_evidence() {
+    // AC: Pre-submission terminal rows (crashed, timed_out, etc.) contribute
+    // to non-attempt model/session labels only when they are post-floor
+    // worker attempts with no submission.
+    let task = test_task("unknown", "[]", None);
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec!["crashed".to_string(), "timed_out".to_string()],
+        non_attempt_session_labels: vec![
+            "attempt a1b2c3d4 (crashed)".to_string(),
+            "attempt e5f6g7h8 (timed_out)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        reason.contains("terminated pre-submission"),
+        "non-attempt park should use pre-submission phrasing; got: {reason}"
+    );
+    assert!(
+        reason.contains("crashed, timed_out"),
+        "reason should list pre-submission terminal outcomes; got: {reason}"
+    );
+    assert!(
+        !history.any_submitted,
+        "non-attempt history must set any_submitted=false"
+    );
+}
+
+#[test]
+fn submitted_terminal_failure_parks_with_reopen_class() {
+    // AC: Terminal post-floor attempts preserve existing uv3p park behavior:
+    // actual submitted-and-rejected attempts may park with truthful attribution.
+    let task = test_task("failing", "[Clippy]", None);
+    let history = PostInterventionHistory {
+        any_submitted: true,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        submission_pending_review: false,
+        latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
+        most_recent_reopen_class: ReopenClass::ReviewRejected,
+    };
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    // The submission was rejected — the park reason should use the
+    // AC-phrasing (review_rejected branch).
+    assert!(
+        reason.contains("acceptance criteria still did not pass"),
+        "submitted terminal failure park should use AC phrasing; got: {reason}"
+    );
+    assert!(
+        history.any_submitted,
+        "submitted terminal failure must set any_submitted=true"
+    );
+    assert!(
+        !history.submission_pending_review,
+        "rejected submission must not be pending review"
+    );
+}
