@@ -404,6 +404,120 @@ pub struct TaskAttemptHistoryRow {
     pub terminal_at: Option<String>,
 }
 
+/// Metadata about log-tail capture status, derived from a task attempt row.
+///
+/// Carries presence detection and error-class classification without
+/// exposing the raw `log_tail` text.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogTailMeta {
+    /// True when the attempt row has a non-NULL `log_tail` value.
+    pub log_tail_present: bool,
+    /// Machine-classified error category from infra-death log-tail fetch,
+    /// extracted from `summary_json->'infra_death_log_tail'->>'fetch_error_class'`.
+    pub log_tail_error_class: Option<String>,
+}
+
+impl LogTailMeta {
+    /// Derive log-tail metadata from raw attempt columns.
+    ///
+    /// `log_tail` is inspected only for NULL/non-NULL presence; its text is
+    /// never propagated.  `summary_json` is parsed for error-class metadata.
+    pub fn from_raw(log_tail: Option<&str>, summary_json: Option<&str>) -> Self {
+        Self {
+            log_tail_present: log_tail.is_some(),
+            log_tail_error_class: Self::extract_error_class(summary_json),
+        }
+    }
+
+    fn extract_error_class(summary_json: Option<&str>) -> Option<String> {
+        let json = summary_json?;
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        v.get("infra_death_log_tail")?
+            .get("fetch_error_class")?
+            .as_str()
+            .map(String::from)
+    }
+}
+
+/// Arbiter/operator audit ledger row for a single attempt.
+///
+/// Superset of [`TaskAttemptHistoryRow`] adding `summary_json`, explicit
+/// log-tail presence/error-class metadata, and model identity when the
+/// lifecycle writer recorded it.  Raw `log_tail` text is never included.
+///
+/// Suitable for `dispatch_ledger_json` consumers and operator audit surfaces.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskAttemptLedgerRow {
+    pub id: String,
+    pub task_id: String,
+    pub role: String,
+    pub attempt_seq: i32,
+    pub dispatch_key: String,
+    pub session_id: Option<String>,
+    pub outcome: String,
+    pub guard_decision: Option<String>,
+    pub guard_reason: Option<String>,
+    pub summary: Option<String>,
+    pub checkpoint_ref: Option<String>,
+    pub submit_ref: Option<String>,
+    pub pr_url: Option<String>,
+    pub mirror_head_sha: Option<String>,
+    pub github_head_sha: Option<String>,
+    pub created_at: String,
+    pub submitted_at: Option<String>,
+    pub terminal_at: Option<String>,
+    /// Raw `summary_json` payload (failure class, infra-death metadata, etc.).
+    pub summary_json: Option<String>,
+    /// True when a `log_tail` value was captured for this attempt.
+    pub log_tail_present: bool,
+    /// Machine-classified error category from infra-death log-tail fetch.
+    pub log_tail_error_class: Option<String>,
+    /// Model used for this attempt, when recorded in `summary_json`.
+    pub model: Option<String>,
+}
+
+impl TaskAttemptLedgerRow {
+    /// Build a ledger row from a full [`TaskAttempt`].
+    ///
+    /// Extracts log-tail presence and error-class metadata from the raw row
+    /// without including the `log_tail` text itself.
+    pub fn from_task_attempt(attempt: &TaskAttempt) -> Self {
+        let meta =
+            LogTailMeta::from_raw(attempt.log_tail.as_deref(), attempt.summary_json.as_deref());
+        let model = Self::extract_model(attempt.summary_json.as_deref());
+        Self {
+            id: attempt.id.clone(),
+            task_id: attempt.task_id.clone(),
+            role: attempt.role.clone(),
+            attempt_seq: attempt.attempt_seq,
+            dispatch_key: attempt.dispatch_key.clone(),
+            session_id: attempt.session_id.clone(),
+            outcome: attempt.outcome.clone(),
+            guard_decision: attempt.guard_decision.clone(),
+            guard_reason: attempt.guard_reason.clone(),
+            summary: attempt.summary.clone(),
+            checkpoint_ref: attempt.checkpoint_ref.clone(),
+            submit_ref: attempt.submit_ref.clone(),
+            pr_url: attempt.pr_url.clone(),
+            mirror_head_sha: attempt.mirror_head_sha.clone(),
+            github_head_sha: attempt.github_head_sha.clone(),
+            created_at: attempt.created_at.clone(),
+            submitted_at: attempt.submitted_at.clone(),
+            terminal_at: attempt.terminal_at.clone(),
+            summary_json: attempt.summary_json.clone(),
+            log_tail_present: meta.log_tail_present,
+            log_tail_error_class: meta.log_tail_error_class,
+            model,
+        }
+    }
+
+    fn extract_model(summary_json: Option<&str>) -> Option<String> {
+        let json = summary_json?;
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        v.get("model")?.as_str().map(String::from)
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -652,5 +766,136 @@ mod tests {
         let serialized = serde_json::to_string(&history).unwrap();
         let deserialized: TaskAttemptHistoryRow = serde_json::from_str(&serialized).unwrap();
         assert_eq!(history, deserialized);
+    }
+
+    #[test]
+    fn log_tail_meta_from_raw_present_and_absent() {
+        // No log tail, no summary_json.
+        let meta = LogTailMeta::from_raw(None, None);
+        assert!(!meta.log_tail_present);
+        assert!(meta.log_tail_error_class.is_none());
+
+        // Log tail present, no summary_json.
+        let meta = LogTailMeta::from_raw(Some("tail text"), None);
+        assert!(meta.log_tail_present);
+        assert!(meta.log_tail_error_class.is_none());
+
+        // Log tail absent, summary_json with error class.
+        let sj = r#"{"infra_death_log_tail":{"fetched":false,"fetch_error_class":"timeout"}}"#;
+        let meta = LogTailMeta::from_raw(None, Some(sj));
+        assert!(!meta.log_tail_present);
+        assert_eq!(meta.log_tail_error_class.as_deref(), Some("timeout"));
+
+        // Both present.
+        let meta = LogTailMeta::from_raw(Some("tail"), Some(sj));
+        assert!(meta.log_tail_present);
+        assert_eq!(meta.log_tail_error_class.as_deref(), Some("timeout"));
+
+        // Summary_json without infra_death_log_tail key.
+        let sj2 = r#"{"failure_class":"compile_error"}"#;
+        let meta = LogTailMeta::from_raw(Some("tail"), Some(sj2));
+        assert!(meta.log_tail_present);
+        assert!(meta.log_tail_error_class.is_none());
+    }
+
+    #[test]
+    fn ledger_row_from_task_attempt_extracts_metadata() {
+        let attempt = TaskAttempt {
+            id: "ta-1".to_string(),
+            task_id: "task-1".to_string(),
+            role: "worker".to_string(),
+            attempt_seq: 2,
+            dispatch_key: "dk-2".to_string(),
+            session_id: Some("s-1".to_string()),
+            outcome: "crashed".to_string(),
+            guard_decision: None,
+            guard_reason: None,
+            summary: Some("crashed mid-run".to_string()),
+            summary_json: Some(r#"{"failure_class":"infra_death","model":"claude-3.5-sonnet","infra_death_log_tail":{"fetched":true,"line_count":42,"fetch_error_class":"partial"}}"#.to_string()),
+            log_tail: Some("last 100 lines of log...".to_string()),
+            checkpoint_ref: Some("cp-1".to_string()),
+            submit_ref: Some("sub-1".to_string()),
+            pr_url: Some("https://example.com/pr/1".to_string()),
+            mirror_head_sha: Some("mirror-sha".to_string()),
+            github_head_sha: Some("github-sha".to_string()),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T01:00:00.000Z".to_string(),
+            submitted_at: Some("2026-01-01T00:30:00.000Z".to_string()),
+            terminal_at: Some("2026-01-01T01:00:00.000Z".to_string()),
+        };
+
+        let ledger = TaskAttemptLedgerRow::from_task_attempt(&attempt);
+        assert_eq!(ledger.id, "ta-1");
+        assert_eq!(ledger.task_id, "task-1");
+        assert_eq!(ledger.role, "worker");
+        assert_eq!(ledger.attempt_seq, 2);
+        assert_eq!(ledger.outcome, "crashed");
+        assert_eq!(ledger.session_id.as_deref(), Some("s-1"));
+        assert_eq!(ledger.checkpoint_ref.as_deref(), Some("cp-1"));
+        assert_eq!(ledger.submit_ref.as_deref(), Some("sub-1"));
+        assert_eq!(ledger.pr_url.as_deref(), Some("https://example.com/pr/1"));
+        assert_eq!(ledger.mirror_head_sha.as_deref(), Some("mirror-sha"));
+        assert_eq!(ledger.github_head_sha.as_deref(), Some("github-sha"));
+        assert_eq!(
+            ledger.submitted_at.as_deref(),
+            Some("2026-01-01T00:30:00.000Z")
+        );
+        assert_eq!(
+            ledger.terminal_at.as_deref(),
+            Some("2026-01-01T01:00:00.000Z")
+        );
+        // Log-tail metadata extracted.
+        assert!(ledger.log_tail_present);
+        assert_eq!(ledger.log_tail_error_class.as_deref(), Some("partial"));
+        assert_eq!(ledger.model.as_deref(), Some("claude-3.5-sonnet"));
+        // summary_json is preserved.
+        assert!(
+            ledger
+                .summary_json
+                .as_ref()
+                .unwrap()
+                .contains("failure_class")
+        );
+    }
+
+    #[test]
+    fn ledger_row_serializes_without_log_tail_text() {
+        let attempt = TaskAttempt {
+            id: "ta-2".to_string(),
+            task_id: "task-2".to_string(),
+            role: "guard".to_string(),
+            attempt_seq: 1,
+            dispatch_key: "dk-guard".to_string(),
+            session_id: None,
+            outcome: "deferred".to_string(),
+            guard_decision: Some("defer".to_string()),
+            guard_reason: Some("park_rung".to_string()),
+            summary: Some("parked".to_string()),
+            summary_json: None,
+            log_tail: None,
+            checkpoint_ref: None,
+            submit_ref: None,
+            pr_url: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            updated_at: "2026-01-01T00:00:00.000Z".to_string(),
+            submitted_at: None,
+            terminal_at: Some("2026-01-01T00:00:00.000Z".to_string()),
+        };
+
+        let ledger = TaskAttemptLedgerRow::from_task_attempt(&attempt);
+        assert!(!ledger.log_tail_present);
+        assert!(ledger.log_tail_error_class.is_none());
+        assert!(ledger.model.is_none());
+        assert_eq!(ledger.guard_decision.as_deref(), Some("defer"));
+        assert_eq!(ledger.guard_reason.as_deref(), Some("park_rung"));
+        let json = serde_json::to_string(&ledger).unwrap();
+        assert!(json.contains("\"log_tail_present\":false"));
+        assert!(json.contains("\"log_tail_error_class\":null"));
+        assert!(json.contains("\"model\":null"));
+        // Round-trip.
+        let deserialized: TaskAttemptLedgerRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(ledger, deserialized);
     }
 }

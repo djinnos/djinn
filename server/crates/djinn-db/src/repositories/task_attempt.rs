@@ -1,8 +1,8 @@
 // djinn:allow-oversize — lifecycle repository: dispatch-start through infra-death log-tail persistence; split when touched substantively.
 use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
-    TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
-    TaskAttemptPromptSummary,
+    TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptLedgerRow,
+    TaskAttemptOutcome, TaskAttemptPromptSummary,
 };
 #[cfg(test)]
 use uuid::Uuid;
@@ -836,6 +836,92 @@ impl TaskAttemptRepository {
         };
         Ok(rows)
     }
+
+    /// Arbiter/operator audit ledger for a task, optionally filtered by role
+    /// and post-intervention timestamp.
+    ///
+    /// Returns [`TaskAttemptLedgerRow`] rows (newest-first) that include
+    /// `summary_json`, explicit log-tail presence/error-class metadata, and
+    /// model identity.  Raw `log_tail` text is never included in the returned
+    /// rows.
+    ///
+    /// When `last_intervention_at` is supplied, only attempts created strictly
+    /// after that timestamp are returned (post-intervention ledger).  This is
+    /// the primary contract for `dispatch_ledger_json` consumers and operator
+    /// audit surfaces.
+    pub async fn ledger_for_task_since(
+        &self,
+        task_id: &str,
+        role: Option<&str>,
+        last_intervention_at: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<TaskAttemptLedgerRow>> {
+        self.db.ensure_initialized().await?;
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        // Runtime query: avoids sqlx compile-time cache dependency.
+        // Uses the same SELECT columns as existing history/list queries.
+        let base = r#"SELECT id, task_id, role, attempt_seq, dispatch_key, session_id,
+                outcome, guard_decision, guard_reason, summary, summary_json,
+                log_tail, checkpoint_ref, submit_ref, pr_url,
+                mirror_head_sha, github_head_sha,
+                created_at, updated_at, submitted_at, terminal_at
+             FROM task_attempts"#;
+
+        let attempts: Vec<TaskAttempt> = match (role, last_intervention_at) {
+            (Some(r), Some(since)) => {
+                sqlx::query_as(&format!(
+                    "{base} WHERE task_id = $1 AND role = $2 AND created_at > $3 \
+                     ORDER BY COALESCE(terminal_at, created_at) DESC LIMIT $4"
+                ))
+                .bind(task_id)
+                .bind(r)
+                .bind(since)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            (Some(r), None) => {
+                sqlx::query_as(&format!(
+                    "{base} WHERE task_id = $1 AND role = $2 \
+                     ORDER BY COALESCE(terminal_at, created_at) DESC LIMIT $3"
+                ))
+                .bind(task_id)
+                .bind(r)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            (None, Some(since)) => {
+                sqlx::query_as(&format!(
+                    "{base} WHERE task_id = $1 AND created_at > $2 \
+                     ORDER BY COALESCE(terminal_at, created_at) DESC LIMIT $3"
+                ))
+                .bind(task_id)
+                .bind(since)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?
+            }
+            (None, None) => {
+                sqlx::query_as(&format!(
+                    "{base} WHERE task_id = $1 \
+                     ORDER BY COALESCE(terminal_at, created_at) DESC LIMIT $2"
+                ))
+                .bind(task_id)
+                .bind(limit)
+                .fetch_all(self.db.pool())
+                .await?
+            }
+        };
+
+        Ok(attempts
+            .iter()
+            .map(TaskAttemptLedgerRow::from_task_attempt)
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -1528,5 +1614,211 @@ mod tests {
                 .unwrap()
                 .contains("infra_death_log_tail")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ledger_for_task_since_returns_post_intervention_rows() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        // Create 3 attempts with tiny sleeps so timestamps differ.
+        let mut ids = Vec::new();
+        for i in 1..=3u32 {
+            let id = new_attempt_id();
+            repo.create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: &format!("dk-ledger-{i}"),
+                session_id: Some(&format!("session-{i}")),
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+            repo.advance_to_terminal(TerminalTaskAttemptParams {
+                id: &id,
+                outcome: TaskAttemptOutcome::Completed,
+                pr_url: Some(&format!("https://example.com/pr/{i}")),
+                submit_ref: Some(&format!("submit-{i}")),
+                checkpoint_ref: Some(&format!("cp-{i}")),
+                mirror_head_sha: Some(&format!("mirror-sha-{i}")),
+                github_head_sha: Some(&format!("github-sha-{i}")),
+                summary: Some(&format!("summary {i}")),
+                summary_json: Some(&format!(r#"{{"model":"test-model-{i}"}}"#)),
+                log_tail: if i == 2 {
+                    Some("log tail content")
+                } else {
+                    None
+                },
+            })
+            .await
+            .unwrap();
+            ids.push(id);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Full ledger (no filters) — should return all 3, newest first.
+        let all = repo
+            .ledger_for_task_since(&task_id, None, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].attempt_seq, 3);
+        assert_eq!(all[1].attempt_seq, 2);
+        assert_eq!(all[2].attempt_seq, 1);
+
+        // Attempt 2 has log_tail; others don't.
+        assert!(!all[0].log_tail_present);
+        assert!(all[1].log_tail_present);
+        assert!(!all[2].log_tail_present);
+        // Model extracted from summary_json.
+        assert_eq!(all[0].model.as_deref(), Some("test-model-3"));
+        assert_eq!(all[1].model.as_deref(), Some("test-model-2"));
+        // summary_json is present.
+        assert!(all[0].summary_json.is_some());
+
+        // Post-intervention filter: only rows after attempt 1's creation.
+        let since = &all[2].created_at; // attempt 1's created_at (oldest)
+        let post = repo
+            .ledger_for_task_since(&task_id, None, Some(since), 100)
+            .await
+            .unwrap();
+        // Should include attempts 2 and 3 (created after attempt 1).
+        assert!(post.len() >= 2);
+        assert_eq!(post[0].attempt_seq, 3);
+        assert_eq!(post[1].attempt_seq, 2);
+
+        // Limit works.
+        let limited = repo
+            .ledger_for_task_since(&task_id, None, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].attempt_seq, 3);
+
+        // Zero limit returns empty.
+        let zero = repo
+            .ledger_for_task_since(&task_id, None, None, 0)
+            .await
+            .unwrap();
+        assert!(zero.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ledger_for_task_since_filters_by_role() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        // One worker attempt.
+        let w_id = new_attempt_id();
+        repo.create_or_get_pending(CreateTaskAttemptParams {
+            id: &w_id,
+            task_id: &task_id,
+            role: "worker",
+            dispatch_key: "dk-ledger-role-w",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &w_id,
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("worker done"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        // One guard attempt.
+        let g_id = new_attempt_id();
+        repo.insert_guard_deferred(GuardDeferTaskAttemptParams {
+            id: &g_id,
+            task_id: &task_id,
+            role: "guard",
+            dispatch_key: "dk-ledger-role-g",
+            decision: GuardDecision::Defer,
+            reason: GuardReason::ParkRung,
+            summary: Some("parked"),
+            summary_json: Some(r#"{"reason":"park_rung"}"#),
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        // Filter by role=worker.
+        let workers = repo
+            .ledger_for_task_since(&task_id, Some("worker"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].role, "worker");
+
+        // Filter by role=guard.
+        let guards = repo
+            .ledger_for_task_since(&task_id, Some("guard"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].role, "guard");
+        assert_eq!(guards[0].outcome, "deferred");
+        assert_eq!(guards[0].guard_decision.as_deref(), Some("defer"));
+        assert_eq!(guards[0].guard_reason.as_deref(), Some("park_rung"));
+        assert!(!guards[0].log_tail_present);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ledger_for_task_since_extracts_log_tail_error_class() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        repo.create_or_get_pending(CreateTaskAttemptParams {
+            id: &id,
+            task_id: &task_id,
+            role: "worker",
+            dispatch_key: "dk-ledger-meta",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &id,
+            outcome: TaskAttemptOutcome::Crashed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("crashed"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        // Persist infra-death log-tail metadata.
+        let meta = r#"{"infra_death_log_tail":{"fetched":false,"fetch_error_class":"timeout"}}"#;
+        repo.persist_infra_death_log_tail(&id, Some("tail content"), meta)
+            .await
+            .unwrap();
+
+        let rows = repo
+            .ledger_for_task_since(&task_id, None, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].log_tail_present);
+        assert_eq!(rows[0].log_tail_error_class.as_deref(), Some("timeout"));
     }
 }
