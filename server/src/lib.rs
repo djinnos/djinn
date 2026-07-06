@@ -1,5 +1,6 @@
 #![warn(unreachable_pub)]
 
+pub mod codex_keepalive;
 pub mod db;
 pub mod error;
 pub mod events;

@@ -201,11 +201,12 @@ impl OAuthConfigWire {
     }
 }
 
-/// Serializes codex OAuth token refresh process-wide. Codex/OpenAI rotate the
-/// refresh token on every use (single-use), so concurrent dispatches racing an
-/// expired token would each POST the SAME refresh_token — the first rotates it
-/// and the rest get `invalid_grant`.
-static CODEX_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+// Serializes Codex OAuth token refresh process-wide — the canonical lock lives
+// with the token type in `djinn-provider` so the background keep-alive sweep
+// takes the *same* mutex as this dispatch path (single-use rotating refresh
+// tokens must never be double-spent). See
+// `djinn_provider::oauth::codex::CODEX_REFRESH_LOCK`.
+use crate::oauth::codex::CODEX_REFRESH_LOCK;
 
 /// Resolve the effective OAuth provider ID for a given provider.
 fn effective_oauth_provider_id(provider_id: &str) -> &str {
