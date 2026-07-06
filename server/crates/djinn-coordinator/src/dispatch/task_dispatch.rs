@@ -1327,12 +1327,39 @@ impl CoordinatorActor {
                 continue;
             };
             // Pre-dispatch respawn guard: consult attempt-history before any
-            // fresh spawn/admission side-effects.  If a non-terminal attempt
-            // (pending or submitted) already exists for this task+role, defer
-            // dispatch and record a guard-only audit row.  No dispatch /
-            // provider / reopen counters are incremented for the deferral.
-            match super::respawn_guard::run_respawn_guard(&self.db, &task.id, role).await {
+            // fresh spawn/admission side-effects.  Guard ordering:
+            // 1. Open-PR adoption: when the task has an existing open PR
+            //    (task.pr_url), adopt it and record an adopted_pr audit row.
+            // 2. Non-terminal attempt: if a pending or submitted attempt
+            //    already exists for this task+role, defer dispatch and record
+            //    a guard-only audit row.  No dispatch / provider / reopen
+            //    counters are incremented for the deferral.
+            match super::respawn_guard::run_respawn_guard(
+                &self.db,
+                &task.id,
+                role,
+                task.pr_url.as_deref(),
+            )
+            .await
+            {
                 super::respawn_guard::RespawnGuardDecision::Allow => {}
+                super::respawn_guard::RespawnGuardDecision::Adopted { pr_url } => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        role,
+                        pr_url = %pr_url,
+                        "CoordinatorActor: respawn guard adopting existing open PR — skipping dispatch"
+                    );
+                    super::respawn_guard::record_adopted_pr_attempt(
+                        &self.db,
+                        &task.id,
+                        role,
+                        &pr_url,
+                        Some("respawn_guard: adopted existing open PR"),
+                    )
+                    .await;
+                    continue;
+                }
                 super::respawn_guard::RespawnGuardDecision::Defer(reason) => {
                     tracing::info!(
                         task_id = %task.short_id,

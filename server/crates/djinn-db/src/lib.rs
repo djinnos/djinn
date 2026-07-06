@@ -131,8 +131,8 @@ pub use repositories::{
     },
     task_attempt::{
         CompletedParentSummary, CreateTaskAttemptParams, FillTaskAttemptParams,
-        GuardDeferTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
-        TerminalTaskAttemptParams,
+        GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams, SubmitTaskAttemptParams,
+        TaskAttemptRepository, TerminalTaskAttemptParams,
     },
     task_run::{CreateTaskRunParams, TaskRunRepository},
     usage_analytics::{
