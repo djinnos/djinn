@@ -1694,6 +1694,16 @@ impl CoordinatorActor {
                     .await;
             }
 
+            // Structured observability: emit one log record per candidate in
+            // the final ordered list so post-apply / post-rollback model order
+            // can be inspected without production-only tooling.
+            super::lane_resolution_log::emit_lane_resolution_candidates(
+                &task.short_id,
+                role,
+                creator.as_deref().unwrap_or(""),
+                &model_ids,
+            );
+
             // No model whose provider this task's owner has connected → the task
             // is structurally undispatchable (the canary). Don't loop it forever
             // (wedging the task open). Back off with the
