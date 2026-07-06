@@ -1,9 +1,9 @@
 use super::super::*;
+use super::attempt_lifecycle::{TerminalAdvancementParams, advance_latest_to_terminal};
 use crate::pr_poller::pr_cleanup::CloseKind;
-#[cfg(test)]
-use djinn_core::models::TaskStatus;
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
 /// Classify a `supervisor_pr_open` push failure as "an oversized blob is
 /// committed in the branch history" (GitHub's 100 MB hard limit, enforced by
@@ -13,11 +13,31 @@ use djinn_core::models::task::IssueType;
 /// loop a transient-retry banner. Matches the verbatim remote error text
 /// GitHub emits (`GH001` / `exceeds GitHub's file size limit` /
 /// `Large files detected` / `pre-receive hook declined`).
-fn is_oversized_blob_push_rejection(reason: &str) -> bool {
+pub(super) fn is_oversized_blob_push_rejection(reason: &str) -> bool {
     reason.contains("pre-receive hook declined")
         || reason.contains("GH001")
         || reason.contains("exceeds GitHub's file size limit")
         || reason.contains("Large files detected")
+}
+
+/// Wave-dispatch attempt outcome discriminator. Carries the structured context
+/// each terminalization path records in `summary_json`. Used only by
+/// [`CoordinatorActor::terminalize_wave_dispatch_attempt`] and the standalone
+/// [`terminalize_wave_dispatch_attempt_on_db`].
+#[allow(dead_code)]
+pub(super) enum WaveDispatchAttemptOutcome<'a> {
+    /// An already-open PR was adopted/reopened instead of a fresh open.
+    AdoptedPr { pr_url: &'a str, head_sha: &'a str },
+    /// The current worker attempt stops and another process takes over.
+    Handoff {
+        reason: &'a str,
+        replacement: &'a str,
+    },
+    /// Dispatch-owned ForceClose (oversized blob in branch history, etc.).
+    ForceClosed {
+        reason: &'a str,
+        close_reason: &'a str,
+    },
 }
 
 impl CoordinatorActor {
@@ -193,6 +213,7 @@ impl CoordinatorActor {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 provider_override: None,
             };
+            let pr_url_existed_before = task.pr_url.is_some();
             let outcome =
                 crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks).await;
             match outcome {
@@ -205,6 +226,21 @@ impl CoordinatorActor {
                         commit_sha = %sha,
                         "CoordinatorActor: pushed latest task_branch to PR (re-cycle commits propagated)"
                     );
+                    // Attempt lifecycle: if a PR was already open before this
+                    // supervisor_pr_open call (adoption/reopen of an existing
+                    // PR rather than a fresh open), terminalize the current
+                    // worker attempt as `adopted_pr`. A fresh open leaves the
+                    // attempt live — it continues through PR review. Best-effort.
+                    if pr_url_existed_before {
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::AdoptedPr {
+                                pr_url: &url,
+                                head_sha: &sha,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 djinn_runtime::TaskRunOutcome::Closed { reason } => {
                     // supervisor_pr_open found no commits ahead of base and
@@ -217,6 +253,18 @@ impl CoordinatorActor {
                         reason = %reason,
                         "CoordinatorActor: approved task had no commits to PR — closed as completed"
                     );
+                    // Attempt lifecycle: the current worker attempt intentionally
+                    // stops here — the task is closed without a PR. Terminalize
+                    // as `handoff` (another process — the close itself — takes
+                    // over). Best-effort.
+                    self.terminalize_wave_dispatch_attempt(
+                        &task,
+                        WaveDispatchAttemptOutcome::Handoff {
+                            reason: &reason,
+                            replacement: "task_closed_no_commits",
+                        },
+                    )
+                    .await;
                 }
                 djinn_runtime::TaskRunOutcome::Failed { stage, reason, .. } => {
                     // Race-tolerant pr_errors gate. The coordinator's tick
@@ -312,6 +360,18 @@ impl CoordinatorActor {
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
+                        // Attempt lifecycle: dispatch-owned ForceClose. The
+                        // push was rejected by GitHub for a non-transient reason
+                        // (oversized blob in branch history). Terminalize the
+                        // current worker attempt as `force_closed`. Best-effort.
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::ForceClosed {
+                                reason: &reason,
+                                close_reason: "oversized_blob_in_branch_history",
+                            },
+                        )
+                        .await;
                     } else if branch_missing && task.pr_url.is_none() {
                         tracing::warn!(
                             task_id = %task.short_id,
@@ -337,6 +397,19 @@ impl CoordinatorActor {
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
+                        // Attempt lifecycle: the current worker attempt stops
+                        // here and another worker process takes over (the task
+                        // is re-queued to `open` for a fresh worker run that
+                        // recreates and pushes the missing branch). Terminalize
+                        // as `handoff`. Best-effort.
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::Handoff {
+                                reason: &reason,
+                                replacement: "requeued_missing_branch",
+                            },
+                        )
+                        .await;
                     } else if task.pr_url.is_some() {
                         tracing::info!(
                             task_id = %task.short_id,
@@ -370,6 +443,18 @@ impl CoordinatorActor {
                         reason = %reason,
                         "CoordinatorActor: approved task PR-open blocked by a pre-PR gate (re-routed, no PR opened)"
                     );
+                    // Attempt lifecycle: a pre-PR gate intentionally stopped
+                    // the current worker attempt and re-routed the task to
+                    // another process (remediation or a fresh worker round).
+                    // Terminalize as `handoff`. Best-effort.
+                    self.terminalize_wave_dispatch_attempt(
+                        &task,
+                        WaveDispatchAttemptOutcome::Handoff {
+                            reason: &reason,
+                            replacement: "pre_pr_gate_rerouted",
+                        },
+                    )
+                    .await;
                 }
                 other => {
                     tracing::warn!(
@@ -380,6 +465,24 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+
+    /// Best-effort terminalize the latest pending/submitted worker attempt for a
+    /// wave-dispatch (`process_approved_tasks`) outcome. Maps each
+    /// [`WaveDispatchAttemptOutcome`] to the corresponding
+    /// [`TaskAttemptOutcome`] and fills available PR URL / head SHA / submit ref
+    /// context. Uses the shared `attempt_lifecycle::advance_latest_to_terminal`
+    /// helper — never creates a second lookup convention.
+    ///
+    /// Idempotent: if no live attempt exists (or it is already terminal), the
+    /// underlying helper is a silent no-op, so duplicate wave-dispatch ticks do
+    /// not create rows or move a terminal attempt backward.
+    async fn terminalize_wave_dispatch_attempt(
+        &self,
+        task: &djinn_core::models::Task,
+        outcome: WaveDispatchAttemptOutcome<'_>,
+    ) {
+        terminalize_wave_dispatch_attempt_on_db(&self.db, task, outcome).await;
     }
 
     /// E6 Part B: best-effort proactive rebase of an approved task branch onto
@@ -488,325 +591,132 @@ impl CoordinatorActor {
     }
 }
 
-#[cfg(test)]
-mod e6_tests {
-    use super::*;
-    use crate::roles::{DispatchContext, RoleRegistry};
-    use djinn_core::models::Task;
-    use djinn_core::models::task::compute_transition;
-
-    /// A `Task` shaped like a worker task reopened by a merge-queue rejection:
-    /// `issue_type=task`, `status=open`, with the given `reopen_count`.
-    fn reopened_worker_task(reopen_count: i64) -> Task {
-        Task {
-            id: "t1".into(),
-            project_id: "p1".into(),
-            short_id: "t1".into(),
-            epic_id: Some("e1".into()),
-            title: "stuck on merge queue".into(),
-            description: String::new(),
-            design: String::new(),
-            issue_type: "task".into(),
-            status: "open".into(),
-            priority: 0,
-            owner: String::new(),
-            labels: "[]".into(),
-            acceptance_criteria: "[]".into(),
-            reopen_count,
-            continuation_count: 0,
-            total_reopen_count: reopen_count,
-            intervention_count: 0,
-            last_intervention_at: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-            closed_at: None,
-            close_reason: None,
-            merge_commit_sha: None,
-            pr_url: None,
-            merge_conflict_metadata: None,
-            memory_refs: "[]".into(),
-            agent_type: None,
-            created_by_user_id: None,
-            ci_status: "unknown".into(),
-            ci_head_sha: None,
-            ci_pr_number: None,
-            ci_blocking_required_check_names: "[]".into(),
-            ci_failure_fingerprint: None,
-            ci_first_seen_at: None,
-            ci_last_seen_at: None,
-            ci_same_signature_count: 0,
-            ci_last_remediation_base_sha: None,
-            unresolved_blocker_count: 0,
+/// Build the [`TerminalAdvancementParams`] fields for a wave-dispatch
+/// terminalization.  Pure parameter construction — no I/O, no `self`.
+/// Factored out of [`CoordinatorActor::terminalize_wave_dispatch_attempt`]
+/// so that the mapping logic is directly unit-testable without constructing
+/// a full `CoordinatorActor`.
+pub(super) fn build_wave_dispatch_terminal_params<'a>(
+    task: &'a djinn_core::models::Task,
+    outcome: WaveDispatchAttemptOutcome<'a>,
+) -> WaveDispatchTerminalParams<'a> {
+    let submit_ref = format!("refs/heads/task/{}", task.short_id);
+    let task_branch = format!("task/{}", task.short_id);
+    match outcome {
+        WaveDispatchAttemptOutcome::AdoptedPr { pr_url, head_sha } => {
+            let summary =
+                format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "adopted_pr",
+                "pr_url": pr_url,
+                "github_head_sha": head_sha,
+                "submit_ref": submit_ref,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::AdoptedPr,
+                pr_url: Some(pr_url),
+                github_head_sha: Some(head_sha),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
+        WaveDispatchAttemptOutcome::Handoff {
+            reason,
+            replacement,
+        } => {
+            let summary = format!(
+                "wave_dispatch: current worker attempt handed off ({replacement}): {reason}"
+            );
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "handoff",
+                "reason": reason,
+                "replacement": replacement,
+                "submit_ref": submit_ref,
+                "pr_url": task.pr_url,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::Handoff,
+                pr_url: task.pr_url.as_deref(),
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
+        WaveDispatchAttemptOutcome::ForceClosed {
+            reason,
+            close_reason,
+        } => {
+            let summary = format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "force_closed",
+                "close_reason": close_reason,
+                "reason": reason,
+                "submit_ref": submit_ref,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::ForceClosed,
+                pr_url: task.pr_url.as_deref(),
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary,
+                summary_json,
+                submit_ref,
+            }
         }
     }
+}
 
-    /// Part A — the `PrCiFailed` transition used by the merge-queue-rejection
-    /// reopen path lands the task at `open` AND increments `reopen_count`. This
-    /// is what drives the reopen counter toward the intervention threshold; if a
-    /// future change stopped incrementing it, the escalation would never arm.
-    #[test]
-    fn merge_queue_rejection_reopen_increments_reopen_count() {
-        // Merge queue rejects an undrafted PR → poller fires PrCiFailed from
-        // pr_review (and the pre-undraft pr_draft case is equally valid).
-        for from in [TaskStatus::PrReview, TaskStatus::PrDraft] {
-            let apply = compute_transition(&TransitionAction::PrCiFailed, &from, None)
-                .expect("PrCiFailed must be a legal transition from pr_review/pr_draft");
-            assert_eq!(
-                apply.to_status,
-                Some(TaskStatus::Open),
-                "merge-queue rejection must reopen the task ({from:?} → open)"
-            );
-            assert!(
-                apply.increment_reopen,
-                "merge-queue rejection reopen MUST bump reopen_count (arms the escalation), from {from:?}"
-            );
-        }
-    }
+/// Owned terminalization parameters returned by
+/// [`build_wave_dispatch_terminal_params`].  The caller borrows these fields
+/// when building [`TerminalAdvancementParams`].
+pub(super) struct WaveDispatchTerminalParams<'a> {
+    pub(super) outcome: TaskAttemptOutcome,
+    pub(super) pr_url: Option<&'a str>,
+    pub(super) github_head_sha: Option<&'a str>,
+    pub(super) summary: String,
+    pub(super) summary_json: String,
+    pub(super) submit_ref: String,
+}
 
-    #[test]
-    fn pr_conflict_transition_does_not_increment_reopen_count() {
-        for from in [
-            TaskStatus::Approved,
-            TaskStatus::PrDraft,
-            TaskStatus::PrReview,
-        ] {
-            let apply = compute_transition(&TransitionAction::PrConflict, &from, None)
-                .expect("PrConflict must remain legal for approved/pr_draft/pr_review tasks");
-            assert_eq!(apply.to_status, Some(TaskStatus::Open));
-            assert!(
-                !apply.increment_reopen,
-                "PrConflict should not bump reopen_count; djinn_task_reopens_total must follow this semantic"
-            );
-        }
-    }
-
-    /// Part A — a merge-queue-reopened worker task routes to the `worker`
-    /// dispatch role. The escalation gate in `dispatch_ready_tasks` is
-    /// `role == "worker" && maybe_intervene_on_stuck_task(..)`, so if a reopened
-    /// task routed anywhere else the escalation would silently never fire on this
-    /// path.
-    #[test]
-    fn merge_queue_reopened_task_routes_to_worker_role() {
-        let registry = RoleRegistry::new();
-        let ctx = DispatchContext;
-        let task = reopened_worker_task(REOPEN_INTERVENTION_THRESHOLD);
-        assert_eq!(
-            registry.dispatch_role_for_task(&task, &ctx),
-            Some("worker"),
-            "a reopened (open, issue_type=task) merge-queue task must dispatch as worker — \
-             the role the escalation gate keys on"
-        );
-    }
-
-    /// Part A — the escalation gate's threshold predicate. Below the threshold
-    /// the worker re-dispatches normally; at/above it the gate routes the task to
-    /// a Planner intervention. This is the `reopen_count` crossing 3 → Planner
-    /// regression lock at the predicate level.
-    #[test]
-    fn reopen_count_crossing_threshold_arms_planner_escalation() {
-        assert_eq!(
-            REOPEN_INTERVENTION_THRESHOLD, 3,
-            "escalation threshold is 3 reopens (memory: reopen_count >= 3 → Planner)"
-        );
-
-        // Below threshold: the gate predicate is false → worker re-dispatches.
-        let below = reopened_worker_task(REOPEN_INTERVENTION_THRESHOLD - 1);
-        assert!(
-            below.reopen_count < REOPEN_INTERVENTION_THRESHOLD,
-            "two reopens stay under the threshold — no escalation yet"
-        );
-
-        // At and above threshold: predicate is true → routed to Planner.
-        for n in [
-            REOPEN_INTERVENTION_THRESHOLD,
-            REOPEN_INTERVENTION_THRESHOLD + 1,
-        ] {
-            let stuck = reopened_worker_task(n);
-            assert!(
-                stuck.reopen_count >= REOPEN_INTERVENTION_THRESHOLD,
-                "reopen_count {n} crosses the threshold and must arm the Planner escalation"
-            );
-            // And it is still a worker task at that point (the gate's other half).
-            let registry = RoleRegistry::new();
-            assert_eq!(
-                registry.dispatch_role_for_task(&stuck, &DispatchContext),
-                Some("worker"),
-                "still a worker task at reopen_count={n} — the full escalation gate is satisfied"
-            );
-        }
-    }
-
-    // ── Part B: proactive-rebase non-fatal contract ──────────────────────────
-
-    async fn git(dir: &std::path::Path, args: &[&str]) {
-        djinn_git::run_git_command(
-            dir.to_path_buf(),
-            args.iter().map(|s| (*s).to_string()).collect(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("git {args:?} in {dir:?} failed: {e}"));
-    }
-
-    async fn write(dir: &std::path::Path, name: &str, contents: &str) {
-        tokio::fs::write(dir.join(name), contents).await.unwrap();
-    }
-
-    /// Part B — a real rebase CONFLICT is reported as `Err` by
-    /// `djinn_git::rebase_with_retry` and the helper `--abort`s, leaving the
-    /// workspace clean (no in-progress rebase). This is the exact failure
-    /// `proactively_rebase_approved_branch` swallows: it logs the `Err` and
-    /// proceeds to `supervisor_pr_open`, so a conflict can never hard-fail
-    /// dispatch and never leaves a wedged mid-rebase tree behind.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proactive_rebase_conflict_is_non_fatal_and_aborts_cleanly() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let repo = tmp.path();
-
-        // Init a repo with a committed base on `main`.
-        git(repo, &["init", "-q", "-b", "main"]).await;
-        git(repo, &["config", "user.email", "t@example.com"]).await;
-        git(repo, &["config", "user.name", "Test"]).await;
-        write(repo, "f.txt", "base\n").await;
-        git(repo, &["add", "f.txt"]).await;
-        git(repo, &["commit", "-q", "-m", "base"]).await;
-
-        // Task branch edits the SAME line one way…
-        git(repo, &["checkout", "-q", "-b", "task/x"]).await;
-        write(repo, "f.txt", "from-task\n").await;
-        git(repo, &["commit", "-qam", "task edit"]).await;
-
-        // …and `main` advances editing it the other way → guaranteed conflict.
-        git(repo, &["checkout", "-q", "main"]).await;
-        write(repo, "f.txt", "from-main\n").await;
-        git(repo, &["commit", "-qam", "main edit"]).await;
-        git(repo, &["checkout", "-q", "task/x"]).await;
-
-        // Rebase task/x onto the diverged main: MUST error (conflict), never panic.
-        let result = djinn_git::rebase_with_retry(repo, "main").await;
-        assert!(
-            result.is_err(),
-            "a conflicting rebase must surface as Err (which the proactive helper swallows)"
-        );
-
-        // And the helper must have aborted: the tree is clean, not mid-rebase.
-        assert!(
-            !repo.join(".git/rebase-merge").exists() && !repo.join(".git/rebase-apply").exists(),
-            "rebase_with_retry must --abort on failure so no wedged mid-rebase state is left behind"
-        );
-        let status = djinn_git::run_git_command(
-            repo.to_path_buf(),
-            vec!["status".into(), "--porcelain".into()],
-        )
-        .await
-        .unwrap();
-        assert!(
-            status.stdout.trim().is_empty(),
-            "workspace must be clean after the aborted rebase, got: {:?}",
-            status.stdout
-        );
-    }
-
-    /// Part B — the clean path: when the task branch rebases without conflict,
-    /// `rebase_with_retry` succeeds and the branch now sits on top of the current
-    /// target. (Confirms the helper actually replays the branch, not just no-ops.)
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn proactive_rebase_clean_replays_branch_onto_target() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let repo = tmp.path();
-
-        git(repo, &["init", "-q", "-b", "main"]).await;
-        git(repo, &["config", "user.email", "t@example.com"]).await;
-        git(repo, &["config", "user.name", "Test"]).await;
-        write(repo, "base.txt", "base\n").await;
-        git(repo, &["add", "base.txt"]).await;
-        git(repo, &["commit", "-q", "-m", "base"]).await;
-
-        // Task branch touches a DIFFERENT file than main advances → no conflict.
-        git(repo, &["checkout", "-q", "-b", "task/y"]).await;
-        write(repo, "task.txt", "task\n").await;
-        git(repo, &["add", "task.txt"]).await;
-        git(repo, &["commit", "-q", "-m", "task edit"]).await;
-
-        git(repo, &["checkout", "-q", "main"]).await;
-        write(repo, "main.txt", "main\n").await;
-        git(repo, &["add", "main.txt"]).await;
-        git(repo, &["commit", "-q", "-m", "main edit"]).await;
-        git(repo, &["checkout", "-q", "task/y"]).await;
-
-        djinn_git::rebase_with_retry(repo, "main")
-            .await
-            .expect("non-conflicting rebase must succeed");
-
-        // After rebase, main's tip is an ancestor of HEAD (branch sits on top).
-        let out = djinn_git::run_git_command(
-            repo.to_path_buf(),
-            vec![
-                "merge-base".into(),
-                "--is-ancestor".into(),
-                "main".into(),
-                "HEAD".into(),
-            ],
-        )
-        .await;
-        assert!(
-            out.is_ok(),
-            "after a clean rebase, main must be an ancestor of the task branch HEAD"
-        );
-    }
-
-    // ── Oversized-blob push rejection → Planner escalation ────────────────────
-
-    /// The classifier must fire on the verbatim error GitHub's pre-receive hook
-    /// emits when a >100 MB blob is in the pushed history, as it reaches the
-    /// coordinator (wrapped by `push_task_branch_to_github` into the
-    /// `"push task_branch to GitHub failed: {e}"` reason, stderr included). This
-    /// is the exact failure that previously looped a `pr_errors` banner forever.
-    #[test]
-    fn oversized_blob_push_rejection_is_classified() {
-        let reason = "push task_branch to GitHub failed: git command failed (exit 1) in \
-            /tmp/.tmp86MbxD: git push --force ... stdout: stderr: \
-            remote: error: File .local/share/pnpm/store/v11/files/ed/63a1c1... is 112.45 MB; \
-            this exceeds GitHub's file size limit of 100.00 MB \
-            remote: error: GH001: Large files detected. \
-            ! [remote rejected] task/aqmk -> task/aqmk (pre-receive hook declined)";
-        assert!(
-            is_oversized_blob_push_rejection(reason),
-            "the real GH001 oversized-blob rejection must be classified for escalation"
-        );
-    }
-
-    /// Negative: ordinary transient push/transition failures must NOT be
-    /// classified as oversized-blob rejections — those still take the existing
-    /// retry-next-tick path, not a (history-rewriting) Planner escalation.
-    #[test]
-    fn transient_push_failures_are_not_oversized_blob_rejections() {
-        for reason in [
-            "push task_branch to GitHub failed: git command failed (exit 1): \
-             fatal: unable to access 'https://github.com/...': Could not resolve host",
-            "push task_branch to GitHub failed: ! [rejected] (non-fast-forward)",
-            "pr_open transition failed: InvalidTransition",
-        ] {
-            assert!(
-                !is_oversized_blob_push_rejection(reason),
-                "transient failure must not be misclassified as an oversized-blob rejection: {reason}"
-            );
-        }
-    }
-
-    /// Idempotency lock: after escalating, the coordinator `ForceClose`s the
-    /// source task so it leaves the `approved` status that `process_approved_tasks`
-    /// re-queries every tick. If `ForceClose` ever stopped being legal from
-    /// `approved` (→ Closed), the task would stay approved and the escalation
-    /// would fire — spawning a duplicate Planner review task — every tick.
-    #[test]
-    fn force_close_moves_approved_task_out_of_queried_state() {
-        let apply = compute_transition(&TransitionAction::ForceClose, &TaskStatus::Approved, None)
-            .expect("ForceClose must be legal from approved");
-        assert_eq!(
-            apply.to_status,
-            Some(TaskStatus::Closed),
-            "ForceClose must move the push-rejected approved task out of `approved` so the \
-             per-tick escalation fires exactly once"
-        );
-    }
+/// Standalone best-effort wave-dispatch terminalization that takes `&Database`
+/// directly (no `CoordinatorActor` construction required).  Delegates to
+/// [`build_wave_dispatch_terminal_params`] for the outcome → params mapping
+/// and then [`advance_latest_to_terminal`] for the DB write.
+///
+/// This is the function integration tests exercise to prove the full wiring:
+/// `WaveDispatchAttemptOutcome` → `build_wave_dispatch_terminal_params` →
+/// `advance_latest_to_terminal` → persisted `task_attempts` row.
+pub(super) async fn terminalize_wave_dispatch_attempt_on_db(
+    db: &djinn_db::Database,
+    task: &djinn_core::models::Task,
+    outcome: WaveDispatchAttemptOutcome<'_>,
+) {
+    let params = build_wave_dispatch_terminal_params(task, outcome);
+    advance_latest_to_terminal(
+        db,
+        TerminalAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            outcome: params.outcome,
+            pr_url: params.pr_url,
+            submit_ref: Some(&params.submit_ref),
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: params.github_head_sha,
+            summary: Some(&params.summary),
+            summary_json: Some(&params.summary_json),
+            log_tail: None,
+        },
+    )
+    .await;
 }
