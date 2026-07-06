@@ -901,6 +901,103 @@ impl CoordinatorActor {
             })
             .collect()
     }
+
+    /// Best-effort terminalization of the live `task_attempts` row when a task
+    /// transitions to `closed` via a force-close path (ForceClose,
+    /// UserOverride→Closed, or Planner reshape/superseded/duplicate).
+    ///
+    /// Maps the `close_reason` to `TaskAttemptOutcome::ForceClosed` for all
+    /// force-close reasons (`force_closed`, `reshape`, `superseded`,
+    /// `duplicate`). Natural completion (`close_reason = "completed"`) is
+    /// terminalized by the PR poller path instead.
+    ///
+    /// Preserves replacement/decomposition context in `summary_json` when
+    /// available (close reason, actor/source from the activity log, task
+    /// short-id). The underlying repository helper is forward-only and
+    /// idempotent, so duplicate event delivery and out-of-order handlers
+    /// never create a duplicate row and never move a terminal attempt
+    /// backward.
+    ///
+    /// Best-effort: lookup/write failures are logged and never propagate.
+    pub(super) async fn terminalize_force_close_attempt(&self, task: &djinn_core::models::Task) {
+        use djinn_core::models::task_attempt::TaskAttemptOutcome;
+
+        let Some(close_reason) = task.close_reason.as_deref() else {
+            return;
+        };
+
+        // Only terminalize for force-close reasons. Natural completion
+        // ("completed") is handled by the PR poller terminalization path.
+        if !is_force_close_reason(close_reason) {
+            return;
+        }
+
+        // Look up the most recent transition activity entry for this task to
+        // capture the actor and actor_role who performed the closure.
+        let (actor_id, actor_role) = match TaskRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        )
+        .list_activity(&task.id)
+        .await
+        {
+            Ok(entries) => {
+                let latest_transition = entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.event_type == "status_changed");
+                match latest_transition {
+                    Some(entry) => (Some(entry.actor_id.clone()), Some(entry.actor_role.clone())),
+                    None => (None, None),
+                }
+            }
+            Err(_) => (None, None),
+        };
+
+        let summary_json = serde_json::json!({
+            "close_reason": close_reason,
+            "actor_id": actor_id,
+            "actor_role": actor_role,
+            "task_short_id": task.short_id,
+        })
+        .to_string();
+
+        let summary = format!(
+            "Task force-closed ({close_reason}) by {actor}",
+            actor = actor_id.as_deref().unwrap_or("unknown"),
+        );
+
+        crate::dispatch::attempt_lifecycle::advance_latest_to_terminal(
+            &self.db,
+            crate::dispatch::attempt_lifecycle::TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::ForceClosed,
+                pr_url: task.pr_url.as_deref(),
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
+    }
+}
+
+/// True when a `close_reason` represents a force-close path (not natural
+/// completion). Covers ForceClose, UserOverride→Closed, and Planner
+/// reshape/superseded/duplicate close reasons.
+fn is_force_close_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        djinn_core::models::task::CLOSE_REASON_FORCE_CLOSED
+            | djinn_core::models::task::CLOSE_REASON_RESHAPE
+            | djinn_core::models::task::CLOSE_REASON_SUPERSEDED
+            | djinn_core::models::task::CLOSE_REASON_DUPLICATE
+    )
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
