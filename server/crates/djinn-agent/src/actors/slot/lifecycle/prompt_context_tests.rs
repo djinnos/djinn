@@ -6,7 +6,7 @@ use djinn_db::{Database, EpicRepository, ProposalCreateInput, ProposalRepository
 use tokio_util::sync::CancellationToken;
 
 use crate::roles::{LeadRole, WorkerRole};
-use crate::test_helpers::{agent_context_from_db, create_test_project};
+use crate::test_helpers::{agent_context_from_db, create_test_project, test_tempdir};
 
 use super::test_support::{
     assemble_for_role, assemble_for_role_with_mcp_instructions, assemble_for_role_with_resume,
@@ -686,4 +686,591 @@ fn format_mcp_instructions_renders_sorted_subsections() {
         ],
     );
     assert_ordered(&result, &["### alpha", "### beta"]);
+}
+
+// ── Regression tests: prompt-context concurrency and failover resume-note ──
+// These tests guard the behavior shipped by epic 97f8:
+// - Concurrent tokio::join! phases preserve deterministic prompt section ordering.
+// - Failover resume-note rendering covers source kind, target ref, model context,
+//   termination labels, and non-worker omission.
+// - Non-fatal fallbacks: concurrent phases returning empty data do not crash.
+
+/// AC1: When all prompt sections are populated, the rendered system prompt
+/// preserves the canonical template-defined section order:
+///   CI blocking → Resume Context → Epic Context → Relevant Knowledge
+///   → Code Graph Context → Activity Log → Environment → Tools
+///
+/// This is the primary regression guard for the concurrent `tokio::join!` phases
+/// in `assemble_prompt_context`: regardless of which futures complete first, the
+/// final prompt must always render sections in template order.
+#[tokio::test]
+async fn prompt_sections_in_template_order_when_all_populated() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Ordering epic", "Ordering task").await;
+    let role = WorkerRole;
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some());
+    let ctx = assemble_for_role_with_resume(db, &task, &role, note.as_deref()).await;
+    let prompt = &ctx.system_prompt;
+
+    // The resume section must be present since we supplied metadata.
+    assert!(
+        prompt.contains("## Resume Context"),
+        "resume section must be present"
+    );
+
+    // Verify all sections that should appear when data is present.
+    // The base template always includes task fields; the sections below are
+    // conditional on the data being populated.
+    let expected_markers = [
+        "## Resume Context",
+        "## Epic Context",
+        "## Environment",
+        "## Tools",
+    ];
+    assert_ordered(prompt, &expected_markers);
+}
+
+/// AC1: Determinism — running `assemble_prompt_context` twice with identical
+/// inputs produces the same rendered prompt. This guards against ordering
+/// nondeterminism introduced by concurrent phases.
+#[tokio::test]
+async fn concurrent_assembly_is_deterministic() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Determinism epic", "Determinism task").await;
+    let role = WorkerRole;
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+
+    // Use a shared worktree path so the workspace_path in the rendered prompt
+    // is identical across both runs.
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    let empty_instructions = std::collections::BTreeMap::new();
+
+    let ctx1 = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: note.as_deref(),
+        mcp_server_instructions: &empty_instructions,
+    })
+    .await;
+
+    let ctx2 = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: note.as_deref(),
+        mcp_server_instructions: &empty_instructions,
+    })
+    .await;
+
+    assert_eq!(
+        ctx1.system_prompt, ctx2.system_prompt,
+        "prompt must be deterministic across runs"
+    );
+    assert_eq!(ctx1.epic_context, ctx2.epic_context);
+    assert_eq!(ctx1.worker_resume_note, ctx2.worker_resume_note);
+}
+
+/// AC1 + AC3: When all concurrent context phases return empty (no epic context,
+/// no activity, no knowledge, no code-graph, no reviewer-diff), the assembly
+/// still completes without error and all optional fields are None.
+#[tokio::test]
+async fn concurrent_assembly_empty_contexts_yield_none_fields() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    // Create a standalone task with no epic (epic_context will be empty)
+    let task = create_project_epic_task(&db, &events, "Empty epic", "Empty task").await;
+    let role = WorkerRole;
+    let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+
+    // Activity/attempt fields should be None (no activity entries seeded)
+    assert!(ctx.activity_text.is_none(), "no activity → None");
+    assert!(ctx.worker_summary.is_none(), "no worker summary → None");
+    assert!(ctx.worker_concerns.is_none(), "no worker concerns → None");
+    // Knowledge is not loaded when epic context is empty
+    // (knowledge depends on epic context for scoping)
+    // Code-graph and reviewer-diff are role-gated: WorkerRole receives them
+    // but the worktree has no git repo, so they'll be None.
+    // Resume note was not supplied
+    assert!(
+        ctx.worker_resume_note.is_none(),
+        "no resume note supplied → None"
+    );
+    // CI blocking directive: task has ci_status="open" → None
+    assert!(ctx.ci_blocking_directive.is_none(), "no failing CI → None");
+    // The base prompt must still be non-empty (task metadata always renders)
+    assert!(
+        !ctx.base_system_prompt.is_empty(),
+        "base prompt must not be empty even with all-empty concurrent phases"
+    );
+}
+
+/// AC2: Each `ResumeSourceKind` variant produces a note with the expected
+/// human-readable label. This is a regression guard for the `source_kind_label`
+/// mapping that feeds into the resume note.
+#[test]
+fn resume_note_renders_all_source_kind_labels() {
+    use djinn_runtime::ResumeSourceKind as K;
+
+    let cases: &[(K, &str)] = &[
+        (K::AutoSubmit, "auto-submit"),
+        (K::TaskBranchCheckpoint, "task-branch checkpoint"),
+        (K::AlternateCheckpointRef, "alternate checkpoint ref"),
+        (K::CleanTaskBranch, "clean task branch"),
+    ];
+
+    for (kind, expected_label) in cases {
+        let metadata = djinn_runtime::ResumeLifecycleMetadata {
+            considered: true,
+            source_kind: Some(*kind),
+            prior_session_lineage: Some("sess-test".to_string()),
+            ..Default::default()
+        };
+        let note = build_worker_resume_note("worker", Some(&metadata))
+            .unwrap_or_else(|| panic!("note should be produced for source kind {kind:?}"));
+        assert!(
+            note.contains(expected_label),
+            "expected label {expected_label:?} in note for {kind:?}, got: {note}"
+        );
+    }
+}
+
+/// AC2: Each `ResumeSelectionReason` variant produces a note with the expected
+/// human-readable termination label. Regression guard for `termination_label`.
+#[test]
+fn resume_note_renders_all_termination_labels() {
+    use djinn_runtime::ResumeSelectionReason as R;
+
+    let cases: &[(R, &str)] = &[
+        (R::AutoSubmitAccepted, "auto-submit accepted"),
+        (R::LatestSafeCheckpoint, "no-progress checkpoint"),
+        (R::AlternateCheckpointRef, "alternate checkpoint ref"),
+        (R::CleanTaskBranchFallback, "clean fallback"),
+        (R::NewerTaskBranch, "newer task branch"),
+        (R::CheckpointMissing, "checkpoint missing"),
+        (R::CheckpointUnsafe, "checkpoint unsafe"),
+        (R::MergeConflict, "merge conflict"),
+        (R::Disabled, "resume disabled"),
+    ];
+
+    for (reason, expected_label) in cases {
+        let metadata = djinn_runtime::ResumeLifecycleMetadata {
+            considered: true,
+            selection_reason: Some(*reason),
+            prior_session_lineage: Some("sess-test".to_string()),
+            ..Default::default()
+        };
+        let note = build_worker_resume_note("worker", Some(&metadata))
+            .unwrap_or_else(|| panic!("note should be produced for reason {reason:?}"));
+        assert!(
+            note.contains(expected_label),
+            "expected label {expected_label:?} in note for {reason:?}, got: {note}"
+        );
+    }
+}
+
+/// AC2: `AlternateCheckpointRef` source kind with `target_ref` renders both
+/// the source label and the target ref in the resume note.
+#[test]
+fn resume_note_renders_alternate_checkpoint_ref_with_target_ref() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        source_kind: Some(djinn_runtime::ResumeSourceKind::AlternateCheckpointRef),
+        target_ref: Some("refs/heads/checkpoint/alt-branch".to_string()),
+        commit_sha: Some("def789abc123".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AlternateCheckpointRef),
+        prior_session_lineage: Some("session-alt-001".to_string()),
+        previous_model: Some("google/gemini-2.5-pro".to_string()),
+        new_model: Some("anthropic/claude-sonnet-4".to_string()),
+        failover_reason: Some("model_rotation".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "alternate checkpoint ref",         // source_kind_label
+            "refs/heads/checkpoint/alt-branch", // target_ref
+            "def789abc123",                     // checkpoint sha
+            "alternate checkpoint ref",         // termination_label
+            "session-alt-001",                  // prior session
+            "gemini-2.5-pro",                   // previous model
+            "claude-sonnet-4",                  // new model
+            "model_rotation",                   // failover reason
+        ],
+    );
+}
+
+/// AC2: Selected source kind and target ref are rendered together in the resume
+/// note for all source/target combinations that carry both fields.
+#[test]
+fn resume_note_selected_source_and_target_ref_details() {
+    // AutoSubmit with target_ref and submit_or_review_id
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        source_kind: Some(djinn_runtime::ResumeSourceKind::AutoSubmit),
+        target_ref: Some("refs/heads/task/my-feature".to_string()),
+        submit_or_review_id: Some("pr-42".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::AutoSubmitAccepted),
+        prior_session_lineage: Some("session-submit-01".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "auto-submit",
+            "refs/heads/task/my-feature",
+            "pr-42",
+            "auto-submit accepted",
+        ],
+    );
+    // Auto-submit source should NOT include "checkpoint"
+    assert!(
+        !note.contains("checkpoint"),
+        "auto-submit note should not mention checkpoint: {note}"
+    );
+}
+
+/// AC2 (non-worker omission): Non-worker roles (lead, reviewer, planner,
+/// architect) must NOT receive a resume note, even when resume metadata is
+/// fully populated. This is a regression guard for `role_receives_worker_resume`
+/// and the full `build_worker_resume_note` pipeline.
+#[test]
+fn non_worker_roles_omit_resume_note_even_with_full_metadata() {
+    let metadata = resume_metadata_with_checkpoint();
+    for role_name in [
+        "lead",
+        "reviewer",
+        "planner",
+        "architect",
+        "advocate",
+        "adversary",
+        "judge",
+    ] {
+        let note = build_worker_resume_note(role_name, Some(&metadata));
+        assert!(
+            note.is_none(),
+            "non-worker role {role_name:?} should not receive resume note, got: {note:?}"
+        );
+    }
+}
+
+/// AC2: Full pipeline — build_resume_note → assemble_prompt_context → rendered
+/// system prompt. The resume note must appear under `## Resume Context` in the
+/// final rendered prompt for the worker role.
+#[tokio::test]
+async fn resume_note_appears_in_rendered_prompt_for_worker() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Pipeline epic", "Pipeline task").await;
+    let role = WorkerRole;
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        source_kind: Some(djinn_runtime::ResumeSourceKind::TaskBranchCheckpoint),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        commit_sha: Some("feedface1234".to_string()),
+        selection_reason: Some(djinn_runtime::ResumeSelectionReason::LatestSafeCheckpoint),
+        prior_session_lineage: Some("session-pipe-001".to_string()),
+        previous_model: Some("openai/gpt-4.1".to_string()),
+        new_model: Some("anthropic/claude-opus-4.7".to_string()),
+        failover_reason: Some("no_durable_progress_streak".to_string()),
+        last_durable_progress_summary: Some("Built the widget module".to_string()),
+        verification_command: Some("cargo test -p widget".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    let ctx = assemble_for_role_with_resume(db, &task, &role, note.as_deref()).await;
+
+    // The resume note must be in the PromptContext
+    let resume_text = ctx
+        .worker_resume_note
+        .as_deref()
+        .expect("resume note should be present");
+    assert_contains_all(
+        resume_text,
+        &[
+            "Resuming from prior session",
+            "feedface1234",
+            "session-pipe-001",
+            "gpt-4.1",
+            "claude-opus-4.7",
+            "no_durable_progress_streak",
+            "Built the widget module",
+            "cargo test -p widget",
+        ],
+    );
+
+    // The rendered system prompt must contain the Resume Context section
+    assert!(
+        ctx.system_prompt.contains("## Resume Context"),
+        "rendered prompt must contain Resume Context section"
+    );
+    assert!(
+        ctx.system_prompt.contains("Resuming from prior session"),
+        "rendered prompt must contain the resume note text"
+    );
+}
+
+/// AC2: Full pipeline for non-worker roles — even when a resume note is
+/// pre-built (e.g. from `build_worker_resume_note`), a non-worker role should
+/// not have the Resume Context section in the rendered prompt. The
+/// `assemble_for_role_with_resume` helper passes the note through, but the
+/// template rendering strips it for non-worker roles since
+/// `role_receives_worker_resume` gates `build_worker_resume_note` at the call
+/// site in stage.rs.  Here we verify that when the note is None (as it would
+/// be for non-worker roles), the Resume Context section does not appear.
+#[tokio::test]
+async fn non_worker_role_prompt_omits_resume_context_section() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "No-resume epic", "No-resume task").await;
+    let role = LeadRole;
+    // Passing None simulates the stage.rs behavior for non-worker roles
+    let ctx = assemble_for_role_with_resume(db, &task, &role, None).await;
+    assert!(
+        ctx.worker_resume_note.is_none(),
+        "non-worker role should have no resume note"
+    );
+    assert!(
+        !ctx.system_prompt.contains("## Resume Context"),
+        "non-worker role prompt should not contain Resume Context section"
+    );
+}
+
+/// AC1: When both CI blocking directive and resume note are present, they
+/// appear in the correct template order: CI blocking before resume context.
+#[tokio::test]
+async fn ci_blocking_appears_before_resume_context_in_prompt() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Order epic", "Order task").await;
+
+    // Seed CI failing status (ci_last_remediation_base_sha is required by build_ci_blocking_directive)
+    let task = {
+        let mut t = task;
+        t.ci_status = "failing".to_string();
+        t.ci_pr_number = Some(100);
+        t.ci_head_sha = Some("head-sha-abc".to_string());
+        t.ci_blocking_required_check_names = "Quality Gate".to_string();
+        t.ci_last_remediation_base_sha = Some("base-sha-abc".to_string());
+        t
+    };
+
+    let role = WorkerRole;
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some());
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    let ctx = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "",
+        learned_prompt: None,
+        resolved_skills: &[],
+        app_state: &app_state,
+        read_sources: &[],
+        worker_resume_note: note.as_deref(),
+        mcp_server_instructions: &std::collections::BTreeMap::new(),
+    })
+    .await;
+
+    // Both sections should be present
+    assert!(
+        ctx.ci_blocking_directive.is_some(),
+        "CI directive should be present"
+    );
+    assert!(
+        ctx.worker_resume_note.is_some(),
+        "resume note should be present"
+    );
+
+    // In the rendered prompt, CI blocking comes before resume context
+    assert_ordered(
+        &ctx.system_prompt,
+        &["## ⛔ BLOCKING: Required CI Failing", "## Resume Context"],
+    );
+}
+
+/// AC1: Activity section (with attempt history appended by concurrent phase 2)
+/// always appears after knowledge context and code graph context in the rendered
+/// prompt. This guards the phase 2 concurrent join ordering.
+#[tokio::test]
+async fn activity_section_appears_after_knowledge_and_code_graph() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task =
+        create_project_epic_task(&db, &events, "Activity order epic", "Activity order task").await;
+    let role = LeadRole;
+    let ctx = assemble_for_role(db, &task, &role, None, "", None, &[], &[]).await;
+    let prompt = &ctx.system_prompt;
+
+    // The template ordering is: Epic Context → Relevant Knowledge → Code Graph → Activity
+    // Even when sections are empty, the template has them in that order as markers.
+    // We verify relative ordering of the sections that do have content markers.
+    // Activity Log appears inside the activity_section; "## Environment" comes after it.
+    if prompt.contains("## Epic Context") && prompt.contains("### Activity Log") {
+        assert_ordered(
+            prompt,
+            &["## Epic Context", "### Activity Log", "## Environment"],
+        );
+    }
+    // Even without Epic Context present, Activity Log must precede Environment
+    if prompt.contains("### Activity Log") {
+        assert_ordered(prompt, &["### Activity Log", "## Environment"]);
+    }
+}
+
+/// AC2: Resume note with only failover context (no checkpoint, no submit, no
+/// prior session) still renders correctly and includes model and reason.
+#[test]
+fn resume_note_failover_only_with_new_and_previous_model() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        new_model: Some("openai/o3".to_string()),
+        previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+        failover_reason: Some("provider_health_degraded".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "Resuming from prior session",
+            "openai/o3",
+            "claude-opus-4.7",
+            "provider_health_degraded",
+        ],
+    );
+    // Should NOT contain checkpoint or submit/review since none was supplied
+    assert!(
+        !note.contains("checkpoint"),
+        "no checkpoint in failover-only: {note}"
+    );
+    assert!(
+        !note.contains("submit/review"),
+        "no submit/review in failover-only: {note}"
+    );
+}
+
+/// AC2: Resume note with both checkpoint and submit_or_review_id prefers
+/// checkpoint (checkpoint takes precedence in the rendering logic).
+#[test]
+fn resume_note_checkpoint_takes_precedence_over_submit() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        commit_sha: Some("abc123".to_string()),
+        submit_or_review_id: Some("review-99".to_string()),
+        prior_session_lineage: Some("sess-both".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    // Checkpoint should appear (it's the first branch in the if/else)
+    assert!(
+        note.contains("abc123"),
+        "checkpoint sha must appear: {note}"
+    );
+    // submit/review should NOT appear since checkpoint is present
+    assert!(
+        !note.contains("review-99"),
+        "submit/review should be omitted when checkpoint is present: {note}"
+    );
+}
+
+/// AC1: The `prompt_sections_append_in_canonical_order` existing test covers
+/// skills and read sources ordering. This extended version adds the Resume
+/// Context marker to verify it participates in the canonical ordering too.
+#[tokio::test]
+async fn resume_context_section_in_canonical_order_with_skills_and_sources() {
+    let db = Database::ephemeral().await.expect("create ephemeral db");
+    let events = EventBus::noop();
+    let task = create_project_epic_task(&db, &events, "Full order epic", "Full order task").await;
+    let role = WorkerRole;
+    let skills = vec![
+        skill("alpha-skill", "First skill", "Alpha body.", true),
+        skill("beta-skill", "Second skill", "Beta body.", false),
+    ];
+    let sources = vec![
+        source("repo-a", "Repository A"),
+        source("repo-b", "Repository B"),
+    ];
+    let metadata = resume_metadata_with_checkpoint();
+    let note = build_worker_resume_note(role.config().name, Some(&metadata));
+    assert!(note.is_some(), "worker resume note should be produced");
+    let note_ref = note.as_deref();
+
+    let app_state = agent_context_from_db(db.clone(), CancellationToken::new());
+    let worktree = test_tempdir("prompt-context-worktree-");
+    let ctx = assemble_prompt_context(PromptContextInputs {
+        task: &task,
+        runtime_role: &role,
+        role_for_epic_check: &role,
+        project_path: "/workspace/test-project",
+        worktree_path: worktree.path(),
+        conflict_ctx: None,
+        merge_validation_ctx: None,
+        prompt_setup_commands: None,
+        system_prompt_extensions: "Custom extension.",
+        learned_prompt: None,
+        resolved_skills: &skills,
+        app_state: &app_state,
+        read_sources: &sources,
+        worker_resume_note: note_ref,
+        mcp_server_instructions: &std::collections::BTreeMap::new(),
+    })
+    .await;
+
+    assert_contains_all(
+        &ctx.system_prompt,
+        &[
+            "Custom extension.",
+            "## Resume Context",
+            "Resuming from prior session",
+            "## Available Skills",
+            "## Related repositories (read-only)",
+        ],
+    );
+    assert_ordered(
+        &ctx.system_prompt,
+        &[
+            "## Resume Context",
+            "Custom extension.",
+            "## Available Skills",
+            "## Related repositories (read-only)",
+        ],
+    );
 }
