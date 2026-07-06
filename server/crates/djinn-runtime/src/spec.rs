@@ -351,6 +351,19 @@ pub struct ResumeLifecycleMetadata {
     /// model-rotation logic.
     #[serde(default)]
     pub previous_model: Option<String>,
+    /// New/current model selected after model failover. When the
+    /// coordinator's model-rotation metadata indicates a rotation from
+    /// `previous_model` to a different model, this field carries the
+    /// target model. Used by the resume-prompt note so the worker knows
+    /// which model it is running on after failover.
+    #[serde(default)]
+    pub new_model: Option<String>,
+    /// Human-readable failover/termination reason supplied by the
+    /// coordinator. Populated from model-rotation reason metadata when
+    /// available. Used by the resume-prompt note so the worker knows
+    /// why the prior session was terminated and a new model was chosen.
+    #[serde(default)]
+    pub failover_reason: Option<String>,
     /// Last durable-progress summary from the prior session, when
     /// available. Used by the resume-prompt note to give the worker
     /// context about what was accomplished before termination.
@@ -719,6 +732,8 @@ mod tests {
                     reason: Some(ResumeSelectionReason::CheckpointUnsafe),
                 }],
                 previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+                new_model: Some("openai/gpt-4.1".to_string()),
+                failover_reason: Some("no_durable_progress_streak".to_string()),
                 last_durable_progress_summary: Some("Implemented core feature".to_string()),
                 verification_command: Some("cargo test".to_string()),
             }),
@@ -776,6 +791,16 @@ mod tests {
             meta.skipped[0].reason,
             Some(ResumeSelectionReason::CheckpointUnsafe),
             "rejected-candidate skip reason must reach the spec"
+        );
+        assert_eq!(
+            meta.new_model.as_deref(),
+            Some("openai/gpt-4.1"),
+            "failover target model must reach the spec"
+        );
+        assert_eq!(
+            meta.failover_reason.as_deref(),
+            Some("no_durable_progress_streak"),
+            "failover reason must reach the spec"
         );
     }
 
