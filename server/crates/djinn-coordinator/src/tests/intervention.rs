@@ -5025,11 +5025,15 @@ async fn completed_close_reason_is_not_force_close_terminalized() {
 
 // ── Arbiter park transaction tests ──────────────────────────────────────────
 
-/// Verify a valid arbiter park decision persists the decision payload and
-/// structured dossier on the current arbitration row, marks the row consumed,
-/// creates a HumanReview remediation hold whose description includes the
-/// structured dossier content, and the ArbiterPark transition moves
-/// in_lead_intervention → open.
+/// Repository-level assertion: a valid arbiter park decision persists the
+/// decision payload and structured dossier on the current arbitration row,
+/// marks the row consumed, creates a HumanReview remediation hold whose
+/// description includes the structured dossier content, and the ArbiterPark
+/// transition moves in_lead_intervention → open.
+///
+/// NOTE: The actual production path (`DirectServices::transition_task("arbiter_park")`)
+/// and malformed/missing arbitration fail-closed behavior are covered by
+/// integration tests in `djinn-agent/tests/arbiter_park_transaction.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn arbiter_park_persists_decision_creates_human_review_hold() {
     let db = test_helpers::create_test_db();
@@ -5251,8 +5255,11 @@ fn arbiter_park_transition_rejects_non_lead_intervention_states() {
     assert_eq!(result.unwrap().to_status, Some(TaskStatus::Open));
 }
 
-/// Verify the HumanReview hold description contains the structured dossier
-/// content rather than a generic fallback reason.
+/// Repository-level assertion: the HumanReview hold description contains the
+/// structured dossier content rather than a generic fallback reason.
+///
+/// NOTE: The actual production path is tested via integration tests in
+/// `djinn-agent/tests/arbiter_park_transaction.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn human_review_hold_description_contains_arbiter_dossier() {
     let db = test_helpers::create_test_db();
