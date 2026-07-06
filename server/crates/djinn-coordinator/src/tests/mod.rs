@@ -1441,3 +1441,6 @@ mod i3mv_regression_tests;
 
 #[cfg(test)]
 mod operator_explanation_tests;
+
+#[cfg(test)]
+mod raw_signal_bypass_guard;

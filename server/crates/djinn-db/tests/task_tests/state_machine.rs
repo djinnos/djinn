@@ -1348,3 +1348,291 @@ async fn board_health_stranded_ready_excludes_credential_revoked_tasks() {
 fn rand_github_id() -> i64 {
     (uuid::Uuid::now_v7().as_u128() & 0x7fff_ffff_ffff) as i64
 }
+
+/// Comprehensive backward-compatibility regression: legacy coarse board_health
+/// fields must remain present and deserializable while all additive liveness,
+/// protocol-violation, stranded-ready, classifier outcome/evidence, and
+/// dispatch-gate fields are also available in a single response.
+///
+/// This test seeds all three categories of additive data (liveness evidence,
+/// protocol-violation evidence, and a stranded-ready task) and verifies that
+/// `board_health` returns every field without omission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn board_health_legacy_and_additive_fields_coexist() {
+    let db = create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let project = create_test_project(&db).await;
+    let epic = create_test_epic(&db, &project.id).await;
+    let repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
+
+    // ── Seed legacy stale task ──────────────────────────────────────────
+    let stale_task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Stale in_progress task",
+            "desc",
+            "design",
+            "task",
+            1,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    repo.transition(
+        &stale_task.id,
+        TransitionAction::Start,
+        "",
+        "system",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // Backdate updated_at so it appears as a stale in_progress task.
+    sqlx::query("UPDATE tasks SET updated_at = '2020-01-01T00:00:00.000Z' WHERE id = $1")
+        .bind(&stale_task.id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+    // ── Seed liveness evidence (dead verdict) ──────────────────────────
+    let liveness_task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Liveness evidence task",
+            "desc",
+            "design",
+            "task",
+            2,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    let liveness_session = create_test_session(&db, &project.id, &liveness_task.id).await;
+    let evidence_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO liveness_evidence \
+         (id, session_id, task_id, verdict, outcome_kind, outcome_reason, evidence, created_at) \
+         VALUES ($1, $2, $3, 'dead', 'dead_reclaimed', 'hard_runtime_exceeded', \
+                 '{\"pod_phase\":\"Succeeded\",\"claim_ttl_expired\":true}', \
+                 '2025-06-01T00:00:00.000Z')",
+    )
+    .bind(&evidence_id)
+    .bind(&liveness_session.id)
+    .bind(&liveness_task.id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // ── Seed protocol-violation evidence ───────────────────────────────
+    let pv_session_id = liveness_session.id.clone();
+    let pv_task_id = liveness_task.id.clone();
+    let pv_evidence_id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO liveness_evidence \
+         (id, session_id, task_id, verdict, outcome_kind, outcome_reason, evidence, created_at) \
+         VALUES ($1, $2, $3, 'protocol_violation', 'protocol_violation', \
+                 'clean_exit_nonterminal', '{\"reason\":\"unexpected\"}', \
+                 '2025-06-01T00:00:01.000Z')",
+    )
+    .bind(&pv_evidence_id)
+    .bind(&pv_session_id)
+    .bind(&pv_task_id)
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    // ── Seed stranded-ready task ───────────────────────────────────────
+    let stranded_task = repo
+        .create_in_project(
+            &project.id,
+            Some(&epic.id),
+            "Stranded open task",
+            "desc",
+            "design",
+            "task",
+            3,
+            "worker",
+            Some("open"),
+            None,
+        )
+        .await
+        .unwrap();
+    backdate_task_updated_at(&db, &stranded_task.id, "90 minutes").await;
+
+    // ── Single board_health call ───────────────────────────────────────
+    let report = repo.board_health(24).await.unwrap();
+
+    // ── Legacy coarse fields must remain present ───────────────────────
+    assert!(
+        report.get("stale_tasks").is_some(),
+        "legacy stale_tasks must remain present"
+    );
+    assert!(
+        report.get("epic_stats").is_some(),
+        "legacy epic_stats must remain present"
+    );
+    assert!(
+        report.get("review_queue").is_some(),
+        "legacy review_queue must remain present"
+    );
+    assert_eq!(
+        report.get("stale_threshold_hours").and_then(|v| v.as_i64()),
+        Some(24),
+        "legacy stale_threshold_hours must remain present"
+    );
+
+    // Verify the stale task actually surfaces.
+    let stale = report["stale_tasks"].as_array().unwrap();
+    assert!(
+        stale.iter().any(|t| t["id"] == stale_task.id),
+        "stale in_progress task must appear in stale_tasks"
+    );
+
+    // ── Additive liveness_outcomes section ─────────────────────────────
+    let liveness = report
+        .get("liveness_outcomes")
+        .expect("liveness_outcomes section must be present");
+    let l_total = liveness
+        .get("total")
+        .and_then(|v| v.as_i64())
+        .expect("liveness_outcomes.total must be a number");
+    assert!(
+        l_total >= 2,
+        "must surface at least 2 liveness outcomes (dead + protocol_violation), got {l_total}"
+    );
+    let by_verdict = liveness
+        .get("by_verdict")
+        .and_then(|v| v.as_object())
+        .expect("liveness_outcomes.by_verdict must be an object");
+    assert!(
+        by_verdict.contains_key("dead"),
+        "by_verdict must contain dead count"
+    );
+    let recent = liveness
+        .get("recent")
+        .and_then(|v| v.as_array())
+        .expect("liveness_outcomes.recent must be an array");
+    // The dead outcome must carry classifier outcome/evidence fields.
+    let dead_item = recent
+        .iter()
+        .find(|i| {
+            i.get("verdict").and_then(|v| v.as_str()) == Some("dead")
+                && i.get("task_id").and_then(|v| v.as_str()) == Some(&liveness_task.id)
+        })
+        .expect("dead verdict for liveness_task must be present");
+    assert_eq!(
+        dead_item.get("outcome_kind").and_then(|v| v.as_str()),
+        Some("dead_reclaimed"),
+        "classifier outcome_kind must be present"
+    );
+    assert_eq!(
+        dead_item.get("outcome_reason").and_then(|v| v.as_str()),
+        Some("hard_runtime_exceeded"),
+        "classifier outcome_reason must be present"
+    );
+
+    // ── Additive protocol_violations section ───────────────────────────
+    let pv = report
+        .get("protocol_violations")
+        .expect("protocol_violations section must be present");
+    assert!(
+        pv.get("total").and_then(|v| v.as_i64()).unwrap_or(0) >= 1,
+        "must surface at least 1 protocol violation"
+    );
+    let pv_recent = pv
+        .get("recent")
+        .and_then(|v| v.as_array())
+        .expect("protocol_violations.recent must be an array");
+    let pv_item = pv_recent
+        .iter()
+        .find(|i| i.get("task_id").and_then(|v| v.as_str()) == Some(&liveness_task.id))
+        .expect("protocol violation for liveness_task must be present");
+    assert_eq!(
+        pv_item.get("verdict").and_then(|v| v.as_str()),
+        Some("protocol_violation"),
+        "protocol violation verdict must match"
+    );
+    assert_eq!(
+        pv_item.get("outcome_reason").and_then(|v| v.as_str()),
+        Some("clean_exit_nonterminal"),
+        "protocol violation outcome_reason must match"
+    );
+
+    // ── Additive stranded_ready section ────────────────────────────────
+    let sr = report
+        .get("stranded_ready")
+        .expect("stranded_ready section must be present");
+    assert_eq!(
+        sr.get("threshold_minutes").and_then(|v| v.as_i64()),
+        Some(30),
+        "must echo the base 30-minute threshold"
+    );
+    let findings = sr
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .expect("stranded_ready.findings must be an array");
+    let stranded_finding = findings
+        .iter()
+        .find(|f| f.get("id").and_then(|v| v.as_str()) == Some(&stranded_task.id))
+        .expect("stranded_task must appear in stranded_ready findings");
+    assert_eq!(
+        stranded_finding.get("severity").and_then(|v| v.as_str()),
+        Some("error"),
+        "90-minute backdate must produce error severity"
+    );
+    // Dispatch-gate evidence must be present.
+    let gate = stranded_finding
+        .get("dispatch_gate")
+        .expect("dispatch_gate evidence must be present on stranded finding");
+    assert!(
+        gate.get("evaluated_role").is_some(),
+        "dispatch_gate.evaluated_role must be present"
+    );
+    assert!(
+        gate.get("gate_verdict").is_some(),
+        "dispatch_gate.gate_verdict must be present"
+    );
+    assert!(
+        gate.get("breaker_open").is_some(),
+        "dispatch_gate.breaker_open must be present"
+    );
+    assert!(
+        gate.get("manually_paused").is_some(),
+        "dispatch_gate.manually_paused must be present"
+    );
+    assert!(
+        gate.get("rate_limited").is_some(),
+        "dispatch_gate.rate_limited must be present"
+    );
+    assert!(
+        gate.get("credential_available").is_some(),
+        "dispatch_gate.credential_available must be present"
+    );
+    assert!(
+        gate.get("reasons").is_some(),
+        "dispatch_gate.reasons must be present"
+    );
+    // Threshold ladder.
+    let threshold = stranded_finding
+        .get("threshold")
+        .expect("threshold ladder must be present");
+    assert_eq!(
+        threshold.get("warning_minutes").and_then(|v| v.as_i64()),
+        Some(30)
+    );
+    assert_eq!(
+        threshold.get("error_minutes").and_then(|v| v.as_i64()),
+        Some(60)
+    );
+    assert_eq!(
+        threshold.get("critical_minutes").and_then(|v| v.as_i64()),
+        Some(180)
+    );
+}
