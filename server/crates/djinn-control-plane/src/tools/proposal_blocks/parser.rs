@@ -372,6 +372,104 @@ pub fn extract_custom_block_tags(body: &str) -> Vec<String> {
     tags
 }
 
+/// The content-bearing ATTRIBUTE alternatives for a children-based block type.
+///
+/// `Some(&[...])` marks a block type as content-required: its visible content
+/// comes from its CHILDREN, so a self-closing tag or blank children renders an
+/// empty block. The slice lists attribute names that satisfy the content
+/// requirement in lieu of children (an empty slice means children are the ONLY
+/// content source). `None` means the block is not subject to this empty-content
+/// check — either self-closing is legitimate, or the emptiness is guarded
+/// elsewhere (e.g. `diagram` is covered by the empty-source guard in
+/// [`validate_mdx_blocks`]).
+///
+/// The children-based set and the attribute alternatives are derived from the
+/// catalog grammar in `proposal_blocks/catalog.rs`: `decisions`, `file-tree`,
+/// `checklist`, `diff`, `json-explorer`, `wireframe`, and `callout` are pure
+/// children blocks (`decisions`' `items=` / `file-tree`'s `entries=` prop forms
+/// are NOT rendered by the UI, so children are mandatory); `rich-text` and
+/// `annotated-code` accept a content attribute (`content` / `code`); `tabs` and
+/// `columns` are self-closing containers whose content lives in the `tabs` /
+/// `columns` attribute.
+fn content_required_attrs(block_type: &str) -> Option<&'static [&'static str]> {
+    match block_type {
+        "rich-text" => Some(&["content"]),
+        "annotated-code" => Some(&["code"]),
+        "tabs" => Some(&["tabs"]),
+        "columns" => Some(&["columns"]),
+        "decisions" | "file-tree" | "checklist" | "diff" | "json-explorer" | "wireframe"
+        | "callout" => Some(&[]),
+        _ => None,
+    }
+}
+
+/// Reject content-required blocks that arrive self-closing or with blank
+/// children and no content-bearing attribute.
+///
+/// A children-based block (see [`content_required_attrs`]) that has neither
+/// non-blank children nor a populated content attribute would validate as a
+/// "known tag" yet render empty in the UI — the exact production failure where
+/// `<Decisions id="x" decisions={[…]} />` (a children-based block written in the
+/// unsupported attribute form) silently rendered nothing. The returned error
+/// names the offending tag + id and states the expected grammar, reusing the
+/// catalog description as the source of truth.
+pub fn validate_block_content(blocks: &[ParsedProposalBlock]) -> Result<(), String> {
+    for block in blocks {
+        let Some(content_attrs) = content_required_attrs(&block.block_type) else {
+            continue;
+        };
+        // Satisfied by non-blank children …
+        if !block.raw_content.trim().is_empty() {
+            continue;
+        }
+        // … or by a present, non-empty content-bearing attribute.
+        let has_content_attr = content_attrs.iter().any(|name| {
+            block
+                .attributes
+                .get(*name)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        });
+        if has_content_attr {
+            continue;
+        }
+        return Err(empty_block_error(block, content_attrs));
+    }
+    Ok(())
+}
+
+/// Build an actionable error for an empty content-required block, naming the
+/// tag/id, listing any attribute alternative, and quoting the catalog grammar.
+fn empty_block_error(block: &ParsedProposalBlock, content_attrs: &[&str]) -> String {
+    let id = if block.id.is_empty() {
+        "<no id>".to_string()
+    } else {
+        format!("`{}`", block.id)
+    };
+    let mut msg = format!(
+        "{} block {id} is empty: its content must be written as block children",
+        block.tag
+    );
+    if !content_attrs.is_empty() {
+        let attrs = content_attrs
+            .iter()
+            .map(|a| format!("`{a}`"))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        msg.push_str(&format!(" (or supplied via the {attrs} attribute)"));
+    }
+    msg.push_str(
+        ", but it arrived self-closing or with blank children and would render empty. ",
+    );
+    if let Some(def) = proposal_block_definition_for_tag(&block.tag)
+        && let Some(desc) = def.description
+    {
+        msg.push_str("Expected grammar — ");
+        msg.push_str(desc);
+    }
+    msg
+}
+
 /// Ensure all parsed blocks have non-empty, unique `id` attributes.
 pub fn validate_block_ids(blocks: &[ParsedProposalBlock]) -> Result<(), String> {
     let mut seen = HashSet::new();
