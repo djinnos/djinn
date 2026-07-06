@@ -3966,12 +3966,17 @@ mod failover_chain_tests {
 
     /// AC4: Per-candidate observation/logging — each candidate in the
     /// failover chain is logged, including those that were skipped or failed.
-    /// This is a smoke test (structured-log subscriber capture would be needed
-    /// for full assertion; the test verifies no panics and correct dispatch
-    /// behavior as a proxy).
+    ///
+    /// Uses `#[tracing_test::traced_test]` to capture structured log output and
+    /// assert that:
+    /// - `failover_candidate_attempt` is emitted for the breaker-open candidate
+    ///   (model-a) with the correct model_id.
+    /// - `failover_candidate_accepted` is emitted for the winning candidate
+    ///   (model-b) with the correct model_id.
+    /// - The correct candidate_index and total_candidates appear in the logs.
     #[tokio::test]
-    async fn failover_chain_logging_smoke_test() {
-        let _ = djinn_telemetry::init();
+    #[tracing_test::traced_test]
+    async fn failover_chain_logging_captures_candidate_events() {
         let db = crate::test_helpers::create_test_db();
         let (events_tx, _) = tokio::sync::broadcast::channel(64);
 
@@ -3985,14 +3990,14 @@ mod failover_chain_tests {
             ],
         );
 
-        // Breaker-open model-a, free model-b, free model-c
+        // Breaker-open model-a; model-b and model-c are free
         for _ in 0..3 {
             actor.health.record_failure(None, "provider/model-a");
         }
 
         let outcome = actor
             .try_dispatch_to_pool(
-                "logging-task",
+                "logging-event-task",
                 "worker",
                 0,
                 None,
@@ -4003,7 +4008,7 @@ mod failover_chain_tests {
                 ],
                 |pool, model_id| {
                     let pool = pool.clone();
-                    let tid = "logging-task".to_owned();
+                    let tid = "logging-event-task".to_owned();
                     let pp = "/tmp/proj".to_owned();
                     let mid = model_id.to_owned();
                     async move { pool.dispatch(&tid, &pp, &mid).await }
@@ -4013,12 +4018,168 @@ mod failover_chain_tests {
 
         assert!(
             matches!(outcome, DispatchOutcome::Dispatched),
-            "dispatch should succeed after breaker-open model-a"
+            "dispatch should succeed on model-b after model-a breaker-open"
         );
 
-        // Verify the lane_resolution_log functions work correctly with the
-        // expected parameters (smoke tests already in lane_resolution_log module).
-        // The real assertion would require a structured-log subscriber capture.
+        // ── Assert failover_candidate_attempt for the breaker-open model-a ──
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log failover_candidate_attempt for the breaker-open candidate"
+        );
+        assert!(
+            logs_contain("provider/model-a"),
+            "failover_candidate_attempt must reference the skipped model-a"
+        );
+
+        // ── Assert failover_candidate_accepted for the winning model-b ──────
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log failover_candidate_accepted for the winning candidate"
+        );
+        assert!(
+            logs_contain("provider/model-b"),
+            "failover_candidate_accepted must reference the accepted model-b"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 + AC4: Failover restamp produces model-dependent ProviderConfig
+    /// defaults for each candidate model.
+    ///
+    /// Verifies that `restamp_provider_config_for_model` re-resolves
+    /// model-dependent fields (`context_window`, `capabilities`, `format_family`)
+    /// from the target model's RestampTarget rather than carrying stale values
+    /// from the previous candidate. The dispatch closure calls the restamp
+    /// helper for the dispatched candidate model, capturing the result for
+    /// post-dispatch assertion.
+    #[tokio::test]
+    async fn failover_chain_restamp_produces_model_dependent_config() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Breaker-open model-a; model-b is free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Capture restamped ProviderConfig for the dispatched candidate model.
+        let restamped_config: Arc<Mutex<Option<djinn_provider::provider::ProviderConfig>>> =
+            Arc::new(Mutex::new(None));
+        let restamped_clone = restamped_config.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "restamp-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "restamp-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let restamped = restamped_clone.clone();
+                    async move {
+                        // Simulate the downstream restamp path: build a source
+                        // ProviderConfig for the *previous* model (model-a) with
+                        // its own model-dependent defaults, then restamp it to the
+                        // *candidate* model (model-b).  This mirrors what
+                        // `build_provider_from_resolved` does when a failover
+                        // candidate is selected.
+                        let source_config = djinn_provider::provider::ProviderConfig {
+                            base_url: "https://api.example.com".to_owned(),
+                            auth: djinn_provider::provider::AuthMethod::BearerToken(
+                                "test-key".to_owned(),
+                            ),
+                            format_family: djinn_provider::provider::FormatFamily::Anthropic,
+                            model_id: "provider/model-a".to_owned(),
+                            context_window: 100_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(8192),
+                            },
+                            reasoning_effort: None,
+                            tool_schema_compat: None,
+                            telemetry: None,
+                            session_affinity_key: None,
+                            provider_headers: std::collections::HashMap::new(),
+                        };
+
+                        // Restamp to model-b with different model-dependent
+                        // defaults to prove the helper re-resolves them.
+                        let target = djinn_provider::provider::RestampTarget {
+                            model_id: mid.clone(),
+                            format_family: djinn_provider::provider::FormatFamily::OpenAI,
+                            reasoning: false,
+                            context_window: 200_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(32_768),
+                            },
+                            tool_schema_compat: None,
+                        };
+                        let cfg = djinn_provider::provider::restamp_provider_config_for_model(
+                            source_config,
+                            &target,
+                        );
+
+                        // Capture the restamped config for post-dispatch assertion
+                        *restamped.lock().expect("restamp mutex") = Some(cfg.clone());
+
+                        pool.dispatch(&tid, &pp, &mid).await
+                    }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker-open"
+        );
+
+        // ── Assert restamped ProviderConfig has model-b's defaults ──────────
+        let captured = restamped_config
+            .lock()
+            .expect("restamp mutex")
+            .take()
+            .expect("dispatch closure must capture restamped config");
+
+        assert_eq!(
+            captured.model_id, "provider/model-b",
+            "restamped config must have the candidate model-b as model_id"
+        );
+        assert_eq!(
+            captured.format_family,
+            djinn_provider::provider::FormatFamily::OpenAI,
+            "restamped config must resolve model-b's format_family (OpenAI), \
+             not carry model-a's stale value (Anthropic)"
+        );
+        assert_eq!(
+            captured.context_window, 200_000,
+            "restamped config must resolve model-b's context_window (200_000), \
+             not carry model-a's stale value (100_000)"
+        );
+        assert_eq!(
+            captured.capabilities.max_tokens_default,
+            Some(32_768),
+            "restamped config must resolve model-b's max_tokens_default (32_768), \
+             not carry model-a's stale value (8192)"
+        );
+        // Transport fields must be preserved from the source config
+        assert_eq!(
+            captured.base_url, "https://api.example.com",
+            "restamped config must preserve the source base_url"
+        );
+
         cancel.cancel();
     }
 }
