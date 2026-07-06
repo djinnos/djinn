@@ -3,7 +3,7 @@ use super::super::*;
 use super::DispatchOutcome;
 use super::model_under_user_cap;
 use djinn_core::clock::{Clock, SystemClock};
-use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_core::models::task_attempt::{TaskAttemptLedgerRow, TaskAttemptOutcome};
 use djinn_core::models::{ReopenClass, TransitionAction};
 #[cfg(not(test))]
 use djinn_db::AgentRepository;
@@ -967,6 +967,12 @@ impl CoordinatorActor {
             // and refuse to park on evidence the fleet never tried.
             let history = self.post_intervention_history(task).await;
 
+            // Build the attempt ledger for inclusion in arbiter dossiers.
+            // This captures all post-intervention attempt rows (all roles)
+            // so operator-facing arbitration payloads consume the durable
+            // attempt rows rather than reassembling bespoke history objects.
+            let attempt_ledger = self.attempt_ledger_for_task(task).await;
+
             // CI staleness check (2vxr): CI evidence whose head SHA predates
             // the latest submitted work must not serve as the park-triggering
             // strike. If the CI was first observed before the latest submission,
@@ -1098,7 +1104,13 @@ impl CoordinatorActor {
                             &reason,
                             quality_strikes,
                             None,
-                            &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                            &Self::arbiter_failure_dossier(
+                                &reason,
+                                role,
+                                task,
+                                &history,
+                                &attempt_ledger,
+                            ),
                         )
                         .await;
                 }
@@ -1120,6 +1132,7 @@ impl CoordinatorActor {
                     "submission_pending_review": history.submission_pending_review,
                     "latest_submission_at": history.latest_submission_at,
                 },
+                "attempt_ledger": attempt_ledger,
             });
             let directive = serde_json::json!({
                 "kind": "lead_arbiter",
@@ -1180,7 +1193,13 @@ impl CoordinatorActor {
                             &reason,
                             quality_strikes,
                             None,
-                            &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                            &Self::arbiter_failure_dossier(
+                                &reason,
+                                role,
+                                task,
+                                &history,
+                                &attempt_ledger,
+                            ),
                         )
                         .await;
                 }
@@ -1260,7 +1279,13 @@ impl CoordinatorActor {
                                     &reason,
                                     quality_strikes,
                                     None,
-                                    &Self::arbiter_failure_dossier(&reason, role, task, &history),
+                                    &Self::arbiter_failure_dossier(
+                                        &reason,
+                                        role,
+                                        task,
+                                        &history,
+                                        &attempt_ledger,
+                                    ),
                                 )
                                 .await;
                         }
@@ -1309,7 +1334,14 @@ impl CoordinatorActor {
                             &reason,
                             quality_strikes,
                             stored_dossier,
-                            &Self::reentry_consumed_dossier(&reason, role, task, &history, &record),
+                            &Self::reentry_consumed_dossier(
+                                &reason,
+                                role,
+                                task,
+                                &history,
+                                &record,
+                                &attempt_ledger,
+                            ),
                         )
                         .await;
                 }
@@ -1491,11 +1523,42 @@ impl CoordinatorActor {
         );
     }
 
+    /// Build the attempt ledger for a task, suitable for inclusion in arbiter
+    /// dossiers.  Returns post-intervention attempt rows (all roles) via
+    /// [`TaskAttemptRepository::ledger_for_task_since`], limited to 100 rows.
+    /// On error, returns an empty vec so the dossier path remains functional.
+    async fn attempt_ledger_for_task(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Vec<TaskAttemptLedgerRow> {
+        let attempt_repo = TaskAttemptRepository::new(self.db.clone());
+        match attempt_repo
+            .ledger_for_task_since(
+                &task.id,
+                None, // all roles — worker, guard, etc.
+                task.last_intervention_at.as_deref(),
+                100,
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.short_id,
+                    error = %e,
+                    "CoordinatorActor: failed to build attempt ledger for dossier; using empty ledger"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     fn arbiter_failure_dossier(
         base_reason: &str,
         role: &str,
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
+        attempt_ledger: &[TaskAttemptLedgerRow],
     ) -> serde_json::Value {
         serde_json::json!({
             "kind": "arbiter_failure_dossier",
@@ -1512,6 +1575,7 @@ impl CoordinatorActor {
                 "submission_pending_review": history.submission_pending_review,
                 "latest_submission_at": history.latest_submission_at,
             },
+            "attempt_ledger": attempt_ledger,
         })
     }
 
@@ -1521,6 +1585,7 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         history: &PostInterventionHistory,
         record: &TaskArbitrationRecord,
+        attempt_ledger: &[TaskAttemptLedgerRow],
     ) -> serde_json::Value {
         serde_json::json!({
             "kind": "arbiter_consumed_dossier",
@@ -1550,6 +1615,7 @@ impl CoordinatorActor {
                 "submission_pending_review": history.submission_pending_review,
                 "latest_submission_at": history.latest_submission_at,
             },
+            "attempt_ledger": attempt_ledger,
         })
     }
 

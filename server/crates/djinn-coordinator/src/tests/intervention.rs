@@ -7,7 +7,8 @@ use djinn_core::{events::DjinnEventEnvelope, models::SessionStatus};
 use djinn_db::repositories::task_arbitration::CreateArbitrationParams;
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::repositories::task_attempt::{
-    CreateTaskAttemptParams, SubmitTaskAttemptParams, TaskAttemptRepository,
+    CreateTaskAttemptParams, GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams,
+    SubmitTaskAttemptParams, TaskAttemptRepository,
 };
 use djinn_db::{
     ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository,
@@ -4126,6 +4127,414 @@ async fn force_close_terminalizes_attempt_as_force_closed() {
     assert_eq!(sj["actor_id"], "test-actor");
     assert_eq!(sj["actor_role"], "lead");
     assert_eq!(sj["task_short_id"], task.short_id);
+}
+
+/// Arbiter dispatch dossier includes an `attempt_ledger` populated from
+/// real seeded `task_attempts` rows via the `ledger_for_task_since` query.
+///
+/// Covers: submitted/in-flight, terminal rejection/reopen, guard-deferred,
+/// adopted-PR, and head-SHA/ref cases — all seeded as real attempt rows
+/// after the task's `last_intervention_at`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_dossier_includes_attempt_ledger() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Create a task and drive intervention_count to MAX_PLANNER_INTERVENTIONS
+    // so the second-strike arbiter path triggers. reset_intervention_counters
+    // sets last_intervention_at = now().
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+    assert!(
+        task.last_intervention_at.is_some(),
+        "reset_intervention_counters must set last_intervention_at"
+    );
+
+    // Seed terminated post-intervention sessions so the park gate sees
+    // remediation was attempted (avoids the "no evidence" early return).
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // Now seed various task_attempts row types post-intervention:
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+
+    // 1) Submitted/in-flight attempt (pending → submitted, no terminal_at)
+    let sub_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &sub_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("ledger-test-sub-{sub_id}"),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &sub_id,
+            submit_ref: Some("submit-ref-001"),
+            checkpoint_ref: Some("ckpt-ref-001"),
+            mirror_head_sha: Some("mirror-sha-submitted"),
+            github_head_sha: Some("github-sha-submitted"),
+            summary: Some("submitted attempt summary"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    // 2) Terminal rejection/reopen attempt (pending → submitted → reopened)
+    let rej_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &rej_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("ledger-test-rej-{rej_id}"),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &rej_id,
+            submit_ref: Some("submit-ref-002"),
+            checkpoint_ref: None,
+            mirror_head_sha: Some("mirror-sha-rejected"),
+            github_head_sha: Some("github-sha-rejected"),
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &rej_id,
+            outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("rejected by CI"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    // 3) Guard-deferred attempt
+    let defer_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .insert_guard_deferred(GuardDeferTaskAttemptParams {
+            id: &defer_id,
+            task_id: &task.id,
+            role: "guard",
+            dispatch_key: &format!("ledger-test-defer-{defer_id}"),
+            decision: djinn_core::models::task_attempt::GuardDecision::Defer,
+            reason: djinn_core::models::task_attempt::GuardReason::RespawnGuard,
+            summary: Some("deferred by respawn guard"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    // 4) Adopted-PR attempt
+    let adopt_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .insert_guard_adopted_pr(GuardAdoptedPrTaskAttemptParams {
+            id: &adopt_id,
+            task_id: &task.id,
+            role: "guard",
+            dispatch_key: &format!("ledger-test-adopt-{adopt_id}"),
+            pr_url: "https://github.com/example/pr/42",
+            summary: Some("adopted existing open PR"),
+            summary_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Trigger the second-strike arbiter path.
+    let handled = actor
+        .route_loop_guard_planner_intervention(&task.id, "worker", "test-reason for ledger dossier")
+        .await;
+    assert!(handled, "second-strike must be handled");
+
+    // Read the arbitration row from DB and verify its dossier includes
+    // the attempt_ledger field with the expected rows.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (_cycle, existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let arb = existing.expect("unconsumed arbitration row must exist");
+    let dossier = arb.dossier.expect("arbitration row must have a dossier");
+    let ledger = dossier
+        .get("attempt_ledger")
+        .expect("dossier must include attempt_ledger");
+    let ledger_arr = ledger.as_array().expect("attempt_ledger must be an array");
+
+    // The ledger should contain at least the 4 hand-seeded attempt rows
+    // (submitted, rejected, deferred, adopted_pr) plus the 2 from
+    // seed_terminated_post_intervention_sessions. Exact count depends on
+    // ordering but must include all seeded rows.
+    assert!(
+        ledger_arr.len() >= 4,
+        "attempt_ledger must contain at least 4 rows (got {})",
+        ledger_arr.len()
+    );
+
+    // Verify each expected category is represented in the ledger.
+    let outcomes: Vec<&str> = ledger_arr
+        .iter()
+        .filter_map(|r| r.get("outcome").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        outcomes.contains(&"submitted"),
+        "ledger must include submitted attempts; got outcomes: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"reopened"),
+        "ledger must include terminal rejection (reopened); got outcomes: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"deferred"),
+        "ledger must include guard-deferred attempts; got outcomes: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"adopted_pr"),
+        "ledger must include adopted-PR attempts; got outcomes: {outcomes:?}"
+    );
+
+    // Verify guard decision/reason is present for guard rows.
+    let deferred_row = ledger_arr
+        .iter()
+        .find(|r| r.get("outcome").and_then(|v| v.as_str()) == Some("deferred"))
+        .expect("must find deferred row");
+    assert_eq!(
+        deferred_row.get("guard_decision").and_then(|v| v.as_str()),
+        Some("defer"),
+        "deferred row must carry guard_decision"
+    );
+    assert_eq!(
+        deferred_row.get("guard_reason").and_then(|v| v.as_str()),
+        Some("respawn_guard"),
+        "deferred row must carry guard_reason"
+    );
+
+    // Verify adopted_pr carries pr_url.
+    let adopted_row = ledger_arr
+        .iter()
+        .find(|r| r.get("outcome").and_then(|v| v.as_str()) == Some("adopted_pr"))
+        .expect("must find adopted_pr row");
+    assert_eq!(
+        adopted_row.get("pr_url").and_then(|v| v.as_str()),
+        Some("https://github.com/example/pr/42"),
+        "adopted_pr row must carry pr_url"
+    );
+
+    // Verify head SHAs are present on the submitted/rejected rows.
+    let submitted_row = ledger_arr
+        .iter()
+        .find(|r| {
+            r.get("outcome").and_then(|v| v.as_str()) == Some("submitted")
+                && r.get("submit_ref").and_then(|v| v.as_str()) == Some("submit-ref-001")
+        })
+        .expect("must find the submitted row with submit-ref-001");
+    assert_eq!(
+        submitted_row
+            .get("mirror_head_sha")
+            .and_then(|v| v.as_str()),
+        Some("mirror-sha-submitted"),
+        "submitted row must carry mirror_head_sha"
+    );
+    assert_eq!(
+        submitted_row
+            .get("github_head_sha")
+            .and_then(|v| v.as_str()),
+        Some("github-sha-submitted"),
+        "submitted row must carry github_head_sha"
+    );
+    assert_eq!(
+        submitted_row.get("checkpoint_ref").and_then(|v| v.as_str()),
+        Some("ckpt-ref-001"),
+        "submitted row must carry checkpoint_ref"
+    );
+
+    // Verify the rejected row also carries its refs.
+    let rejected_row = ledger_arr
+        .iter()
+        .find(|r| {
+            r.get("outcome").and_then(|v| v.as_str()) == Some("reopened")
+                && r.get("mirror_head_sha").and_then(|v| v.as_str()) == Some("mirror-sha-rejected")
+        })
+        .expect("must find the reopened row with mirror-sha-rejected");
+    assert_eq!(
+        rejected_row.get("github_head_sha").and_then(|v| v.as_str()),
+        Some("github-sha-rejected"),
+        "reopened row must carry github_head_sha"
+    );
+
+    // Verify the post_intervention_history field is still present and correct.
+    let pih = dossier
+        .get("post_intervention_history")
+        .expect("dossier must still include post_intervention_history");
+    assert!(
+        pih.get("any_submitted").is_some(),
+        "post_intervention_history must include any_submitted"
+    );
+}
+
+/// After consuming an arbitration and re-dispatching, the new arbitration
+/// dossier includes an attempt_ledger that reflects guard-deferred rows
+/// seeded between the first and second intervention cycles.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cross_cycle_dossier_includes_guard_deferred_ledger() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Set up task with intervention_count >= MAX_PLANNER_INTERVENTIONS.
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    // Seed terminated sessions so the park gate works.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // First arbiter dispatch: creates the arbitration row.
+    assert!(
+        actor
+            .route_loop_guard_planner_intervention(&task.id, "worker", "initial reason",)
+            .await,
+        "first dispatch creates the arbitration"
+    );
+
+    // Consume the arbitration to simulate the arbiter completing.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let (cycle, _existing) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    arb_repo.mark_consumed(&task.id, cycle).await.unwrap();
+
+    // Seed a guard-deferred attempt BETWEEN the first dispatch and re-entry.
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let defer_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .insert_guard_deferred(GuardDeferTaskAttemptParams {
+            id: &defer_id,
+            task_id: &task.id,
+            role: "guard",
+            dispatch_key: &format!("cross-cycle-defer-{defer_id}"),
+            decision: djinn_core::models::task_attempt::GuardDecision::Defer,
+            reason: djinn_core::models::task_attempt::GuardReason::Capacity,
+            summary: Some("deferred: capacity reached"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    // Seed an adopted-PR attempt.
+    let adopt_id = uuid::Uuid::now_v7().to_string();
+    attempt_repo
+        .insert_guard_adopted_pr(GuardAdoptedPrTaskAttemptParams {
+            id: &adopt_id,
+            task_id: &task.id,
+            role: "guard",
+            dispatch_key: &format!("cross-cycle-adopt-{adopt_id}"),
+            pr_url: "https://github.com/example/pr/99",
+            summary: Some("adopted existing open PR"),
+            summary_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Reload the task and re-trigger the intervention. Since the previous
+    // arbitration was consumed, a NEW cycle is created.
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    let handled = actor
+        .route_loop_guard_planner_intervention(&task.id, "worker", "re-entry reason")
+        .await;
+    assert!(handled, "re-entry dispatch creates a new arbitration cycle");
+
+    // Read the NEW arbitration row and verify its dossier includes the ledger
+    // with both the guard-deferred and adopted-PR rows.
+    let (new_cycle, new_arb) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    let arb = new_arb.expect("new unconsumed arbitration row must exist");
+    assert!(
+        arb.hold_cycle > cycle,
+        "new arbitration (cycle {}) must be after consumed cycle ({})",
+        new_cycle,
+        cycle
+    );
+    let dossier = arb.dossier.expect("arbitration row must have a dossier");
+    let ledger = dossier
+        .get("attempt_ledger")
+        .expect("dossier must include attempt_ledger");
+    let ledger_arr = ledger.as_array().expect("attempt_ledger must be an array");
+
+    // The ledger should include the guard-deferred and adopted-PR rows
+    // seeded between cycles.
+    let outcomes: Vec<&str> = ledger_arr
+        .iter()
+        .filter_map(|r| r.get("outcome").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        outcomes.contains(&"deferred"),
+        "cross-cycle ledger must include deferred row; got: {outcomes:?}"
+    );
+    assert!(
+        outcomes.contains(&"adopted_pr"),
+        "cross-cycle ledger must include adopted_pr row; got: {outcomes:?}"
+    );
+
+    // Verify guard decision/reason on the deferred row.
+    let deferred_row = ledger_arr
+        .iter()
+        .find(|r| r.get("outcome").and_then(|v| v.as_str()) == Some("deferred"))
+        .expect("must find deferred row");
+    assert_eq!(
+        deferred_row.get("guard_decision").and_then(|v| v.as_str()),
+        Some("defer"),
+        "deferred row must carry guard_decision=defer"
+    );
+    assert_eq!(
+        deferred_row.get("guard_reason").and_then(|v| v.as_str()),
+        Some("capacity"),
+        "deferred row must carry guard_reason=capacity"
+    );
+
+    // Verify the adopted_pr row carries pr_url.
+    let adopted_row = ledger_arr
+        .iter()
+        .find(|r| r.get("outcome").and_then(|v| v.as_str()) == Some("adopted_pr"))
+        .expect("must find adopted_pr row");
+    assert_eq!(
+        adopted_row.get("pr_url").and_then(|v| v.as_str()),
+        Some("https://github.com/example/pr/99"),
+        "adopted_pr row must carry pr_url"
+    );
+    assert_eq!(
+        adopted_row.get("guard_decision").and_then(|v| v.as_str()),
+        Some("allow"),
+        "adopted_pr row must carry guard_decision=allow"
+    );
+    assert_eq!(
+        adopted_row.get("guard_reason").and_then(|v| v.as_str()),
+        Some("open_pr_adoption"),
+        "adopted_pr row must carry guard_reason=open_pr_adoption"
+    );
+
+    // Verify the post_intervention_history is still present alongside the ledger.
+    assert!(
+        dossier.get("post_intervention_history").is_some(),
+        "dossier must still include post_intervention_history"
+    );
 }
 
 /// Duplicate terminalization calls are idempotent: the second call must not
