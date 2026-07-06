@@ -8,7 +8,7 @@ use djinn_db::repositories::task_arbitration::CreateArbitrationParams;
 use djinn_db::repositories::task_arbitration::TaskArbitrationRepository;
 use djinn_db::repositories::task_attempt::{
     CreateTaskAttemptParams, GuardAdoptedPrTaskAttemptParams, GuardDeferTaskAttemptParams,
-    SubmitTaskAttemptParams, TaskAttemptRepository,
+    SubmitTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
 };
 use djinn_db::{
     ActivityQuery, DispatchStateRepository, DispatchStateUpsert, ReadyQuery, UserRepository,
@@ -3813,6 +3813,270 @@ async fn reentry_with_unconsumed_arbiter_does_not_create_second_arbiter() {
     assert_eq!(
         final_task.status, "needs_lead_intervention",
         "re-entry with unconsumed arbiter keeps the task in needs_lead_intervention"
+    );
+}
+
+/// Recovery/replay after a transition-before-activity partial failure.
+///
+/// The arbiter dispatch commits its durable state in two steps that are NOT in
+/// one transaction: (1) the source task transitions to `needs_lead_intervention`
+/// AND the durable `task_arbitrations` row is written (the arbitration ledger,
+/// keyed by `(task_id, hold_cycle)`), then (2) a best-effort `arbiter_dispatched`
+/// activity/outbox record is logged — a write whose failure is only a
+/// `tracing::warn!` (see `route_planner_intervention`, "Log the arbiter_dispatched
+/// outbox payload"). A crash/error in the window AFTER step 1 commits but BEFORE
+/// step 2 becomes durable leaves the task held on a committed arbitration with NO
+/// visible `arbiter_dispatched` record.
+///
+/// This regression proves the coordinator's next pass RECOVERS that partial state
+/// idempotently: because the durable arbitration row already exists and is
+/// unconsumed, the re-entry re-derives and re-emits exactly ONE `arbiter_dispatched`
+/// payload for the SAME `(task_id, hold_cycle)` carrying the SAME durable ledger
+/// values (hold_cycle, mirror/GitHub heads, PR URL, failing CI job ids), and grants
+/// NO second arbiter dispatch (`try_create` short-circuits on
+/// `AlreadyExistsUnconsumed` — no new row, no new hold cycle).
+///
+/// Distinct from `reentry_with_unconsumed_arbiter_does_not_create_second_arbiter`
+/// (which asserts the arbitration ROW is not duplicated but never inspects the
+/// activity record) and from `loop_guard_second_strike_parks_task` (a normal
+/// successful dispatch): here the initial `arbiter_dispatched` write is made
+/// non-durable (archived) to reconstruct the crash window, and the assertion is on
+/// the replayed activity record — exactly one, with the durable ledger preserved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arbiter_dispatch_transition_before_activity_failure_recovers_to_single_record() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+
+    // Seed a task at the second-strike park rung (intervention_count == MAX).
+    let task = make_task_with_reopen_count(&db, &tx, REOPEN_INTERVENTION_THRESHOLD).await;
+    repo.reset_intervention_counters(&task.id).await.unwrap();
+    for _ in 0..REOPEN_INTERVENTION_THRESHOLD {
+        repo.set_status(&task.id, "closed").await.unwrap();
+        repo.set_status(&task.id, "open").await.unwrap();
+    }
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(task.intervention_count, MAX_PLANNER_INTERVENTIONS);
+
+    // Durable CI ledger the arbiter dispatch must preserve. The GitHub head SHA
+    // and PR URL flow from live task state (CI snapshot + pr_url); the failing CI
+    // job ids are parsed from the escalation sections. No failure fingerprint is
+    // seeded so the first-occurrence-fingerprint park rung stays out of the way.
+    repo.upsert_ci_snapshot(djinn_core::models::TaskPrCiSnapshotInput {
+        task_id: task.id.clone(),
+        pr_number: 77,
+        head_sha: "gh-head-lvm4".to_string(),
+        ci_status: djinn_core::models::CiStatus::Failing,
+        blocking_required_check_names: vec!["Quality Gate".to_string()],
+        failure_fingerprint: None,
+        same_signature_count: 0,
+        last_remediation_base_sha: None,
+    })
+    .await
+    .unwrap();
+    repo.set_pr_url(&task.id, "https://github.com/djinnos/djinn/pull/77")
+        .await
+        .unwrap();
+
+    // Two distinct-model pre-submission terminations so the attempted-remediation
+    // park gate reaches its non-attempt bound and routes to the arbiter.
+    seed_terminated_post_intervention_sessions(&db, &tx, &task.id, &["m-a", "m-b"]).await;
+
+    // A terminated (crashed) attempt carrying the mirror head SHA — the arbiter
+    // ledger re-derives `mirror_head_sha` from the latest task attempt that has
+    // one. Kept pre-submission terminal (no `submitted_at`) so it stays a
+    // non-attempt strike and does not put the round into a pending-review state.
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    let attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: "arbiter-ledger-heads",
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: djinn_core::models::TaskAttemptOutcome::Crashed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: Some("mirror-head-lvm4"),
+            github_head_sha: Some("gh-head-lvm4"),
+            summary: None,
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+    // Escalation sections carrying two failing CI job ids (101, 102).
+    let ci_sections = "CI failed on required checks: (job_id=101) build, (job_id=102) test";
+    let expected_job_ids = serde_json::json!([101, 102]);
+
+    // ── Initial dispatch: real code commits the transition + durable arbitration
+    // row and logs the arbiter_dispatched activity. ─────────────────────────────
+    let first_handled = actor
+        .route_planner_intervention(
+            &task,
+            "worker",
+            "second strike initial dispatch",
+            Some(ci_sections),
+            REOPEN_INTERVENTION_THRESHOLD,
+        )
+        .await;
+    assert!(first_handled, "initial arbiter dispatch must be handled");
+
+    let dispatched = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(
+        dispatched.status, "needs_lead_intervention",
+        "initial dispatch transitions the source to needs_lead_intervention"
+    );
+
+    // The durable arbitration ledger (source of truth for the recovery replay).
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let arbs = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        arbs.len(),
+        1,
+        "initial dispatch creates exactly one arbitration row"
+    );
+    let arb = arbs.into_iter().next().unwrap();
+    assert_eq!(arb.hold_cycle, 0);
+    assert_eq!(arb.state, "unconsumed");
+    assert_eq!(arb.mirror_head_sha.as_deref(), Some("mirror-head-lvm4"));
+    assert_eq!(arb.github_head_sha.as_deref(), Some("gh-head-lvm4"));
+    assert_eq!(
+        arb.pr_url.as_deref(),
+        Some("https://github.com/djinnos/djinn/pull/77")
+    );
+    assert_eq!(arb.failing_ci_job_ids, expected_job_ids);
+
+    let task_id_for_query = task.id.clone();
+    let arbiter_dispatched_query = || ActivityQuery {
+        task_id: Some(task_id_for_query.clone()),
+        event_type: Some("arbiter_dispatched".to_string()),
+        ..ActivityQuery::default()
+    };
+
+    // The initial dispatch logged exactly one arbiter_dispatched matching the row.
+    let initial = repo
+        .query_activity(arbiter_dispatched_query())
+        .await
+        .unwrap();
+    assert_eq!(
+        initial.len(),
+        1,
+        "initial dispatch logs exactly one arbiter_dispatched"
+    );
+
+    // ── Inject the transition-before-activity partial failure ────────────────────
+    // The transition and the durable arbitration row have committed; make the
+    // arbiter_dispatched activity non-durable (archived) to reconstruct the crash
+    // window where the best-effort outbox log never became visible. The task
+    // remains held in needs_lead_intervention on a committed, unconsumed arbitration
+    // with NO visible arbiter_dispatched record.
+    repo.archive_activity_for_task(&task.id).await.unwrap();
+    let after_loss = repo
+        .query_activity(arbiter_dispatched_query())
+        .await
+        .unwrap();
+    assert!(
+        after_loss.is_empty(),
+        "precondition: the arbiter_dispatched record is not durably visible after the injected failure"
+    );
+    // The durable arbitration row survives the lost activity write.
+    let (cycle_held, held) = arb_repo.resolve_current_hold_cycle(&task.id).await.unwrap();
+    assert_eq!(cycle_held, 0);
+    assert!(
+        held.is_some(),
+        "the committed arbitration row survives the lost activity write"
+    );
+
+    // ── Recovery/replay pass on the still-unconsumed arbitration ────────────────
+    let refreshed = repo.get(&task.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.status, "needs_lead_intervention");
+    let recovered = actor
+        .route_planner_intervention(
+            &refreshed,
+            "worker",
+            "second strike recovery replay",
+            Some(ci_sections),
+            REOPEN_INTERVENTION_THRESHOLD,
+        )
+        .await;
+    assert!(
+        recovered,
+        "the recovery pass must re-handle the held arbitration"
+    );
+
+    // Exactly one arbiter_dispatched is visible after recovery — the replay
+    // repaired the lost write without duplicating it.
+    let replayed = repo
+        .query_activity(arbiter_dispatched_query())
+        .await
+        .unwrap();
+    assert_eq!(
+        replayed.len(),
+        1,
+        "recovery replays exactly one arbiter_dispatched for the held hold cycle"
+    );
+    let payload: serde_json::Value = serde_json::from_str(&replayed[0].payload).unwrap();
+
+    // The replayed payload carries the SAME durable ledger values as the row.
+    assert_eq!(
+        payload.get("hold_cycle").and_then(|v| v.as_i64()),
+        Some(arb.hold_cycle as i64),
+        "replayed hold_cycle matches the durable arbitration row"
+    );
+    assert_eq!(
+        payload.get("mirror_head_sha").and_then(|v| v.as_str()),
+        arb.mirror_head_sha.as_deref(),
+        "replayed mirror head SHA matches the durable ledger"
+    );
+    assert_eq!(
+        payload.get("github_head_sha").and_then(|v| v.as_str()),
+        arb.github_head_sha.as_deref(),
+        "replayed GitHub head SHA matches the durable ledger"
+    );
+    assert_eq!(
+        payload.get("pr_url").and_then(|v| v.as_str()),
+        arb.pr_url.as_deref(),
+        "replayed PR URL matches the durable ledger"
+    );
+    assert_eq!(
+        payload.get("failing_ci_job_ids"),
+        Some(&expected_job_ids),
+        "replayed failing CI job ids match the durable ledger"
+    );
+
+    // No second arbiter dispatch was granted: the same single unconsumed row on
+    // the same hold cycle, and no next-cycle row.
+    let arbs_after = arb_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        arbs_after.len(),
+        1,
+        "recovery must NOT create a second arbitration row"
+    );
+    assert_eq!(
+        arbs_after[0].id, arb.id,
+        "the surviving row is the original one"
+    );
+    assert_eq!(arbs_after[0].state, "unconsumed");
+    assert!(
+        arb_repo
+            .get_by_task_and_cycle(&task.id, 1)
+            .await
+            .unwrap()
+            .is_none(),
+        "recovery must NOT advance to a new hold cycle"
     );
 }
 
