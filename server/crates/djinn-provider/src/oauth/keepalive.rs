@@ -254,14 +254,9 @@ mod tests {
     /// given token blob.
     async fn seed_codex(repo: &CredentialRepository, owner: Option<&str>, tokens: &CodexTokens) {
         let json = serde_json::to_string(tokens).unwrap();
-        repo.set_with_owner(
-            CODEX_PROVIDER_ID,
-            codex::CODEX_OAUTH_DB_KEY,
-            &json,
-            owner,
-        )
-        .await
-        .unwrap();
+        repo.set_with_owner(CODEX_PROVIDER_ID, codex::CODEX_OAUTH_DB_KEY, &json, owner)
+            .await
+            .unwrap();
     }
 
     async fn stored_tokens(repo: &CredentialRepository, owner: Option<&str>) -> CodexTokens {
@@ -295,7 +290,10 @@ mod tests {
         assert_eq!(parse_refresh_after(None), DEFAULT_REFRESH_AFTER_SECS);
         assert_eq!(parse_refresh_after(Some("0")), DEFAULT_REFRESH_AFTER_SECS);
         assert_eq!(parse_refresh_after(Some("-5")), DEFAULT_REFRESH_AFTER_SECS);
-        assert_eq!(parse_refresh_after(Some("nope")), DEFAULT_REFRESH_AFTER_SECS);
+        assert_eq!(
+            parse_refresh_after(Some("nope")),
+            DEFAULT_REFRESH_AFTER_SECS
+        );
     }
 
     #[test]
@@ -342,7 +340,10 @@ mod tests {
         assert_eq!(stats.refreshed, 1);
         assert_eq!(stats.revoked, 0);
         // The rotated token is now the stored one.
-        assert_eq!(stored_tokens(&repo, None).await.refresh_token, "rotated-new");
+        assert_eq!(
+            stored_tokens(&repo, None).await.refresh_token,
+            "rotated-new"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -442,11 +443,21 @@ mod tests {
             .unwrap()
             .id;
         let repo = CredentialRepository::new(db.clone(), EventBus::noop());
-        seed_codex(&repo, Some(&uid), &tokens_with("r0", 2_000_000_000 - 5 * DAY)).await;
+        seed_codex(
+            &repo,
+            Some(&uid),
+            &tokens_with("r0", 2_000_000_000 - 5 * DAY),
+        )
+        .await;
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let stats =
-            sweep_inner(&repo, 3 * DAY, 2_000_000_000, ok_exchange(calls.clone()).as_ref()).await;
+        let stats = sweep_inner(
+            &repo,
+            3 * DAY,
+            2_000_000_000,
+            ok_exchange(calls.clone()).as_ref(),
+        )
+        .await;
 
         assert_eq!(stats.refreshed, 1);
         // The rotated token is readable via an *exact-owner* load for this user,

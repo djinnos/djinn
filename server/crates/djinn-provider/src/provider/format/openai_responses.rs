@@ -8,7 +8,7 @@ use std::pin::Pin;
 
 use crate::message::{ContentBlock, Conversation};
 use crate::provider::FormatFamily;
-use crate::provider::client::ApiClient;
+use crate::provider::client::{ApiClient, SseFrame};
 use crate::provider::error::ProviderError;
 use crate::provider::format::tool_projection::project;
 use crate::provider::{LlmProvider, ProviderConfig, StreamEvent, TokenUsage, ToolChoice};
@@ -229,7 +229,10 @@ enum ResponsesStreamEvent {
     #[serde(rename = "response.output_text.done")]
     OutputTextDone {},
     #[serde(rename = "response.output_item.added")]
-    OutputItemAdded {},
+    OutputItemAdded {
+        #[serde(default)]
+        item: Option<OutputItemInfo>,
+    },
     #[serde(rename = "response.content_part.added")]
     ContentPartAdded {},
     #[serde(rename = "response.content_part.done")]
@@ -289,6 +292,11 @@ fn parse_stream_event(data: &str) -> anyhow::Result<Option<ResponsesStreamEvent>
 /// that should be propagated through the stream.
 enum ParsedLine {
     Events(Vec<StreamEvent>),
+    /// The OpenAI Responses family terminal frame (`response.completed`).
+    /// Carries the terminal events (final output items, usage) that should be
+    /// yielded to the consumer, and signals to the stream loop that the
+    /// provider-family terminal frame has been observed.
+    Terminal(Vec<StreamEvent>),
     /// A typed provider error parsed from a mid-stream `response.failed` /
     /// `error` event, plus the human-readable message. The typed
     /// [`ProviderError`] is preserved (not stringified) so the supervisor's
@@ -331,8 +339,14 @@ fn extract_error_message(error: &Value) -> String {
 /// Parse a single SSE data line from the OpenAI Responses streaming API.
 ///
 /// `accumulated_items` collects OutputItemDone items across the stream.
-/// Returns zero or more `StreamEvent`s, or a provider error.
-fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>) -> ParsedLine {
+/// `in_flight_function_calls` tracks function call items that have been added
+/// but whose arguments haven't completed yet (for truncation detection).
+/// Returns zero or more `StreamEvent`s, a terminal signal, or a provider error.
+fn parse_responses_line(
+    line: &str,
+    accumulated_items: &mut Vec<OutputItemInfo>,
+    in_flight_function_calls: &mut usize,
+) -> ParsedLine {
     let event = match parse_stream_event(line) {
         Ok(Some(e)) => e,
         Ok(None) => return ParsedLine::Events(vec![]),
@@ -362,6 +376,23 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
             ParsedLine::Events(vec![])
         }
         ResponsesStreamEvent::ResponseCompleted { response } => {
+            // Detect truncated function call accumulators: function call items
+            // were added but their arguments never completed. Fail typed rather
+            // than emitting a false complete response.
+            if *in_flight_function_calls > 0 {
+                tracing::warn!(
+                    in_flight = *in_flight_function_calls,
+                    "openai_responses stream response.completed with in-flight function calls"
+                );
+                accumulated_items.clear();
+                *in_flight_function_calls = 0;
+                return ParsedLine::ProviderError(
+                    ProviderError::Transport,
+                    "openai_responses stream ended with incomplete function call accumulator"
+                        .to_string(),
+                );
+            }
+
             let mut events = Vec::new();
 
             // Emit tool uses from accumulated items (text was already streamed as deltas)
@@ -471,7 +502,7 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                 );
             }
 
-            ParsedLine::Events(events)
+            ParsedLine::Terminal(events)
         }
         ResponsesStreamEvent::ResponseFailed { error } => {
             let msg = extract_error_message(&error);
@@ -486,6 +517,22 @@ fn parse_responses_line(line: &str, accumulated_items: &mut Vec<OutputItemInfo>)
                 ProviderError::from_stream_error(extract_error_code(&error).as_deref(), &msg);
             tracing::error!(error = %msg, ?class, "Responses API error");
             ParsedLine::ProviderError(class, msg)
+        }
+        // Track function call items that have been added to the stream so we
+        // can detect truncation (added but never completed).
+        ResponsesStreamEvent::OutputItemAdded { item } => {
+            if let Some(OutputItemInfo::FunctionCall { .. }) = item {
+                *in_flight_function_calls += 1;
+            }
+            ParsedLine::Events(vec![])
+        }
+        // A completed function call arguments event: the function call is no
+        // longer in-flight (it will arrive as OutputItemDone next).
+        ResponsesStreamEvent::FunctionCallArgumentsDone {} => {
+            if *in_flight_function_calls > 0 {
+                *in_flight_function_calls -= 1;
+            }
+            ParsedLine::Events(vec![])
         }
         // Ignore all other event types
         _ => ParsedLine::Events(vec![]),
@@ -524,35 +571,88 @@ impl LlmProvider for OpenAIResponsesProvider {
         let extra_headers = self.extra_headers();
 
         Box::pin(async move {
-            let raw = self.client.stream_sse(&url, body, &auth, extra_headers);
+            let raw = self
+                .client
+                .stream_sse_frames(&url, body, &auth, extra_headers);
             let out: Pin<Box<dyn futures::Stream<Item = anyhow::Result<StreamEvent>> + Send>> =
                 Box::pin(stream! {
                     let mut accumulated_items: Vec<OutputItemInfo> = Vec::new();
+                    let mut in_flight_function_calls: usize = 0;
                     let mut raw_stream = raw;
+                    let mut seen_done = false;
                     while let Some(result) = raw_stream.next().await {
                         match result {
                             Err(e) => { yield Err(e); return; }
-                            Ok(line) => {
-                                match parse_responses_line(&line, &mut accumulated_items) {
-                                    ParsedLine::Events(events) => {
-                                        for event in events {
-                                            yield Ok(event);
+                            Ok(frame) => match frame {
+                                SseFrame::Data(line) => {
+                                    match parse_responses_line(
+                                        &line,
+                                        &mut accumulated_items,
+                                        &mut in_flight_function_calls,
+                                    ) {
+                                        ParsedLine::Events(events) => {
+                                            for event in events {
+                                                yield Ok(event);
+                                            }
+                                        }
+                                        ParsedLine::Terminal(events) => {
+                                            // The family terminal frame
+                                            // (response.completed) has been
+                                            // observed. Yield its events, then
+                                            // mark terminal so [DONE] or EOF
+                                            // handling is correct.
+                                            for event in events {
+                                                yield Ok(event);
+                                            }
+                                            seen_done = true;
+                                        }
+                                        ParsedLine::ProviderError(class, msg) => {
+                                            // Preserve the typed ProviderError as the
+                                            // source so downstream `downcast_ref` can
+                                            // classify it; the human message rides as
+                                            // anyhow context (so `to_string()` is
+                                            // unchanged for logs/tests).
+                                            yield Err(anyhow::Error::new(class).context(msg));
+                                            return;
                                         }
                                     }
-                                    ParsedLine::ProviderError(class, msg) => {
-                                        // Preserve the typed ProviderError as the
-                                        // source so downstream `downcast_ref` can
-                                        // classify it; the human message rides as
-                                        // anyhow context (so `to_string()` is
-                                        // unchanged for logs/tests).
-                                        yield Err(anyhow::Error::new(class).context(msg));
-                                        return;
+                                }
+                                SseFrame::Done => {
+                                    // The OpenAI [DONE] transport sentinel.
+                                    // If we already saw the family terminal
+                                    // frame, this is expected. If not, the
+                                    // stream ended before the expected terminal
+                                    // — fail typed.
+                                    if seen_done {
+                                        yield Ok(StreamEvent::Done);
+                                    } else {
+                                        // Discard any partial accumulator state.
+                                        accumulated_items.clear();
+                                        tracing::warn!("openai_responses stream [DONE] before response.completed");
+                                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                                            .context("openai_responses stream ended before response.completed"));
                                     }
+                                    return;
                                 }
                             }
                         }
                     }
-                    yield Ok(StreamEvent::Done);
+                    // Raw EOF before the OpenAI Responses terminal frame.
+                    // Yield a typed retryable failure.
+                    if !seen_done {
+                        // Discard any partial accumulator state.
+                        if !accumulated_items.is_empty() || in_flight_function_calls > 0 {
+                            tracing::warn!(
+                                accumulated = accumulated_items.len(),
+                                in_flight = in_flight_function_calls,
+                                "openai_responses stream EOF with incomplete accumulators"
+                            );
+                            accumulated_items.clear();
+                        }
+                        tracing::warn!("openai_responses stream ended before response.completed");
+                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                            .context("openai_responses stream ended before response.completed"));
+                    }
                 });
             Ok(out)
         })
@@ -778,7 +878,7 @@ mod tests {
     fn test_parse_text_delta() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello"}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -792,7 +892,7 @@ mod tests {
     fn test_parse_empty_delta_skipped() {
         let line = r#"{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"delta":""}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -802,7 +902,7 @@ mod tests {
     fn test_parse_completed_with_function_call() {
         let line = r#"{"type":"response.completed","sequence_number":10,"response":{"id":"resp_1","object":"response","created_at":1737368310,"status":"completed","model":"gpt-5.1-codex","output":[{"type":"function_call","id":"fc_1","status":"completed","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         // Should have tool use + usage
@@ -828,7 +928,7 @@ mod tests {
     fn test_parse_completed_with_reasoning_and_function_call() {
         let line = r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1","summary":[],"status":"completed","encrypted_content":"enc"},{"type":"function_call","call_id":"call_abc","name":"bash","arguments":"{\"cmd\":\"ls\"}"}],"usage":{"input_tokens":10,"output_tokens":5}}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
 
@@ -856,13 +956,13 @@ mod tests {
         let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":3,"output_tokens":4}}}"#;
         let mut acc = Vec::new();
 
-        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
         assert_eq!(acc.len(), 1);
 
-        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 2);
@@ -889,12 +989,12 @@ mod tests {
         let completed = r#"{"type":"response.completed","response":{"output":[],"usage":{"input_tokens":1,"output_tokens":2}}}"#;
         let mut acc = Vec::new();
 
-        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(item_done, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
 
-        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -906,7 +1006,7 @@ mod tests {
         let completed = r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":2}}}"#;
         let mut acc = Vec::new();
 
-        let ParsedLine::Events(events) = parse_responses_line(completed, &mut acc) else {
+        let ParsedLine::Terminal(events) = parse_responses_line(completed, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert_eq!(events.len(), 1);
@@ -917,7 +1017,7 @@ mod tests {
     fn test_incomplete_function_call_item_is_ignored() {
         let line = r#"{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_abc","name":"bash"}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -928,7 +1028,7 @@ mod tests {
     fn test_parse_keepalive_ignored() {
         let line = r#"{"type":"keepalive"}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -938,7 +1038,7 @@ mod tests {
     fn test_parse_unknown_event_ignored() {
         let line = r#"{"type":"response.some_future_event","data":"foo"}"#;
         let mut acc = Vec::new();
-        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::Events(events) = parse_responses_line(line, &mut acc, &mut 0) else {
             panic!("expected events");
         };
         assert!(events.is_empty());
@@ -948,7 +1048,8 @@ mod tests {
     fn test_parse_error_propagates() {
         let line = r#"{"type":"error","error":{"message":"context_length_exceeded: too many tokens","code":"context_length_exceeded"}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc, &mut 0)
+        else {
             panic!("expected provider error");
         };
         assert!(msg.contains("context_length_exceeded"));
@@ -959,7 +1060,8 @@ mod tests {
     fn test_parse_response_failed_propagates() {
         let line = r#"{"type":"response.failed","error":{"message":"server error","code":"server_error"}}"#;
         let mut acc = Vec::new();
-        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc) else {
+        let ParsedLine::ProviderError(class, msg) = parse_responses_line(line, &mut acc, &mut 0)
+        else {
             panic!("expected provider error");
         };
         assert!(msg.contains("server_error"));
@@ -1161,7 +1263,8 @@ mod tests {
             "event: response.output_item.done\n",
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_stream\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}}\n\n"
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":13}}}\n\n",
+            "data: [DONE]\n\n"
         );
         let mut config = test_provider().config.clone();
         config.base_url = spawn_sse_server(200, body, seen_auth.clone());
@@ -1243,15 +1346,122 @@ mod tests {
         assert!(msg.contains("quota exceeded"));
     }
 
+    #[tokio::test]
+    async fn test_stream_raw_eof_before_terminal_yields_retryable_error() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        // SSE body with data events but NO response.completed and NO [DONE]
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n"
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let result: Result<Vec<_>, _> = stream.try_collect().await;
+        let err = match result {
+            Ok(_) => panic!("expected provider error for EOF before terminal"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("ended before response.completed"));
+        // Must be a downcastable retryable ProviderError::Transport
+        assert!(
+            err.downcast_ref::<ProviderError>()
+                .is_some_and(|e| e.retryable()),
+            "expected retryable ProviderError::Transport, got: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_response_completed_before_done_is_terminal() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        // response.completed followed by [DONE] — the expected happy path
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let events: Vec<_> = stream.try_collect().await.expect("stream events");
+
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Delta(ContentBlock::Text { text }) if text == "Hi"
+        ));
+        assert!(matches!(&events[1], StreamEvent::Usage(_)));
+        assert!(matches!(&events[2], StreamEvent::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stream_truncated_function_call_accumulator_fails_typed() {
+        let seen_auth = Arc::new(Mutex::new(None));
+        // A function call item is added (output_item.added) but
+        // function_call_arguments.done never arrives, and
+        // response.completed is emitted. The adapter should fail typed.
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Let me check\"}\n\n",
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_trunc\",\"name\":\"bash\",\"arguments\":\"\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut config = test_provider().config.clone();
+        config.base_url = spawn_sse_server(200, body, seen_auth);
+        let provider = OpenAIResponsesProvider::new(config);
+        let mut conv = Conversation::new();
+        conv.push(Message::user("Hello"));
+
+        let stream = provider
+            .stream(&conv, &[], None)
+            .await
+            .expect("stream start");
+        let result: Result<Vec<_>, _> = stream.try_collect().await;
+        let err = match result {
+            Ok(_) => panic!("expected error for truncated function call accumulator"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("incomplete function call accumulator"),
+            "unexpected error: {err:#}"
+        );
+        // Must be downcastable retryable ProviderError::Transport
+        assert!(
+            err.downcast_ref::<ProviderError>()
+                .is_some_and(|e| e.retryable()),
+            "expected retryable ProviderError::Transport, got: {err:#}"
+        );
+    }
+
     #[test]
     fn test_parse_reasoning_summary_delta() {
         let mut acc = Vec::new();
         let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"The user wants to","sequence_number":4}"#;
-        match parse_responses_line(line, &mut acc) {
+        match parse_responses_line(line, &mut acc, &mut 0) {
             ParsedLine::Events(events) => {
                 assert_eq!(events.len(), 1);
                 assert!(matches!(&events[0], StreamEvent::Thinking(t) if t == "The user wants to"));
             }
+            ParsedLine::Terminal(_) => panic!("unexpected terminal"),
             ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
         }
     }
@@ -1260,8 +1470,9 @@ mod tests {
     fn test_parse_reasoning_summary_empty_delta_skipped() {
         let mut acc = Vec::new();
         let line = r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_abc","output_index":0,"summary_index":0,"delta":"","sequence_number":4}"#;
-        match parse_responses_line(line, &mut acc) {
+        match parse_responses_line(line, &mut acc, &mut 0) {
             ParsedLine::Events(events) => assert!(events.is_empty()),
+            ParsedLine::Terminal(_) => panic!("unexpected terminal"),
             ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
         }
     }
@@ -1275,10 +1486,11 @@ mod tests {
             r#"{"type":"response.reasoning_summary_text.done","item_id":"rs_abc","output_index":0,"summary_index":0,"text":"Full summary.","sequence_number":10}"#,
             r#"{"type":"response.reasoning_summary_part.done","item_id":"rs_abc","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"Full summary."},"sequence_number":11}"#,
         ] {
-            match parse_responses_line(line, &mut acc) {
+            match parse_responses_line(line, &mut acc, &mut 0) {
                 ParsedLine::Events(events) => {
                     assert!(events.is_empty(), "expected no events for lifecycle event")
                 }
+                ParsedLine::Terminal(_) => panic!("unexpected terminal"),
                 ParsedLine::ProviderError(_, e) => panic!("unexpected error: {e}"),
             }
         }
@@ -1425,7 +1637,8 @@ data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_in
 data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"text\":\"The answer is 42.\"}\n\n\
 data: {\"type\":\"response.content_part.done\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"The answer is 42.\"}}\n\n\
 data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The answer is 42.\"}],\"status\":\"completed\"}}\n\n\
-data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"reasoning\"},{\"type\":\"message\"}],\"usage\":{\"input_tokens\":50,\"output_tokens\":30}}}\n\n";
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"reasoning\"},{\"type\":\"message\"}],\"usage\":{\"input_tokens\":50,\"output_tokens\":30}}}\n\n\
+data: [DONE]\n\n";
 
         let mut config = test_provider().config.clone();
         config.base_url = spawn_sse_server(200, body, seen_auth);
