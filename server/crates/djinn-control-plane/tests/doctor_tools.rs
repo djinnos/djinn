@@ -178,68 +178,10 @@ fn register_test_check() -> (Arc<AtomicBool>, Arc<AtomicU32>) {
     (fix_called, run_count)
 }
 
-/// Ensure the `doctor_findings` table exists in the test database. The test
-/// DB is cloned from `djinn_test_template` which may not include the latest
-/// migration if the template hasn't been rebuilt. This is a no-op if the
-/// table already exists.
-async fn ensure_doctor_findings_schema(db: &djinn_db::Database) {
-    db.ensure_initialized().await.expect("db initialized");
-    // Check if the table exists; create it if not.
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'doctor_findings'",
-    )
-    .fetch_optional(db.pool())
-    .await
-    .expect("check doctor_findings existence");
-
-    if matches!(exists, Some((count,)) if count > 0) {
-        return;
-    }
-
-    // Apply the migration SQL inline. This matches migration 61.
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS doctor_findings (
-            id                VARCHAR(36)  NOT NULL PRIMARY KEY,
-            run_id            VARCHAR(64)  NULL,
-            created_at        VARCHAR(64)  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            check_name        VARCHAR(255) NOT NULL,
-            severity          VARCHAR(16)  NOT NULL,
-            entity_ids        JSONB        NOT NULL DEFAULT '[]'::jsonb,
-            evidence          JSONB        NOT NULL DEFAULT '{}'::jsonb,
-            resolver_snapshot JSONB        NULL,
-            detail            TEXT         NULL,
-            CONSTRAINT doctor_findings_severity_check
-                CHECK (severity IN ('info', 'warn', 'critical'))
-        )"#,
-    )
-    .execute(db.pool())
-    .await
-    .expect("create doctor_findings table");
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_created_at_idx ON doctor_findings (created_at DESC)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_created_at_idx");
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS doctor_findings_check_name_idx ON doctor_findings (check_name)",
-    )
-    .execute(db.pool())
-    .await
-    .expect("create doctor_findings_check_name_idx");
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_check_name_created_at_idx ON doctor_findings (check_name, created_at DESC)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_check_name_created_at_idx");
-    sqlx::query("CREATE INDEX IF NOT EXISTS doctor_findings_entity_ids_gin_idx ON doctor_findings USING GIN (entity_ids jsonb_path_ops)")
-        .execute(db.pool())
-        .await
-        .expect("create doctor_findings_entity_ids_gin_idx");
-}
-
 /// Create a harness and ensure the schema is ready for doctor tests.
 async fn doctor_test_harness() -> McpTestHarness {
     let harness = McpTestHarness::new().await;
-    ensure_doctor_findings_schema(harness.db()).await;
+    djinn_db::test_support::ensure_doctor_findings_schema(harness.db()).await;
     harness
 }
 
