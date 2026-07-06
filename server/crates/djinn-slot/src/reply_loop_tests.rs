@@ -78,6 +78,41 @@ async fn run_with_provider(
     i64,
     i64,
 ) {
+    run_with_provider_and_model(
+        provider,
+        tools,
+        conversation,
+        slot_ctx,
+        project_path,
+        task_id,
+        session_id,
+        cancel,
+        "synthetic/test-model",
+    )
+    .await
+}
+
+/// Like [`run_with_provider`] but accepts an explicit `model_id`, allowing
+/// tests to exercise Codex-specific (or non-Codex) retry behaviour.
+#[allow(clippy::too_many_arguments)]
+async fn run_with_provider_and_model(
+    provider: &dyn djinn_provider::provider::LlmProvider,
+    tools: &[serde_json::Value],
+    conversation: &mut Conversation,
+    slot_ctx: &crate::host::SlotContext,
+    project_path: &str,
+    task_id: &str,
+    session_id: &str,
+    cancel: &CancellationToken,
+    model_id: &str,
+) -> (
+    anyhow::Result<()>,
+    crate::output_parser::ParsedAgentOutput,
+    i64,
+    i64,
+    i64,
+    i64,
+) {
     let worktree = test_path("djinn-reply-loop-");
     let worktree_path = worktree.as_path();
     run_reply_loop(
@@ -93,7 +128,7 @@ async fn run_with_provider(
             role_name: "worker",
             finalize_tool_names: &["submit_work", "request_lead"],
             context_window: 10_000,
-            model_id: "synthetic/test-model",
+            model_id,
             cancel,
             global_cancel: cancel,
             ctx: slot_ctx,
@@ -265,7 +300,9 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     ]);
     let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
     let mut conversation = base_conversation();
-    let (result, output, _, _, _, _) = run_with_provider(
+    // Use a Codex-family model so that empty-stream retries are allowed
+    // (non-Codex models now fail immediately on terminal empty turns).
+    let (result, output, _, _, _, _) = run_with_provider_and_model(
         &provider,
         &tools,
         &mut conversation,
@@ -274,6 +311,7 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
         &task_id,
         &session_id,
         &cancel,
+        "openai/test-model",
     )
     .await;
     assert!(
@@ -288,6 +326,41 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
                 matches!(block, ContentBlock::Text { text } if text.contains("You have not completed your session."))
             })
     }));
+}
+
+/// Regression: a non-Codex provider that returns an empty stream (no events)
+/// must produce a typed provider failure on the very first occurrence — no
+/// retries, no nudge path.
+#[tokio::test]
+async fn non_codex_empty_stream_fails_immediately_on_first_occurrence() {
+    use djinn_provider::provider::ProviderError;
+
+    let provider = FakeProvider::script(vec![vec![]]);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+    // Non-Codex model → immediate terminal failure.
+    let (result, _output, _, _, _, _) = run_with_provider_and_model(
+        &provider,
+        &[],
+        &mut conversation,
+        &slot_ctx,
+        &project_path,
+        &task_id,
+        &session_id,
+        &cancel,
+        "synthetic/kimi-k2.5",
+    )
+    .await;
+    let err = result.expect_err("non-Codex empty stream must produce a terminal error");
+    // Non-Codex providers get a transient ProviderInternal(500).
+    assert!(
+        err.downcast_ref::<ProviderError>().is_some(),
+        "error must carry a typed ProviderError for failover classification: {err}"
+    );
+    assert!(
+        err.to_string().contains("empty"),
+        "error must mention empty for diagnostics: {err}"
+    );
 }
 
 #[tokio::test]
