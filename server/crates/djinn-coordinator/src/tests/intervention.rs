@@ -3995,3 +3995,287 @@ async fn park_reason_never_uses_old_static_template() {
     );
     assert!(!reason.is_empty(), "park reason must not be empty");
 }
+
+// ── Force-close attempt terminalization tests ─────────────────────────────────
+
+/// ForceClose via the task event handler terminalizes the live pending attempt
+/// as `force_closed` with close_reason and actor info in summary_json.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_close_terminalizes_attempt_as_force_closed() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+
+    // Seed a pending attempt.
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .expect("dispatch-start should succeed");
+
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "pending");
+
+    // ForceClose the task through the repository.
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let closed = repo
+        .transition(
+            &task.id,
+            TransitionAction::ForceClose,
+            "test-actor",
+            "lead",
+            Some("test force close reason"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.close_reason.as_deref(), Some("force_closed"));
+
+    // Invoke terminalization directly (the event handler would do this in
+    // production, but the actor event loop is not running in tests).
+    actor.terminalize_force_close_attempt(&closed).await;
+
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "force_closed");
+    assert!(attempt.terminal_at.is_some());
+    assert!(attempt.pr_url.is_none());
+    assert_eq!(
+        attempt.summary.as_deref().unwrap(),
+        "Task force-closed (force_closed) by test-actor"
+    );
+
+    // Verify summary_json captures the close reason and actor.
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["close_reason"], "force_closed");
+    assert_eq!(sj["actor_id"], "test-actor");
+    assert_eq!(sj["actor_role"], "lead");
+    assert_eq!(sj["task_short_id"], task.short_id);
+}
+
+/// Duplicate terminalization calls are idempotent: the second call must not
+/// create a new attempt row or overwrite the existing terminal outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_close_duplicate_terminalization_is_idempotent() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .unwrap();
+
+    // ForceClose the task.
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let closed = repo
+        .transition(
+            &task.id,
+            TransitionAction::ForceClose,
+            "lead-agent",
+            "lead",
+            Some("duplicate test"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Terminalize twice.
+    actor.terminalize_force_close_attempt(&closed).await;
+    actor.terminalize_force_close_attempt(&closed).await;
+
+    let all = attempt_repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        all.len(),
+        1,
+        "duplicate terminalization must not create rows"
+    );
+
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "force_closed");
+    assert_eq!(
+        attempt.summary.as_deref().unwrap(),
+        "Task force-closed (force_closed) by lead-agent"
+    );
+}
+
+/// A pre-existing higher-rank terminal row (e.g. completed) must not be moved
+/// backward by a late force-close terminalization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_close_preserves_pre_existing_higher_rank_terminal() {
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::TerminalTaskAttemptParams;
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .unwrap();
+
+    // Advance to submitted WITHOUT a summary (leave it NULL), then terminalize
+    // as completed (higher rank) so the terminalization summary is the first
+    // non-NULL value.
+    crate::dispatch::attempt_lifecycle::advance_to_submitted(
+        &db,
+        crate::dispatch::attempt_lifecycle::SubmitAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            submit_ref: Some("submit-original"),
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: None,
+            summary_json: None,
+        },
+    )
+    .await;
+
+    attempt_repo
+        .advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt_id,
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: Some("https://github.example/pr/1"),
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("completed via PR merge"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+    let before = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(before.outcome, "completed");
+
+    // Now force-close the task and attempt terminalization.
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let closed = repo
+        .transition(
+            &task.id,
+            TransitionAction::ForceClose,
+            "admin",
+            "lead",
+            Some("superseded by new work"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    actor.terminalize_force_close_attempt(&closed).await;
+
+    // The attempt must remain completed — the terminal row must not move
+    // backward from completed to force_closed.
+    let after = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        after.outcome, "completed",
+        "must not move terminal row backward from completed to force_closed"
+    );
+    assert_eq!(
+        after.summary.as_deref(),
+        Some("completed via PR merge"),
+        "must not overwrite summary of higher-rank terminal"
+    );
+}
+
+/// UserOverride closing a task also triggers force-close terminalization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_override_close_terminalizes_as_force_closed() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .unwrap();
+
+    // UserOverride to closed.
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let closed = repo
+        .transition(
+            &task.id,
+            TransitionAction::UserOverride,
+            "operator",
+            "lead",
+            Some("user chose to cancel"),
+            Some(djinn_core::models::TaskStatus::Closed),
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.close_reason.as_deref(), Some("force_closed"));
+
+    actor.terminalize_force_close_attempt(&closed).await;
+
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "force_closed");
+    assert!(attempt.terminal_at.is_some());
+
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["close_reason"], "force_closed");
+    assert_eq!(sj["actor_id"], "operator");
+    assert_eq!(sj["actor_role"], "lead");
+}
+
+/// Tasks with "completed" close_reason (natural PR merge) are NOT
+/// terminalized by the force-close path — the PR poller owns that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_close_reason_is_not_force_close_terminalized() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let actor = coordinator_actor_for_tests(&db, &tx);
+
+    let task = make_task_with_reopen_count(&db, &tx, 0).await;
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let dk = crate::dispatch::attempt_lifecycle::make_dispatch_key(&task.id, "worker");
+
+    let attempt_id = crate::dispatch::attempt_lifecycle::record_dispatch_start(
+        &db, &task.id, "worker", None, &dk,
+    )
+    .await
+    .unwrap();
+
+    // Simulate a naturally closed task (close_reason = "completed").
+    // We set the status directly since the Close transition requires merge_commit_sha.
+    let repo = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    repo.set_status_with_reason(&task.id, "closed", Some("completed"))
+        .await
+        .unwrap();
+    let task = repo.get(&task.id).await.unwrap().unwrap();
+
+    actor.terminalize_force_close_attempt(&task).await;
+
+    // The attempt must remain pending — the force-close terminalizer must not
+    // touch "completed" close_reason tasks.
+    let attempt = attempt_repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "pending",
+        "completed close_reason must not be terminalized by the force-close path"
+    );
+}

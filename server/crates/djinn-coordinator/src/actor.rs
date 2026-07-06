@@ -1245,6 +1245,10 @@ impl CoordinatorActor {
                     return;
                 };
                 if task.status == "closed" {
+                    // Terminalize the live attempt when a task closes via a
+                    // force-close path. Best-effort; does not block the event.
+                    self.terminalize_force_close_attempt(&task).await;
+
                     // Record throughput event when a task with a merge commit closes.
                     if task.merge_commit_sha.is_some()
                         && let Some(epic_id) = task.epic_id.as_deref()
