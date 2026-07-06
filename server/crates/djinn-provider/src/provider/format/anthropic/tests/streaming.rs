@@ -357,6 +357,44 @@ async fn test_stream_uses_payload_type_over_sse_event_name() {
 }
 
 #[tokio::test]
+async fn test_stream_raw_eof_before_message_stop_yields_error() {
+    // A stream that emits data events but ends (raw EOF) before the
+    // Anthropic terminal `message_stop` frame must yield a typed retryable
+    // Transport error, not silently close the stream.
+    let body = concat!(
+        "event: message_start\\n",
+        "data: {\\\"type\\\":\\\"message_start\\\",\\\"message\\\":{\\\"usage\\\":{\\\"input_tokens\\\":7}}}\\n\\n",
+        "event: content_block_delta\\n",
+        "data: {\\\"type\\\":\\\"content_block_delta\\\",\\\"delta\\\":{\\\"type\\\":\\\"text_delta\\\",\\\"text\\\":\\\"partial response\\\"}}\\n\\n",
+        // No message_stop — stream ends after this chunk.
+    );
+    let mut config = test_anthropic_config();
+    config.base_url = spawn_sse_server(200, body);
+    let provider = AnthropicProvider::new(config);
+    let mut conv = Conversation::new();
+    conv.push(Message::user("Hello"));
+
+    let err = provider
+        .stream(&conv, &[], None)
+        .await
+        .expect("stream")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("raw EOF before message_stop must yield Err");
+
+    let pe = err
+        .downcast_ref::<ProviderError>()
+        .expect("typed ProviderError must be downcastable from the stream error");
+    assert_eq!(*pe, ProviderError::Transport);
+    assert!(pe.retryable(), "truncated stream must be retryable");
+    assert!(
+        err.to_string().contains("message_stop"),
+        "error message must mention message_stop: {}",
+        err
+    );
+}
+
+#[tokio::test]
 async fn test_streamed_overloaded_error_event_surfaces_typed_provider_error() {
     // Anthropic signals overload as a 200 SSE `error` event. It must surface as
     // a typed retryable `ProviderError::ProviderInternal` (server-side), NOT be
