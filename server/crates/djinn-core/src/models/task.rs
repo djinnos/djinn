@@ -569,6 +569,12 @@ pub enum TransitionAction {
     /// `reopen_count`, carries no `reopen_class`, and records no intervention,
     /// so a red CI-grade result never costs a reopen/quality strike.
     PreApprovalVerifyRejected,
+    /// Arbiter `submit_decision(decision="park")` — the arbiter parked the
+    /// task with a structured dossier. Moves `in_lead_intervention → open`
+    /// behind a `HumanReview` remediation hold. The dossier is persisted on
+    /// the arbitration row and the hold description. Like `ParkForRemediation`
+    /// this is a HOLD, not a rework: it does NOT increment `reopen_count`.
+    ArbiterPark,
 }
 
 impl TransitionAction {
@@ -621,6 +627,7 @@ impl TransitionAction {
             "park_for_remediation" => Ok(Self::ParkForRemediation),
             "submit_for_merge" => Ok(Self::SubmitForMerge),
             "preapproval_verify_rejected" => Ok(Self::PreApprovalVerifyRejected),
+            "arbiter_park" => Ok(Self::ArbiterPark),
             other => Err(Error::Internal(format!(
                 "unknown transition action: {other}"
             ))),
@@ -1057,6 +1064,19 @@ pub fn compute_transition(
             }
             TransitionApply::simple(TaskStatus::Open)
         }
+
+        TransitionAction::ArbiterPark => {
+            // Arbiter `submit_decision(decision="park")` — the arbiter parked
+            // the task with a structured dossier. Like ParkForRemediation this
+            // lands the source at `open` behind a HumanReview hold blocker;
+            // unlike ParkForRemediation it is only legal from
+            // `InLeadIntervention`. Does NOT bump `reopen_count` — this is a
+            // hold, not a rework.
+            if *from != TaskStatus::InLeadIntervention {
+                return bad("arbiter_park is only valid from in_lead_intervention");
+            }
+            TransitionApply::simple(TaskStatus::Open)
+        }
     })
 }
 
@@ -1103,6 +1123,7 @@ pub fn compute_transition_for_issue_type(
                 | TransitionAction::PrMerge
                 | TransitionAction::PrChangesRequested
                 | TransitionAction::ParkForRemediation
+                | TransitionAction::ArbiterPark
         );
         if !allowed {
             return Err(Error::InvalidTransition(format!(
@@ -1131,7 +1152,7 @@ mod tests {
         TaskStatus::Closed,
     ];
 
-    const ACTIONS: [TransitionAction; 28] = [
+    const ACTIONS: [TransitionAction; 29] = [
         TransitionAction::Start,
         TransitionAction::ResumeWorker,
         TransitionAction::SubmitTaskReview,
@@ -1160,6 +1181,7 @@ mod tests {
         TransitionAction::PrChangesRequested,
         TransitionAction::ParkForRemediation,
         TransitionAction::PreApprovalVerifyRejected,
+        TransitionAction::ArbiterPark,
     ];
 
     fn expected_status(action: &TransitionAction, from: &TaskStatus) -> Option<TaskStatus> {
@@ -1244,6 +1266,9 @@ mod tests {
                 | TaskStatus::Approved,
             ) => Some(TaskStatus::Open),
             (TransitionAction::PreApprovalVerifyRejected, TaskStatus::Approved) => {
+                Some(TaskStatus::Open)
+            }
+            (TransitionAction::ArbiterPark, TaskStatus::InLeadIntervention) => {
                 Some(TaskStatus::Open)
             }
             (TransitionAction::SubmitForMerge, TaskStatus::InProgress) => {
