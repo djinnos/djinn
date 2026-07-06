@@ -701,5 +701,9 @@ mod test_support;
 mod tests;
 
 #[cfg(test)]
+#[path = "attempt_history_prompt_tests.rs"]
+mod attempt_history_tests;
+
+#[cfg(test)]
 #[path = "ci_directive_tests.rs"]
 mod ci_directive_tests;
