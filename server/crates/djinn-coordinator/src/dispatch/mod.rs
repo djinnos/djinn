@@ -3,6 +3,9 @@ pub(crate) mod attempt_lifecycle;
 pub(crate) mod liveness;
 mod outcome;
 pub(crate) mod post_intervention_lane;
+/// Pre-dispatch respawn guard: consults attempt-history before fresh
+/// spawn/admission and records guard-deferred audit rows.
+pub(crate) mod respawn_guard;
 /// Pure resume-source selector and candidate builder. Wired into the dispatch
 /// path for re-dispatch after controlled terminations; returns `None` when
 /// resume selection is disabled so default/off dispatch behavior is unchanged.

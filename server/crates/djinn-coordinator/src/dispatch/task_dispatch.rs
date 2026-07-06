@@ -1326,6 +1326,31 @@ impl CoordinatorActor {
             let Some(role) = self.role_registry.dispatch_role_for_task(&task, &ctx) else {
                 continue;
             };
+            // Pre-dispatch respawn guard: consult attempt-history before any
+            // fresh spawn/admission side-effects.  If a non-terminal attempt
+            // (pending or submitted) already exists for this task+role, defer
+            // dispatch and record a guard-only audit row.  No dispatch /
+            // provider / reopen counters are incremented for the deferral.
+            match super::respawn_guard::run_respawn_guard(&self.db, &task.id, role).await {
+                super::respawn_guard::RespawnGuardDecision::Allow => {}
+                super::respawn_guard::RespawnGuardDecision::Defer(reason) => {
+                    tracing::info!(
+                        task_id = %task.short_id,
+                        role,
+                        reason = %reason,
+                        "CoordinatorActor: respawn guard deferring dispatch"
+                    );
+                    super::respawn_guard::record_guard_deferred_attempt(
+                        &self.db,
+                        &task.id,
+                        role,
+                        reason,
+                        Some("respawn_guard: non-terminal attempt in flight"),
+                    )
+                    .await;
+                    continue;
+                }
+            }
             // Planner intervention for a stuck worker task (trigger A): if a
             // worker task is about to be re-dispatched for the Nth time
             // (`reopen_count >= REOPEN_INTERVENTION_THRESHOLD` — e.g. the
@@ -1732,6 +1757,16 @@ impl CoordinatorActor {
                         role,
                         "CoordinatorActor: task owner at per-model concurrency cap — deferring"
                     );
+                    // Audit: record a guard-deferred row for the capacity
+                    // deferral.  Best-effort; no counters incremented.
+                    super::respawn_guard::record_guard_deferred_attempt(
+                        &self.db,
+                        &task.id,
+                        role,
+                        djinn_core::models::task_attempt::GuardReason::Capacity,
+                        Some("capacity: user at per-model concurrency cap"),
+                    )
+                    .await;
                     continue;
                 }
             }
