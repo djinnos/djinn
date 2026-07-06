@@ -832,3 +832,200 @@ async fn initial_user_message_ledger_combined_with_feedback() {
     assert!(msg.contains("review_rejected"));
     assert!(msg.contains("missing null check"));
 }
+
+// ── Attempt history formatting tests (2v3k) ─────────────────────────────────
+
+use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
+use djinn_db::CompletedParentSummary;
+
+fn make_prompt_summary(
+    attempt_seq: i32,
+    role: &str,
+    outcome: &str,
+    summary: Option<&str>,
+) -> TaskAttemptPromptSummary {
+    TaskAttemptPromptSummary {
+        attempt_seq,
+        role: role.to_string(),
+        outcome: outcome.to_string(),
+        summary: summary.map(str::to_string),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        terminal_at: Some("2026-01-01T01:00:00Z".to_string()),
+        submit_ref: Some("abc123".to_string()),
+        pr_url: Some("https://github.com/pr/1".to_string()),
+        guard_decision: None,
+        guard_reason: None,
+        checkpoint_ref: Some("ckpt-456".to_string()),
+        summary_json: None,
+    }
+}
+
+#[test]
+fn format_attempt_history_returns_none_for_empty_inputs() {
+    assert!(format_attempt_history(&[], &[]).is_none());
+}
+
+#[test]
+fn format_attempt_history_renders_prior_attempts_with_summary() {
+    let attempts = vec![make_prompt_summary(
+        1,
+        "worker",
+        "completed",
+        Some("Implemented widget"),
+    )];
+    let result = format_attempt_history(&attempts, &[]).expect("should produce Some");
+    assert!(result.contains("**Prior attempts (newest first):**"));
+    assert!(result.contains("Attempt #1 (worker): completed"));
+    assert!(result.contains("summary: Implemented widget"));
+    assert!(result.contains("submit_ref: `abc123`"));
+    assert!(result.contains("PR: https://github.com/pr/1"));
+    assert!(result.contains("checkpoint: `ckpt-456`"));
+}
+
+#[test]
+fn format_attempt_history_uses_fallback_for_missing_summary() {
+    let attempts = vec![
+        make_prompt_summary(1, "worker", "crashed", None),
+        make_prompt_summary(2, "worker", "timed_out", None),
+        make_prompt_summary(3, "worker", "spawn_failed", None),
+        make_prompt_summary(4, "worker", "deferred", None),
+        make_prompt_summary(5, "worker", "reopened", None),
+    ];
+    let result = format_attempt_history(&attempts, &[]).expect("should produce Some");
+    assert!(result.contains("attempt crashed (no summary recorded)"));
+    assert!(result.contains("attempt timed out (no summary recorded)"));
+    assert!(
+        result
+            .contains("attempt spawn failed — worker process did not start (no summary recorded)")
+    );
+    assert!(result.contains("attempt deferred by guard (no summary recorded)"));
+    assert!(result.contains("attempt reopened (no summary recorded)"));
+}
+
+#[test]
+fn format_attempt_history_renders_guard_decision_and_reason() {
+    let mut attempt = make_prompt_summary(1, "worker", "deferred", None);
+    attempt.guard_decision = Some("defer".to_string());
+    attempt.guard_reason = Some("loop_guard".to_string());
+    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    assert!(result.contains("guard: defer (loop_guard)"));
+}
+
+#[test]
+fn format_attempt_history_renders_summary_json_fields() {
+    let mut attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
+    attempt.summary_json =
+        Some(r#"{"failure_class":"compile_error","last_verify":"cargo clippy"}"#.to_string());
+    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    assert!(result.contains("failure_class: compile_error"));
+    assert!(result.contains("last_verify: cargo clippy"));
+}
+
+#[test]
+fn format_attempt_history_omits_summary_json_when_absent() {
+    let attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
+    // summary_json is None by default
+    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    assert!(!result.contains("failure_class:"));
+    assert!(!result.contains("last_verify:"));
+}
+
+#[test]
+fn format_attempt_history_renders_completed_dependency_parents() {
+    let parents = vec![CompletedParentSummary {
+        task_id: "task-parent-1".to_string(),
+        short_id: "p1".to_string(),
+        title: "Parent task".to_string(),
+        terminal_at: "2026-01-01T02:00:00Z".to_string(),
+        latest_completed_attempt: Some(make_prompt_summary(
+            1,
+            "worker",
+            "completed",
+            Some("Parent done"),
+        )),
+    }];
+    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    assert!(result.contains("**Completed dependency parents:**"));
+    assert!(result.contains("Parent p1 (Parent task): closed 2026-01-01T02:00:00Z"));
+    assert!(result.contains("latest completed attempt #1: Parent done"));
+    assert!(result.contains("submit_ref: `abc123`"));
+    assert!(result.contains("PR: https://github.com/pr/1"));
+}
+
+#[test]
+fn format_attempt_history_renders_parent_without_attempt() {
+    let parents = vec![CompletedParentSummary {
+        task_id: "task-parent-2".to_string(),
+        short_id: "p2".to_string(),
+        title: "Orphan parent".to_string(),
+        terminal_at: "2026-01-02T00:00:00Z".to_string(),
+        latest_completed_attempt: None,
+    }];
+    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    assert!(result.contains("Parent p2 (Orphan parent): closed 2026-01-02T00:00:00Z"));
+    // Should not crash or include attempt details
+    assert!(!result.contains("latest completed attempt"));
+}
+
+#[test]
+fn format_attempt_history_parent_renders_summary_json_fields() {
+    let mut attempt = make_prompt_summary(1, "worker", "completed", Some("done"));
+    attempt.summary_json =
+        Some(r#"{"failure_class":"test_failure","last_verify":"cargo test"}"#.to_string());
+    let parents = vec![CompletedParentSummary {
+        task_id: "task-parent-1".to_string(),
+        short_id: "p1".to_string(),
+        title: "Parent task".to_string(),
+        terminal_at: "2026-01-01T02:00:00Z".to_string(),
+        latest_completed_attempt: Some(attempt),
+    }];
+    let result = format_attempt_history(&[], &parents).expect("should produce Some");
+    assert!(result.contains("failure_class: test_failure"));
+    assert!(result.contains("last_verify: cargo test"));
+}
+
+#[test]
+fn format_attempt_history_combined_attempts_and_parents() {
+    let attempts = vec![make_prompt_summary(1, "worker", "completed", Some("done"))];
+    let parents = vec![CompletedParentSummary {
+        task_id: "task-parent-1".to_string(),
+        short_id: "p1".to_string(),
+        title: "Parent task".to_string(),
+        terminal_at: "2026-01-01T02:00:00Z".to_string(),
+        latest_completed_attempt: Some(make_prompt_summary(
+            1,
+            "worker",
+            "completed",
+            Some("Parent done"),
+        )),
+    }];
+    let result = format_attempt_history(&attempts, &parents).expect("should produce Some");
+    assert!(result.contains("**Prior attempts (newest first):**"));
+    assert!(result.contains("Attempt #1 (worker): completed"));
+    assert!(result.contains("**Completed dependency parents:**"));
+    assert!(result.contains("Parent p1"));
+}
+
+#[test]
+fn format_attempt_history_omits_refs_when_absent() {
+    let attempt = TaskAttemptPromptSummary {
+        attempt_seq: 1,
+        role: "worker".to_string(),
+        outcome: "completed".to_string(),
+        summary: Some("done".to_string()),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        terminal_at: None,
+        submit_ref: None,
+        pr_url: None,
+        guard_decision: None,
+        guard_reason: None,
+        checkpoint_ref: None,
+        summary_json: None,
+    };
+    let result = format_attempt_history(&[attempt], &[]).expect("should produce Some");
+    assert!(!result.contains("submit_ref:"));
+    assert!(!result.contains("PR:"));
+    assert!(!result.contains("checkpoint:"));
+    assert!(!result.contains("guard:"));
+    assert!(!result.contains("failure_class:"));
+}

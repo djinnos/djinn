@@ -9,7 +9,7 @@ use djinn_core::models::task_attempt::TaskAttemptPromptSummary;
 use crate::actors::slot::MergeConflictMetadata;
 use crate::actors::slot::helpers::{
     build_reviewer_diff_context, build_role_code_graph_context, derive_task_scope_paths,
-    extract_worker_context, format_knowledge_notes, recent_feedback,
+    extract_worker_context, format_attempt_history, format_knowledge_notes, recent_feedback,
 };
 use crate::actors::slot::lifecycle::attempt_context;
 use crate::context::AgentContext;
@@ -435,6 +435,20 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
     let prior_attempts = attempt_context::load_prior_attempts(task, &task_attempt_repo).await;
     let completed_dependency_parents =
         attempt_context::load_completed_dependency_parents(task, &task_attempt_repo).await;
+    // Append attempt history to the existing activity text so it renders inside
+    // the Activity Log section, not as a new competing top-level prompt section.
+    let activity_text = {
+        let attempt_history_text = format_attempt_history(
+            prior_attempts.as_deref().unwrap_or(&[]),
+            completed_dependency_parents.as_deref().unwrap_or(&[]),
+        );
+        match (activity_text, attempt_history_text) {
+            (Some(activity), Some(history)) => Some(format!("{activity}\n\n---\n\n{history}")),
+            (activity @ Some(_), None) => activity,
+            (None, history @ Some(_)) => history,
+            (None, None) => None,
+        }
+    };
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
     let code_graph_context = build_role_code_graph_context(
         runtime_role.config().name,
