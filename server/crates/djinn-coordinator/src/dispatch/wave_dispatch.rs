@@ -1,9 +1,11 @@
 use super::super::*;
+use super::attempt_lifecycle::{TerminalAdvancementParams, advance_latest_to_terminal};
 use crate::pr_poller::pr_cleanup::CloseKind;
 #[cfg(test)]
 use djinn_core::models::TaskStatus;
 use djinn_core::models::TransitionAction;
 use djinn_core::models::task::IssueType;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
 /// Classify a `supervisor_pr_open` push failure as "an oversized blob is
 /// committed in the branch history" (GitHub's 100 MB hard limit, enforced by
@@ -18,6 +20,25 @@ fn is_oversized_blob_push_rejection(reason: &str) -> bool {
         || reason.contains("GH001")
         || reason.contains("exceeds GitHub's file size limit")
         || reason.contains("Large files detected")
+}
+
+/// Wave-dispatch attempt outcome discriminator. Carries the structured context
+/// each terminalization path records in `summary_json`. Used only by
+/// [`CoordinatorActor::terminalize_wave_dispatch_attempt`].
+#[allow(dead_code)]
+enum WaveDispatchAttemptOutcome<'a> {
+    /// An already-open PR was adopted/reopened instead of a fresh open.
+    AdoptedPr { pr_url: &'a str, head_sha: &'a str },
+    /// The current worker attempt stops and another process takes over.
+    Handoff {
+        reason: &'a str,
+        replacement: &'a str,
+    },
+    /// Dispatch-owned ForceClose (oversized blob in branch history, etc.).
+    ForceClosed {
+        reason: &'a str,
+        close_reason: &'a str,
+    },
 }
 
 impl CoordinatorActor {
@@ -193,6 +214,7 @@ impl CoordinatorActor {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 provider_override: None,
             };
+            let pr_url_existed_before = task.pr_url.is_some();
             let outcome =
                 crate::supervisor_impl::supervisor_pr_open(&spec, &task, &callbacks).await;
             match outcome {
@@ -205,6 +227,21 @@ impl CoordinatorActor {
                         commit_sha = %sha,
                         "CoordinatorActor: pushed latest task_branch to PR (re-cycle commits propagated)"
                     );
+                    // Attempt lifecycle: if a PR was already open before this
+                    // supervisor_pr_open call (adoption/reopen of an existing
+                    // PR rather than a fresh open), terminalize the current
+                    // worker attempt as `adopted_pr`. A fresh open leaves the
+                    // attempt live — it continues through PR review. Best-effort.
+                    if pr_url_existed_before {
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::AdoptedPr {
+                                pr_url: &url,
+                                head_sha: &sha,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 djinn_runtime::TaskRunOutcome::Closed { reason } => {
                     // supervisor_pr_open found no commits ahead of base and
@@ -217,6 +254,18 @@ impl CoordinatorActor {
                         reason = %reason,
                         "CoordinatorActor: approved task had no commits to PR — closed as completed"
                     );
+                    // Attempt lifecycle: the current worker attempt intentionally
+                    // stops here — the task is closed without a PR. Terminalize
+                    // as `handoff` (another process — the close itself — takes
+                    // over). Best-effort.
+                    self.terminalize_wave_dispatch_attempt(
+                        &task,
+                        WaveDispatchAttemptOutcome::Handoff {
+                            reason: &reason,
+                            replacement: "task_closed_no_commits",
+                        },
+                    )
+                    .await;
                 }
                 djinn_runtime::TaskRunOutcome::Failed { stage, reason, .. } => {
                     // Race-tolerant pr_errors gate. The coordinator's tick
@@ -312,6 +361,18 @@ impl CoordinatorActor {
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
+                        // Attempt lifecycle: dispatch-owned ForceClose. The
+                        // push was rejected by GitHub for a non-transient reason
+                        // (oversized blob in branch history). Terminalize the
+                        // current worker attempt as `force_closed`. Best-effort.
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::ForceClosed {
+                                reason: &reason,
+                                close_reason: "oversized_blob_in_branch_history",
+                            },
+                        )
+                        .await;
                     } else if branch_missing && task.pr_url.is_none() {
                         tracing::warn!(
                             task_id = %task.short_id,
@@ -337,6 +398,19 @@ impl CoordinatorActor {
                         }
                         self.pr_errors.remove(&task.project_id);
                         self.publish_status();
+                        // Attempt lifecycle: the current worker attempt stops
+                        // here and another worker process takes over (the task
+                        // is re-queued to `open` for a fresh worker run that
+                        // recreates and pushes the missing branch). Terminalize
+                        // as `handoff`. Best-effort.
+                        self.terminalize_wave_dispatch_attempt(
+                            &task,
+                            WaveDispatchAttemptOutcome::Handoff {
+                                reason: &reason,
+                                replacement: "requeued_missing_branch",
+                            },
+                        )
+                        .await;
                     } else if task.pr_url.is_some() {
                         tracing::info!(
                             task_id = %task.short_id,
@@ -370,6 +444,18 @@ impl CoordinatorActor {
                         reason = %reason,
                         "CoordinatorActor: approved task PR-open blocked by a pre-PR gate (re-routed, no PR opened)"
                     );
+                    // Attempt lifecycle: a pre-PR gate intentionally stopped
+                    // the current worker attempt and re-routed the task to
+                    // another process (remediation or a fresh worker round).
+                    // Terminalize as `handoff`. Best-effort.
+                    self.terminalize_wave_dispatch_attempt(
+                        &task,
+                        WaveDispatchAttemptOutcome::Handoff {
+                            reason: &reason,
+                            replacement: "pre_pr_gate_rerouted",
+                        },
+                    )
+                    .await;
                 }
                 other => {
                     tracing::warn!(
@@ -380,6 +466,112 @@ impl CoordinatorActor {
                 }
             }
         }
+    }
+
+    /// Best-effort terminalize the latest pending/submitted worker attempt for a
+    /// wave-dispatch (`process_approved_tasks`) outcome. Maps each
+    /// [`WaveDispatchAttemptOutcome`] to the corresponding
+    /// [`TaskAttemptOutcome`] and fills available PR URL / head SHA / submit ref
+    /// context. Uses the shared `attempt_lifecycle::advance_latest_to_terminal`
+    /// helper — never creates a second lookup convention.
+    ///
+    /// Idempotent: if no live attempt exists (or it is already terminal), the
+    /// underlying helper is a silent no-op, so duplicate wave-dispatch ticks do
+    /// not create rows or move a terminal attempt backward.
+    async fn terminalize_wave_dispatch_attempt(
+        &self,
+        task: &djinn_core::models::Task,
+        outcome: WaveDispatchAttemptOutcome<'_>,
+    ) {
+        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+        let (terminal_outcome, pr_url, head_sha, summary, summary_json) = match outcome {
+            WaveDispatchAttemptOutcome::AdoptedPr { pr_url, head_sha } => {
+                let summary =
+                    format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
+                let summary_json = serde_json::json!({
+                    "source": "wave_dispatch",
+                    "path": "adopted_pr",
+                    "pr_url": pr_url,
+                    "github_head_sha": head_sha,
+                    "submit_ref": submit_ref,
+                    "task_branch": format!("task/{}", task.short_id),
+                })
+                .to_string();
+                (
+                    TaskAttemptOutcome::AdoptedPr,
+                    Some(pr_url),
+                    Some(head_sha),
+                    summary,
+                    summary_json,
+                )
+            }
+            WaveDispatchAttemptOutcome::Handoff {
+                reason,
+                replacement,
+            } => {
+                let summary = format!(
+                    "wave_dispatch: current worker attempt handed off ({replacement}): {reason}"
+                );
+                let summary_json = serde_json::json!({
+                    "source": "wave_dispatch",
+                    "path": "handoff",
+                    "reason": reason,
+                    "replacement": replacement,
+                    "submit_ref": submit_ref,
+                    "pr_url": task.pr_url,
+                    "task_branch": format!("task/{}", task.short_id),
+                })
+                .to_string();
+                (
+                    TaskAttemptOutcome::Handoff,
+                    task.pr_url.as_deref(),
+                    task.ci_head_sha.as_deref(),
+                    summary,
+                    summary_json,
+                )
+            }
+            WaveDispatchAttemptOutcome::ForceClosed {
+                reason,
+                close_reason,
+            } => {
+                let summary =
+                    format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
+                let summary_json = serde_json::json!({
+                    "source": "wave_dispatch",
+                    "path": "force_closed",
+                    "close_reason": close_reason,
+                    "reason": reason,
+                    "submit_ref": submit_ref,
+                    "task_branch": format!("task/{}", task.short_id),
+                })
+                .to_string();
+                (
+                    TaskAttemptOutcome::ForceClosed,
+                    task.pr_url.as_deref(),
+                    task.ci_head_sha.as_deref(),
+                    summary,
+                    summary_json,
+                )
+            }
+        };
+
+        advance_latest_to_terminal(
+            &self.db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: terminal_outcome,
+                pr_url,
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: head_sha,
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
     }
 
     /// E6 Part B: best-effort proactive rebase of an approved task branch onto
@@ -808,5 +1000,298 @@ mod e6_tests {
             "ForceClose must move the push-rejected approved task out of `approved` so the \
              per-tick escalation fires exactly once"
         );
+    }
+
+    // ── Attempt lifecycle: wave-dispatch terminalization ─────────────────────
+    //
+    // These tests exercise the wave-dispatch terminalization outcomes through
+    // the shared `advance_latest_to_terminal` helper with the exact param shapes
+    // that `terminalize_wave_dispatch_attempt` produces for each wave-dispatch
+    // path (adopted-PR, handoff, ForceClose). They prove the outcome mapping,
+    // structured context recording, and duplicate-handling idempotency without
+    // requiring a full CoordinatorActor + mirror + supervisor_pr_open setup.
+    //
+    // The param construction here mirrors `terminalize_wave_dispatch_attempt`
+    // one-to-one — it is the smallest existing function that owns the
+    // terminalization branch.
+
+    use super::super::attempt_lifecycle::{
+        TerminalAdvancementParams, advance_latest_to_terminal, make_dispatch_key,
+        record_dispatch_start,
+    };
+    use djinn_core::events::EventBus;
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+    use djinn_db::{Database, EpicRepository, TaskAttemptRepository, TaskRepository};
+
+    fn lifecycle_test_db() -> Database {
+        Database::open_in_memory().unwrap()
+    }
+
+    async fn lifecycle_create_task(db: &Database) -> djinn_core::models::Task {
+        let event_bus = EventBus::noop();
+        let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
+        let epic = epic_repo
+            .create("Epic", "", "", "", "", None)
+            .await
+            .unwrap();
+        let task_repo = TaskRepository::new(db.clone(), event_bus);
+        task_repo
+            .create(&epic.id, "Test task", "", "", "task", 0, "", None)
+            .await
+            .unwrap()
+    }
+
+    /// Set up a task with a pending worker attempt (mimicking a dispatched
+    /// worker that reached the approved-PR-open wave-dispatch tick).
+    async fn setup_pending_attempt(db: &Database) -> (djinn_core::models::Task, String) {
+        let task = lifecycle_create_task(db).await;
+        let dk = make_dispatch_key(&task.id, "worker");
+        let attempt_id = record_dispatch_start(db, &task.id, "worker", None, &dk)
+            .await
+            .unwrap();
+        (task, attempt_id)
+    }
+
+    /// The adopted-PR wave-dispatch path terminalizes as `adopted_pr` with the
+    /// PR URL and head SHA recorded from the adopted PR.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wave_dispatch_adopted_pr_terminalization_records_pr_context() {
+        let db = lifecycle_test_db();
+        let (task, attempt_id) = setup_pending_attempt(&db).await;
+
+        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+        let pr_url = "https://github.example/owner/repo/pull/42";
+        let head_sha = "abc123deadbeef";
+        let summary = format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
+        let summary_json = serde_json::json!({
+            "source": "wave_dispatch",
+            "path": "adopted_pr",
+            "pr_url": pr_url,
+            "github_head_sha": head_sha,
+            "submit_ref": submit_ref,
+        })
+        .to_string();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::AdoptedPr,
+                pr_url: Some(pr_url),
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: Some(head_sha),
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "adopted_pr");
+        assert_eq!(attempt.pr_url.as_deref(), Some(pr_url));
+        assert_eq!(attempt.github_head_sha.as_deref(), Some(head_sha));
+        assert_eq!(attempt.submit_ref.as_deref(), Some(submit_ref.as_str()));
+        assert!(attempt.terminal_at.is_some());
+        // The structured context must be present.
+        let ctx: serde_json::Value =
+            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["source"], "wave_dispatch");
+        assert_eq!(ctx["path"], "adopted_pr");
+    }
+
+    /// The handoff wave-dispatch path (closed-no-commits, branch-missing
+    /// re-queue, or pre-PR-gate reroute) terminalizes as `handoff` with a
+    /// structured reason/replacement context.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wave_dispatch_handoff_terminalization_records_replacement_context() {
+        let db = lifecycle_test_db();
+        let (task, attempt_id) = setup_pending_attempt(&db).await;
+
+        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+        let reason = "approved with no pushed task_branch; re-running worker to recreate it";
+        let replacement = "requeued_missing_branch";
+        let summary =
+            format!("wave_dispatch: current worker attempt handed off ({replacement}): {reason}");
+        let summary_json = serde_json::json!({
+            "source": "wave_dispatch",
+            "path": "handoff",
+            "reason": reason,
+            "replacement": replacement,
+            "submit_ref": submit_ref,
+        })
+        .to_string();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::Handoff,
+                pr_url: None,
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "handoff");
+        assert!(attempt.terminal_at.is_some());
+        let ctx: serde_json::Value =
+            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["source"], "wave_dispatch");
+        assert_eq!(ctx["path"], "handoff");
+        assert_eq!(ctx["replacement"], replacement);
+    }
+
+    /// The dispatch-owned ForceClose path (oversized blob in branch history)
+    /// terminalizes as `force_closed` with the close reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wave_dispatch_force_close_terminalization_records_close_reason() {
+        let db = lifecycle_test_db();
+        let (task, attempt_id) = setup_pending_attempt(&db).await;
+
+        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+        let reason = "remote: error: GH001: Large files detected. pre-receive hook declined";
+        let close_reason = "oversized_blob_in_branch_history";
+        let summary = format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
+        let summary_json = serde_json::json!({
+            "source": "wave_dispatch",
+            "path": "force_closed",
+            "close_reason": close_reason,
+            "reason": reason,
+            "submit_ref": submit_ref,
+        })
+        .to_string();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::ForceClosed,
+                pr_url: None,
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        assert_eq!(attempt.outcome, "force_closed");
+        assert!(attempt.terminal_at.is_some());
+        let ctx: serde_json::Value =
+            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["source"], "wave_dispatch");
+        assert_eq!(ctx["path"], "force_closed");
+        assert_eq!(ctx["close_reason"], close_reason);
+    }
+
+    /// Duplicate wave-dispatch handling is idempotent: a second terminalization
+    /// call (mimicking a re-tick that re-processes the same approved task) must
+    /// NOT create a second attempt row, move the terminal outcome backward, or
+    /// overwrite the original recorded context.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wave_dispatch_duplicate_terminalization_is_idempotent() {
+        let db = lifecycle_test_db();
+        let (task, attempt_id) = setup_pending_attempt(&db).await;
+
+        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+        let pr_url_orig = "https://github.example/owner/repo/pull/7";
+        let head_sha_orig = "sha-orig";
+        let summary_orig =
+            format!("wave_dispatch: adopted existing open PR {pr_url_orig} for approved task");
+        let summary_json_orig = serde_json::json!({
+            "source": "wave_dispatch",
+            "path": "adopted_pr",
+            "pr_url": pr_url_orig,
+            "github_head_sha": head_sha_orig,
+            "submit_ref": submit_ref,
+        })
+        .to_string();
+
+        // First terminalization — adopted-PR path.
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::AdoptedPr,
+                pr_url: Some(pr_url_orig),
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: Some(head_sha_orig),
+                summary: Some(&summary_orig),
+                summary_json: Some(&summary_json_orig),
+                log_tail: None,
+            },
+        )
+        .await;
+
+        // A second tick fires a DIFFERENT wave-dispatch path (e.g. a late
+        // ForceClose attempt from a duplicate supervisor_pr_open race). It must
+        // not move the terminal attempt backward or create a new row.
+        let summary_late = "wave_dispatch: attempt force-closed (late): race";
+        let summary_json_late = serde_json::json!({
+            "source": "wave_dispatch",
+            "path": "force_closed",
+            "close_reason": "late",
+            "submit_ref": submit_ref,
+        })
+        .to_string();
+
+        advance_latest_to_terminal(
+            &db,
+            TerminalAdvancementParams {
+                task_id: &task.id,
+                role: "worker",
+                outcome: TaskAttemptOutcome::ForceClosed,
+                pr_url: Some("https://github.example/owner/repo/pull/late"),
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: Some("sha-late"),
+                summary: Some(summary_late),
+                summary_json: Some(&summary_json_late),
+                log_tail: None,
+            },
+        )
+        .await;
+
+        let repo = TaskAttemptRepository::new(db);
+        let all = repo.list_for_task(&task.id).await.unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "duplicate wave-dispatch terminalization must not create a second attempt row"
+        );
+        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+        // The original terminal outcome must be preserved — no backward movement.
+        assert_eq!(attempt.outcome, "adopted_pr");
+        assert_eq!(attempt.pr_url.as_deref(), Some(pr_url_orig));
+        assert_eq!(attempt.github_head_sha.as_deref(), Some(head_sha_orig));
+        // The original structured context must not be overwritten.
+        let ctx: serde_json::Value =
+            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx["path"], "adopted_pr");
+        assert_eq!(ctx["pr_url"], pr_url_orig);
     }
 }
