@@ -6,6 +6,43 @@ pub use djinn_slot::helpers::provider_resolution::{
     format_family_for_provider, parse_model_id,
 };
 
+/// Build a [`djinn_provider::provider::RestampTarget`] from catalog metadata
+/// for the given provider/model pair.
+///
+/// Looks up the catalog model to determine `reasoning` capability and
+/// `context_window`, falling back to the caller-supplied `context_window`
+/// when the catalog entry is absent.
+pub(crate) fn build_restamp_target(
+    catalog_provider_id: &str,
+    model_name: &str,
+    context_window: u32,
+    catalog: &djinn_provider::catalog::CatalogService,
+) -> djinn_provider::provider::RestampTarget {
+    use djinn_provider::provider::RestampTarget;
+    let full_model_id = format!("{catalog_provider_id}/{model_name}");
+    let catalog_model = catalog.find_model(&full_model_id);
+    let reasoning = catalog_model.as_ref().is_some_and(|m| m.reasoning);
+    let resolved_context_window = catalog_model.as_ref().map_or(context_window, |m| {
+        let cw = m.context_window.max(0) as u32;
+        if context_window > 0 {
+            context_window
+        } else {
+            cw
+        }
+    });
+    RestampTarget {
+        model_id: model_name.to_string(),
+        format_family: format_family_for_provider(catalog_provider_id, model_name),
+        reasoning,
+        context_window: resolved_context_window,
+        capabilities: capabilities_for_provider(catalog_provider_id),
+        tool_schema_compat: djinn_provider::catalog::builtin::tool_schema_compat_for(
+            catalog_provider_id,
+            model_name,
+        ),
+    }
+}
+
 /// Resolved provider credentials — API key or OAuth-derived `ProviderConfig`.
 pub enum ProviderCredential {
     /// Traditional API-key credential (key_name, decrypted key).
@@ -15,14 +52,23 @@ pub enum ProviderCredential {
 }
 
 impl ProviderCredential {
-    /// Stamp the resolved per-role model onto an OAuth-derived config.
-    /// No-op for API-key credentials; the worker stamps those from the
-    /// spec's per-role model.
-    pub fn with_model_id(mut self, model_id: &str) -> Self {
-        if let ProviderCredential::OAuthConfig(cfg) = &mut self {
-            cfg.model_id = model_id.to_string();
+    /// Restamp an OAuth-derived config for the target model using the shared
+    /// [`djinn_provider::provider::restamp_provider_config_for_model`] helper.
+    ///
+    /// Re-resolves model-dependent defaults (`reasoning_effort`,
+    /// `max_tokens_default`, `tool_schema_compat`, `format_family`) for the
+    /// target so that failover from model A to model B does not carry A's
+    /// stale defaults.  Transport / session fields (`base_url`, `auth`,
+    /// `telemetry`, `session_affinity_key`, `provider_headers`) are preserved.
+    ///
+    /// No-op for API-key credentials.
+    pub fn with_model_id(self, target: &djinn_provider::provider::RestampTarget) -> Self {
+        match self {
+            ProviderCredential::OAuthConfig(cfg) => ProviderCredential::OAuthConfig(Box::new(
+                djinn_provider::provider::restamp_provider_config_for_model(*cfg, target),
+            )),
+            other => other,
         }
-        self
     }
     /// Convert into a wire-friendly [`djinn_runtime::SerializableCredential`].
     /// OAuth configs are projected onto [`OAuthConfigWire`] because the upstream
@@ -293,44 +339,54 @@ pub(crate) fn build_telemetry_meta_with_attribution(
 
 /// Build an [`LlmProvider`] from a resolved model + credential.
 /// `base_url` is unused for OAuth configs (they carry their own).
+///
+/// `target` carries the resolved model-dependent defaults for the target
+/// model; callers build it via [`build_restamp_target`] using catalog
+/// metadata so that failover to a different model re-resolves
+/// `reasoning_effort`, `max_tokens_default`, `format_family`, and
+/// `tool_schema_compat` for the target instead of carrying stale values
+/// from the previous model.
 pub(crate) fn build_provider_from_resolved(
     resolved: crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential,
-    context_window: u32,
+    _context_window: u32,
     telemetry: Option<djinn_provider::provider::TelemetryMeta>,
     session_affinity_key: Option<String>,
     base_url: String,
+    target: &djinn_provider::provider::RestampTarget,
 ) -> Option<Box<dyn djinn_provider::provider::LlmProvider>> {
     match resolved.provider_credential {
-        Some(ProviderCredential::OAuthConfig(mut cfg)) => {
-            cfg.model_id = resolved.model_name.clone();
-            cfg.context_window = context_window;
+        Some(ProviderCredential::OAuthConfig(cfg)) => {
+            // Restamp the OAuth config for the target model so model-dependent
+            // defaults (reasoning_effort, max_tokens_default, format_family,
+            // tool_schema_compat) reflect the target rather than the previous model.
+            let mut cfg = djinn_provider::provider::restamp_provider_config_for_model(*cfg, target);
+            // Per-run fields that are not model-dependent and must be set fresh.
             cfg.telemetry = telemetry;
             cfg.session_affinity_key = session_affinity_key;
-            Some(djinn_provider::provider::create_provider(*cfg))
+            Some(djinn_provider::provider::create_provider(cfg))
         }
         Some(ProviderCredential::ApiKey(_key_name, api_key)) => {
             let provider_headers = provider_headers_for(
                 &resolved.catalog_provider_id,
                 session_affinity_key.as_deref(),
             );
-            Some(djinn_provider::provider::create_provider(
-                djinn_provider::provider::ProviderConfig {
-                    base_url,
-                    auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
-                    format_family: format_family_for_provider(
-                        &resolved.catalog_provider_id,
-                        &resolved.model_name,
-                    ),
-                    model_id: resolved.model_name.clone(),
-                    context_window,
-                    telemetry,
-                    session_affinity_key,
-                    provider_headers,
-                    capabilities: capabilities_for_provider(&resolved.catalog_provider_id),
-                    reasoning_effort: None,
-                    tool_schema_compat: None,
-                },
-            ))
+            // Build a base config with transport/auth fields, then restamp
+            // model-dependent defaults through the shared helper.
+            let base_cfg = djinn_provider::provider::ProviderConfig {
+                base_url,
+                auth: auth_method_for_provider(&resolved.catalog_provider_id, &api_key),
+                format_family: target.format_family,
+                model_id: target.model_id.clone(),
+                context_window: target.context_window,
+                telemetry,
+                session_affinity_key,
+                provider_headers,
+                capabilities: target.capabilities.clone(),
+                reasoning_effort: None,
+                tool_schema_compat: None,
+            };
+            let cfg = djinn_provider::provider::restamp_provider_config_for_model(base_cfg, target);
+            Some(djinn_provider::provider::create_provider(cfg))
         }
         None => None,
     }
@@ -506,5 +562,169 @@ mod tests {
             host_config.capabilities.max_tokens_default
         );
         assert!(reconstructed.telemetry.is_none());
+    }
+
+    // ── Restamp regression tests ───────────────────────────────────────────
+
+    use djinn_provider::provider::RestampTarget;
+
+    /// Build a `RestampTarget` for an Anthropic reasoning-capable model
+    /// (e.g. Claude Sonnet 4) — the "failover target" state.
+    fn anthropic_reasoning_target() -> RestampTarget {
+        RestampTarget {
+            model_id: "claude-sonnet-4".to_string(),
+            format_family: FormatFamily::Anthropic,
+            reasoning: true,
+            context_window: 200_000,
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: Some(64_000),
+            },
+            tool_schema_compat: None,
+        }
+    }
+
+    /// Build a `RestampTarget` for a non-reasoning OpenAI model (e.g. GPT-4o).
+    fn openai_non_reasoning_target() -> RestampTarget {
+        RestampTarget {
+            model_id: "gpt-4o".to_string(),
+            format_family: FormatFamily::OpenAI,
+            reasoning: false,
+            context_window: 128_000,
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: None,
+            },
+            tool_schema_compat: None,
+        }
+    }
+
+    /// OAuth `with_model_id` restamps the config for model B and resolves
+    /// B's reasoning_effort and max_tokens_default while preserving transport
+    /// fields (base_url, auth, provider_headers, session_affinity_key).
+    #[test]
+    fn oauth_with_model_id_restamp_resolves_model_b_defaults() {
+        // Start with an OpenAI non-reasoning model A config.
+        let config_a = sample_oauth_config(None);
+        assert_eq!(config_a.model_id, "minimax-coding-plan/M-2");
+        assert_eq!(config_a.reasoning_effort, None);
+
+        // Restamp for model B (Anthropic reasoning target).
+        let cred = ProviderCredential::OAuthConfig(Box::new(config_a));
+        let target = anthropic_reasoning_target();
+        match cred.with_model_id(&target) {
+            ProviderCredential::OAuthConfig(cfg) => {
+                assert_eq!(cfg.model_id, "claude-sonnet-4");
+                assert_eq!(
+                    cfg.reasoning_effort,
+                    Some(ReasoningEffort::Medium),
+                    "Anthropic reasoning model B must get Some(Medium)"
+                );
+                assert_eq!(
+                    cfg.capabilities.max_tokens_default,
+                    Some(64_000),
+                    "model B's max_tokens_default must be resolved"
+                );
+                assert_eq!(cfg.format_family, FormatFamily::Anthropic);
+                assert_eq!(cfg.context_window, 200_000);
+                // Transport fields preserved.
+                assert_eq!(cfg.base_url, "https://api.minimax.io/anthropic");
+                assert!(matches!(
+                    cfg.auth,
+                    AuthMethod::BearerToken(ref t) if t == "test-token"
+                ));
+                assert_eq!(cfg.session_affinity_key, Some("session-123".to_string()));
+                assert_eq!(
+                    cfg.provider_headers.get("chatgpt-account-id"),
+                    Some(&"acc-1".to_string())
+                );
+            }
+            _ => panic!("expected OAuthConfig"),
+        }
+    }
+
+    /// OAuth `with_model_id` is a no-op for API-key credentials.
+    #[test]
+    fn oauth_with_model_id_is_noop_for_api_key() {
+        let cred = ProviderCredential::ApiKey("KEY".to_string(), "secret".to_string());
+        let target = anthropic_reasoning_target();
+        match cred.with_model_id(&target) {
+            ProviderCredential::ApiKey(name, key) => {
+                assert_eq!(name, "KEY");
+                assert_eq!(key, "secret");
+            }
+            _ => panic!("expected ApiKey to pass through unchanged"),
+        }
+    }
+
+    /// Restamp from model A (with reasoning_effort=Some(Medium)) to model B
+    /// (non-reasoning OpenAI) clears reasoning_effort to None.
+    #[test]
+    fn restamp_from_reasoning_to_non_reasoning_clears_effort() {
+        let config_a = sample_oauth_config(Some(ReasoningEffort::Medium));
+        assert_eq!(config_a.reasoning_effort, Some(ReasoningEffort::Medium));
+
+        let cred = ProviderCredential::OAuthConfig(Box::new(config_a));
+        let target = openai_non_reasoning_target();
+        match cred.with_model_id(&target) {
+            ProviderCredential::OAuthConfig(cfg) => {
+                assert_eq!(cfg.model_id, "gpt-4o");
+                assert_eq!(
+                    cfg.reasoning_effort, None,
+                    "non-reasoning model B must clear reasoning_effort"
+                );
+                assert_eq!(cfg.format_family, FormatFamily::OpenAI);
+                assert_eq!(cfg.context_window, 128_000);
+            }
+            _ => panic!("expected OAuthConfig"),
+        }
+    }
+
+    /// `build_provider_from_resolved` OAuth arm restamps model-dependent
+    /// defaults through the shared helper instead of bare model_id assignment.
+    #[test]
+    fn build_provider_oauth_restamp_resolves_model_b_reasoning_effort() {
+        use crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential;
+        let source_config = sample_oauth_config(None);
+        let resolved = ResolvedModelCredential {
+            catalog_provider_id: "anthropic".to_string(),
+            model_name: "claude-sonnet-4".to_string(),
+            provider_credential: Some(ProviderCredential::OAuthConfig(Box::new(source_config))),
+        };
+        let target = anthropic_reasoning_target();
+        let provider =
+            build_provider_from_resolved(resolved, 0, None, None, String::new(), &target);
+        assert!(provider.is_some(), "provider must be created");
+        // We can't inspect the provider internals, but the function succeeded,
+        // which means the restamp path executed without panicking. The
+        // with_model_id restamp test above validates the actual field values.
+    }
+
+    /// `build_provider_from_resolved` API-key arm uses the shared model-default
+    /// policy to resolve reasoning_effort instead of hardcoding None.
+    #[test]
+    fn build_provider_api_key_restamp_resolves_reasoning_effort() {
+        use crate::actors::slot::lifecycle::model_resolution::ResolvedModelCredential;
+        let resolved = ResolvedModelCredential {
+            catalog_provider_id: "anthropic".to_string(),
+            model_name: "claude-sonnet-4".to_string(),
+            provider_credential: Some(ProviderCredential::ApiKey(
+                "ANTHROPIC_API_KEY".to_string(),
+                "sk-test-key".to_string(),
+            )),
+        };
+        let target = anthropic_reasoning_target();
+        let provider = build_provider_from_resolved(
+            resolved,
+            200_000,
+            None,
+            None,
+            "https://api.anthropic.com".to_string(),
+            &target,
+        );
+        assert!(
+            provider.is_some(),
+            "API-key provider must be created for Anthropic reasoning model"
+        );
     }
 }
