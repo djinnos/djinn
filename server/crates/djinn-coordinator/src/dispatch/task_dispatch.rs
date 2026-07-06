@@ -873,8 +873,10 @@ impl CoordinatorActor {
         Fut: std::future::Future<Output = Result<(), PoolError>>,
     {
         let mut any_at_capacity = false;
+        let total_candidates = model_ids.len();
+        let mut skipped_count: usize = 0;
 
-        for model_id in model_ids {
+        for (candidate_index, model_id) in model_ids.iter().enumerate() {
             tracing::Span::current().record("model_id", tracing::field::display(model_id));
             if !self.health.is_available(scope, model_id) {
                 tracing::Span::current().record("outcome", "breaker");
@@ -885,6 +887,15 @@ impl CoordinatorActor {
                     label,
                     "CoordinatorActor: model unavailable by health tracker"
                 );
+                super::lane_resolution_log::emit_failover_candidate_attempt(
+                    label,
+                    role,
+                    model_id,
+                    candidate_index,
+                    total_candidates,
+                    &super::lane_resolution_log::CandidateAttemptOutcome::BreakerOpen,
+                );
+                skipped_count += 1;
                 continue;
             }
 
@@ -892,6 +903,14 @@ impl CoordinatorActor {
                 Ok(()) => {
                     tracing::Span::current().record("outcome", "ok");
                     tracing::info!(outcome = "ok", model_id = %model_id, label);
+                    super::lane_resolution_log::emit_failover_candidate_accepted(
+                        label,
+                        role,
+                        model_id,
+                        candidate_index,
+                        total_candidates,
+                        skipped_count,
+                    );
                     return DispatchOutcome::Dispatched;
                 }
                 Err(PoolError::AtCapacity { .. }) => {
@@ -903,6 +922,15 @@ impl CoordinatorActor {
                         label,
                         "CoordinatorActor: model at capacity, trying next model"
                     );
+                    super::lane_resolution_log::emit_failover_candidate_attempt(
+                        label,
+                        role,
+                        model_id,
+                        candidate_index,
+                        total_candidates,
+                        &super::lane_resolution_log::CandidateAttemptOutcome::AtCapacity,
+                    );
+                    skipped_count += 1;
                 }
                 Err(PoolError::ActorDead) => {
                     tracing::Span::current().record("outcome", "error");
@@ -911,19 +939,36 @@ impl CoordinatorActor {
                     return DispatchOutcome::PoolDead;
                 }
                 Err(e) => {
+                    // Failover-chain traversal: log the per-candidate failure
+                    // and continue to the next eligible candidate instead of
+                    // returning Failed immediately.  Terminal side effects are
+                    // intentionally deferred until all candidates are exhausted
+                    // (the dependent task owns further deferral policy).
                     tracing::Span::current().record("outcome", "error");
                     tracing::debug!(outcome = "error", model_id = %model_id, label);
                     tracing::warn!(
                         model_id = %model_id,
                         label,
+                        candidate_index,
+                        total_candidates,
                         error = %e,
-                        "CoordinatorActor: dispatch failed"
+                        "CoordinatorActor: candidate dispatch failed — advancing to next failover candidate"
                     );
-                    return DispatchOutcome::Failed;
+                    super::lane_resolution_log::emit_failover_candidate_attempt(
+                        label,
+                        role,
+                        model_id,
+                        candidate_index,
+                        total_candidates,
+                        &super::lane_resolution_log::CandidateAttemptOutcome::Error(e.to_string()),
+                    );
+                    skipped_count += 1;
+                    continue;
                 }
             }
         }
 
+        // All candidates exhausted: the failover chain is depleted.
         if any_at_capacity {
             tracing::Span::current().record("outcome", "cap");
             DispatchOutcome::AtCapacity
@@ -3364,5 +3409,949 @@ mod inflight_ledger_tests {
             post_count, 2,
             "running session count must remain at cap=2 after a denied dispatch pass"
         );
+    }
+}
+
+/// Failover-chain traversal regression tests.
+///
+/// Verifies that `try_dispatch_to_pool` traverses the routed candidate list in
+/// order, advances past failed (breaker-open / at-capacity) candidates, and
+/// preserves per-candidate observability logging. These tests lock the
+/// contracts delivered by blocking epics `5wxi` (lane candidate ordering) and
+/// `13w7` (restamp helper) so that the coordinator dispatch path correctly
+/// consumes the routed failover chain.
+#[cfg(test)]
+mod failover_chain_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal actor factory for failover chain tests.
+    ///
+    /// Creates a `CoordinatorActor` with a pool configured for the given
+    /// models and a fresh `HealthTracker`. The pool uses a controlled slot
+    /// factory whose slots stay alive until the `releases` map is drained.
+    #[allow(clippy::type_complexity)]
+    fn failover_actor(
+        db: &djinn_db::Database,
+        events_tx: &tokio::sync::broadcast::Sender<djinn_core::events::DjinnEventEnvelope>,
+        models: Vec<(&str, u32)>, // (model_id, max_slots)
+    ) -> (
+        CoordinatorActor,
+        tokio_util::sync::CancellationToken,
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    ) {
+        use djinn_slot::{ModelSlotConfig, SlotPoolConfig};
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let releases: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let releases_clone = releases.clone();
+
+        let pool_config = SlotPoolConfig {
+            models: models
+                .iter()
+                .map(|(model_id, max_slots)| ModelSlotConfig {
+                    model_id: (*model_id).to_owned(),
+                    max_slots: *max_slots,
+                    roles: ["worker".to_owned()].into_iter().collect(),
+                })
+                .collect(),
+            role_priorities: HashMap::new(),
+        };
+
+        let app_state = crate::test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+        let pool = djinn_slot::SlotPoolHandle::spawn_with_factory(
+            app_state,
+            cancel.clone(),
+            pool_config,
+            Arc::new(move |_slot_id, model_id, _event_tx, _app_state, kill| {
+                let releases_inner = releases_clone.clone();
+                let runner: djinn_slot::TestLifecycleRunner = Arc::new(
+                    move |task_id, _project_path, _model_id, _app_state, kill, _pause, _resume| {
+                        let releases_inner = releases_inner.clone();
+                        Box::pin(async move {
+                            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                            releases_inner
+                                .lock()
+                                .expect("failover release mutex")
+                                .insert(task_id.clone(), release_tx);
+                            tokio::select! {
+                                _ = release_rx => {}
+                                _ = kill.cancelled() => {}
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                            }
+                            Ok(())
+                        })
+                    },
+                );
+                djinn_slot::SlotHandle::spawn_with_test_runner(
+                    0, model_id, _event_tx, _app_state, kill, runner,
+                )
+            }),
+        );
+
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(SharedCoordinatorState {
+            dispatched: 0,
+            recovered: 0,
+            epic_throughput: HashMap::new(),
+            pr_errors: HashMap::new(),
+            rate_limited_until: None,
+        });
+
+        let actor = CoordinatorActor {
+            receiver: tokio::sync::mpsc::channel(1).1,
+            events: events_tx.subscribe(),
+            cancel: cancel.clone(),
+            tick: tokio::time::interval(std::time::Duration::from_secs(60)),
+            db: db.clone(),
+            events_tx: events_tx.clone(),
+            pool: pool.clone(),
+            catalog: CatalogService::new(),
+            health: djinn_provider::catalog::health::HealthTracker::new(),
+            role_registry: std::sync::Arc::new(crate::roles::RoleRegistry::new()),
+            lsp: djinn_lsp::LspManager::new(),
+            self_sender: tokio::sync::mpsc::channel(1).0,
+            status_tx,
+            dispatch_limit: 50,
+            model_priorities: HashMap::new(),
+            pr_errors: HashMap::new(),
+            last_dispatched: HashMap::new(),
+            inflight_dispatches: HashMap::new(),
+            provisional_admissions: HashMap::new(),
+            dispatch_cooldowns: HashMap::new(),
+            dispatch_failure_streak: HashMap::new(),
+            background_work_tracker: BackgroundWorkTracker::default(),
+            stranded_ready_source: None,
+            auto_merge_tracker: AutoMergeTracker::default(),
+            consolidation_runner: std::sync::Arc::new(
+                crate::consolidation::DbConsolidationRunner::new(db.clone()),
+            ),
+            last_stale_sweep: StdInstant::now(),
+            last_auto_dispatch_sweep: StdInstant::now(),
+            last_proposal_review_sweep: StdInstant::now(),
+            last_graph_refresh: StdInstant::now(),
+            graph_warmer: None,
+            mirror: None,
+            runtime_ops: None,
+            rpc_registry: None,
+            prune_tick_counter: 0,
+            throughput_events: HashMap::new(),
+            escalation_counts: HashMap::new(),
+            pr_status_cache: HashMap::new(),
+            pr_draft_first_seen: HashMap::new(),
+            review_stuck_sha_first_seen: HashMap::new(),
+            merge_fail_count: HashMap::new(),
+            auto_approve_attempted: HashMap::new(),
+            delegated_to_github: HashMap::new(),
+            conversations_resolved: HashMap::new(),
+            handled_dequeues: HashMap::new(),
+            stall_killed: std::collections::HashSet::new(),
+            stall_progress_watermark: HashMap::new(),
+            stall_cancel_streak: HashMap::new(),
+            stall_extension_count: HashMap::new(),
+            provider_failure_streak: HashMap::new(),
+            last_idle_consolidation: None,
+            idle_consolidation_cancel: None,
+            idle_consolidation_handle: None,
+            pr_cleanup_config: PrCleanupConfig::default(),
+            worker_lifecycle_config: crate::WorkerLifecycleConfig::default(),
+            active_refinements: HashMap::new(),
+            refinement_sessions: HashMap::new(),
+            dispatched: 0,
+            recovered: 0,
+        };
+
+        (actor, cancel, releases)
+    }
+
+    /// AC1: Failover-chain traversal preserves candidate order.
+    ///
+    /// When the first candidate's breaker is open, dispatch should advance to the
+    /// second candidate and succeed — proving the chain is traversed in routed
+    /// lane order rather than giving up on the first failure.
+    #[tokio::test]
+    async fn failover_chain_advances_past_breaker_to_next_candidate() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        // 3 models, each with 1 slot
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // Trip breaker for model-a
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Dispatch with candidate order [model-a, model-b, model-c].
+        // model-a breaker is open; dispatch should advance to model-b.
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "failover-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "failover-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker is open"
+        );
+
+        // Verify the task was dispatched to model-b (not model-a or model-c)
+        let status = actor.pool.get_status().await.unwrap();
+        let model_b_running = status
+            .running_tasks
+            .iter()
+            .filter(|t| t.model_id == "provider/model-b" && t.task_id == "failover-task")
+            .count();
+        assert!(
+            model_b_running > 0,
+            "failover-task should be running on model-b"
+        );
+        assert!(
+            actor
+                .pool
+                .has_session("failover-task")
+                .await
+                .unwrap_or(false),
+            "failover-task should have an active session"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC1 (breaker path): When the first candidate's breaker is open,
+    /// dispatch should advance to the next eligible candidate.
+    #[tokio::test]
+    async fn failover_chain_advances_past_breaker_open() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // Trip the breaker for model-a (stall trips immediately)
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Dispatch with candidate order [model-a, model-b, model-c].
+        // model-a should be breaker-open; dispatch should advance to model-b.
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "breaker-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "breaker-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker is open"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC3: When all candidates are exhausted (all breaker-open),
+    /// the chain traversal returns `Failed` without marking terminal state.
+    #[tokio::test]
+    async fn failover_chain_all_breakers_exhausted_returns_failed() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Trip breakers for both models
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+            actor.health.record_failure(None, "provider/model-b");
+        }
+
+        // Dispatch with candidate order [model-a, model-b] — both breaker-open
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "exhausted-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "exhausted-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Failed),
+            "dispatch should return Failed when all candidates have open breakers"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC1: Mixed scenario — breaker-open on first two, success on third.
+    /// Verifies the full failover chain traversal skips multiple candidates.
+    #[tokio::test]
+    async fn failover_chain_mixed_breaker_success() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // model-a: breaker-open
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // model-b: breaker-open
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-b");
+        }
+
+        // model-c: free (should succeed)
+
+        // Dispatch with candidate order [model-a, model-b, model-c]
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "mixed-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "mixed-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-c after model-a and model-b breaker-open"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC1 + AC3: Candidate order is preserved — first eligible candidate wins.
+    /// When model-a is breaker-open and model-b is free, dispatch should use
+    /// model-b (not skip to model-c).
+    #[tokio::test]
+    async fn failover_chain_first_eligible_candidate_wins() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // model-a: breaker-open (skip it)
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // model-b and model-c are both free
+        // Dispatch should succeed on model-b (first eligible), not model-c
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "order-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "order-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b (first eligible in order)"
+        );
+
+        // Verify task is on model-b by checking the pool status
+        let status = actor.pool.get_status().await.unwrap();
+        let model_b_running = status
+            .running_tasks
+            .iter()
+            .filter(|t| t.model_id == "provider/model-b")
+            .count();
+        assert!(
+            model_b_running > 0,
+            "model-b should have a running task (order-task dispatched to first eligible candidate)"
+        );
+
+        // model-c should NOT have any running tasks (dispatch stopped at model-b)
+        let model_c_running = status
+            .running_tasks
+            .iter()
+            .filter(|t| t.model_id == "provider/model-c")
+            .count();
+        assert_eq!(
+            model_c_running, 0,
+            "model-c should NOT have a running task — dispatch succeeded on model-b first"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2: When candidates have different restamped ProviderConfig,
+    /// each candidate dispatch uses the model_id from the routed candidate
+    /// list (the downstream restamp helper resolves ProviderConfig per-model).
+    /// This test verifies that each model_id in the candidate list is passed
+    /// to the dispatch function, which is the prerequisite for restamping.
+    #[tokio::test]
+    async fn failover_chain_passes_correct_model_ids_to_dispatch() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // Track which models the dispatch_fn was called with
+        let attempted_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let attempted_models_clone = attempted_models.clone();
+
+        // Breaker-open model-a; model-b and model-c are free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Dispatch with a closure that tracks which models are attempted
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "model-tracking-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "model-tracking-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let tracker = attempted_models_clone.clone();
+                    async move {
+                        // Note: model-a is skipped by breaker before dispatch_fn
+                        tracker.lock().unwrap().push(mid.clone());
+                        pool.dispatch(&tid, &pp, &mid).await
+                    }
+                },
+            )
+            .await;
+
+        assert!(matches!(outcome, DispatchOutcome::Dispatched));
+
+        // The dispatch_fn should have been called for model-b (first eligible,
+        // succeeds), but NOT for model-a (breaker-open) or model-c (chain
+        // already succeeded on model-b).
+        let attempted = attempted_models.lock().unwrap().clone();
+        assert!(
+            attempted.contains(&"provider/model-b".to_string()),
+            "dispatch_fn should have been called with model-b (first eligible candidate)"
+        );
+        // model-a is skipped by the breaker check BEFORE dispatch_fn is called,
+        // so it should NOT appear in the attempted list
+        assert!(
+            !attempted.contains(&"provider/model-a".to_string()),
+            "dispatch_fn should NOT have been called with model-a (breaker-open)"
+        );
+        // model-c is NOT called because model-b succeeded — the chain stops
+        // at the first successful candidate
+        assert!(
+            !attempted.contains(&"provider/model-c".to_string()),
+            "dispatch_fn should NOT have been called with model-c (model-b already succeeded)"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC4: Per-candidate observation/logging — each candidate in the
+    /// failover chain is logged, including those that were skipped or failed.
+    ///
+    /// Uses `#[tracing_test::traced_test]` to capture structured log output and
+    /// assert that:
+    /// - `failover_candidate_attempt` is emitted for the breaker-open candidate
+    ///   (model-a) with the correct model_id.
+    /// - `failover_candidate_accepted` is emitted for the winning candidate
+    ///   (model-b) with the correct model_id.
+    /// - The correct candidate_index and total_candidates appear in the logs.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_logging_captures_candidate_events() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![
+                ("provider/model-a", 1),
+                ("provider/model-b", 1),
+                ("provider/model-c", 1),
+            ],
+        );
+
+        // Breaker-open model-a; model-b and model-c are free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "logging-event-task",
+                "worker",
+                0,
+                None,
+                &[
+                    "provider/model-a".to_owned(),
+                    "provider/model-b".to_owned(),
+                    "provider/model-c".to_owned(),
+                ],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "logging-event-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    async move { pool.dispatch(&tid, &pp, &mid).await }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker-open"
+        );
+
+        // ── Assert failover_candidate_attempt for the breaker-open model-a ──
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log failover_candidate_attempt for the breaker-open candidate"
+        );
+        assert!(
+            logs_contain("provider/model-a"),
+            "failover_candidate_attempt must reference the skipped model-a"
+        );
+
+        // ── Assert failover_candidate_accepted for the winning model-b ──────
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log failover_candidate_accepted for the winning candidate"
+        );
+        assert!(
+            logs_contain("provider/model-b"),
+            "failover_candidate_accepted must reference the accepted model-b"
+        );
+
+        cancel.cancel();
+    }
+
+    /// AC2 + AC4: Failover restamp produces model-dependent ProviderConfig
+    /// defaults for each candidate model.
+    ///
+    /// Verifies that `restamp_provider_config_for_model` re-resolves
+    /// model-dependent fields (`context_window`, `capabilities`, `format_family`)
+    /// from the target model's RestampTarget rather than carrying stale values
+    /// from the previous candidate. The dispatch closure calls the restamp
+    /// helper for the dispatched candidate model, capturing the result for
+    /// post-dispatch assertion.
+    #[tokio::test]
+    async fn failover_chain_restamp_produces_model_dependent_config() {
+        let _ = djinn_telemetry::init();
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Breaker-open model-a; model-b is free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Capture restamped ProviderConfig for the dispatched candidate model.
+        let restamped_config: Arc<Mutex<Option<djinn_provider::provider::ProviderConfig>>> =
+            Arc::new(Mutex::new(None));
+        let restamped_clone = restamped_config.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "restamp-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "restamp-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let restamped = restamped_clone.clone();
+                    async move {
+                        // Simulate the downstream restamp path: build a source
+                        // ProviderConfig for the *previous* model (model-a) with
+                        // its own model-dependent defaults, then restamp it to the
+                        // *candidate* model (model-b).  This mirrors what
+                        // `build_provider_from_resolved` does when a failover
+                        // candidate is selected.
+                        let source_config = djinn_provider::provider::ProviderConfig {
+                            base_url: "https://api.example.com".to_owned(),
+                            auth: djinn_provider::provider::AuthMethod::BearerToken(
+                                "test-key".to_owned(),
+                            ),
+                            format_family: djinn_provider::provider::FormatFamily::Anthropic,
+                            model_id: "provider/model-a".to_owned(),
+                            context_window: 100_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(8192),
+                            },
+                            reasoning_effort: None,
+                            tool_schema_compat: None,
+                            telemetry: None,
+                            session_affinity_key: None,
+                            provider_headers: std::collections::HashMap::new(),
+                        };
+
+                        // Restamp to model-b with different model-dependent
+                        // defaults to prove the helper re-resolves them.
+                        let target = djinn_provider::provider::RestampTarget {
+                            model_id: mid.clone(),
+                            format_family: djinn_provider::provider::FormatFamily::OpenAI,
+                            reasoning: false,
+                            context_window: 200_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(32_768),
+                            },
+                            tool_schema_compat: None,
+                        };
+                        let cfg = djinn_provider::provider::restamp_provider_config_for_model(
+                            source_config,
+                            &target,
+                        );
+
+                        // Capture the restamped config for post-dispatch assertion
+                        *restamped.lock().expect("restamp mutex") = Some(cfg.clone());
+
+                        pool.dispatch(&tid, &pp, &mid).await
+                    }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker-open"
+        );
+
+        // ── Assert restamped ProviderConfig has model-b's defaults ──────────
+        let captured = restamped_config
+            .lock()
+            .expect("restamp mutex")
+            .take()
+            .expect("dispatch closure must capture restamped config");
+
+        assert_eq!(
+            captured.model_id, "provider/model-b",
+            "restamped config must have the candidate model-b as model_id"
+        );
+        assert_eq!(
+            captured.format_family,
+            djinn_provider::provider::FormatFamily::OpenAI,
+            "restamped config must resolve model-b's format_family (OpenAI), \
+             not carry model-a's stale value (Anthropic)"
+        );
+        assert_eq!(
+            captured.context_window, 200_000,
+            "restamped config must resolve model-b's context_window (200_000), \
+             not carry model-a's stale value (100_000)"
+        );
+        assert_eq!(
+            captured.capabilities.max_tokens_default,
+            Some(32_768),
+            "restamped config must resolve model-b's max_tokens_default (32_768), \
+             not carry model-a's stale value (8192)"
+        );
+        // Transport fields must be preserved from the source config
+        assert_eq!(
+            captured.base_url, "https://api.example.com",
+            "restamped config must preserve the source base_url"
+        );
+
+        cancel.cancel();
+    }
+
+    /// Comprehensive AC2 + AC4 regression: failover-chain traversal with
+    /// restamped ProviderConfig and per-candidate observation/logging.
+    ///
+    /// Scenario: 2 candidates — model-a (breaker-open, skipped) and model-b
+    /// (dispatched). The dispatch closure calls `restamp_provider_config_for_model`
+    /// for model-b, re-resolving model-dependent fields from model-a's source
+    /// config to model-b's target values. The test asserts:
+    ///
+    /// 1. **Restamped config use (AC2)**: The restamped `ProviderConfig` has
+    ///    model-b's `format_family`, `context_window`, and `max_tokens_default`
+    ///    — not model-a's stale values — proving the restamp helper re-resolves
+    ///    model-dependent defaults.
+    /// 2. **Per-candidate observation/logging (AC4)**: `failover_candidate_attempt`
+    ///    is emitted for model-a with `breaker_open` outcome, and
+    ///    `failover_candidate_accepted` is emitted for model-b with
+    ///    `skipped_count=1`. Both records include `total_candidates=2`.
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn failover_chain_restamp_and_logging_comprehensive() {
+        let db = crate::test_helpers::create_test_db();
+        let (events_tx, _) = tokio::sync::broadcast::channel(64);
+
+        let (actor, cancel, _releases) = failover_actor(
+            &db,
+            &events_tx,
+            vec![("provider/model-a", 1), ("provider/model-b", 1)],
+        );
+
+        // Breaker-open model-a; model-b is free
+        for _ in 0..3 {
+            actor.health.record_failure(None, "provider/model-a");
+        }
+
+        // Capture restamped ProviderConfig for the dispatched candidate.
+        let restamped_config: Arc<Mutex<Option<djinn_provider::provider::ProviderConfig>>> =
+            Arc::new(Mutex::new(None));
+        let restamped_clone = restamped_config.clone();
+
+        let outcome = actor
+            .try_dispatch_to_pool(
+                "restamp-log-task",
+                "worker",
+                0,
+                None,
+                &["provider/model-a".to_owned(), "provider/model-b".to_owned()],
+                |pool, model_id| {
+                    let pool = pool.clone();
+                    let tid = "restamp-log-task".to_owned();
+                    let pp = "/tmp/proj".to_owned();
+                    let mid = model_id.to_owned();
+                    let restamped = restamped_clone.clone();
+                    async move {
+                        // Simulate the downstream restamp path: build a source
+                        // ProviderConfig for model-a with its own model-dependent
+                        // defaults, then restamp it to the candidate model-b.
+                        // This mirrors what `build_provider_from_resolved` does
+                        // when a failover candidate is selected in production.
+                        let source_config = djinn_provider::provider::ProviderConfig {
+                            base_url: "https://api.example.com".to_owned(),
+                            auth: djinn_provider::provider::AuthMethod::BearerToken(
+                                "test-key".to_owned(),
+                            ),
+                            format_family: djinn_provider::provider::FormatFamily::Anthropic,
+                            model_id: "provider/model-a".to_owned(),
+                            context_window: 100_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(8192),
+                            },
+                            reasoning_effort: None,
+                            tool_schema_compat: None,
+                            telemetry: None,
+                            session_affinity_key: None,
+                            provider_headers: std::collections::HashMap::new(),
+                        };
+
+                        // Restamp to model-b with different model-dependent
+                        // defaults to prove the helper re-resolves them.
+                        let target = djinn_provider::provider::RestampTarget {
+                            model_id: mid.clone(),
+                            format_family: djinn_provider::provider::FormatFamily::OpenAI,
+                            reasoning: false,
+                            context_window: 200_000,
+                            capabilities: djinn_provider::provider::ProviderCapabilities {
+                                streaming: true,
+                                max_tokens_default: Some(32_768),
+                            },
+                            tool_schema_compat: None,
+                        };
+                        let cfg = djinn_provider::provider::restamp_provider_config_for_model(
+                            source_config,
+                            &target,
+                        );
+
+                        // Capture the restamped config for post-dispatch assertion
+                        *restamped.lock().expect("restamp mutex") = Some(cfg.clone());
+
+                        pool.dispatch(&tid, &pp, &mid).await
+                    }
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(outcome, DispatchOutcome::Dispatched),
+            "dispatch should succeed on model-b after model-a breaker-open"
+        );
+
+        // ── AC2: Assert restamped ProviderConfig has model-b's model-dependent
+        // values, not model-a's stale values ──────────────────────────────────
+        let captured = restamped_config
+            .lock()
+            .expect("restamp mutex")
+            .take()
+            .expect("dispatch closure must capture restamped config");
+
+        assert_eq!(
+            captured.model_id, "provider/model-b",
+            "restamped config must have the candidate model-b as model_id"
+        );
+        assert_eq!(
+            captured.format_family,
+            djinn_provider::provider::FormatFamily::OpenAI,
+            "restamped config must resolve model-b's format_family (OpenAI), \
+             not carry model-a's stale value (Anthropic)"
+        );
+        assert_eq!(
+            captured.context_window, 200_000,
+            "restamped config must resolve model-b's context_window (200_000), \
+             not carry model-a's stale value (100_000)"
+        );
+        assert_eq!(
+            captured.capabilities.max_tokens_default,
+            Some(32_768),
+            "restamped config must resolve model-b's max_tokens_default (32_768), \
+             not carry model-a's stale value (8192)"
+        );
+        // Transport fields must be preserved from the source config
+        assert_eq!(
+            captured.base_url, "https://api.example.com",
+            "restamped config must preserve transport fields from the source config"
+        );
+
+        // ── AC4: Assert per-candidate observation/logging ─────────────────────
+        // failover_candidate_attempt for the breaker-open model-a
+        assert!(
+            logs_contain("failover_candidate_attempt"),
+            "must log failover_candidate_attempt for the breaker-open candidate"
+        );
+        assert!(
+            logs_contain("breaker_open"),
+            "failover_candidate_attempt must include breaker_open outcome for model-a"
+        );
+        assert!(
+            logs_contain("total_candidates=2"),
+            "failover_candidate_attempt must include total_candidates=2"
+        );
+
+        // failover_candidate_accepted for the winning model-b
+        assert!(
+            logs_contain("failover_candidate_accepted"),
+            "must log failover_candidate_accepted for the winning candidate"
+        );
+        assert!(
+            logs_contain("skipped_count=1"),
+            "failover_candidate_accepted must report skipped_count=1 \
+             (model-a was skipped before model-b was accepted)"
+        );
+
+        cancel.cancel();
     }
 }
