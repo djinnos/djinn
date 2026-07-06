@@ -36,7 +36,7 @@ use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_runtime::wire::{ControlMsg, WorkerEvent, WorkspaceRef};
 use serde::{Deserialize, Serialize};
 
-use crate::{RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
+use crate::{ArbiterGateResult, RoleKind, StageError, StageOutcome, TaskRunOutcome, TaskRunSpec};
 
 /// Top-level wire envelope.
 ///
@@ -420,6 +420,11 @@ pub enum ServiceRpcRequest {
         cache_read: i64,
         cache_write: i64,
     },
+    /// [`crate::SupervisorServices::run_arbiter_preapproval_gate`].
+    /// Arbiter pre-approval gate — runs the same CI-grade verification
+    /// gate as the PR-open path but without firing a board transition on
+    /// red.  Appended at the enum tail for bincode stability.
+    RunArbiterPreapprovalGate { task: Task },
 }
 
 /// Typed response variants — one per [`ServiceRpcRequest`] variant.
@@ -488,6 +493,10 @@ pub enum ServiceRpcResponse {
     /// pre-existing variant index stable for the positional bincode codec
     /// (see `ServiceRpcRequest::FlushSessionTokens`).
     FlushSessionTokens(Result<(), String>),
+    /// Arbiter pre-approval gate result.  `Ok` carries the gate verdict;
+    /// `Err` is a transport/infra failure.  Appended at the enum tail for
+    /// bincode stability.
+    RunArbiterPreapprovalGate(Result<ArbiterGateResult, String>),
 }
 
 #[cfg(test)]

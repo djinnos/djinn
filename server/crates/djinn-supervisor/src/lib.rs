@@ -255,6 +255,23 @@ pub enum ParkReason {
     Budget,
 }
 
+/// Result of running the pre-approval verification gate for an arbiter
+/// approve/approve_conflict decision.
+///
+/// Mirrors [`PreApprovalGateOutcome`] semantics but stripped to the two
+/// outcomes the arbiter settlement path needs: proceed or block with
+/// feedback.  Returned by [`SupervisorServices::run_arbiter_preapproval_gate`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArbiterGateResult {
+    /// Gate passed (green), was skipped, disabled, deferred, or hit an
+    /// infra error (fail-open).  Proceed with the arbiter approval.
+    Pass,
+    /// Gate failed (red).  The arbiter approval must NOT be applied;
+    /// `feedback` describes which checks failed and should be surfaced
+    /// to the arbiter session.
+    Blocked { feedback: String },
+}
+
 impl StageOutcome {
     /// Whether this outcome should short-circuit the role sequence.
     pub fn is_terminal(&self) -> bool {
@@ -1883,6 +1900,37 @@ impl TaskRunSupervisor {
                             result = Some(TaskRunOutcome::Interrupted);
                             break;
                         }
+                        // ── Pre-approval CI-grade verification gate ───────
+                        // Arbiter approvals must pass the same gate as
+                        // reviewer approvals.  A red result returns feedback
+                        // to the arbiter session without transitioning the
+                        // task or consuming the arbitration row.
+                        match self.services.run_arbiter_preapproval_gate(&task).await {
+                            Ok(ArbiterGateResult::Blocked { feedback }) => {
+                                tracing::info!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    "supervisor: arbiter pre-approval gate red — task stays in_lead_intervention (no strike, no arbitration consumption)"
+                                );
+                                result = Some(TaskRunOutcome::Escalated {
+                                    reason: format!(
+                                        "pre-approval CI-grade verification gate blocked arbiter approve; \
+                                         returned to arbiter session (strike-free). {feedback}"
+                                    ),
+                                });
+                                break;
+                            }
+                            Ok(ArbiterGateResult::Pass) => { /* proceed */ }
+                            Err(e) => {
+                                // Infra error — fail-open like the reviewer gate.
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: arbiter pre-approval gate infra error — proceeding (fail-open)"
+                                );
+                            }
+                        }
                         if let Err(e) = self
                             .services
                             .transition_task(spec.task_id.clone(), "lead_approve".into(), None)
@@ -1897,15 +1945,50 @@ impl TaskRunSupervisor {
                         }
                     }
                     StageOutcome::LeadApproveConflict { reason } => {
-                        if !self.services.cancel().is_cancelled()
-                            && let Err(e) = self
-                                .services
-                                .transition_task(
-                                    spec.task_id.clone(),
-                                    "lead_approve_conflict".into(),
-                                    Some(reason.clone()),
-                                )
-                                .await
+                        if self.services.cancel().is_cancelled() {
+                            tracing::debug!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                "supervisor: run cancelled — skipping lead_approve_conflict (task stays in_lead_intervention for redispatch)"
+                            );
+                            result = Some(TaskRunOutcome::Interrupted);
+                            break;
+                        }
+                        // ── Pre-approval CI-grade verification gate ───────
+                        // Same gate as LeadApproved — see comment above.
+                        match self.services.run_arbiter_preapproval_gate(&task).await {
+                            Ok(ArbiterGateResult::Blocked { feedback }) => {
+                                tracing::info!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    "supervisor: arbiter pre-approval gate red — task stays in_lead_intervention (no strike, no arbitration consumption)"
+                                );
+                                result = Some(TaskRunOutcome::Escalated {
+                                    reason: format!(
+                                        "pre-approval CI-grade verification gate blocked arbiter approve_conflict; \
+                                         returned to arbiter session (strike-free). {feedback}"
+                                    ),
+                                });
+                                break;
+                            }
+                            Ok(ArbiterGateResult::Pass) => { /* proceed */ }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_run_id = %run_id,
+                                    task_id = %spec.task_id,
+                                    error = %e,
+                                    "supervisor: arbiter pre-approval gate infra error — proceeding (fail-open)"
+                                );
+                            }
+                        }
+                        if let Err(e) = self
+                            .services
+                            .transition_task(
+                                spec.task_id.clone(),
+                                "lead_approve_conflict".into(),
+                                Some(reason.clone()),
+                            )
+                            .await
                         {
                             tracing::warn!(
                                 task_run_id = %run_id,
@@ -2741,6 +2824,14 @@ mod tests {
                 return Err("task has unresolved blockers".into());
             }
             Ok(())
+        }
+
+        async fn run_arbiter_preapproval_gate(
+            &self,
+            _task: &Task,
+        ) -> Result<ArbiterGateResult, String> {
+            // Test stub: always pass.
+            Ok(ArbiterGateResult::Pass)
         }
     }
 
@@ -5085,5 +5176,463 @@ mod tests {
                 });
             Ok(())
         }
+
+        async fn run_arbiter_preapproval_gate(
+            &self,
+            _task: &Task,
+        ) -> Result<ArbiterGateResult, String> {
+            // Test stub: always pass.
+            Ok(ArbiterGateResult::Pass)
+        }
+    }
+
+    // ── Arbiter pre-approval gate tests ──────────────────────────────────────
+
+    /// Test services whose `execute_stage` returns a configurable
+    /// `StageOutcome` and whose `run_arbiter_preapproval_gate` returns a
+    /// configurable `ArbiterGateResult`.  Transition calls are recorded
+    /// for assertion.
+    struct ArbiterGateTestServices {
+        cancel: CancellationToken,
+        task: Task,
+        stage_outcome: StageOutcome,
+        gate_result: Result<ArbiterGateResult, String>,
+        transition_calls: std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        open_pr_called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SupervisorServices for ArbiterGateTestServices {
+        fn cancel(&self) -> &CancellationToken {
+            &self.cancel
+        }
+
+        async fn load_task(&self, task_id: String) -> Result<Task, String> {
+            assert_eq!(task_id, self.task.id);
+            Ok(self.task.clone())
+        }
+
+        async fn execute_stage(
+            &self,
+            _task: &Task,
+            _workspace: &Workspace,
+            role_kind: RoleKind,
+            _task_run_id: &str,
+            _spec: &TaskRunSpec,
+        ) -> Result<StageOutcome, StageError> {
+            assert_eq!(role_kind, RoleKind::Lead);
+            Ok(self.stage_outcome.clone())
+        }
+
+        async fn open_pr(&self, _spec: &TaskRunSpec, _task: &Task) -> TaskRunOutcome {
+            self.open_pr_called
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            TaskRunOutcome::PrOpened {
+                url: "https://github.com/test/pr/1".into(),
+                sha: "abc123".into(),
+            }
+        }
+
+        async fn create_task_run(
+            &self,
+            _params: services::SerializableCreateTaskRunParams,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn update_task_run_status(
+            &self,
+            _run_id: String,
+            _status: TaskRunStatus,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_model_context_window(&self, _model_id: String) -> Result<i64, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_provider_base_url(
+            &self,
+            _catalog_provider_id: String,
+        ) -> Result<String, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn pick_any_default_model(&self) -> Result<Option<String>, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn create_session(
+            &self,
+            _params: services::SerializableCreateSessionParams,
+        ) -> Result<djinn_core::models::SessionRecord, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn publish_session_message(
+            &self,
+            _session_id: String,
+            _task_id: String,
+            _agent_type: String,
+            _message: serde_json::Value,
+        ) -> Result<(), String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn get_environment_config(
+            &self,
+            _project_id: String,
+        ) -> Result<djinn_stack::environment::EnvironmentConfig, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn invoke_llm(
+            &self,
+            _model_id: String,
+            _conversation: djinn_provider::message::Conversation,
+            _tools: Vec<serde_json::Value>,
+            _tool_choice: Option<djinn_provider::provider::ToolChoice>,
+        ) -> Result<djinn_provider::provider::LlmResponse, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn update_session_status(
+            &self,
+            _session_id: String,
+            _status: djinn_core::models::SessionStatus,
+            _tokens_in: i64,
+            _tokens_out: i64,
+            _cache_read: i64,
+            _cache_write: i64,
+            _parked_reason: Option<String>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn emit_djinn_event(
+            &self,
+            _event: services::SerializableDjinnEvent,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn tool_github_search(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_github_fetch_file(
+            &self,
+            _project_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn tool_ci_job_log(
+            &self,
+            _session_task_id: Option<String>,
+            _arguments: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<serde_json::Value, String> {
+            unimplemented!("not exercised")
+        }
+
+        async fn touch_activity(&self, _task_id: String) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn transition_task(
+            &self,
+            task_id: String,
+            action: String,
+            reason: Option<String>,
+        ) -> Result<(), String> {
+            self.transition_calls
+                .lock()
+                .expect("transition_calls mutex poisoned")
+                .push(TransitionCall {
+                    task_id,
+                    action,
+                    reason,
+                });
+            Ok(())
+        }
+
+        async fn run_arbiter_preapproval_gate(
+            &self,
+            _task: &Task,
+        ) -> Result<ArbiterGateResult, String> {
+            self.gate_result.clone()
+        }
+    }
+
+    /// Build a minimal mirror + supervisor for arbiter gate tests.
+    /// Returns the tempdir guard so the caller keeps the mirror alive.
+    async fn build_arbiter_gate_test_env(
+        task_id: &str,
+        project_id: &str,
+        stage_outcome: StageOutcome,
+        gate_result: Result<ArbiterGateResult, String>,
+    ) -> (
+        tempfile::TempDir,
+        TaskRunSupervisor,
+        TaskRunSpec,
+        std::sync::Arc<std::sync::Mutex<Vec<TransitionCall>>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let root = tempfile::tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("temp test root");
+        let source_dir = root.path().join("source");
+        make_source_repo(&source_dir);
+
+        let mirror = std::sync::Arc::new(MirrorManager::new(root.path().join("mirrors")));
+        mirror
+            .ensure_mirror(project_id, &format!("file://{}", source_dir.display()))
+            .await
+            .expect("install fixture mirror");
+
+        let transition_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let open_pr_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let services: std::sync::Arc<dyn SupervisorServices> =
+            std::sync::Arc::new(ArbiterGateTestServices {
+                cancel: CancellationToken::new(),
+                task: fixture_task(task_id, project_id),
+                stage_outcome,
+                gate_result,
+                transition_calls: transition_calls.clone(),
+                open_pr_called: open_pr_called.clone(),
+            });
+
+        let supervisor = TaskRunSupervisor::new(std::sync::Arc::clone(&mirror), services);
+        let spec = TaskRunSpec {
+            task_run_id: format!("run-arbiter-{task_id}"),
+            task_id: task_id.into(),
+            project_id: project_id.into(),
+            trigger: TaskRunTrigger::NewTask,
+            base_branch: "main".into(),
+            task_branch: format!("djinn/{task_id}"),
+            flow: SupervisorFlow::Lead,
+            model_id_per_role: Default::default(),
+            read_source_project_ids: Vec::new(),
+            github_owner: None,
+            github_install_token: None,
+            commit_author_name: None,
+            commit_author_email: None,
+            resume_lifecycle_metadata: None,
+            is_evidence_spike: false,
+        };
+
+        (root, supervisor, spec, transition_calls, open_pr_called)
+    }
+
+    #[tokio::test]
+    async fn arbiter_approve_green_gate_proceeds_with_transition() {
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-green",
+                "proj-gate",
+                StageOutcome::LeadApproved,
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Gate passed → lead_approve transition fired.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.action == "lead_approve"),
+            "green gate must fire lead_approve transition, got: {calls:?}"
+        );
+        // LeadApproved falls through to open_pr.
+        assert!(
+            open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "green gate must fall through to open_pr"
+        );
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::PrOpened { .. }),
+            "green gate must produce PrOpened, got: {:?}",
+            report.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_approve_red_gate_blocks_without_transition() {
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-red",
+                "proj-gate",
+                StageOutcome::LeadApproved,
+                Ok(ArbiterGateResult::Blocked {
+                    feedback: "clippy failed: error[E0425]".into(),
+                }),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Gate blocked → NO lead_approve transition.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve"),
+            "red gate must NOT fire lead_approve transition, got: {calls:?}"
+        );
+        // open_pr must NOT be called.
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "red gate must NOT reach open_pr"
+        );
+        // Must surface Escalated with the gate feedback.
+        match &report.outcome {
+            TaskRunOutcome::Escalated { reason } => {
+                assert!(
+                    reason.contains("clippy failed"),
+                    "Escalated reason must contain gate feedback, got: {reason}"
+                );
+                assert!(
+                    reason.contains("strike-free"),
+                    "Escalated reason must mention strike-free, got: {reason}"
+                );
+            }
+            other => panic!("expected Escalated, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn arbiter_approve_conflict_green_gate_proceeds_with_transition() {
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-conflict-green",
+                "proj-gate",
+                StageOutcome::LeadApproveConflict {
+                    reason: "merge conflict".into(),
+                },
+                Ok(ArbiterGateResult::Pass),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Gate passed → lead_approve_conflict transition fired.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.action == "lead_approve_conflict"),
+            "green gate must fire lead_approve_conflict transition, got: {calls:?}"
+        );
+        // Must produce Closed (approve_conflict is terminal).
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Closed { .. }),
+            "green approve_conflict must produce Closed, got: {:?}",
+            report.outcome
+        );
+        // open_pr must NOT be called (approve_conflict is terminal).
+        assert!(
+            !open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "approve_conflict must NOT fall through to open_pr"
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_approve_conflict_red_gate_blocks_without_transition() {
+        let (_root, supervisor, spec, transition_calls, _open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-conflict-red",
+                "proj-gate",
+                StageOutcome::LeadApproveConflict {
+                    reason: "merge conflict".into(),
+                },
+                Ok(ArbiterGateResult::Blocked {
+                    feedback: "test target build failed".into(),
+                }),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Gate blocked → NO lead_approve_conflict transition.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.action == "lead_approve_conflict"),
+            "red gate must NOT fire lead_approve_conflict transition, got: {calls:?}"
+        );
+        // Must surface Escalated with the gate feedback.
+        match &report.outcome {
+            TaskRunOutcome::Escalated { reason } => {
+                assert!(
+                    reason.contains("test target build failed"),
+                    "Escalated reason must contain gate feedback, got: {reason}"
+                );
+            }
+            other => panic!("expected Escalated, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn arbiter_gate_red_does_not_consume_arbitration_or_increment_counters() {
+        // The red-gate path must:
+        // 1. NOT fire lead_approve (which would mark the arbitration consumed)
+        // 2. NOT increment decision-failure / reopen / strike counters
+        // 3. Return Escalated so the task stays in in_lead_intervention
+        let (_root, supervisor, spec, transition_calls, _open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-no-strike",
+                "proj-gate",
+                StageOutcome::LeadApproved,
+                Ok(ArbiterGateResult::Blocked {
+                    feedback: "sqlx cache check failed".into(),
+                }),
+            )
+            .await;
+
+        let report = supervisor.run(spec).await.expect("supervisor run");
+
+        // lead_approve must NOT be fired — task stays in in_lead_intervention.
+        // (lead_intervention_start is expected as the entry transition.)
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|c| c.action == "lead_approve"),
+            "red gate must NOT fire lead_approve transition (no arbitration consumption), got: {calls:?}"
+        );
+        // Escalated outcome — the coordinator will re-dispatch to the arbiter.
+        assert!(
+            matches!(report.outcome, TaskRunOutcome::Escalated { .. }),
+            "red gate must produce Escalated, got: {:?}",
+            report.outcome
+        );
+    }
+
+    #[tokio::test]
+    async fn arbiter_gate_infra_error_proceeds_fail_open() {
+        // An infra error (Err) from the gate must proceed (fail-open),
+        // same as the reviewer gate's Error behavior.
+        let (_root, supervisor, spec, transition_calls, open_pr_called) =
+            build_arbiter_gate_test_env(
+                "T-gate-infra-err",
+                "proj-gate",
+                StageOutcome::LeadApproved,
+                Err("db connection timeout".into()),
+            )
+            .await;
+
+        let _report = supervisor.run(spec).await.expect("supervisor run");
+
+        // Infra error → fail-open → lead_approve transition fired.
+        let calls = transition_calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c.action == "lead_approve"),
+            "infra error must proceed (fail-open) and fire lead_approve, got: {calls:?}"
+        );
+        // Falls through to open_pr.
+        assert!(
+            open_pr_called.load(std::sync::atomic::Ordering::SeqCst),
+            "infra error must fall through to open_pr"
+        );
     }
 }

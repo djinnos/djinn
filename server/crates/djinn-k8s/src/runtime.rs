@@ -1991,6 +1991,12 @@ mod tests {
             ) -> Result<(), String> {
                 unimplemented!()
             }
+            async fn run_arbiter_preapproval_gate(
+                &self,
+                _: &djinn_core::models::Task,
+            ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
+                unimplemented!()
+            }
         }
 
         let services: Arc<dyn SupervisorServices> = Arc::new(NoopServices {

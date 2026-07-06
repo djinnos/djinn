@@ -57,6 +57,7 @@ pub mod file_time;
 pub mod github_error_render;
 pub mod output_stash;
 pub(crate) mod preapproval_gate;
+pub use preapproval_gate::run_arbiter_preapproval_gate;
 pub mod resource_monitor;
 pub mod roles;
 pub mod supervisor_impl;

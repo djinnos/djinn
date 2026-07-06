@@ -313,4 +313,21 @@ pub trait SupervisorServices: Send + Sync + 'static {
         action: String,
         reason: Option<String>,
     ) -> Result<(), String>;
+
+    /// Run the pre-approval CI-grade verification gate for an arbiter
+    /// `approve` or `approve_conflict` decision.
+    ///
+    /// Semantically identical to the reviewer/worker PR-open gate: green
+    /// outcomes pass, red outcomes block with feedback.  The critical
+    /// difference is that this method does NOT fire a board transition on
+    /// red — the caller is responsible for leaving the task in
+    /// `in_lead_intervention` and not consuming the arbitration row.
+    ///
+    /// The host-side implementation calls the same
+    /// `preapproval_gate::run_preapproval_gate` machinery used by the
+    /// PR-open path.  The worker-side RPC stub forwards to the host.
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        task: &crate::Task,
+    ) -> Result<crate::ArbiterGateResult, String>;
 }

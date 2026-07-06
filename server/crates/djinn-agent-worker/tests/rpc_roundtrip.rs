@@ -257,6 +257,13 @@ impl SupervisorServices for FakeServices {
     ) -> Result<(), String> {
         unimplemented!("not exercised on the auth-rejection path")
     }
+
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        _task: &djinn_core::models::Task,
+    ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
+        unimplemented!("not exercised on the auth-rejection path")
+    }
 }
 
 /// Bind `serve_on_tcp` to `127.0.0.1:0`, return the resolved `(SocketAddr,
