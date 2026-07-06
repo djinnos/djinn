@@ -28,10 +28,10 @@ use super::compaction_guard::CompactionCriticalSection;
 use super::error_handling::{
     BudgetWindDownIgnored, MAX_COMPACTION_RETRIES, empty_start_streak_feeds_breaker,
     empty_turn_backoff, empty_turn_is_reasoning_only, is_context_length_error,
-    is_orphaned_tool_call_error, next_nudge_message, reasoning_only_nudge_message,
-    should_retry_after_tool_call_compaction, should_retry_empty_assistant_turn,
-    should_retry_empty_stream, soft_budget_converge_message, tool_choice_for_turn,
-    wind_down_message,
+    is_orphaned_tool_call_error, is_provider_failure_prose, next_nudge_message,
+    reasoning_only_nudge_message, should_retry_after_tool_call_compaction,
+    should_retry_empty_assistant_turn, should_retry_empty_stream, soft_budget_converge_message,
+    tool_choice_for_turn, wind_down_message,
 };
 use super::loop_guard::{
     AssistantOutputSignature, LoopGuardCondition, LoopGuardError, LoopGuardReason, LoopGuardState,
@@ -57,8 +57,13 @@ fn is_codex_openai_family(model_id: &str) -> bool {
     matches!(provider.as_str(), "openai" | "chatgpt_codex")
 }
 
-/// Build the terminal error for a reply loop that gave up after the bounded
-/// empty/no-event-turn retries.
+/// Typed terminal error for empty/no-event turns that signals a provider failure
+/// suitable for failover.  Carries a [`ProviderError`] source so downstream
+/// breaker/failover logic can `downcast_ref` and branch on the class.
+///
+/// Non-Codex providers fail on the first terminal empty occurrence (no retries).
+/// Codex/OpenAI consumers may retry up to `MAX_EMPTY_TURN_RETRIES` because they
+/// signal over-quota by answering with an empty 200.
 fn empty_turn_terminal_error(
     kind: &str,
     retries: u32,
@@ -75,6 +80,37 @@ fn empty_turn_terminal_error(
          throttled the request (a ChatGPT-account Codex rate limit returns empty 200s, \
          not 429s; verify provider/account status or switch to an API-key backend); {diag}"
     ))
+}
+
+/// Build a typed provider-failure error from assistant text that was classified
+/// as disguised rate-limit / quota / out-of-credits / provider error prose.
+///
+/// The returned error carries a [`ProviderError::RateLimit`] source so
+/// downstream failover logic can `downcast_ref` and branch on the class.
+fn provider_failure_prose_error(snippet: &str) -> anyhow::Error {
+    anyhow::Error::new(djinn_provider::provider::ProviderError::RateLimit {
+        retry_after_ms: None,
+    })
+    .context(format!(
+        "assistant text classified as provider failure prose (not genuine model output) — \
+         the model likely echoed back a rate-limit/quota/provider error; snippet: {snippet:?}"
+    ))
+}
+
+/// Build a typed provider-failure error for a stream that ended early (without
+/// `StreamEvent::Done`) after producing partial assistant content.
+///
+/// Observed in-flight content is already persisted via
+/// [`persistence::flush_in_flight_turn`] for resume/timeline visibility, but
+/// the truncated turn must **not** be finalized as a successful assistant
+/// message.  This error signals that to the reply loop.
+fn truncated_stream_error(text_len: usize, tool_call_count: usize) -> anyhow::Error {
+    anyhow::Error::new(djinn_provider::provider::ProviderError::ProviderInternal { status: 500 })
+        .context(format!(
+            "provider stream ended early (without Done) after producing partial assistant content \
+         (text_len={text_len}, tool_calls={tool_call_count}); the truncated output has been \
+         flushed as observed artifacts for resume but must not be persisted as a complete turn"
+        ))
 }
 
 fn permission_denial_text(text: &str) -> bool {
@@ -568,6 +604,7 @@ pub async fn run_reply_loop(
         let mut assistant_fragments: Vec<String> = Vec::new();
         let mut compaction_attempts: u32 = 0;
         let mut empty_turn_retries: u32 = 0;
+        let is_codex = is_codex_openai_family(model_id);
         let mut consecutive_nudge_count: u32 = 0;
         // Early breaker-feed guard: count zero-progress turns *before* the
         // session's first productive turn so a model that accepts a dispatch and
@@ -855,13 +892,13 @@ pub async fn run_reply_loop(
                 needs_reactive_compaction,
                 streaming_results,
                 streaming_dispatched,
-                early_stream_end: _,
+                early_stream_end,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
             if let Some(llm) = otel_llm {
-                if interrupted.is_some() {
-                    llm.end_error("interrupted");
+                if interrupted.is_some() || early_stream_end {
+                    llm.end_error(if interrupted.is_some() { "interrupted" } else { "truncated" });
                 } else {
                     llm.record_usage(turn_tokens_in, turn_tokens_out);
                     llm.record_cache_usage(
@@ -891,6 +928,17 @@ pub async fn run_reply_loop(
             }
             if let Some(reason) = interrupted {
                 return Err(anyhow::anyhow!(reason));
+            }
+            // AC3: When the provider stream ended early (without StreamEvent::Done)
+            // and partial content was produced, the truncated turn must not be
+            // persisted as a complete assistant message.  The in-flight flush
+            // above already preserved observed artifacts for resume; now return
+            // a typed provider failure so the reply loop exits cleanly.
+            if early_stream_end && has_in_flight_content {
+                return Err(truncated_stream_error(
+                    turn_text.len(),
+                    turn_tool_calls.len(),
+                ));
             }
             if needs_reactive_compaction {
                 tracing::warn!(
@@ -923,7 +971,7 @@ pub async fn run_reply_loop(
                 ));
             }
             if !saw_round_event {
-                if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries) {
+                if let Some(next_retry) = should_retry_empty_stream(saw_round_event, empty_turn_retries, is_codex) {
                     empty_turn_retries = next_retry;
                     let backoff = empty_turn_backoff(empty_turn_retries);
                     tracing::warn!(
@@ -1001,7 +1049,7 @@ pub async fn run_reply_loop(
                     }
                 }
                 if let Some(next_retry) =
-                    should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries)
+                    should_retry_empty_assistant_turn(assistant_content.is_empty(), empty_turn_retries, is_codex)
                 {
                     empty_turn_retries = next_retry;
                     let backoff = empty_turn_backoff(empty_turn_retries);
@@ -1027,6 +1075,23 @@ pub async fn run_reply_loop(
             // zero-progress guard for the rest of the run so a later isolated
             // empty turn can't fail a working session over.
             saw_productive_turn = true;
+            // AC2: Success-shaped assistant prose that actually reports rate
+            // limit, provider error, out-of-credits, or quota exhaustion must
+            // be reclassified as a typed provider failure and must NOT be
+            // persisted as a successful assistant turn.
+            if !turn_text.is_empty() && is_provider_failure_prose(&turn_text) {
+                let snippet: String = turn_text.chars().take(120).collect();
+                tracing::warn!(
+                    task_id = %task_id,
+                    session_id = %session_id,
+                    turn = turns,
+                    text_len = turn_text.len(),
+                    snippet = %snippet,
+                    "ReplyLoop: assistant text classified as provider failure prose — \
+                     reclassifying as typed provider failure; not persisting as successful turn"
+                );
+                return Err(provider_failure_prose_error(&snippet));
+            }
             let assistant_msg = Message {
                 role: Role::Assistant,
                 content: assistant_content,
