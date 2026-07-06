@@ -328,6 +328,59 @@ async fn empty_response_retries_then_injects_nudge_into_second_turn_history() {
     }));
 }
 
+/// AC3 regression: a stream that emits partial assistant text but ends without
+/// `StreamEvent::Done` must NOT be persisted as a complete assistant turn.
+///
+/// The in-flight flush still preserves observed content for resume, but the
+/// reply loop must return a typed provider failure error so the truncated turn
+/// is not finalized as a successful assistant message.
+#[tokio::test]
+async fn truncated_stream_with_partial_text_is_not_persisted_as_complete() {
+    let tools = vec![dummy_tool_schema("submit_work")];
+    // Provider returns partial text with no StreamEvent::Done — simulates a
+    // truncated/early-ended provider stream.
+    let provider = FakeProvider::script(vec![vec![
+        StreamEvent::Delta(ContentBlock::Text {
+            text: "partial assistant output that was cut short".into(),
+        }),
+        // No StreamEvent::Done — stream ends early.
+    ]]);
+    let (slot_ctx, project_path, task_id, session_id, cancel) = make_context().await;
+    let mut conversation = base_conversation();
+    let (result, _output, _, _, _, _) = run_with_provider(
+        &provider,
+        &tools,
+        &mut conversation,
+        &slot_ctx,
+        &project_path,
+        &task_id,
+        &session_id,
+        &cancel,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "truncated stream should produce an error, not succeed: {result:?}"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("ended early") || err_msg.contains("truncated"),
+        "error should mention truncated/early stream: {err_msg}"
+    );
+    // The conversation must NOT contain a finalized assistant message with the
+    // partial text.  Only the original system + user messages should remain.
+    let has_assistant_msg = conversation
+        .messages
+        .iter()
+        .any(|m| m.role == Role::Assistant);
+    assert!(
+        !has_assistant_msg,
+        "truncated assistant output must not be finalized as a complete assistant message; \
+         conversation messages: {:?}",
+        conversation.messages.len()
+    );
+}
+
 /// Regression: a non-Codex provider that returns an empty stream (no events)
 /// must produce a typed provider failure on the very first occurrence — no
 /// retries, no nudge path.

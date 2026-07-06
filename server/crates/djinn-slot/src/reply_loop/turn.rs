@@ -97,6 +97,22 @@ fn provider_failure_prose_error(snippet: &str) -> anyhow::Error {
     ))
 }
 
+/// Build a typed provider-failure error for a stream that ended early (without
+/// `StreamEvent::Done`) after producing partial assistant content.
+///
+/// Observed in-flight content is already persisted via
+/// [`persistence::flush_in_flight_turn`] for resume/timeline visibility, but
+/// the truncated turn must **not** be finalized as a successful assistant
+/// message.  This error signals that to the reply loop.
+fn truncated_stream_error(text_len: usize, tool_call_count: usize) -> anyhow::Error {
+    anyhow::Error::new(djinn_provider::provider::ProviderError::ProviderInternal { status: 500 })
+        .context(format!(
+            "provider stream ended early (without Done) after producing partial assistant content \
+         (text_len={text_len}, tool_calls={tool_call_count}); the truncated output has been \
+         flushed as observed artifacts for resume but must not be persisted as a complete turn"
+        ))
+}
+
 fn permission_denial_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("permission denied")
@@ -876,13 +892,13 @@ pub async fn run_reply_loop(
                 needs_reactive_compaction,
                 streaming_results,
                 streaming_dispatched,
-                early_stream_end: _,
+                early_stream_end,
                 turn_flushed: _,
             } = stream_state;
             saw_any_event |= saw_round_event;
             if let Some(llm) = otel_llm {
-                if interrupted.is_some() {
-                    llm.end_error("interrupted");
+                if interrupted.is_some() || early_stream_end {
+                    llm.end_error(if interrupted.is_some() { "interrupted" } else { "truncated" });
                 } else {
                     llm.record_usage(turn_tokens_in, turn_tokens_out);
                     llm.record_cache_usage(
@@ -912,6 +928,17 @@ pub async fn run_reply_loop(
             }
             if let Some(reason) = interrupted {
                 return Err(anyhow::anyhow!(reason));
+            }
+            // AC3: When the provider stream ended early (without StreamEvent::Done)
+            // and partial content was produced, the truncated turn must not be
+            // persisted as a complete assistant message.  The in-flight flush
+            // above already preserved observed artifacts for resume; now return
+            // a typed provider failure so the reply loop exits cleanly.
+            if early_stream_end && has_in_flight_content {
+                return Err(truncated_stream_error(
+                    turn_text.len(),
+                    turn_tool_calls.len(),
+                ));
             }
             if needs_reactive_compaction {
                 tracing::warn!(
