@@ -26,7 +26,8 @@ pub use provider_resolution::{
 };
 #[allow(unused_imports)]
 pub(crate) use provider_resolution::{
-    build_provider_from_resolved, build_telemetry_meta_with_attribution, resolved_needs_base_url,
+    build_provider_from_resolved, build_restamp_target, build_telemetry_meta_with_attribution,
+    resolved_needs_base_url,
 };
 
 /// Agent-compatible wrapper around the canonical djinn-slot code graph context helper.

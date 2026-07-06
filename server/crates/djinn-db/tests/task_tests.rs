@@ -14,6 +14,8 @@ pub(crate) use djinn_db::{ActivityQuery, CountQuery, ListQuery, ReadyQuery, Task
 pub(crate) use rstest::rstest;
 pub(crate) use tokio::sync::broadcast;
 
+#[path = "task_tests/board_health.rs"]
+mod board_health;
 #[path = "task_tests/closed_task_sync.rs"]
 mod closed_task_sync;
 #[path = "task_tests/existing.rs"]

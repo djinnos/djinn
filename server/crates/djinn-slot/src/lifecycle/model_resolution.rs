@@ -7,6 +7,9 @@ pub(crate) struct ResolvedModelCredential {
     pub catalog_provider_id: String,
     pub model_name: String,
     pub provider_credential: Option<ProviderCredential>,
+    /// Whether the catalog metadata marks this model as reasoning-capable.
+    /// Defaults to `false` when the model is not found in the catalog.
+    pub reasoning: bool,
 }
 
 /// Failure from [`resolve_model_and_credential`].
@@ -27,19 +30,17 @@ pub(crate) async fn resolve_model_and_credential(
     task_id: &str,
     ctx: &SlotContext,
 ) -> Result<ResolvedModelCredential, ModelResolutionError> {
-    let (cpid, mname) = match parse_model_id(model_id) {
+    let (cpid, mname, reasoning) = match parse_model_id(model_id) {
         Ok((provider_id, name)) => {
-            let resolved = ctx
-                .catalog
-                .list_models(&provider_id)
-                .iter()
-                .find(|m| {
-                    let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
-                    m.id == name || m.name == name || bare == name
-                })
-                .map(|m| m.id.clone())
-                .unwrap_or(name);
-            (provider_id, resolved)
+            let models = ctx.catalog.list_models(&provider_id);
+            let found = models.iter().find(|m| {
+                let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+                m.id == name || m.name == name || bare == name
+            });
+            match found {
+                Some(m) => (provider_id, m.id.clone(), m.reasoning),
+                None => (provider_id, name, false),
+            }
         }
         Err(e) => {
             tracing::warn!(task_id = %task_id, error = %e, "Lifecycle: invalid model ID");
@@ -67,6 +68,7 @@ pub(crate) async fn resolve_model_and_credential(
         catalog_provider_id: cpid,
         model_name: mname,
         provider_credential: Some(cred),
+        reasoning,
     })
 }
 
@@ -79,9 +81,20 @@ pub(crate) async fn resolve_role_model_preference(
     let credential = load_provider_credential(&provider_id, ctx)
         .await
         .map_err(|e| e.to_string())?;
+    let reasoning = ctx
+        .catalog
+        .list_models(&provider_id)
+        .iter()
+        .find(|m| {
+            let bare = m.id.rsplit('/').next().unwrap_or(&m.id);
+            m.id == model_name || m.name == model_name || bare == model_name
+        })
+        .map(|m| m.reasoning)
+        .unwrap_or(false);
     Ok(ResolvedModelCredential {
         catalog_provider_id: provider_id,
         model_name,
         provider_credential: Some(credential),
+        reasoning,
     })
 }

@@ -18,6 +18,7 @@ use crate::prompts::{TaskContext, apply_role_extensions, apply_skills};
 use crate::roles::AgentRole;
 use crate::skills::ResolvedSkill;
 use djinn_db::{NoteRepository, ProposalRepository, TaskRepository};
+use tracing::Instrument;
 
 /// Fully-assembled prompt context for a single role session.
 #[allow(dead_code)]
@@ -424,70 +425,129 @@ pub(crate) async fn assemble_prompt_context(inputs: PromptContextInputs<'_>) -> 
         mcp_server_instructions,
     } = inputs;
     let conflict_files = format_conflict_files(conflict_ctx);
-    let task_repo = TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
-    let activity_entries = task_repo.list_activity(&task.id).await.ok();
-    let activity_text = format_activity_text(&activity_entries, 3);
-    let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
-    let epic_context =
-        load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state).await;
-    let knowledge_context = load_knowledge_context(task, epic_context.as_deref(), app_state).await;
-    let ci_blocking_directive = build_ci_blocking_directive(task);
-    let task_attempt_repo = djinn_db::TaskAttemptRepository::new(app_state.db.clone());
-    let prior_attempts = attempt_context::load_prior_attempts(task, &task_attempt_repo).await;
-    let completed_dependency_parents =
-        attempt_context::load_completed_dependency_parents(task, &task_attempt_repo).await;
-    // Append attempt history to the existing activity text so it renders inside
-    // the Activity Log section, not as a new competing top-level prompt section.
-    // The attempt entries share the COMBINED_BRIEF_TOTAL_CHARS budget with existing
-    // feedback.  Deduplication prevents rendering the same rejection text twice;
-    // over-budget output drops oldest attempt entries first, then oldest
-    // dependency-parent entries, with a deterministic truncation note.
-    let activity_text = {
-        let existing_len = activity_text.as_deref().map_or(0, |s| s.len());
-        let remaining_budget = COMBINED_BRIEF_TOTAL_CHARS.saturating_sub(existing_len);
-        let attempt_history_text = format_attempt_history(
-            prior_attempts.as_deref().unwrap_or(&[]),
-            completed_dependency_parents.as_deref().unwrap_or(&[]),
-            activity_text.as_deref().unwrap_or(""),
-            remaining_budget,
+    let (activity_text, worker_summary, worker_concerns) = {
+        let span = tracing::info_span!(
+            "prompt_ctx::activity_db",
+            task_id = %task.short_id,
         );
-        match (activity_text, attempt_history_text) {
-            (Some(activity), Some(history)) => Some(format!("{activity}\n\n---\n\n{history}")),
-            (activity @ Some(_), None) => activity,
-            (None, history @ Some(_)) => history,
-            (None, None) => None,
+        async {
+            let task_repo =
+                TaskRepository::new(app_state.db.clone(), app_state.event_bus.clone());
+            let activity_entries = task_repo.list_activity(&task.id).await.ok();
+            let activity_text = format_activity_text(&activity_entries, 3);
+            let (worker_summary, worker_concerns) = extract_worker_context(&activity_entries);
+            (activity_text, worker_summary, worker_concerns)
         }
+        .instrument(span)
+        .await
+    };
+    let epic_context = {
+        let span = tracing::info_span!(
+            "prompt_ctx::epic_context",
+            task_id = %task.short_id,
+        );
+        load_epic_context(task, role_for_epic_check.needs_epic_context(), app_state)
+            .instrument(span)
+            .await
+    };
+    let knowledge_context = {
+        let span = tracing::info_span!(
+            "prompt_ctx::knowledge_context",
+            task_id = %task.short_id,
+        );
+        load_knowledge_context(task, epic_context.as_deref(), app_state)
+            .instrument(span)
+            .await
+    };
+    let ci_blocking_directive = build_ci_blocking_directive(task);
+    let (prior_attempts, completed_dependency_parents, activity_text) = {
+        let span = tracing::info_span!(
+            "prompt_ctx::attempt_history",
+            task_id = %task.short_id,
+        );
+        async {
+            let task_attempt_repo =
+                djinn_db::TaskAttemptRepository::new(app_state.db.clone());
+            let prior_attempts =
+                attempt_context::load_prior_attempts(task, &task_attempt_repo).await;
+            let completed_dependency_parents =
+                attempt_context::load_completed_dependency_parents(task, &task_attempt_repo)
+                    .await;
+            // Append attempt history to the existing activity text so it renders inside
+            // the Activity Log section, not as a new competing top-level prompt section.
+            // The attempt entries share the COMBINED_BRIEF_TOTAL_CHARS budget with existing
+            // feedback.  Deduplication prevents rendering the same rejection text twice;
+            // over-budget output drops oldest attempt entries first, then oldest
+            // dependency-parent entries, with a deterministic truncation note.
+            let activity_text = {
+                let existing_len = activity_text.as_deref().map_or(0, |s| s.len());
+                let remaining_budget = COMBINED_BRIEF_TOTAL_CHARS.saturating_sub(existing_len);
+                let attempt_history_text = format_attempt_history(
+                    prior_attempts.as_deref().unwrap_or(&[]),
+                    completed_dependency_parents.as_deref().unwrap_or(&[]),
+                    activity_text.as_deref().unwrap_or(""),
+                    remaining_budget,
+                );
+                match (activity_text, attempt_history_text) {
+                    (Some(activity), Some(history)) => {
+                        Some(format!("{activity}\n\n---\n\n{history}"))
+                    }
+                    (activity @ Some(_), None) => activity,
+                    (None, history @ Some(_)) => history,
+                    (None, None) => None,
+                }
+            };
+            (prior_attempts, completed_dependency_parents, activity_text)
+        }
+        .instrument(span)
+        .await
     };
     let task_paths_for_code_graph = derive_task_scope_paths(task, epic_context.as_deref());
-    let code_graph_context = build_role_code_graph_context(
-        runtime_role.config().name,
-        task,
-        app_state,
-        project_path,
-        &task_paths_for_code_graph,
-    )
-    .await;
+    let code_graph_context = {
+        let span = tracing::info_span!(
+            "prompt_ctx::code_graph",
+            task_id = %task.short_id,
+        );
+        build_role_code_graph_context(
+            runtime_role.config().name,
+            task,
+            app_state,
+            project_path,
+            &task_paths_for_code_graph,
+        )
+        .instrument(span)
+        .await
+    };
     let reviewer_diff_context = {
-        let role_name = runtime_role.config().name;
-        if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
-            let (from_sha, to_sha) =
-                resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state).await;
-            if from_sha.is_some() || to_sha.is_some() {
-                build_reviewer_diff_context(
-                    role_name,
-                    task,
-                    app_state,
-                    project_path,
-                    from_sha.as_deref(),
-                    to_sha.as_deref(),
-                )
-                .await
+        let span = tracing::info_span!(
+            "prompt_ctx::reviewer_diff",
+            task_id = %task.short_id,
+        );
+        async {
+            let role_name = runtime_role.config().name;
+            if crate::actors::slot::helpers::is_role_auto_code_context_enabled(role_name) {
+                let (from_sha, to_sha) =
+                    resolve_reviewer_diff_shas(worktree_path, &task.project_id, app_state)
+                        .await;
+                if from_sha.is_some() || to_sha.is_some() {
+                    build_reviewer_diff_context(
+                        role_name,
+                        task,
+                        app_state,
+                        project_path,
+                        from_sha.as_deref(),
+                        to_sha.as_deref(),
+                    )
+                    .await
+                } else {
+                    None
+                }
             } else {
                 None
             }
-        } else {
-            None
         }
+        .instrument(span)
+        .await
     };
     let base_system_prompt = runtime_role.render_prompt(
         task,

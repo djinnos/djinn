@@ -47,8 +47,8 @@ use djinn_agent::supervisor::worker_execute_stage;
 use djinn_core::models::{SessionRecord, SessionStatus, Task, TaskRunStatus};
 use djinn_provider::message::Conversation;
 use djinn_provider::provider::{
-    LlmProvider, LlmResponse, ProviderCapabilities, ProviderConfig, ToolChoice, create_provider,
-    default_reasoning_effort_for_model,
+    LlmProvider, LlmResponse, ProviderConfig, RestampTarget, ToolChoice, create_provider,
+    restamp_provider_config_for_model,
 };
 use djinn_runtime::{ResolvedCredentials, RoleKind, SerializableCredential};
 use djinn_slot::helpers::{
@@ -155,13 +155,35 @@ pub(crate) fn build_provider_config_from_serializable(
                 .map_err(|e| StageError::ModelResolution(format!("parse_model_id: {e}")))?;
             let format_family = format_family_for_provider(&provider_id, &model_name);
             let base_url = base_url_override.unwrap_or_else(|| default_base_url(&provider_id));
-            let reasoning_effort = djinn_provider::catalog::CatalogService::new()
-                .find_model(model_id)
-                .and_then(|model| {
-                    default_reasoning_effort_for_model(model.reasoning, format_family, &model.id)
-                });
 
-            Ok(ProviderConfig {
+            // Resolve the target model's catalog metadata so the shared restamp
+            // helper re-resolves reasoning_effort from the *target* model rather
+            // than computing it inline. A catalog miss falls back to
+            // non-reasoning / provider-level defaults, matching the pre-restamp
+            // behaviour for unknown models.
+            let reasoning = djinn_provider::catalog::CatalogService::new()
+                .find_model(model_id)
+                .is_some_and(|model| model.reasoning);
+
+            let target = RestampTarget {
+                model_id: model_name.clone(),
+                format_family,
+                reasoning,
+                context_window,
+                capabilities: capabilities_for_provider(&provider_id),
+                tool_schema_compat: djinn_provider::catalog::builtin::tool_schema_compat_for(
+                    &provider_id,
+                    &model_name,
+                ),
+            };
+
+            // Build a seed `ProviderConfig` from auth/transport fields, then run
+            // it through the shared restamp helper so every model-dependent field
+            // (reasoning_effort, capabilities/max_tokens_default, tool_schema_compat,
+            // context_window) is resolved through the single shared policy — the
+            // same path host/canonical slot construction uses. Previously this arm
+            // duplicated `default_reasoning_effort_for_model` inline.
+            let seed = ProviderConfig {
                 base_url,
                 auth: auth_method_for_provider(&provider_id, api_key),
                 format_family,
@@ -170,32 +192,64 @@ pub(crate) fn build_provider_config_from_serializable(
                 telemetry: None,
                 session_affinity_key: None,
                 provider_headers: Default::default(),
-                capabilities: capabilities_for_provider(&provider_id),
-                reasoning_effort,
+                capabilities: target.capabilities.clone(),
+                reasoning_effort: None,
                 tool_schema_compat: None,
-            })
+            };
+            Ok(restamp_provider_config_for_model(seed, &target))
         }
         SerializableCredential::OAuthConfig { config_json } => {
             let wire: OAuthConfigWire = serde_json::from_str(config_json).map_err(|e| {
                 StageError::ModelResolution(format!("deserialize OAuth ProviderConfig: {e}"))
             })?;
-            let (_, model_name) = parse_model_id(model_id)
+            let (provider_id, model_name) = parse_model_id(model_id)
                 .map_err(|e| StageError::ModelResolution(format!("parse_model_id: {e}")))?;
-            let mut cfg = wire.to_provider_config();
-            cfg.model_id = model_name;
-            cfg.context_window = context_window;
-            cfg.telemetry = None;
-            cfg.session_affinity_key = None;
-            // `capabilities` survives the round-trip via OAuthCapabilitiesWire
-            // but a defensive default keeps `streaming` truthy if the host
-            // shipped a zero-value blob.
-            if !cfg.capabilities.streaming {
-                cfg.capabilities = ProviderCapabilities {
+            let cfg = wire.to_provider_config();
+
+            // Route through the shared restamp helper instead of a bare
+            // `cfg.model_id = model_name` assignment. This is the failover path:
+            // the wire blob carries model A's resolved defaults, but the worker
+            // may be dispatched against model B, so every model-dependent field
+            // (reasoning_effort, capabilities/max_tokens_default, tool_schema_compat,
+            // context_window) must be re-resolved from B's catalog/provider identity.
+            let reasoning = djinn_provider::catalog::CatalogService::new()
+                .find_model(model_id)
+                .is_some_and(|model| model.reasoning);
+            let format_family = format_family_for_provider(&provider_id, &model_name);
+
+            // Re-resolve capabilities from the TARGET provider identity (same as
+            // the API-key arm) so failover to model B picks up B's
+            // max_tokens_default instead of carrying model A's stale value from
+            // the wire blob. A defensive default keeps `streaming` truthy.
+            let capabilities = capabilities_for_provider(&provider_id);
+            let capabilities = if capabilities.streaming {
+                capabilities
+            } else {
+                djinn_provider::provider::ProviderCapabilities {
                     streaming: true,
-                    max_tokens_default: cfg.capabilities.max_tokens_default,
-                };
-            }
-            Ok(cfg)
+                    max_tokens_default: capabilities.max_tokens_default,
+                }
+            };
+
+            let target = RestampTarget {
+                model_id: model_name.clone(),
+                format_family,
+                reasoning,
+                context_window,
+                capabilities,
+                tool_schema_compat: djinn_provider::catalog::builtin::tool_schema_compat_for(
+                    &provider_id,
+                    &model_name,
+                ),
+            };
+
+            let mut restamped = restamp_provider_config_for_model(cfg, &target);
+            // The worker has no session_id at construction time and owns no
+            // Langfuse telemetry; clear host-side values that survived the
+            // round-trip.
+            restamped.telemetry = None;
+            restamped.session_affinity_key = None;
+            Ok(restamped)
         }
     }
 }
@@ -516,7 +570,9 @@ impl SupervisorServices for WorkerSupervisorServices {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use djinn_provider::provider::{AuthMethod, FormatFamily, ReasoningEffort};
+    use djinn_provider::provider::{
+        AuthMethod, FormatFamily, ProviderCapabilities, ReasoningEffort,
+    };
 
     fn api_key_credential() -> SerializableCredential {
         SerializableCredential::ApiKey {
@@ -570,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_reconstruction_preserves_wire_reasoning_effort() {
+    fn oauth_reconstruction_re_resolves_target_reasoning_effort() {
         let cfg = ProviderConfig {
             base_url: "https://api.minimax.io/anthropic/v1".to_string(),
             auth: AuthMethod::BearerToken("oauth-token".to_string()),
@@ -584,6 +640,9 @@ mod tests {
                 streaming: true,
                 max_tokens_default: Some(64_000),
             },
+            // Wire carries a stale `High` tier for the host's original model;
+            // the worker must re-resolve it from the *target* model via the
+            // shared restamp helper rather than preserving the wire value.
             reasoning_effort: Some(ReasoningEffort::High),
             tool_schema_compat: None,
         };
@@ -603,6 +662,79 @@ mod tests {
         assert_eq!(rebuilt.model_id, "MiniMax-M2.5");
         assert_eq!(rebuilt.context_window, 262_144);
         assert_eq!(rebuilt.session_affinity_key, None);
-        assert_eq!(rebuilt.reasoning_effort, Some(ReasoningEffort::High));
+        // Transport/auth fields survive the round-trip.
+        assert_eq!(rebuilt.base_url, "https://api.minimax.io/anthropic/v1");
+        assert!(matches!(
+            &rebuilt.auth,
+            AuthMethod::BearerToken(t) if t == "oauth-token",
+        ));
+        // Reasoning-capable Anthropic target → Medium (re-resolved, not preserved).
+        assert_eq!(rebuilt.reasoning_effort, Some(ReasoningEffort::Medium));
+    }
+
+    /// Regression: OAuth failover from a source config carrying model A's
+    /// defaults to model B re-resolves B's `reasoning_effort` and
+    /// `max_tokens_default` while preserving the wire blob's auth/base_url.
+    #[test]
+    fn oauth_failover_re_resolves_target_model_defaults() {
+        // Source OAuth blob built for model A: an OpenAI-format non-reasoning
+        // model whose defaults (reasoning_effort=None, max_tokens_default=None)
+        // must NOT carry forward to model B.
+        let source_model_a = ProviderConfig {
+            base_url: "https://api.openai.com".to_string(),
+            auth: AuthMethod::BearerToken("oauth-token".to_string()),
+            format_family: FormatFamily::OpenAI,
+            model_id: "gpt-4.1-mini".to_string(),
+            context_window: 1,
+            telemetry: None,
+            session_affinity_key: Some("host-affinity".to_string()),
+            provider_headers: Default::default(),
+            capabilities: ProviderCapabilities {
+                streaming: true,
+                max_tokens_default: None,
+            },
+            reasoning_effort: None,
+            tool_schema_compat: None,
+        };
+        let wire = OAuthConfigWire::from_provider_config(&source_model_a);
+        let cred = SerializableCredential::OAuthConfig {
+            config_json: serde_json::to_string(&wire).expect("wire serializes"),
+        };
+
+        // Failover target: model B = anthropic/claude-sonnet-4-5, an
+        // Anthropic-format reasoning-capable model whose provider policy gives
+        // reasoning_effort = Some(Medium) and max_tokens_default = Some(64_000).
+        // (Anthropic matches the `capabilities_for_provider` special-case, so
+        // its max-token default is actually re-resolved — MiniMax does not.)
+        let rebuilt = build_provider_config_from_serializable(
+            &cred,
+            "anthropic/claude-sonnet-4-5",
+            200_000,
+            None,
+        )
+        .expect("config builds");
+
+        // Model B's identity + format.
+        assert_eq!(rebuilt.model_id, "claude-sonnet-4-5");
+        assert_eq!(rebuilt.format_family, FormatFamily::Anthropic);
+        // B's re-resolved reasoning_effort (NOT model A's None).
+        assert_eq!(rebuilt.reasoning_effort, Some(ReasoningEffort::Medium));
+        // B's re-resolved max-token default (NOT model A's None).
+        assert_eq!(rebuilt.capabilities.max_tokens_default, Some(64_000));
+        assert!(rebuilt.capabilities.streaming);
+        // Transport/session fields preserved from the wire blob (auth/base_url)
+        // or cleared per worker policy (telemetry/session affinity).
+        assert_eq!(rebuilt.base_url, "https://api.openai.com");
+        assert!(matches!(
+            &rebuilt.auth,
+            AuthMethod::BearerToken(t) if t == "oauth-token",
+        ));
+        assert_eq!(rebuilt.context_window, 200_000);
+        assert_eq!(rebuilt.session_affinity_key, None);
+        assert!(rebuilt.telemetry.is_none());
+        // Anthropic is a native provider (identity schema projection), proving
+        // tool_schema_compat is re-resolved from B's provider identity (the
+        // source blob carried model A's quirk, here None).
+        assert_eq!(rebuilt.tool_schema_compat, None);
     }
 }
