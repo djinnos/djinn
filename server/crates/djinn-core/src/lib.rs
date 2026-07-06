@@ -15,3 +15,6 @@ pub mod paths;
 pub mod run_progress;
 pub mod test_paths;
 pub mod tool_error;
+
+#[cfg(test)]
+mod lane_roundtrip_proof;
