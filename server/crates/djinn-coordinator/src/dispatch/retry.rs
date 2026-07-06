@@ -29,9 +29,19 @@ pub(crate) struct PostInterventionHistory {
     /// strings as a fallback. Counted against [`NON_ATTEMPT_PARK_THRESHOLD`].
     /// For model-rotation exclusions, use [`rotation_excluded_models()`](PostInterventionHistory::rotation_excluded_models)
     /// which filters to actual model IDs only.
+    ///
+    /// NOTE: infra-classified outcomes (`timed_out`, `spawn_failed`, `crashed`)
+    /// are excluded from this list — they do not count toward the park
+    /// escalation threshold. See [`infra_session_labels`].
     pub non_attempt_models: Vec<String>,
     /// `sess <id8> (model)` labels for the truthful park reason.
     pub non_attempt_session_labels: Vec<String>,
+    /// Diagnostic labels for infra-classified pre-submission terminal attempts
+    /// (`timed_out`, `spawn_failed`, `crashed`). These are excluded from
+    /// [`non_attempt_models`] (and thus the park escalation threshold) but
+    /// still appear in truthful park/retry diagnostics so operators can see
+    /// that infrastructure failures occurred.
+    pub infra_session_labels: Vec<String>,
     /// The newest post-intervention `work_submitted` activity is newer than any
     /// rejection/CI-failure evidence — the submission is pending review
     /// (`needs_task_review` / `in_task_review`) and the round is still in flight.
@@ -43,7 +53,8 @@ pub(crate) struct PostInterventionHistory {
     /// must not serve as the park-triggering strike.
     pub latest_submission_at: Option<String>,
     /// Class of the most recent reopen after the evidence floor. Determines the
-    /// truthful park-reason attribution (merge_queue_failed vs review_rejected).
+    /// truthful park-reason attribution (merge_queue_failed vs review_rejected
+    /// vs infra).
     pub most_recent_reopen_class: ReopenClass,
 }
 
@@ -748,6 +759,7 @@ impl CoordinatorActor {
 
         let mut non_attempt_models: Vec<String> = Vec::new();
         let mut non_attempt_session_labels: Vec<String> = Vec::new();
+        let mut infra_session_labels: Vec<String> = Vec::new();
         for attempt in post_floor.iter() {
             if !attempt.is_terminal() {
                 // Pending/in-flight: skip.
@@ -759,7 +771,15 @@ impl CoordinatorActor {
                 // branch above if this existed.)
                 continue;
             }
-            // Pre-submission terminal: count toward non-attempt evidence.
+            // Pre-submission terminal: classify and track.
+            //
+            // Infra outcomes (timed_out, spawn_failed, crashed) are excluded
+            // from the park escalation threshold (non_attempt_models) and
+            // tracked separately in infra_session_labels for truthful
+            // diagnostics. Non-infra pre-submission terminals (cancelled,
+            // loop_guard_tripped, etc.) continue to count toward the
+            // non-attempt model rotation / park threshold.
+            //
             // Resolve the model_id from the linked session when available,
             // falling back to the attempt outcome for park-reason display.
             // `rotation_excluded_models()` filters this list to actual model
@@ -771,6 +791,12 @@ impl CoordinatorActor {
                 .map(|m| m.as_str())
                 .unwrap_or(attempt.outcome.as_str());
             let id8: String = attempt.id.chars().take(8).collect();
+            let is_infra = attempt.outcome_enum().is_ok_and(|o| o.is_infra());
+            if is_infra {
+                // Infra: diagnostic-only; excluded from park escalation.
+                infra_session_labels.push(format!("attempt {id8} ({model_label})"));
+                continue;
+            }
             non_attempt_session_labels.push(format!("attempt {id8} ({model_label})"));
             if !non_attempt_models.contains(&model_label.to_string()) {
                 non_attempt_models.push(model_label.to_string());
@@ -781,6 +807,7 @@ impl CoordinatorActor {
             any_submitted: false,
             non_attempt_models,
             non_attempt_session_labels,
+            infra_session_labels,
             submission_pending_review: false,
             latest_submission_at: None,
             most_recent_reopen_class,
@@ -830,6 +857,18 @@ impl CoordinatorActor {
                          re-dispatching would only loop again.{skip_note}"
                     )
                 }
+                djinn_core::models::ReopenClass::Infra => {
+                    // Infra-classified submitted terminal: the attempt reached
+                    // submission but ended in an infrastructure/provider failure
+                    // (timed_out/crashed/spawn_failed). This is NOT a worker
+                    // quality strike, so it must not use the AC phrasing.
+                    format!(
+                        "The post-intervention attempt submitted work but the session ended in an \
+                         infrastructure/provider failure (timed_out, crashed, or spawn_failed), \
+                         which is excluded from quality-strike counts. Re-dispatching targets \
+                         healthy infrastructure rather than penalizing the task.{skip_note}"
+                    )
+                }
                 _ => {
                     // review_rejected / other quality strikes keep the existing AC phrasing.
                     format!(
@@ -840,10 +879,39 @@ impl CoordinatorActor {
                 }
             }
         } else {
+            // Non-submitted branch. Infra-only histories (no non-infra
+            // pre-submission terminals) should not use the generic "never
+            // converged" phrasing because the failures were infra, not worker
+            // quality. Instead, attribute them truthfully to infrastructure.
+            if history.non_attempt_session_labels.is_empty()
+                && !history.infra_session_labels.is_empty()
+            {
+                return format!(
+                    "The post-intervention attempt(s) ended in infrastructure/provider failures \
+                     ({}) — timed_out, crashed, or spawn_failed — which are excluded from \
+                     quality-strike counts. Re-dispatching targets healthy infrastructure rather \
+                     than penalizing the task.",
+                    history.infra_session_labels.join(", "),
+                );
+            }
+            // Mixed or non-infra pre-submission terminals: existing phrasing
+            // with an infra diagnostic suffix appended so operators can see
+            // infrastructure failures, even though infra outcomes are excluded
+            // from the park escalation threshold count above.
+            let infra_note = if history.infra_session_labels.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " Additionally, {} infrastructure/provider attempt(s) ({}) terminated \
+                     pre-submission (excluded from quality-strike counts as infra failures).",
+                    history.infra_session_labels.len(),
+                    history.infra_session_labels.join(", "),
+                )
+            };
             format!(
                 "{} post-intervention session(s) terminated pre-submission across models {} — \
                  the remediation never converged despite forced model rotation, so re-dispatching \
-                 would only loop again.",
+                 would only loop again.{infra_note}",
                 history.non_attempt_session_labels.len(),
                 history.non_attempt_models.join(", "),
             )
@@ -1495,6 +1563,14 @@ impl CoordinatorActor {
                         match entry.reopen_class {
                             ReopenClass::MergeConflict => merge_conflict += 1,
                             ReopenClass::Superseded => superseded += 1,
+                            ReopenClass::Infra => {
+                                // Infra (provider/infrastructure-attempt
+                                // failures) is excluded from quality-strike
+                                // counts, intervention counters, and park
+                                // escalation thresholds. It still appears in
+                                // diagnostic park/retry reasons via
+                                // most_recent_reopen_class.
+                            }
                             _ => {
                                 // review_rejected, merge_queue_failed, other
                                 // are all quality strikes.
@@ -2084,6 +2160,16 @@ fn outcome_to_reopen_class(outcome: &TaskAttemptOutcome) -> Option<ReopenClass> 
             Some(ReopenClass::ReviewRejected)
         }
         TaskAttemptOutcome::Completed => Some(ReopenClass::Other),
+        // Infrastructure / provider-attempt failures (worker handshake
+        // timeouts, provider stalls, spawn failures, timed-out attempts,
+        // crashed infra attempts) are classified as `Infra` so they do NOT
+        // count as worker/task-quality strikes, intervention counters, or
+        // park escalation thresholds — while still surfacing in diagnostic
+        // park/retry reasons. Sourced from the `7w2i` `task_attempts.outcome`
+        // contract; no parallel outcome store is introduced.
+        TaskAttemptOutcome::TimedOut
+        | TaskAttemptOutcome::SpawnFailed
+        | TaskAttemptOutcome::Crashed => Some(ReopenClass::Infra),
         // Guard-only or not a submission-triggered terminal.
         TaskAttemptOutcome::Deferred
         | TaskAttemptOutcome::AdoptedPr
@@ -2144,5 +2230,74 @@ mod telemetry_tests {
             .and_then(|(_, v)| v.parse().ok())
             .expect("metric value parses");
         assert!(value >= 1.0, "parked counter should be >= 1.0, got {value}");
+    }
+}
+
+#[cfg(test)]
+mod infra_reopen_class_tests {
+    use super::outcome_to_reopen_class;
+    use djinn_core::models::ReopenClass;
+    use djinn_core::models::task_attempt::TaskAttemptOutcome;
+
+    /// AC #2: `timed_out`, `spawn_failed`, and `crashed` attempt outcomes map
+    /// to `ReopenClass::Infra` without introducing a parallel outcome store.
+    #[test]
+    fn infra_outcomes_map_to_reopen_class_infra() {
+        for outcome in [
+            TaskAttemptOutcome::TimedOut,
+            TaskAttemptOutcome::SpawnFailed,
+            TaskAttemptOutcome::Crashed,
+        ] {
+            assert_eq!(
+                outcome_to_reopen_class(&outcome),
+                Some(ReopenClass::Infra),
+                "{:?} must map to ReopenClass::Infra",
+                outcome
+            );
+        }
+    }
+
+    /// AC #4: A non-infra quality failure (Reopened) keeps mapping to
+    /// `ReviewRejected`, proving strike behavior is unchanged for real
+    /// worker-quality failures.
+    #[test]
+    fn non_infra_quality_failure_still_maps_to_review_rejected() {
+        assert_eq!(
+            outcome_to_reopen_class(&TaskAttemptOutcome::Reopened),
+            Some(ReopenClass::ReviewRejected)
+        );
+        assert_eq!(
+            outcome_to_reopen_class(&TaskAttemptOutcome::ForceClosed),
+            Some(ReopenClass::ReviewRejected)
+        );
+    }
+
+    /// `TaskAttemptOutcome::is_infra()` agrees with the mapping set so the
+    /// park-escalation exclusion and the reopen classification stay in sync.
+    #[test]
+    fn is_infra_predicate_matches_outcome_to_reopen_class_set() {
+        for outcome in [
+            TaskAttemptOutcome::Pending,
+            TaskAttemptOutcome::Submitted,
+            TaskAttemptOutcome::Completed,
+            TaskAttemptOutcome::Reopened,
+            TaskAttemptOutcome::Crashed,
+            TaskAttemptOutcome::TimedOut,
+            TaskAttemptOutcome::Cancelled,
+            TaskAttemptOutcome::LoopGuardTripped,
+            TaskAttemptOutcome::SpawnFailed,
+            TaskAttemptOutcome::Deferred,
+            TaskAttemptOutcome::AdoptedPr,
+            TaskAttemptOutcome::ForceClosed,
+            TaskAttemptOutcome::Handoff,
+        ] {
+            let mapped_to_infra = outcome_to_reopen_class(&outcome) == Some(ReopenClass::Infra);
+            assert_eq!(
+                outcome.is_infra(),
+                mapped_to_infra,
+                "is_infra() must agree with outcome_to_reopen_class for {:?}",
+                outcome
+            );
+        }
     }
 }

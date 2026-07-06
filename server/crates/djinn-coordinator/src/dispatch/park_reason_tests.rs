@@ -60,6 +60,7 @@ fn post_intervention_history_with_submission(reopen_class: ReopenClass) -> PostI
         any_submitted: true,
         non_attempt_models: vec![],
         non_attempt_session_labels: vec![],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: reopen_class,
@@ -150,6 +151,7 @@ fn non_attempt_history_uses_rotation_phrasing() {
         any_submitted: false,
         non_attempt_models: vec!["model-a".to_string(), "model-b".to_string()],
         non_attempt_session_labels: vec!["sess aaaaaaaa (model-a)".to_string()],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::ReviewRejected,
@@ -181,6 +183,7 @@ fn in_flight_submitted_attempt_does_not_park() {
         any_submitted: true,
         non_attempt_models: vec![],
         non_attempt_session_labels: vec![],
+        infra_session_labels: vec![],
         submission_pending_review: true,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::Other,
@@ -225,6 +228,7 @@ fn pre_submission_terminal_non_attempt_produces_non_attempt_evidence() {
             "attempt a1b2c3d4 (crashed)".to_string(),
             "attempt e5f6g7h8 (timed_out)".to_string(),
         ],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
@@ -255,6 +259,7 @@ fn submitted_terminal_failure_parks_with_reopen_class() {
         any_submitted: true,
         non_attempt_models: vec![],
         non_attempt_session_labels: vec![],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::ReviewRejected,
@@ -298,6 +303,7 @@ fn rotation_excluded_models_from_two_distinct_post_floor_models() {
             "attempt a1b2c3d4 (provider-a/model-x)".to_string(),
             "attempt e5f6g7h8 (provider-b/model-y)".to_string(),
         ],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
@@ -330,6 +336,7 @@ fn rotation_excluded_models_excludes_in_flight_submitted_attempt() {
         any_submitted: true,
         non_attempt_models: vec![],
         non_attempt_session_labels: vec![],
+        infra_session_labels: vec![],
         submission_pending_review: true,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::Other,
@@ -355,6 +362,7 @@ fn rotation_excluded_models_skips_outcome_string_fallbacks() {
             "attempt a1b2c3d4 (crashed)".to_string(),
             "attempt e5f6g7h8 (timed_out)".to_string(),
         ],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
@@ -379,6 +387,7 @@ fn rotation_excluded_models_separates_model_ids_from_outcome_fallbacks() {
             "attempt a1b2c3d4 (provider-a/model-x)".to_string(),
             "attempt e5f6g7h8 (spawn_failed)".to_string(),
         ],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: None,
         most_recent_reopen_class: ReopenClass::Other,
@@ -411,6 +420,7 @@ fn submitted_terminal_failure_uses_quality_strike_api_not_inline_rotation() {
         any_submitted: true,
         non_attempt_models: vec![],
         non_attempt_session_labels: vec![],
+        infra_session_labels: vec![],
         submission_pending_review: false,
         latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
         most_recent_reopen_class: ReopenClass::ReviewRejected,
@@ -426,4 +436,157 @@ fn submitted_terminal_failure_uses_quality_strike_api_not_inline_rotation() {
         history.any_submitted,
         "submitted terminal failure must set any_submitted=true for the quality-strike park gate"
     );
+}
+
+// ── Infra reopen class exclusion tests (ry9v Wave 1 task 4) ────────────────
+// These prove that infra-classified outcomes (timed_out, spawn_failed, crashed)
+// are excluded from quality-strike, intervention, and park escalation counters
+// while still appearing in diagnostic park/retry reasons.
+
+#[test]
+fn infra_only_pre_submission_history_excludes_from_park_threshold() {
+    // AC #3: Infra-classified pre-submission terminals do NOT populate
+    // non_attempt_models (the park escalation threshold list). They are
+    // tracked separately in infra_session_labels for diagnostics.
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        infra_session_labels: vec![
+            "attempt a1b2c3d4 (crashed)".to_string(),
+            "attempt e5f6g7h8 (timed_out)".to_string(),
+            "attempt i9j0k1l2 (spawn_failed)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Infra,
+    };
+
+    // Infra outcomes must NOT count toward the park escalation threshold.
+    assert!(
+        history.non_attempt_models.is_empty(),
+        "infra outcomes must be excluded from non_attempt_models (park threshold); \
+         got: {:?}",
+        history.non_attempt_models
+    );
+    assert!(
+        history.non_attempt_session_labels.is_empty(),
+        "infra outcomes must be excluded from non_attempt_session_labels"
+    );
+    // Infra labels are retained for diagnostics.
+    assert_eq!(
+        history.infra_session_labels.len(),
+        3,
+        "infra_session_labels must retain all infra attempts for diagnostics"
+    );
+}
+
+#[test]
+fn infra_only_park_reason_names_infrastructure_not_ac_phrasing() {
+    // AC #3: An infra-only history produces a truthful park reason that names
+    // infrastructure failures and does NOT use the worker-quality AC phrasing
+    // or the generic "never converged despite model rotation" phrasing.
+    let task = test_task("unknown", "[]", None);
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        infra_session_labels: vec![
+            "attempt a1b2c3d4 (crashed)".to_string(),
+            "attempt e5f6g7h8 (timed_out)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Infra,
+    };
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        reason.contains("infrastructure/provider failures"),
+        "infra-only park reason should name infrastructure failures; got: {reason}"
+    );
+    assert!(
+        reason.contains("crashed, timed_out") || reason.contains("infra"),
+        "infra-only park reason should list infra attempts; got: {reason}"
+    );
+    assert!(
+        reason.contains("excluded from quality-strike counts"),
+        "infra park reason should note exclusion from quality-strike counts; got: {reason}"
+    );
+    assert!(
+        !reason.contains("acceptance criteria still did not pass"),
+        "infra-only park must NOT use worker-quality AC phrasing; got: {reason}"
+    );
+    assert!(
+        !reason.contains("never converged despite forced model rotation"),
+        "infra-only park must NOT use generic model-rotation phrasing; got: {reason}"
+    );
+}
+
+#[test]
+fn infra_submitted_park_reason_uses_infra_phrasing_not_ac() {
+    // AC #3: A submitted terminal that ended in an infra outcome (e.g.
+    // submitted then crashed) must use the infra phrasing, not the AC phrasing.
+    let task = test_task("unknown", "[]", None);
+    let history = post_intervention_history_with_submission(ReopenClass::Infra);
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        reason.contains("infrastructure/provider failure"),
+        "submitted-infra park reason should name infra failure; got: {reason}"
+    );
+    assert!(
+        !reason.contains("acceptance criteria still did not pass"),
+        "submitted-infra park must NOT use AC phrasing; got: {reason}"
+    );
+}
+
+#[test]
+fn mixed_infra_and_quality_park_reason_appends_infra_diagnostics() {
+    // AC #3: When both infra and non-infra pre-submission terminals exist, the
+    // park reason keeps the model-rotation phrasing and appends infra
+    // diagnostics so operators see infrastructure failures too.
+    let task = test_task("unknown", "[]", None);
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec!["provider-a/model-x".to_string()],
+        non_attempt_session_labels: vec!["attempt a1b2c3d4 (provider-a/model-x)".to_string()],
+        infra_session_labels: vec!["attempt e5f6g7h8 (timed_out)".to_string()],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let reason = CoordinatorActor::compute_park_reason(&task, &history);
+
+    assert!(
+        reason.contains("never converged despite forced model rotation"),
+        "mixed history should keep model-rotation phrasing; got: {reason}"
+    );
+    assert!(
+        reason.contains("infrastructure/provider attempt"),
+        "mixed history should append infra diagnostics; got: {reason}"
+    );
+    assert!(
+        reason.contains("timed_out"),
+        "mixed history should name the infra outcome; got: {reason}"
+    );
+}
+
+#[test]
+fn infra_reopen_class_is_not_a_quality_strike() {
+    // AC #1: ReopenClass::Infra is not counted as a quality strike by the
+    // core task model. This mirrors the core test but lives here so the
+    // coordinator-level exclusion contract is documented alongside the
+    // park-reason behavior.
+    assert!(
+        !ReopenClass::Infra.is_quality_strike(),
+        "infra must NOT be a quality strike"
+    );
+    // Quality strikes remain unchanged for real worker-quality failures.
+    assert!(ReopenClass::ReviewRejected.is_quality_strike());
+    assert!(ReopenClass::MergeQueueFailed.is_quality_strike());
+    assert!(ReopenClass::Other.is_quality_strike());
 }
