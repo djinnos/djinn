@@ -14,6 +14,9 @@ use crate::test_helpers;
 use djinn_db::EpicRepository;
 use djinn_db::NoteRepository;
 use djinn_db::TaskRepository;
+use djinn_db::repositories::task_attempt::{
+    CreateTaskAttemptParams, TaskAttemptRepository, TerminalTaskAttemptParams,
+};
 use djinn_db::{
     CreateSessionParams, CreateTaskRunParams, DispatchPauseRepository, DispatchPauseTarget,
     SessionRepository, TaskRunRepository,
@@ -1287,6 +1290,11 @@ async fn make_task_with_reopen_count(
 /// `last_intervention_at`/`human_review_resolved_at` floor (millisecond-format
 /// timestamps), matching the production ordering where a post-intervention
 /// dispatch lands seconds after the intervention.
+///
+/// Since `post_intervention_history` now derives its state from `task_attempts`
+/// rows (not sessions), each seeded session also gets a matching `task_attempts`
+/// row: created as `pending`, then advanced to `crashed` (a pre-submission
+/// terminal outcome) so the attempt row mirrors the session's lifecycle.
 #[allow(dead_code)]
 async fn seed_terminated_post_intervention_sessions(
     db: &Database,
@@ -1302,6 +1310,7 @@ async fn seed_terminated_post_intervention_sessions(
         .expect("seed task must exist")
         .project_id;
     let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(tx));
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
     for model in models {
         // Strictly after the intervention floor; the format truncates to
         // milliseconds so a few ms of real time guarantees a greater string.
@@ -1331,6 +1340,39 @@ async fn seed_terminated_post_intervention_sessions(
                 0,
                 None,
             )
+            .await
+            .unwrap();
+
+        // Mirror the session lifecycle in task_attempts so
+        // post_intervention_history sees the pre-submission terminal attempt.
+        // Use the full session.id (36-char UUID) as the attempt id and dispatch
+        // key to avoid collisions when two sessions share a UUID v7 prefix.
+        let attempt_id = session.id.clone();
+        let dispatch_key = format!("seed-{}", session.id);
+        let attempt = attempt_repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &attempt_id,
+                task_id,
+                role: "worker",
+                dispatch_key: &dispatch_key,
+                session_id: Some(&session.id),
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+        attempt_repo
+            .advance_to_terminal(TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Crashed,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            })
             .await
             .unwrap();
     }

@@ -689,6 +689,37 @@ impl CoordinatorActor {
         // loop_guard_tripped, deferred — no `submitted_at`). These contribute
         // to non-attempt model/label tracking for the park rung.
         // `pending` rows are in flight and must not count as failed evidence.
+        //
+        // Look up sessions for the task so we can resolve the model_id for each
+        // pre-submission terminal attempt (the attempt's `session_id` links to
+        // the session that carried the model).
+        let session_repo = djinn_db::SessionRepository::new(
+            self.db.clone(),
+            crate::events::event_bus_for(&self.events_tx),
+        );
+        let session_model_map: std::collections::HashMap<String, String> =
+            match session_repo.list_for_task(&task.id).await {
+                Ok(sessions) => {
+                    tracing::debug!(
+                        task_id = %task.short_id,
+                        session_count = sessions.len(),
+                        "uv3p: session model map built from task sessions"
+                    );
+                    sessions
+                        .into_iter()
+                        .map(|s| (s.id.clone(), s.model_id.clone()))
+                        .collect()
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task.short_id,
+                        error = %e,
+                        "uv3p: session lookup for model resolution failed; using outcome labels"
+                    );
+                    std::collections::HashMap::new()
+                }
+            };
+
         let mut non_attempt_models: Vec<String> = Vec::new();
         let mut non_attempt_session_labels: Vec<String> = Vec::new();
         for attempt in post_floor.iter() {
@@ -703,11 +734,18 @@ impl CoordinatorActor {
                 continue;
             }
             // Pre-submission terminal: count toward non-attempt evidence.
-            let outcome_str = attempt.outcome.as_str();
+            // Resolve the model_id from the linked session when available,
+            // falling back to the attempt outcome for model-rotation exclusion.
+            let model_label = attempt
+                .session_id
+                .as_deref()
+                .and_then(|sid| session_model_map.get(sid))
+                .map(|m| m.as_str())
+                .unwrap_or(attempt.outcome.as_str());
             let id8: String = attempt.id.chars().take(8).collect();
-            non_attempt_session_labels.push(format!("attempt {id8} ({outcome_str})"));
-            if !non_attempt_models.contains(&outcome_str.to_string()) {
-                non_attempt_models.push(outcome_str.to_string());
+            non_attempt_session_labels.push(format!("attempt {id8} ({model_label})"));
+            if !non_attempt_models.contains(&model_label.to_string()) {
+                non_attempt_models.push(model_label.to_string());
             }
         }
 

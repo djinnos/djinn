@@ -1058,6 +1058,26 @@ async fn loop_guard_second_strike_parks_task() {
         })
         .await
         .unwrap();
+    // Advance to terminal (reopened) so the submission is no longer pending
+    // review. Without this, post_intervention_history would see the submitted
+    // attempt as in-flight and decline to park.
+    attempt_repo
+        .advance_to_terminal(
+            djinn_db::repositories::task_attempt::TerminalTaskAttemptParams {
+                id: &attempt.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            },
+        )
+        .await
+        .unwrap();
 
     let handled = actor
         .route_loop_guard_planner_intervention(
@@ -3408,6 +3428,36 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
     .await
     .unwrap();
 
+    // Create a submitted task_attempts row so post_intervention_history sees
+    // the submission (activity-log work_submitted is no longer the primary
+    // source of truth for the park gate).
+    let attempt_repo = TaskAttemptRepository::new(db.clone());
+    let submit_attempt_id = uuid::Uuid::now_v7().to_string();
+    let submit_attempt = attempt_repo
+        .create_or_get_pending(CreateTaskAttemptParams {
+            id: &submit_attempt_id,
+            task_id: &task.id,
+            role: "worker",
+            dispatch_key: &format!("submit-pending-review-{}", submit_attempt_id),
+            session_id: None,
+            attempt_seq: None,
+        })
+        .await
+        .unwrap();
+    attempt_repo
+        .advance_to_submitted(SubmitTaskAttemptParams {
+            id: &submit_attempt.id,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("post-intervention submission"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
     // The task is in needs_task_review — submission is pending review.
     repo.set_status(&task.id, "needs_task_review")
         .await
@@ -3463,6 +3513,26 @@ async fn park_rung_does_not_park_while_submission_pending_review() {
 
     let task = repo.get(&task.id).await.unwrap().unwrap();
     assert_eq!(task.status, "open", "rejection returns task to open");
+
+    // Advance the submitted attempt to terminal (reopened) to reflect the
+    // review rejection, so post_intervention_history sees a concluded attempt.
+    attempt_repo
+        .advance_to_terminal(
+            djinn_db::repositories::task_attempt::TerminalTaskAttemptParams {
+                id: &submit_attempt.id,
+                outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary: None,
+                summary_json: None,
+                log_tail: None,
+            },
+        )
+        .await
+        .unwrap();
 
     // ── Act: run the park evaluation again ────────────────────────────
     let handled = actor.maybe_intervene_on_stuck_task(&task).await;
