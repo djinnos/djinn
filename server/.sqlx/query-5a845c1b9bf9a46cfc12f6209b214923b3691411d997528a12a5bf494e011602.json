@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE task_attempts\n               SET log_tail = COALESCE(log_tail, $2),\n                   summary_json = CASE\n                     WHEN summary_json IS NULL THEN $3::text::jsonb\n                     WHEN NOT (summary_json ? 'infra_death_log_tail')\n                       THEN summary_json || $3::text::jsonb\n                     ELSE summary_json\n                   END,\n                   updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Varchar",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a845c1b9bf9a46cfc12f6209b214923b3691411d997528a12a5bf494e011602"
+}

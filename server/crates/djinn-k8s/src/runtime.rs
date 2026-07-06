@@ -46,8 +46,8 @@ use djinn_core::clock::{Clock, SystemClock};
 use djinn_db::{Database, ProjectRepository, TaskRepository};
 use djinn_runtime::wire::ControlMsg;
 use djinn_runtime::{
-    BiStream, ResolvedCredentials, RoleKind, RunHandle, RuntimeError, SessionRuntime, StreamEvent,
-    StreamFrame, TaskRunOutcome, TaskRunReport, TaskRunSpec,
+    BiStream, InfraDeathLogTailCapture, ResolvedCredentials, RoleKind, RunHandle, RuntimeError,
+    SessionRuntime, StreamEvent, StreamFrame, TaskRunOutcome, TaskRunReport, TaskRunSpec,
 };
 use djinn_supervisor::{ConnectionRegistry, Frame, FramePayload, PendingConnection};
 use k8s_openapi::api::batch::v1::Job;
@@ -925,6 +925,18 @@ impl SessionRuntime for KubernetesRuntime {
 
             tokio::time::sleep(INFRA_DEATH_POLL_INTERVAL).await;
         }
+    }
+
+    async fn capture_infra_death_log_tail(
+        &self,
+        handle: &RunHandle,
+    ) -> Option<InfraDeathLogTailCapture> {
+        crate::infra_death_log_tail::capture_infra_death_log_tail(
+            &self.client,
+            &self.config.namespace,
+            &handle.task_run_id,
+        )
+        .await
     }
 }
 

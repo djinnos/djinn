@@ -403,6 +403,13 @@ impl CoordinatorActor {
                 task.reopen_count,
             )
             .await;
+            self.terminalize_for_pr_outcome(
+                task_id,
+                djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+                Some(&TransitionAction::PrCiFailed),
+                Some(&reason),
+            )
+            .await;
             // Park the source to `open` so it is held by the blocker the
             // intervention added (not left in pr_draft/pr_review) and revivable
             // when the remediation closes.
@@ -575,6 +582,14 @@ impl CoordinatorActor {
         ci_failure_sections: &[String],
     ) {
         let task_repo = self.task_repo();
+
+        self.terminalize_for_pr_outcome(
+            &task.id,
+            djinn_core::models::task_attempt::TaskAttemptOutcome::Reopened,
+            Some(&TransitionAction::PrCiFailed),
+            Some(reason),
+        )
+        .await;
 
         let sections_text = if ci_failure_sections.is_empty() {
             String::new()
