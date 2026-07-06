@@ -1,3 +1,6 @@
+// djinn:allow-oversize — shared test infrastructure (actors, helpers, fixtures)
+// pushed file past the byte threshold; split when touched substantively.
+
 use std::path::Path;
 use std::sync::Mutex;
 
