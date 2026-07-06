@@ -731,7 +731,7 @@ async fn board_health_legacy_and_additive_fields_coexist() {
             1,
             "worker",
             Some("open"),
-            None,
+            Some(r#"[{"description":"default","met":false}]"#),
         )
         .await
         .unwrap();

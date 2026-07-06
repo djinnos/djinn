@@ -903,8 +903,9 @@ pub struct BoardHealthDispatchGate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<String>,
     /// Machine-readable gate reasons (`no_eligible_model`,
-    /// `image_not_ready`).
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    /// `image_not_ready`). Always present in the serialized output
+    /// (may be an empty array) so clients can rely on the key existing.
+    #[serde(default)]
     pub reasons: Vec<String>,
     /// Last role the dispatcher actually attempted for this task, when
     /// known. Retained for backward compatibility with the initial
