@@ -308,6 +308,15 @@ impl SupervisorServices for DirectServices {
         } else {
             String::new()
         };
+        // Build a RestampTarget from catalog metadata so model-dependent
+        // defaults (reasoning_effort, max_tokens_default, format_family,
+        // tool_schema_compat) reflect the target model.
+        let restamp_target = crate::actors::slot::helpers::build_restamp_target(
+            &resolved.catalog_provider_id,
+            &resolved.model_name,
+            context_window,
+            &self.callbacks.agent_context.catalog,
+        );
         let provider: Box<dyn LlmProvider> =
             crate::actors::slot::helpers::build_provider_from_resolved(
                 resolved,
@@ -315,6 +324,7 @@ impl SupervisorServices for DirectServices {
                 Some(telemetry_meta),
                 None,
                 base_url,
+                &restamp_target,
             )
             .ok_or_else(|| "no provider credential resolved for model".to_string())?;
 

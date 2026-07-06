@@ -73,8 +73,8 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_telemetry_meta_with_attribution, default_base_url,
-    resolved_needs_base_url,
+    build_provider_from_resolved, build_restamp_target, build_telemetry_meta_with_attribution,
+    default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
@@ -959,12 +959,22 @@ pub(crate) async fn execute_stage(
         } else {
             String::new()
         };
+        // Build a RestampTarget from catalog metadata so model-dependent
+        // defaults (reasoning_effort, max_tokens_default, format_family,
+        // tool_schema_compat) reflect the target model.
+        let restamp_target = build_restamp_target(
+            &resolved.catalog_provider_id,
+            &resolved.model_name,
+            context_window.max(0) as u32,
+            &agent_context.catalog,
+        );
         let built = match build_provider_from_resolved(
             resolved,
             context_window.max(0) as u32,
             Some(telemetry_meta),
             Some(session_id.clone()),
             base_url,
+            &restamp_target,
         ) {
             Some(provider) => provider,
             None => {
