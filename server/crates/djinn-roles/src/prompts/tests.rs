@@ -1133,3 +1133,84 @@ fn worker_resume_section_omitted_when_note_is_whitespace() {
         "prompt should not include Resume Context for whitespace-only note"
     );
 }
+
+// ── Attempt history rendering (2v3k) ────────────────────────────────────────
+
+/// When activity_text includes attempt history, it renders inside the Activity
+/// Log section — not as a new top-level section.
+#[test]
+fn worker_prompt_includes_attempt_history_inside_activity_section() {
+    let task = make_task();
+    let activity_with_attempts = Some(
+        "Some activity log text\n\n---\n\n\
+         **Prior attempts (newest first):**\n\
+         - Attempt #1 (worker): crashed\n\
+           created: 2026-01-01T00:00:00Z\n\
+           terminal: 2026-01-01T01:00:00Z\n\
+           summary: attempt crashed (no summary recorded)\n\
+           submit_ref: `abc123`\n\
+           PR: https://github.com/pr/1"
+            .into(),
+    );
+    let ctx = TaskContext {
+        activity: activity_with_attempts,
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    // Attempt history should appear inside the Activity Log section.
+    assert!(
+        prompt.contains("**Prior attempts (newest first):**"),
+        "prompt should contain attempt history inside activity section"
+    );
+    assert!(
+        prompt.contains("Attempt #1 (worker): crashed"),
+        "prompt should contain the attempt entry"
+    );
+    assert!(
+        prompt.contains("submit_ref: `abc123`"),
+        "prompt should contain the submit_ref"
+    );
+    // Should NOT be a separate top-level section.
+    assert!(
+        !prompt.contains("## Prior Attempts"),
+        "attempt history should not be a separate top-level heading"
+    );
+}
+
+/// When activity_text is None, the prompt should not have the Activity Log
+/// section or attempt history.
+#[test]
+fn worker_prompt_omits_attempt_history_when_no_activity() {
+    let task = make_task();
+    let ctx = make_ctx(); // activity: None
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(
+        !prompt.contains("Prior attempts"),
+        "prompt should not contain attempt history when no activity"
+    );
+}
+
+/// Attempt history with summary_json fields renders inside the activity section.
+#[test]
+fn worker_prompt_includes_attempt_history_with_summary_json_fields() {
+    let task = make_task();
+    let activity_with_attempts = Some(
+        "**Prior attempts (newest first):**\n\
+         - Attempt #1 (worker): completed\n\
+           created: 2026-01-01T00:00:00Z\n\
+           summary: done\n\
+           failure_class: compile_error\n\
+           last_verify: cargo clippy"
+            .into(),
+    );
+    let ctx = TaskContext {
+        activity: activity_with_attempts,
+        ..make_ctx()
+    };
+    let prompt = render_prompt(AgentType::Worker, &task, &ctx);
+
+    assert!(prompt.contains("failure_class: compile_error"));
+    assert!(prompt.contains("last_verify: cargo clippy"));
+}
