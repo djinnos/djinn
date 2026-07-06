@@ -499,7 +499,6 @@ fn tool_schemas_lead_inner() -> Vec<serde_json::Value> {
         serialize_tool(tool_task_archive_activity(), destructive()),
         serialize_tool(tool_task_reset_counters(), idempotent_destructive()),
         serialize_tool(tool_task_kill_session(), destructive()),
-        serialize_tool(tool_request_planner(), mutation()),
         serialize_tool(crate::finalize_tools::tool_submit_decision(), mutation()),
     ] {
         tool_values.push(value);

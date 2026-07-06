@@ -107,44 +107,73 @@ pub(super) async fn board_reconcile_impl(
                 // Wedged-slot path: slot alive but no LLM progress past
                 // the observation threshold — kill the slot first, then
                 // mark interrupted.
+                // Runtime-cap path: slot alive, session is a worker on a
+                // capped model (glm-5.2) past the wall-clock cap — kill
+                // and reroute as runtime policy, NOT a task-quality strike.
                 let should_finalize = if slot_alive {
                     let last_msg = session_repo
                         .last_message_at(&session.id)
                         .await
                         .unwrap_or(None);
-                    let verdict = djinn_core::liveness::classify_session_progress(
+                    let interruption = djinn_core::liveness::classify_session_interruption(
+                        &session.agent_type,
+                        &session.model_id,
                         &session.started_at,
                         last_msg.as_deref(),
                         session.tokens_in,
                         session.tokens_out,
                         now,
                         &liveness_config,
+                        &djinn_core::liveness::RuntimeCapConfig::default_config(),
                     );
-                    match verdict {
-                        djinn_core::liveness::ProgressVerdict::Live => false,
-                        djinn_core::liveness::ProgressVerdict::Wedged {
-                            idle_secs,
-                            zero_tokens,
-                        } => {
+                    match interruption {
+                        None => false,
+                        Some(reason) => {
+                            let label = reason.log_label();
                             if let Err(e) = pool.kill_session(task_id).await {
                                 tracing::warn!(
                                     task_id = %task_id,
                                     session_id = %session.id,
+                                    reason = label,
                                     error = %e,
-                                    "board_reconcile: failed to kill wedged session"
+                                    "board_reconcile: failed to kill session"
                                 );
                                 // Don't finalize a row whose slot we
                                 // couldn't kill — the next sweep will
                                 // see it again with fresher state.
                                 false
                             } else {
-                                tracing::warn!(
-                                    task_id = %task_id,
-                                    session_id = %session.id,
-                                    idle_seconds = idle_secs,
-                                    zero_tokens,
-                                    "board_reconcile: killed wedged session"
-                                );
+                                match &reason {
+                                    djinn_core::liveness::SessionInterruptReason::Wedged {
+                                        idle_secs,
+                                        zero_tokens,
+                                    } => {
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            session_id = %session.id,
+                                            idle_seconds = idle_secs,
+                                            zero_tokens,
+                                            "board_reconcile: killed wedged session"
+                                        );
+                                    }
+                                    djinn_core::liveness::SessionInterruptReason::RuntimeCap {
+                                        elapsed_secs,
+                                        cap_secs,
+                                        provider_id,
+                                        model_name,
+                                    } => {
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            session_id = %session.id,
+                                            elapsed_secs,
+                                            cap_secs,
+                                            provider_id = %provider_id,
+                                            model_name = %model_name,
+                                            "board_reconcile: killed glm-5.2 runtime-cap session \
+                                             (not a task-quality strike)"
+                                        );
+                                    }
+                                }
                                 true
                             }
                         }
