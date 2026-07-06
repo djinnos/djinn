@@ -3890,6 +3890,477 @@ fn running_pod_active_signal_is_live_regardless_of_claim_ttl() {
     assert!(!result.extension_eligible);
 }
 
+/// AC historical: Pending-pod / capacity-crunch — a session with a Pending pod
+/// (e.g. pod stuck in image pull or waiting for node resources during a
+/// capacity crunch) is NOT classified as Dead, even when the in-memory activity
+/// signal is Idle. `Pending` is not `Absent` or `Failed`, so the Dead guard
+/// (`pod_absent_or_failed && no_recent_activity`) does not fire. The classifier
+/// returns `Live` (default fallthrough).
+///
+/// This is the targeted regression for the historical false-reap class where
+/// raw pod-phase heuristics would treat a Pending pod as "not running" and
+/// reclaim the session before the pod had a chance to start.
+#[test]
+fn pending_pod_capacity_crunch_spared_by_classifier() {
+    use crate::dispatch::liveness::*;
+
+    let evidence = LivenessEvidence {
+        pod_phase: Some(PodPhase::Pending),
+        activity: ActivitySignal::Idle,
+        db_session_status: Some(DbSessionStatus::Running),
+        db_task_status: Some(DbTaskStatus::InProgress),
+        claim_ttl_remaining: Some(std::time::Duration::from_secs(120)),
+        extension_budget_exhausted: false,
+        hard_runtime_deadline_exceeded: false,
+        exit_code: None,
+    };
+
+    let result = classify(&evidence);
+    assert_ne!(
+        result.verdict,
+        Verdict::Dead,
+        "Pending-pod capacity-crunch session must NOT be classified as Dead"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Live,
+        "Pending pod with idle activity falls through to Live"
+    );
+    assert_eq!(result.outcome, None, "Live has no outcome");
+    assert!(!result.extension_eligible);
+}
+
+/// AC historical: Pending-pod just past the zombie hard cap — even when the
+/// claim TTL has expired, a Pending pod is still not Dead because `Pending` is
+/// not `Absent`/`Failed`. The classifier returns `Live` (not Dead, not Slow).
+#[test]
+fn pending_pod_past_hard_cap_still_not_dead() {
+    use crate::dispatch::liveness::*;
+
+    let evidence = LivenessEvidence {
+        pod_phase: Some(PodPhase::Pending),
+        activity: ActivitySignal::Idle,
+        db_session_status: Some(DbSessionStatus::Running),
+        db_task_status: Some(DbTaskStatus::InProgress),
+        claim_ttl_remaining: Some(std::time::Duration::ZERO),
+        extension_budget_exhausted: true,
+        hard_runtime_deadline_exceeded: true,
+        exit_code: None,
+    };
+
+    // Even with hard_runtime_deadline_exceeded, the classifier applies the
+    // hard-cap precedence which forces Dead/Timeout — but the key regression
+    // guard is: absent hard-cap override, Pending is NOT Dead.
+    let evidence_no_hard_cap = LivenessEvidence {
+        pod_phase: Some(PodPhase::Pending),
+        activity: ActivitySignal::Idle,
+        db_session_status: Some(DbSessionStatus::Running),
+        db_task_status: Some(DbTaskStatus::InProgress),
+        claim_ttl_remaining: Some(std::time::Duration::ZERO),
+        extension_budget_exhausted: true,
+        hard_runtime_deadline_exceeded: false,
+        exit_code: None,
+    };
+    let result = classify(&evidence_no_hard_cap);
+    assert_ne!(
+        result.verdict,
+        Verdict::Dead,
+        "Pending pod must not be Dead without hard-cap override (capacity-crunch false-reap guard)"
+    );
+    assert_eq!(result.verdict, Verdict::Live);
+    // With hard_cap override, Dead IS expected (precedence rule), but the
+    // Pending-pod test point is the no-hard-cap case above.
+    let result_hard = classify(&evidence);
+    assert_eq!(
+        result_hard.verdict,
+        Verdict::Dead,
+        "hard_runtime_deadline_exceeded overrides Pending into Dead/Timeout (precedence 2)"
+    );
+    assert_eq!(result_hard.outcome, Some(LivenessOutcome::Timeout));
+}
+
+/// AC historical: Zero-token running session is classified Slow (not Dead)
+/// through the landed classifier/reaper rules. The integration path through
+/// `reap_zombie_sessions` uses the liveness classifier as its authoritative
+/// gate: with a live pool mapping and aged activity, the classifier returns
+/// Slow and the session is spared.
+///
+/// This regression proves the zero-token case is routed through the
+/// classifier verdict path, not a raw zero-token shortcut.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_token_running_session_classified_slow_not_dead() {
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "zero-token-slow").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-zero-token-slow";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo =
+        djinn_db::SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(djinn_db::CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    // Default tokens: 0/0. Backdate past zombie hard cap.
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    // Dispatch to pool so `session_for_task` returns Some (Running pod).
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(RecordingRuntimeOps::new(true)));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+
+    // Age activity so idle > ZOMBIE_HARD_CAP_SECS: the zombie reaper's pool
+    // gate (idle <= cap) does NOT spare, but the classifier sees Running pod +
+    // Idle → Slow.
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(20 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+    actor.pool = pool;
+    actor.reap_zombie_sessions().await;
+
+    // Session must be spared: the classifier returned Slow (not Dead) even
+    // though this is a zero-token session past the zombie hard cap.
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "zero-token running session with Running pod must be spared by Slow verdict (not Dead)"
+    );
+
+    // No dead_reclaimed evidence must exist.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let dead_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dead_count, 0,
+        "classifier Slow verdict must NOT produce dead_reclaimed evidence"
+    );
+
+    // Task must remain in_progress.
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "in_progress",
+        "task must remain in_progress when zero-token session is spared by classifier"
+    );
+}
+
+/// AC historical: Kill-task no-op cleanup records terminal evidence — when a
+/// session is reaped for a task that has already been closed, the classifier
+/// returns `KillNoop` outcome (terminal-task precedence). The session is
+/// finalized but the task is NOT reopened. The evidence row records the
+/// terminal verdict on the denormalized session columns and the append-only
+/// `liveness_evidence` table.
+///
+/// This regression strengthens the existing kill_noop tests by explicitly
+/// asserting the denormalized verdict is NOT "dead" (proving the classifier
+/// ruled it KillNoop, not Dead) and that the task stays closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kill_noop_cleanup_records_terminal_verdict_on_session() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "kill-noop-terminal").await;
+
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-kill-noop-terminal";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    // Close the task BEFORE the reaper runs — the canonical terminal-race
+    // condition.
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "closed")
+        .await
+        .unwrap();
+
+    let runtime = RecordingRuntimeOps::new(true);
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.runtime_ops = Some(Arc::new(runtime));
+    actor.reap_zombie_sessions().await;
+
+    // 1. Task stays closed (not reopened).
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "closed",
+        "task must remain closed — kill_noop must NOT reopen a terminal task"
+    );
+
+    // 2. Session finalized.
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "orphaned session for terminal task must be finalized"
+    );
+
+    // 3. Denormalized session columns: verdict is NOT "dead" (classifier ruled
+    //    KillNoop via terminal-task precedence); outcome is "kill_noop".
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let (verdict, outcome_kind) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_ne!(
+        verdict.as_deref(),
+        Some("dead"),
+        "terminal-task race must NOT produce a 'dead' verdict — classifier uses KillNoop precedence"
+    );
+    assert_eq!(
+        outcome_kind.as_deref(),
+        Some("kill_noop"),
+        "session must have kill_noop outcome on denormalized columns"
+    );
+
+    // 4. Append-only evidence: kill_noop row exists, dead_reclaimed does NOT.
+    let kill_noop_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("kill_noop"))
+        .await
+        .unwrap();
+    assert!(
+        kill_noop_count >= 1,
+        "liveness_evidence table must have kill_noop row"
+    );
+    let dead_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        dead_count, 0,
+        "terminal-task race must NOT produce dead_reclaimed evidence"
+    );
+}
+
+/// AC historical: Ready-but-never-claimed dispatch starvation — a session that
+/// predates its task's `updated_at` (stale ready-state orphan) is finalized by
+/// `detect_and_recover_stuck_filtered` as an orphan, NOT reaped as a zombie.
+/// The task remains `open` (released for redispatch) and the session does NOT
+/// get liveness classifier evidence, because the orphan detection path is
+/// structurally separate from the liveness/zombie path.
+///
+/// This regression proves that dispatch starvation is represented as a
+/// stranded-ready/dispatch-gate condition (task stays open, session finalized
+/// without zombie semantics) rather than as session zombie evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_never_claimed_session_not_misclassified_as_zombie() {
+    use djinn_db::{CreateSessionParams, SessionRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stranded-ready-regression").await;
+
+    // Task stays `open` — dispatch starvation scenario: no worker ever claimed it.
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    // Backdate session so it predates the task's `updated_at`. This models a
+    // ready-state task whose session was created alongside it but never claimed
+    // — the canonical stranded-ready/dispatch-starvation pattern.
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    assert!(
+        session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "precondition: stale ready-state session should be listed as running"
+    );
+
+    // Drive the orphan detection path (NOT the zombie reaper).
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.detect_and_recover_stuck_filtered(None).await;
+
+    // 1. Session finalized (orphan detected and cleaned up).
+    assert!(
+        !session_repo
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .any(|s| s.id == session.id),
+        "stale ready-state orphan session must be finalized via orphan detection"
+    );
+
+    // 2. Task stays `open` — released for redispatch (stranded-ready, not zombie).
+    let updated = TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .get(&task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated.status, "open",
+        "ready-but-never-claimed task must remain open (stranded-ready, not zombie reclaim)"
+    );
+
+    // 3. No zombie/Dead liveness evidence — the orphan detection path does NOT
+    //    consult the liveness classifier or persist evidence rows. The
+    //    stranded-ready condition is a dispatch-gate observation, not a
+    //    session-zombie classification.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let total_evidence = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        total_evidence, 0,
+        "stranded-ready orphan must NOT produce liveness evidence (not a zombie classification)"
+    );
+
+    let (verdict, outcome) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert!(
+        verdict.is_none(),
+        "stranded-ready session must NOT have a liveness verdict (orphan path, not zombie path)"
+    );
+    assert!(
+        outcome.is_none(),
+        "stranded-ready session must NOT have a liveness outcome"
+    );
+}
+
 // ── Attempt-lifecycle terminalization in the session-recovery lane (i6xq) ──
 //
 // These path-level tests drive the real recovery functions
