@@ -299,6 +299,7 @@ impl LlmProvider for AnthropicProvider {
                     // we handle this by parsing event type from the data itself for Anthropic.
                     // The data JSON always has a "type" field.
                     let mut raw_stream = raw;
+                    let mut seen_message_stop = false;
                     while let Some(result) = raw_stream.next().await {
                         match result {
                             Err(e) => { yield Err(e); return; }
@@ -323,11 +324,23 @@ impl LlmProvider for AnthropicProvider {
                                         return;
                                     }
                                     for event in parse_anthropic_event(&event_type, &line, &mut tool_acc, &mut input_tokens, &mut cache_read, &mut cache_write) {
+                                        if matches!(event, StreamEvent::Done) {
+                                            seen_message_stop = true;
+                                        }
                                         yield Ok(event);
                                     }
                                 }
                             }
                         }
+                    }
+                    // Raw EOF before the Anthropic terminal `message_stop` frame
+                    // is a truncated / stalled stream, not a complete turn. Yield
+                    // a typed retryable failure so the breaker and failover logic
+                    // can react.
+                    if !seen_message_stop {
+                        tracing::warn!("anthropic stream ended before message_stop");
+                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                            .context("stream ended before message_stop"));
                     }
                 });
             Ok(out)

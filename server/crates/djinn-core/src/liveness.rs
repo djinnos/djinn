@@ -1,12 +1,21 @@
-//! Session liveness classification.
+//! Session liveness and runtime-cap classification.
 //!
-//! A running session is "wedged" when its in-process slot is still alive but
-//! the LLM has stopped producing progress — either it never returned a single
-//! token (the HTTP call is hung before any byte) or no new `session_messages`
-//! row has been appended for long enough that the turn cannot still be in
-//! flight legitimately.
+//! Two complementary pure classifiers live here so reconcile / observation
+//! code can use the same rules for both failure modes:
 //!
-//! This module exposes a pure classifier so the same rules are used by
+//! - [`classify_session_progress`] reports a wedged session — its in-process
+//!   slot is still alive but the LLM has stopped producing progress, either
+//!   because it never returned a single token (the HTTP call is hung before
+//!   any byte) or because no new `session_messages` row has been appended for
+//!   long enough that the turn cannot still be in flight legitimately.
+//!
+//! - [`classify_runtime_cap`] reports a model-specific wall-clock runtime
+//!   cap breach — independent of the wedged thresholds above — so that
+//!   long-grinding sessions on providers we know get stuck (today: the
+//!   `zai` / `zai-coding-plan` `glm-5.2` workers) become eligible for reroute
+//!   before they consume the soft deadline.
+//!
+//! Both modules expose pure classifiers so the same rules are used by
 //! `session_active` (observation), `board_reconcile` (active healing on
 //! demand), and the coordinator's periodic stall sweep.
 
@@ -107,6 +116,138 @@ pub fn elapsed_secs_since(iso: &str, now: OffsetDateTime) -> Option<i64> {
     Some(elapsed.max(0))
 }
 
+/// A model-specific worker wall-clock runtime cap.
+///
+/// Used by [`classify_runtime_cap`] to flag long-grinding worker sessions on
+/// providers known to wedge (today: the `zai` / `zai-coding-plan` `glm-5.2`
+/// workers) so they can be rerouted before they consume the soft deadline.
+///
+/// A cap hit is a reroute trigger, **not** a task-quality strike: the
+/// follow-up wiring should surface it as infrastructure / runtime policy
+/// rather than counting it against the task.
+#[derive(Debug, Clone)]
+pub struct RuntimeCapConfig {
+    /// Wall-clock cap in seconds (approximately 90 minutes for the default).
+    pub worker_runtime_cap_secs: i64,
+    /// `(provider_id, model_name)` pairs that the cap applies to. The
+    /// `model_id` field on `SessionRecord` is `provider_id/model_name`, so
+    /// matching is done on the split halves — exact equality on both sides,
+    /// not substring or prefix.
+    pub capped_models: Vec<(String, String)>,
+    /// Agent type the cap applies to. Today: only `"worker"`. Reviewer and
+    /// planner sessions are deliberately excluded.
+    pub worker_agent_type: String,
+}
+
+impl RuntimeCapConfig {
+    /// Default runtime-cap config used by reconcile / observation paths for
+    /// epic `5wxi`: an approximately 90-minute wall-clock cap (5,400
+    /// seconds) on worker sessions running the `zai` and `zai-coding-plan`
+    /// `glm-5.2` models.
+    pub fn default_config() -> Self {
+        Self {
+            worker_runtime_cap_secs: 5_400,
+            capped_models: Self::DEFAULT_CAPPED_MODELS
+                .iter()
+                .map(|(p, m)| (p.to_string(), m.to_string()))
+                .collect(),
+            worker_agent_type: Self::DEFAULT_WORKER_AGENT_TYPE.to_string(),
+        }
+    }
+
+    /// `(provider_id, model_name)` pairs covered by [`Self::default_config`].
+    pub const DEFAULT_CAPPED_MODELS: &'static [(&'static str, &'static str)] =
+        &[("zai-coding-plan", "glm-5.2"), ("zai", "glm-5.2")];
+
+    /// Default worker agent-type identifier, matching the value written by
+    /// `djinn-runtime::RoleKind::Worker` (see `RoleKind::as_str`).
+    pub const DEFAULT_WORKER_AGENT_TYPE: &'static str = "worker";
+}
+
+/// Verdict returned by [`classify_runtime_cap`].
+///
+/// Distinct from [`ProgressVerdict`] so the wiring layer can branch on cap
+/// hits without conflating them with wedged / stale failures — a cap hit is
+/// a reroute trigger, not a task-quality strike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeCapVerdict {
+    /// Session is below the runtime cap, or not on a capped model, or not
+    /// on a worker role — no reroute needed.
+    Live,
+    /// Session has been running at or beyond the configured wall-clock cap
+    /// for a capped `(provider_id, model_name)` worker. `elapsed_secs` is
+    /// the wall-clock seconds since `started_at` (clamped to `>= 0`).
+    RuntimeCap {
+        elapsed_secs: i64,
+        cap_secs: i64,
+        provider_id: String,
+        model_name: String,
+    },
+}
+
+/// Classify a worker session's runtime against the configured wall-clock cap.
+///
+/// `started_at` is the ISO-8601 timestamp from `sessions.started_at`.
+/// `now` is injected so callers can use a single observation time across a
+/// batch and so tests can pin the clock. `role` should be the value stored
+/// in `sessions.agent_type` (e.g. `"worker"`, `"reviewer"`, `"planner"`).
+/// `model_id` should be the value stored in `sessions.model_id`, formatted
+/// as `"provider_id/model_name"` (e.g. `"zai-coding-plan/glm-5.2"`,
+/// `"zai/glm-5.2"`, `"xiaomi-token-plan-sgp/mimo-v2.5-pro"`).
+///
+/// The verdict is [`RuntimeCapVerdict::Live`] (no reroute) when:
+///
+/// - `role` is not the configured worker agent type (today: anything that
+///   isn't `"worker"`), so reviewer/planner sessions are exempt by design.
+/// - `model_id` does not exactly match any `(provider_id, model_name)` pair
+///   in [`RuntimeCapConfig::capped_models`], so other models are exempt.
+/// - The session has not yet reached `worker_runtime_cap_secs` since
+///   `started_at`.
+/// - `started_at` fails to parse (failing open — same fail-safe posture as
+///   [`classify_session_progress`]).
+///
+/// A `RuntimeCap` verdict is the reroute trigger consumed by follow-up
+/// wiring; it must remain distinguishable from a `Wedged` verdict so the
+/// wiring does not count cap hits as task-quality strikes.
+pub fn classify_runtime_cap(
+    role: &str,
+    model_id: &str,
+    started_at: &str,
+    now: OffsetDateTime,
+    config: &RuntimeCapConfig,
+) -> RuntimeCapVerdict {
+    if role != config.worker_agent_type {
+        return RuntimeCapVerdict::Live;
+    }
+
+    let Some((provider_id, model_name)) = model_id.split_once('/') else {
+        return RuntimeCapVerdict::Live;
+    };
+
+    let matched = config
+        .capped_models
+        .iter()
+        .find(|(p, m)| p == provider_id && m == model_name);
+    let Some((cap_provider, cap_model)) = matched else {
+        return RuntimeCapVerdict::Live;
+    };
+
+    let Some(elapsed) = elapsed_secs_since(started_at, now) else {
+        return RuntimeCapVerdict::Live;
+    };
+
+    if elapsed >= config.worker_runtime_cap_secs {
+        RuntimeCapVerdict::RuntimeCap {
+            elapsed_secs: elapsed,
+            cap_secs: config.worker_runtime_cap_secs,
+            provider_id: cap_provider.clone(),
+            model_name: cap_model.clone(),
+        }
+    } else {
+        RuntimeCapVerdict::Live
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +343,324 @@ mod tests {
         let started = "2026-05-22T12:05:00Z"; // future
         let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
+    }
+
+    // ── Runtime-cap classifier tests (epic 5wxi, task vt00) ────────────
+    //
+    // The runtime cap is independent of the wedged-session thresholds
+    // above. These tests pin the contract:
+    //
+    // - `zai-coding-plan/glm-5.2` and `zai/glm-5.2` worker sessions hit
+    //   `RuntimeCap` at or beyond ~90 minutes (5,400 seconds).
+    // - Below cap, wrong role, wrong model, and bad timestamps stay `Live`.
+    // - The verdict is a distinct enum (`RuntimeCapVerdict`) so the
+    //   follow-up wiring can branch on it without conflating it with the
+    //   wedged `Wedged` verdict.
+
+    /// Cap is exactly 90 minutes (5,400 s) and only targets the two
+    /// `glm-5.2` provider ids surveyed in the repo.
+    #[test]
+    fn runtime_cap_default_config_targets_only_glm5_zai() {
+        let cfg = RuntimeCapConfig::default_config();
+        assert_eq!(cfg.worker_runtime_cap_secs, 5_400);
+        assert_eq!(cfg.worker_agent_type, "worker");
+        assert!(
+            cfg.capped_models
+                .iter()
+                .any(|(p, m)| p == "zai-coding-plan" && m == "glm-5.2"),
+            "default config must include zai-coding-plan/glm-5.2"
+        );
+        assert!(
+            cfg.capped_models
+                .iter()
+                .any(|(p, m)| p == "zai" && m == "glm-5.2"),
+            "default config must include zai/glm-5.2"
+        );
+        assert_eq!(cfg.capped_models.len(), 2);
+    }
+
+    /// `zai-coding-plan/glm-5.2` worker exactly at 90 minutes triggers the
+    /// cap (boundary: `elapsed >= cap`).
+    #[test]
+    fn runtime_cap_at_threshold_triggers_for_zai_coding_plan_glm5() {
+        let now = t("2026-07-06T13:20:00Z");
+        // 5,400 seconds == 90 minutes.
+        let started = "2026-07-06T11:50:00Z";
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(
+            v,
+            RuntimeCapVerdict::RuntimeCap {
+                elapsed_secs: 5_400,
+                cap_secs: 5_400,
+                provider_id: "zai-coding-plan".to_string(),
+                model_name: "glm-5.2".to_string(),
+            }
+        );
+    }
+
+    /// `zai/glm-5.2` worker well beyond 90 minutes also triggers.
+    #[test]
+    fn runtime_cap_well_over_threshold_triggers_for_zai_glm5() {
+        let now = t("2026-07-06T13:20:00Z");
+        // 6,300 seconds == 105 minutes.
+        let started = "2026-07-06T11:35:00Z";
+        let v = classify_runtime_cap(
+            "worker",
+            "zai/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(
+            v,
+            RuntimeCapVerdict::RuntimeCap {
+                elapsed_secs: 6_300,
+                cap_secs: 5_400,
+                provider_id: "zai".to_string(),
+                model_name: "glm-5.2".to_string(),
+            }
+        );
+    }
+
+    /// `zai-coding-plan/glm-5.2` worker just below 90 minutes is `Live`.
+    #[test]
+    fn runtime_cap_below_threshold_is_live() {
+        let now = t("2026-07-06T13:20:00Z");
+        // 5,399 seconds == 89m59s — under the cap.
+        let started = "2026-07-06T11:50:01Z";
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// `xiaomi-token-plan-sgp/mimo-v2.5-pro` is exempt even though it has
+    /// run far past the cap — only the configured `capped_models` count.
+    #[test]
+    fn runtime_cap_does_not_apply_to_other_models() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago, would trip the cap
+        let v = classify_runtime_cap(
+            "worker",
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// `glm-5.2` (without `provider/` prefix) is exempt — the classifier
+    /// must not match on a bare model name.
+    #[test]
+    fn runtime_cap_rejects_model_id_without_provider_prefix() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T11:50:00Z"; // exactly at cap
+        let v = classify_runtime_cap(
+            "worker",
+            "glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Substring matches like `zai-coding-plan-extra/glm-5.2` or
+    /// `zai/glm-5.2-extra` must not count — exact equality on both halves.
+    #[test]
+    fn runtime_cap_requires_exact_provider_and_model_equality() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T11:50:00Z"; // exactly at cap
+
+        // Wrong provider prefix.
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan-extra/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+
+        // Wrong model suffix.
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2-preview",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Reviewer sessions are exempt by design — even an hour-long
+    /// `zai-coding-plan/glm-5.2` reviewer must not trigger the cap.
+    #[test]
+    fn runtime_cap_does_not_apply_to_reviewer_role() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago
+        let v = classify_runtime_cap(
+            "reviewer",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Planner sessions are exempt by design — same rationale as reviewer.
+    #[test]
+    fn runtime_cap_does_not_apply_to_planner_role() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago
+        let v = classify_runtime_cap(
+            "planner",
+            "zai/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// `chat` sessions are exempt by design — chat is not on the cap list
+    /// and additionally is not a worker role.
+    #[test]
+    fn runtime_cap_does_not_apply_to_chat_role() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago
+        let v = classify_runtime_cap(
+            "chat",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Unparseable `started_at` fails open (same posture as
+    /// `classify_session_progress`) — the classifier must not synthesize a
+    /// cap verdict from a clock it cannot read.
+    #[test]
+    fn runtime_cap_unparseable_timestamp_is_live() {
+        let now = t("2026-07-06T13:20:00Z");
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            "garbage",
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Space-separated (SQLite-style) timestamps also parse, so a
+    /// `started_at` written that way still produces a `RuntimeCap`
+    /// verdict when the elapsed wall-clock is past the cap.
+    #[test]
+    fn runtime_cap_accepts_space_separated_timestamp() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06 11:50:00"; // exactly 5,400s ago
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(
+            v,
+            RuntimeCapVerdict::RuntimeCap {
+                elapsed_secs: 5_400,
+                cap_secs: 5_400,
+                provider_id: "zai-coding-plan".to_string(),
+                model_name: "glm-5.2".to_string(),
+            }
+        );
+    }
+
+    /// Negative elapsed (future `started_at`) is clamped to zero, so the
+    /// classifier returns `Live` — same posture as `elapsed_secs_since`.
+    #[test]
+    fn runtime_cap_negative_elapsed_clamped_to_zero() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T13:25:00Z"; // future
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            now,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// Custom config (different cap, different model set) still drives the
+    /// same verdict shape — verifies the classifier depends on the config,
+    /// not on hard-coded globals.
+    #[test]
+    fn runtime_cap_uses_provided_config_not_hardcoded() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T13:00:00Z"; // 1,200s ago, >= 600s
+        let cfg = RuntimeCapConfig {
+            worker_runtime_cap_secs: 600,
+            capped_models: vec![("acme".to_string(), "beta-1".to_string())],
+            worker_agent_type: "worker".to_string(),
+        };
+        let v = classify_runtime_cap("worker", "acme/beta-1", started, now, &cfg);
+        assert_eq!(
+            v,
+            RuntimeCapVerdict::RuntimeCap {
+                elapsed_secs: 1_200,
+                cap_secs: 600,
+                provider_id: "acme".to_string(),
+                model_name: "beta-1".to_string(),
+            }
+        );
+
+        // `glm-5.2` is no longer in the config's capped_models, so even a
+        // long-running zai-coding-plan session stays `Live`.
+        let v = classify_runtime_cap(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            "2026-07-05T13:20:00Z",
+            now,
+            &cfg,
+        );
+        assert_eq!(v, RuntimeCapVerdict::Live);
+    }
+
+    /// The runtime-cap verdict is a distinct enum from `ProgressVerdict`
+    /// (which only carries `Live` or `Wedged { .. }`). This is the
+    /// acceptance-criterion #3 invariant: follow-up wiring can branch on
+    /// `RuntimeCap` without conflating it with wedged/stale failures.
+    #[test]
+    fn runtime_cap_verdict_is_distinct_type_from_progress_verdict() {
+        // Compile-time guarantee: `RuntimeCapVerdict` and `ProgressVerdict`
+        // are different enums; this test just pins the runtime tag so a
+        // future refactor that collapses them is a deliberate decision.
+        let cap: RuntimeCapVerdict = RuntimeCapVerdict::RuntimeCap {
+            elapsed_secs: 5_500,
+            cap_secs: 5_400,
+            provider_id: "zai-coding-plan".to_string(),
+            model_name: "glm-5.2".to_string(),
+        };
+        match cap {
+            RuntimeCapVerdict::RuntimeCap { .. } => {}
+            RuntimeCapVerdict::Live => panic!("expected RuntimeCap"),
+        }
     }
 }
