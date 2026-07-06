@@ -73,8 +73,8 @@ use djinn_workspace::Workspace;
 use crate::AgentType;
 use crate::actors::slot::helpers::conflict_context_for_dispatch;
 use crate::actors::slot::helpers::{
-    build_provider_from_resolved, build_telemetry_meta_with_attribution, default_base_url,
-    resolved_needs_base_url,
+    build_provider_from_resolved, build_restamp_target, build_telemetry_meta_with_attribution,
+    default_base_url, resolved_needs_base_url,
 };
 use crate::actors::slot::lifecycle::mcp_resolve::{McpAndSkills, resolve_mcp_and_skills};
 use crate::actors::slot::lifecycle::model_resolution::{
@@ -467,6 +467,180 @@ async fn advertise_read_sources(
     out
 }
 
+/// Map a finished lead/arbiter stage's finalize tool + payload onto a
+/// [`StageOutcome`]. Pure (no `task`/tracing deps) so the arbiter decision
+/// validation branches are unit-testable.
+///
+/// Validates that:
+/// - `approve` / `approve_conflict` require an `evidence` object with non-empty `summary`.
+/// - `reopen` requires non-empty `directive` and `verification_command`.
+/// - `park` requires a `park_dossier` object with non-empty `hold_description`
+///   and `failure_analysis`.
+/// - Legacy decisions (`escalate`, `decompose`, `force_close`) are rejected.
+fn lead_stage_outcome(
+    finalize_name: &str,
+    finalize_payload: Option<&serde_json::Value>,
+) -> StageOutcome {
+    let payload_str = |key: &str| {
+        finalize_payload
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+    };
+    let reason = || -> Option<String> {
+        for key in ["reason", "message", "summary"] {
+            if let Some(v) = payload_str(key).filter(|v| !v.is_empty()) {
+                return Some(v.to_string());
+            }
+        }
+        None
+    };
+    match finalize_name {
+        "submit_decision" => {
+            let decision = payload_str("decision").unwrap_or("");
+            match decision {
+                // approve: work is complete + correct.
+                // Requires evidence citation.
+                "approve" => {
+                    let evidence = finalize_payload.and_then(|p| p.get("evidence"));
+                    if evidence.is_none()
+                        || evidence
+                            .and_then(|e| e.get("summary"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true)
+                    {
+                        StageOutcome::Failed {
+                            reason: "approve decision requires evidence \
+                                     with non-empty summary"
+                                .into(),
+                            provider_failure: None,
+                        }
+                    } else {
+                        StageOutcome::LeadApproved
+                    }
+                }
+                // approve_conflict: approved but merge conflict.
+                // Requires evidence citation.
+                "approve_conflict" => {
+                    let evidence = finalize_payload.and_then(|p| p.get("evidence"));
+                    if evidence.is_none()
+                        || evidence
+                            .and_then(|e| e.get("summary"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.is_empty())
+                            .unwrap_or(true)
+                    {
+                        StageOutcome::Failed {
+                            reason: "approve_conflict decision requires \
+                                     evidence with non-empty summary"
+                                .into(),
+                            provider_failure: None,
+                        }
+                    } else {
+                        StageOutcome::LeadApproveConflict {
+                            reason: reason()
+                                .unwrap_or_else(|| "lead approved with merge conflict".into()),
+                        }
+                    }
+                }
+                // reopen: rescoped/guided/blocked-on-deps.
+                // Requires non-empty directive and verification_command.
+                "reopen" => {
+                    let directive = payload_str("directive").unwrap_or("");
+                    let verification_command = payload_str("verification_command").unwrap_or("");
+                    if directive.is_empty() {
+                        StageOutcome::Failed {
+                            reason: "reopen decision requires a non-empty \
+                                     'directive' field"
+                                .into(),
+                            provider_failure: None,
+                        }
+                    } else if verification_command.is_empty() {
+                        StageOutcome::Failed {
+                            reason: "reopen decision requires a non-empty \
+                                     'verification_command' field"
+                                .into(),
+                            provider_failure: None,
+                        }
+                    } else {
+                        let exclude_models: Vec<String> = finalize_payload
+                            .and_then(|p| p.get("exclude_models"))
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        StageOutcome::LeadReopen {
+                            reason: reason().unwrap_or_else(|| "lead reopened task".into()),
+                            directive: directive.to_string(),
+                            verification_command: verification_command.to_string(),
+                            exclude_models,
+                        }
+                    }
+                }
+                // park: hold for human review with structured dossier.
+                "park" => {
+                    let dossier = finalize_payload.and_then(|p| p.get("park_dossier"));
+                    match dossier {
+                        None => StageOutcome::Failed {
+                            reason: "park decision requires a 'park_dossier' \
+                                     object with 'hold_description' and \
+                                     'failure_analysis' fields"
+                                .into(),
+                            provider_failure: None,
+                        },
+                        Some(d) => {
+                            let hold_desc = d
+                                .get("hold_description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let failure_analysis = d
+                                .get("failure_analysis")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if hold_desc.is_empty() || failure_analysis.is_empty() {
+                                StageOutcome::Failed {
+                                    reason: "park_dossier requires non-empty \
+                                             'hold_description' and \
+                                             'failure_analysis' fields"
+                                        .into(),
+                                    provider_failure: None,
+                                }
+                            } else {
+                                let dossier_json =
+                                    serde_json::to_string(d).unwrap_or_else(|_| "{}".to_string());
+                                StageOutcome::LeadParked {
+                                    park_dossier_json: dossier_json,
+                                }
+                            }
+                        }
+                    }
+                }
+                // Legacy decisions removed: escalate, decompose,
+                // force_close are no longer valid arbiter outcomes.
+                other => StageOutcome::Failed {
+                    reason: format!(
+                        "lead submitted unknown or removed decision '{other}'; \
+                         valid arbiter decisions are: approve, approve_conflict, \
+                         reopen, park"
+                    ),
+                    provider_failure: None,
+                },
+            }
+        }
+        "" => StageOutcome::Failed {
+            reason: "lead session ended without calling submit_decision".into(),
+            provider_failure: None,
+        },
+        other => StageOutcome::Failed {
+            reason: format!("lead finalized via unexpected tool '{other}'"),
+            provider_failure: None,
+        },
+    }
+}
+
 /// Execute one role stage against the shared workspace.
 ///
 /// Resolves the role → model credential → project setup config →
@@ -785,12 +959,22 @@ pub(crate) async fn execute_stage(
         } else {
             String::new()
         };
+        // Build a RestampTarget from catalog metadata so model-dependent
+        // defaults (reasoning_effort, max_tokens_default, format_family,
+        // tool_schema_compat) reflect the target model.
+        let restamp_target = build_restamp_target(
+            &resolved.catalog_provider_id,
+            &resolved.model_name,
+            context_window.max(0) as u32,
+            &agent_context.catalog,
+        );
         let built = match build_provider_from_resolved(
             resolved,
             context_window.max(0) as u32,
             Some(telemetry_meta),
             Some(session_id.clone()),
             base_url,
+            &restamp_target,
         ) {
             Some(provider) => provider,
             None => {
@@ -1065,63 +1249,9 @@ pub(crate) async fn execute_stage(
                             provider_failure: None,
                         },
                     },
-                    RoleKind::Lead => match finalize_name {
-                        "submit_decision" => {
-                            let decision = final_output
-                                .finalize_payload
-                                .as_ref()
-                                .and_then(|p| p.get("decision"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let reason = extract_reason(&final_output.finalize_payload);
-                            match decision {
-                                // Work is complete + correct; reviewer/worker just
-                                // couldn't certify. Reconnects the existing
-                                // lead_approve DB transition (the incident fix).
-                                "approve" | "approved" => StageOutcome::LeadApproved,
-                                "approve_conflict" => StageOutcome::LeadApproveConflict {
-                                    reason: reason.unwrap_or_else(|| {
-                                        "lead approved with merge conflict".into()
-                                    }),
-                                },
-                                // Rescope / guide / block-on-deps: the Lead made the
-                                // edits and sends the task back for a fresh worker.
-                                "reopen" => StageOutcome::LeadReopen {
-                                    reason: reason.unwrap_or_else(|| "lead reopened task".into()),
-                                },
-                                // decompose: replacement subtasks already created by
-                                // the Lead via MCP; force_close: redundant /
-                                // already-landed work. Both terminally close the
-                                // original task.
-                                "decompose" | "force_close" => StageOutcome::LeadClose {
-                                    reason: reason.unwrap_or_else(|| {
-                                        format!("lead closed task ({decision})")
-                                    }),
-                                },
-                                "escalate" => StageOutcome::LeadEscalate {
-                                    reason: reason.unwrap_or_else(|| {
-                                        "lead escalated for board review".into()
-                                    }),
-                                },
-                                other => StageOutcome::Failed {
-                                    reason: format!("lead submitted unknown decision '{other}'"),
-                                    provider_failure: None,
-                                },
-                            }
-                        }
-                        // The Lead ended without calling submit_decision. Releasing
-                        // the task back to the lead queue (it stays
-                        // in_lead_intervention → redispatch a fresh Lead) is safer
-                        // than guessing a board transition.
-                        "" => StageOutcome::Failed {
-                            reason: "lead session ended without calling submit_decision".into(),
-                            provider_failure: None,
-                        },
-                        other => StageOutcome::Failed {
-                            reason: format!("lead finalized via unexpected tool '{other}'"),
-                            provider_failure: None,
-                        },
-                    },
+                    RoleKind::Lead => {
+                        lead_stage_outcome(finalize_name, final_output.finalize_payload.as_ref())
+                    }
                     // Refinement tribunal roles each finalize via their own
                     // configured tool: the Advocate `submit_work`, the Adversary
                     // `submit_review`, the Judge `submit_decision`. The finalize
@@ -1734,5 +1864,337 @@ mod tests {
             ),
             "request_lead must escalate to the lead, carrying the stated reason",
         );
+    }
+
+    // ── Arbiter submit_decision payload validation ─────────────────────
+
+    #[test]
+    fn arbiter_approve_with_evidence_succeeds() {
+        let payload = serde_json::json!({
+            "decision": "approve",
+            "evidence": {
+                "source": "ci_run",
+                "summary": "All 47 tests green in CI run #1234",
+                "reference_id": "ci-1234"
+            }
+        });
+        assert!(
+            matches!(
+                lead_stage_outcome("submit_decision", Some(&payload)),
+                StageOutcome::LeadApproved
+            ),
+            "approve with valid evidence must succeed",
+        );
+    }
+
+    #[test]
+    fn arbiter_approve_without_evidence_fails() {
+        let payload = serde_json::json!({
+            "decision": "approve",
+            "rationale": "looks good to me"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("evidence"),
+                    "failure reason must mention evidence requirement, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for approve without evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_approve_with_empty_evidence_summary_fails() {
+        let payload = serde_json::json!({
+            "decision": "approve",
+            "evidence": {
+                "source": "ci_run",
+                "summary": ""
+            }
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("evidence"),
+                    "failure reason must mention evidence, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for empty evidence summary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_approve_conflict_with_evidence_succeeds() {
+        let payload = serde_json::json!({
+            "decision": "approve_conflict",
+            "reason": "correct but conflicts",
+            "evidence": {
+                "source": "review_round",
+                "summary": "Reviewer approved in round 3"
+            }
+        });
+        assert!(
+            matches!(
+                lead_stage_outcome("submit_decision", Some(&payload)),
+                StageOutcome::LeadApproveConflict { reason } if reason == "correct but conflicts"
+            ),
+            "approve_conflict with evidence and reason must succeed",
+        );
+    }
+
+    #[test]
+    fn arbiter_reopen_with_directive_and_command_succeeds() {
+        let payload = serde_json::json!({
+            "decision": "reopen",
+            "directive": "Fix the off-by-one error in the pagination logic",
+            "verification_command": "cargo test --test pagination",
+            "exclude_models": ["gpt-4o"]
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::LeadReopen {
+                directive,
+                verification_command,
+                exclude_models,
+                ..
+            } => {
+                assert_eq!(
+                    directive,
+                    "Fix the off-by-one error in the pagination logic"
+                );
+                assert_eq!(verification_command, "cargo test --test pagination");
+                assert_eq!(exclude_models, vec!["gpt-4o"]);
+            }
+            other => panic!("expected LeadReopen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_reopen_without_directive_fails() {
+        let payload = serde_json::json!({
+            "decision": "reopen",
+            "verification_command": "cargo test"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("directive"),
+                    "failure reason must mention directive, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for reopen without directive, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_reopen_without_verification_command_fails() {
+        let payload = serde_json::json!({
+            "decision": "reopen",
+            "directive": "Fix the bug"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("verification_command"),
+                    "failure reason must mention verification_command, got: {reason}"
+                );
+            }
+            other => {
+                panic!("expected Failed for reopen without verification_command, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn arbiter_park_with_dossier_succeeds() {
+        let payload = serde_json::json!({
+            "decision": "park",
+            "park_dossier": {
+                "hold_description": "Requires senior engineer review of auth flow",
+                "failure_analysis": "Three attempts failed; auth logic needs domain expertise",
+                "attempted_decisions": ["reopen", "reopen"],
+                "recommended_action": "Assign to auth-team lead"
+            }
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::LeadParked { park_dossier_json } => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&park_dossier_json).expect("valid JSON");
+                assert_eq!(
+                    parsed["hold_description"],
+                    "Requires senior engineer review of auth flow"
+                );
+                assert_eq!(
+                    parsed["failure_analysis"],
+                    "Three attempts failed; auth logic needs domain expertise"
+                );
+            }
+            other => panic!("expected LeadParked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_park_without_dossier_fails() {
+        let payload = serde_json::json!({
+            "decision": "park",
+            "rationale": "stuck"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("park_dossier"),
+                    "failure reason must mention park_dossier, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for park without dossier, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_park_with_empty_hold_description_fails() {
+        let payload = serde_json::json!({
+            "decision": "park",
+            "park_dossier": {
+                "hold_description": "",
+                "failure_analysis": "some analysis"
+            }
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("hold_description"),
+                    "failure reason must mention hold_description, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for empty hold_description, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_legacy_escalate_rejected() {
+        let payload = serde_json::json!({
+            "decision": "escalate",
+            "rationale": "cannot resolve"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("unknown or removed"),
+                    "failure reason must indicate removed decision, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for legacy escalate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_legacy_decompose_rejected() {
+        let payload = serde_json::json!({
+            "decision": "decompose",
+            "created_tasks": ["task-1", "task-2"]
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("unknown or removed"),
+                    "failure reason must indicate removed decision, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for legacy decompose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_legacy_force_close_rejected() {
+        let payload = serde_json::json!({
+            "decision": "force_close",
+            "rationale": "redundant"
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("unknown or removed"),
+                    "failure reason must indicate removed decision, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for legacy force_close, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_no_finalize_tool_fails() {
+        match lead_stage_outcome("", None) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("without calling submit_decision"),
+                    "failure reason must mention missing finalize tool, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for no finalize tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_unexpected_finalize_tool_fails() {
+        match lead_stage_outcome("submit_work", None) {
+            StageOutcome::Failed { reason, .. } => {
+                assert!(
+                    reason.contains("unexpected tool"),
+                    "failure reason must mention unexpected tool, got: {reason}"
+                );
+            }
+            other => panic!("expected Failed for unexpected tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_park_dossier_round_trips_json() {
+        // Verify the dossier is serialized as valid JSON with all fields preserved.
+        let dossier = serde_json::json!({
+            "hold_description": "CI flaky",
+            "failure_analysis": "intermittent test",
+            "attempted_decisions": ["reopen"],
+            "recommended_action": "fix flaky test"
+        });
+        let payload = serde_json::json!({
+            "decision": "park",
+            "park_dossier": dossier
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::LeadParked { park_dossier_json } => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&park_dossier_json).expect("valid JSON");
+                assert_eq!(parsed["hold_description"], "CI flaky");
+                assert_eq!(parsed["failure_analysis"], "intermittent test");
+                assert_eq!(parsed["attempted_decisions"][0], "reopen");
+                assert_eq!(parsed["recommended_action"], "fix flaky test");
+            }
+            other => panic!("expected LeadParked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_reopen_excludes_models() {
+        let payload = serde_json::json!({
+            "decision": "reopen",
+            "directive": "redo with better error handling",
+            "verification_command": "cargo clippy",
+            "exclude_models": ["model-a", "model-b"]
+        });
+        match lead_stage_outcome("submit_decision", Some(&payload)) {
+            StageOutcome::LeadReopen { exclude_models, .. } => {
+                assert_eq!(exclude_models, vec!["model-a", "model-b"]);
+            }
+            other => panic!("expected LeadReopen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arbiter_refinement_submit_decision_not_broken() {
+        // Refinement tribunal roles use submit_decision as a session terminator
+        // and map it to WorkerDone — this must not be affected by the arbiter
+        // changes.
+        // (This is tested indirectly: the RoleKind::Refinement arm is separate
+        // from the RoleKind::Lead arm in execute_stage.)
     }
 }

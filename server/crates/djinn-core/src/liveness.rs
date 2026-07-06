@@ -255,6 +255,107 @@ pub fn classify_runtime_cap(
     }
 }
 
+/// Describes why a live session should be interrupted by reconcile /
+/// observation code. Carries enough context for the wiring layer to log
+/// a reason that distinguishes infrastructure/runtime-policy events from
+/// task-quality failures.
+///
+/// Returned by [`classify_session_interruption`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionInterruptReason {
+    /// The slot is alive but the LLM has stopped producing progress (see
+    /// [`classify_session_progress`]).  This is an ordinary wedged/stale
+    /// failure.
+    Wedged { idle_secs: i64, zero_tokens: bool },
+    /// The session is on a capped model/role and has exceeded the
+    /// wall-clock runtime cap (see [`classify_runtime_cap`]).  This is
+    /// an infrastructure / runtime-policy reroute — **not** a task-quality
+    /// strike.
+    RuntimeCap {
+        elapsed_secs: i64,
+        cap_secs: i64,
+        provider_id: String,
+        model_name: String,
+    },
+}
+
+impl SessionInterruptReason {
+    /// Human-readable label used in tracing / log messages.  The
+    /// `RuntimeCap` variant intentionally includes "not a task-quality
+    /// strike" so downstream log searchers can filter on it.
+    pub fn log_label(&self) -> &'static str {
+        match self {
+            Self::Wedged { .. } => "wedged session",
+            Self::RuntimeCap { .. } => "glm-5.2 runtime-cap (not a task-quality strike)",
+        }
+    }
+}
+
+/// Combined classifier: decide whether a running session should be
+/// interrupted, and if so, why.
+///
+/// This is the single call-site helper consumed by `session_active` and
+/// `board_reconcile` so both paths use the same decision logic.  It runs
+/// the wedged / stale liveness check first; if that returns `Live`, it
+/// falls through to the runtime-cap check.  A `RuntimeCap` verdict takes
+/// priority only when the session is not already wedged — if the session
+/// is both wedged *and* over the runtime cap, `Wedged` wins because the
+/// wedged condition is the more specific / urgent signal.
+///
+/// Returns `None` when the session is live under both classifiers (no
+/// interruption needed).
+#[allow(clippy::too_many_arguments)]
+pub fn classify_session_interruption(
+    agent_type: &str,
+    model_id: &str,
+    started_at: &str,
+    last_message_at: Option<&str>,
+    tokens_in: i64,
+    tokens_out: i64,
+    now: OffsetDateTime,
+    liveness_config: &LivenessConfig,
+    runtime_cap_config: &RuntimeCapConfig,
+) -> Option<SessionInterruptReason> {
+    // 1. Wedged / stale check (existing behavior).
+    let progress = classify_session_progress(
+        started_at,
+        last_message_at,
+        tokens_in,
+        tokens_out,
+        now,
+        liveness_config,
+    );
+    if let ProgressVerdict::Wedged {
+        idle_secs,
+        zero_tokens,
+    } = progress
+    {
+        return Some(SessionInterruptReason::Wedged {
+            idle_secs,
+            zero_tokens,
+        });
+    }
+
+    // 2. Runtime-cap check (epic 5wxi — glm-5.2 worker cap).
+    let cap = classify_runtime_cap(agent_type, model_id, started_at, now, runtime_cap_config);
+    if let RuntimeCapVerdict::RuntimeCap {
+        elapsed_secs,
+        cap_secs,
+        provider_id,
+        model_name,
+    } = cap
+    {
+        return Some(SessionInterruptReason::RuntimeCap {
+            elapsed_secs,
+            cap_secs,
+            provider_id,
+            model_name,
+        });
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +805,178 @@ mod tests {
         match cap {
             RuntimeCapVerdict::RuntimeCap { .. } => {}
             RuntimeCapVerdict::Live => panic!("expected RuntimeCap"),
+        }
+    }
+
+    // ── Combined interruption classifier tests (wiring seam) ────────
+    //
+    // These tests pin the behaviour of `classify_session_interruption`,
+    // which is the single decision helper consumed by `session_active`
+    // and `board_reconcile`.  Each test exercises one wiring-seam
+    // scenario:
+    //
+    // 1. Over-cap glm-5.2 worker → `RuntimeCap` reason
+    // 2. Below-cap glm-5.2 worker → no interruption
+    // 3. Non-worker role on glm-5.2 → no interruption
+    // 4. Worker on non-glm-5.2 model → no interruption
+    // 5. Wedged session (any model) → `Wedged` reason
+    // 6. Wedged + over-cap → `Wedged` wins (more specific)
+
+    /// Over-cap glm-5.2 worker session produces a `RuntimeCap` reason.
+    /// A recent `last_message_at` keeps the session out of the wedged
+    /// path so only the runtime-cap check fires.
+    #[test]
+    fn interruption_over_cap_glm5_worker() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T11:50:00Z"; // 5,400s == 90min
+        let last_msg = "2026-07-06T13:19:00Z"; // 60s ago — not wedged
+        let r = classify_session_interruption(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            Some(last_msg),
+            500,
+            200,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        match r.unwrap() {
+            SessionInterruptReason::RuntimeCap {
+                elapsed_secs,
+                cap_secs,
+                provider_id,
+                model_name,
+            } => {
+                assert_eq!(elapsed_secs, 5_400);
+                assert_eq!(cap_secs, 5_400);
+                assert_eq!(provider_id, "zai-coding-plan");
+                assert_eq!(model_name, "glm-5.2");
+            }
+            other => panic!("expected RuntimeCap, got {:?}", other),
+        }
+    }
+
+    /// Below-cap glm-5.2 worker session produces no interruption.
+    #[test]
+    fn interruption_below_cap_glm5_worker_is_none() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T11:50:01Z"; // 5,399s — under cap
+        let last_msg = "2026-07-06T13:19:00Z"; // 60s ago — not wedged
+        let r = classify_session_interruption(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            Some(last_msg),
+            500,
+            200,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert!(r.is_none(), "below-cap worker should be None, got {:?}", r);
+    }
+
+    /// Reviewer role on glm-5.2 — even at 24h — produces no interruption.
+    #[test]
+    fn interruption_non_worker_role_on_glm5_is_none() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago
+        let last_msg = "2026-07-06T13:19:00Z"; // 60s ago — not wedged
+        let r = classify_session_interruption(
+            "reviewer",
+            "zai-coding-plan/glm-5.2",
+            started,
+            Some(last_msg),
+            500,
+            200,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert!(
+            r.is_none(),
+            "reviewer should not be interrupted, got {:?}",
+            r
+        );
+    }
+
+    /// Worker on a non-glm-5.2 model — even at 24h — produces no
+    /// interruption from the runtime-cap path.
+    #[test]
+    fn interruption_worker_on_other_model_is_none() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-05T13:20:00Z"; // 24h ago
+        let last_msg = "2026-07-06T13:19:00Z"; // 60s ago — not wedged
+        let r = classify_session_interruption(
+            "worker",
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            started,
+            Some(last_msg),
+            500,
+            200,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        assert!(
+            r.is_none(),
+            "non-glm-5.2 worker should not be interrupted, got {:?}",
+            r
+        );
+    }
+
+    /// Wedged session (zero tokens, past threshold) produces `Wedged`
+    /// regardless of runtime-cap status.
+    #[test]
+    fn interruption_wedged_session_produces_wedged_reason() {
+        let now = t("2026-07-06T13:20:00Z");
+        let started = "2026-07-06T13:17:00Z"; // 180s == zero-token threshold
+        let r = classify_session_interruption(
+            "worker",
+            "xiaomi-token-plan-sgp/mimo-v2.5-pro",
+            started,
+            None,
+            0,
+            0,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        match r.unwrap() {
+            SessionInterruptReason::Wedged {
+                idle_secs,
+                zero_tokens,
+            } => {
+                assert_eq!(idle_secs, 180);
+                assert!(zero_tokens);
+            }
+            other => panic!("expected Wedged, got {:?}", other),
+        }
+    }
+
+    /// When a session is BOTH wedged and over the runtime cap, `Wedged`
+    /// wins (it's the more specific / urgent signal).
+    #[test]
+    fn interruption_wedged_wins_over_runtime_cap() {
+        let now = t("2026-07-06T13:20:00Z");
+        // Zero tokens, 91 minutes — both wedged (zero-token threshold
+        // = 180s) and over the runtime cap (5,400s).
+        let started = "2026-07-06T11:49:00Z"; // 5,460s ago
+        let r = classify_session_interruption(
+            "worker",
+            "zai-coding-plan/glm-5.2",
+            started,
+            None,
+            0,
+            0,
+            now,
+            &LivenessConfig::OBSERVATION,
+            &RuntimeCapConfig::default_config(),
+        );
+        match r.unwrap() {
+            SessionInterruptReason::Wedged { .. } => {} // expected
+            other => panic!("expected Wedged to win over RuntimeCap, got {:?}", other),
         }
     }
 }
