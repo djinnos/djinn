@@ -13,7 +13,12 @@ use super::{
     pr_transition_increments_reopen_count, record_auto_merge_decision_metrics,
     record_pr_transition_reopen_metric, should_auto_resolve_conversations,
 };
+use djinn_core::events::EventBus;
 use djinn_core::models::TransitionAction;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
+use djinn_db::{
+    CreateTaskAttemptParams, Database, EpicRepository, TaskAttemptRepository, TaskRepository,
+};
 use djinn_provider::github_api::{
     ActionsJob, ActionsJobStep, CheckRun, DequeueEvent, GitHubApiError, GitHubUser, PrReview,
     ReproductionJob, ReproductionSetupStep, ReproductionStep, RequiredCheckReproductionContext,
@@ -21,6 +26,185 @@ use djinn_provider::github_api::{
 };
 use reqwest::StatusCode;
 use std::collections::HashMap;
+
+// ── PR-owned attempt terminalization outcomes ─────────────────────────────
+
+fn pr_attempt_test_db() -> Database {
+    Database::open_in_memory().unwrap()
+}
+
+async fn pr_attempt_test_task(db: &Database) -> djinn_core::models::Task {
+    let event_bus = EventBus::noop();
+    let epic_repo = EpicRepository::new(db.clone(), event_bus.clone());
+    let epic = epic_repo
+        .create("PR poller attempt epic", "", "", "", "", None)
+        .await
+        .unwrap();
+    let task_repo = TaskRepository::new(db.clone(), event_bus);
+    let task = task_repo
+        .create(
+            &epic.id,
+            "PR poller attempt task",
+            "",
+            "",
+            "task",
+            0,
+            "",
+            Some("pr_review"),
+        )
+        .await
+        .unwrap();
+    task_repo
+        .set_pr_url(&task.id, "https://github.com/acme/repo/pull/42")
+        .await
+        .unwrap()
+}
+
+async fn create_worker_attempt(repo: &TaskAttemptRepository, task_id: &str, key: &str) -> String {
+    let attempt_id = uuid::Uuid::now_v7().to_string();
+    repo.create_or_get_pending(CreateTaskAttemptParams {
+        id: &attempt_id,
+        task_id,
+        role: "worker",
+        dispatch_key: key,
+        session_id: None,
+        attempt_seq: None,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr_merge_terminalization_records_completed_context() {
+    let db = pr_attempt_test_db();
+    let task = pr_attempt_test_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = create_worker_attempt(&repo, &task.id, "pr-merge-terminal").await;
+
+    crate::dispatch::attempt_lifecycle::advance_latest_to_terminal(
+        &db,
+        crate::dispatch::attempt_lifecycle::TerminalAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: task.pr_url.as_deref(),
+            submit_ref: Some("refs/heads/task/abcd"),
+            checkpoint_ref: Some("checkpoint:abcd"),
+            mirror_head_sha: Some("mirror-sha"),
+            github_head_sha: Some("github-sha"),
+            summary: Some("PR merged and task completed"),
+            summary_json: Some(r#"{"source":"pr_poller","reason":"merged","pr_url":"https://github.com/acme/repo/pull/42"}"#),
+            log_tail: None,
+        },
+    )
+    .await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "completed");
+    assert_eq!(attempt.pr_url.as_deref(), task.pr_url.as_deref());
+    assert_eq!(attempt.github_head_sha.as_deref(), Some("github-sha"));
+    assert_eq!(attempt.mirror_head_sha.as_deref(), Some("mirror-sha"));
+    assert_eq!(attempt.submit_ref.as_deref(), Some("refs/heads/task/abcd"));
+    assert_eq!(attempt.checkpoint_ref.as_deref(), Some("checkpoint:abcd"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pr_reopen_terminalization_records_structured_reason_context() {
+    let db = pr_attempt_test_db();
+    let task = pr_attempt_test_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = create_worker_attempt(&repo, &task.id, "pr-reopen-terminal").await;
+
+    crate::dispatch::attempt_lifecycle::advance_latest_to_terminal(
+        &db,
+        crate::dispatch::attempt_lifecycle::TerminalAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            outcome: TaskAttemptOutcome::Reopened,
+            pr_url: task.pr_url.as_deref(),
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: Some("failing-sha"),
+            summary: Some("CI checks failed on PR"),
+            summary_json: Some(r#"{"source":"pr_poller","reason":"ci_failed","pr_url":"https://github.com/acme/repo/pull/42","github_head_sha":"failing-sha"}"#),
+            log_tail: None,
+        },
+    )
+    .await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "reopened");
+    assert_eq!(attempt.pr_url.as_deref(), task.pr_url.as_deref());
+    assert_eq!(attempt.github_head_sha.as_deref(), Some("failing-sha"));
+    let summary_json: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(summary_json["reason"], "ci_failed");
+    assert_eq!(
+        summary_json["pr_url"],
+        "https://github.com/acme/repo/pull/42"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_or_late_pr_terminalization_preserves_first_terminal_outcome() {
+    let db = pr_attempt_test_db();
+    let task = pr_attempt_test_task(&db).await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt_id = create_worker_attempt(&repo, &task.id, "pr-duplicate-terminal").await;
+
+    crate::dispatch::attempt_lifecycle::advance_latest_to_terminal(
+        &db,
+        crate::dispatch::attempt_lifecycle::TerminalAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            outcome: TaskAttemptOutcome::Reopened,
+            pr_url: task.pr_url.as_deref(),
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: Some("original-sha"),
+            summary: Some("Reviewer requested changes on PR"),
+            summary_json: Some(r#"{"source":"pr_poller","reason":"changes_requested"}"#),
+            log_tail: None,
+        },
+    )
+    .await;
+
+    crate::dispatch::attempt_lifecycle::advance_latest_to_terminal(
+        &db,
+        crate::dispatch::attempt_lifecycle::TerminalAdvancementParams {
+            task_id: &task.id,
+            role: "worker",
+            outcome: TaskAttemptOutcome::Completed,
+            pr_url: Some("https://github.com/acme/repo/pull/99"),
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: Some("late-sha"),
+            summary: Some("late merge"),
+            summary_json: Some(r#"{"source":"pr_poller","reason":"merged"}"#),
+            log_tail: None,
+        },
+    )
+    .await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(attempt.outcome, "reopened");
+    assert_eq!(attempt.github_head_sha.as_deref(), Some("original-sha"));
+    assert_eq!(
+        attempt.summary.as_deref(),
+        Some("Reviewer requested changes on PR")
+    );
+    assert_eq!(
+        repo.latest_pending_or_submitted(&task.id, Some("worker"))
+            .await
+            .unwrap()
+            .map(|a| a.id),
+        None
+    );
+}
 
 // ── Offloaded clean-merge fast-path guard ─────────────────────────────────
 
