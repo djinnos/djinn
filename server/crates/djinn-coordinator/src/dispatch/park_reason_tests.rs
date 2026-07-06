@@ -277,3 +277,153 @@ fn submitted_terminal_failure_parks_with_reopen_class() {
         "rejected submission must not be pending review"
     );
 }
+
+// ── Model-rotation exclusion regression tests ───────────────────────────────
+// These prove that `rotation_excluded_models()` derives exclusions from the
+// attempt-backed `PostInterventionHistory` and correctly separates real model
+// IDs from outcome-string fallbacks.
+
+#[test]
+fn rotation_excluded_models_from_two_distinct_post_floor_models() {
+    // AC: Post-intervention forced model-rotation exclusions are derived from
+    // attempt-backed history/query results. Two distinct pre-submission
+    // terminal models (model IDs resolved from session lookup) are excluded.
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec![
+            "provider-a/model-x".to_string(),
+            "provider-b/model-y".to_string(),
+        ],
+        non_attempt_session_labels: vec![
+            "attempt a1b2c3d4 (provider-a/model-x)".to_string(),
+            "attempt e5f6g7h8 (provider-b/model-y)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let excluded = history.rotation_excluded_models();
+
+    assert_eq!(
+        excluded.len(),
+        2,
+        "two distinct post-floor models must both be excluded; got: {excluded:?}"
+    );
+    assert!(
+        excluded.contains(&"provider-a/model-x".to_string()),
+        "exclusions must include provider-a/model-x"
+    );
+    assert!(
+        excluded.contains(&"provider-b/model-y".to_string()),
+        "exclusions must include provider-b/model-y"
+    );
+}
+
+#[test]
+fn rotation_excluded_models_excludes_in_flight_submitted_attempt() {
+    // AC: `pending`/`submitted` in-flight rows do not exclude their model as a
+    // failure. `non_attempt_models` is empty when only in-flight attempts exist
+    // (the post_intervention_history builder skips non-terminal rows), so
+    // rotation_excluded_models() returns nothing.
+    let history = PostInterventionHistory {
+        any_submitted: true,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        submission_pending_review: true,
+        latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let excluded = history.rotation_excluded_models();
+
+    assert!(
+        excluded.is_empty(),
+        "in-flight submitted attempt must not produce rotation exclusions; got: {excluded:?}"
+    );
+}
+
+#[test]
+fn rotation_excluded_models_skips_outcome_string_fallbacks() {
+    // AC: When session model lookup fails and non_attempt_models contains
+    // outcome strings (not model IDs), rotation_excluded_models() returns
+    // empty — no real model IDs to exclude.
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec!["crashed".to_string(), "timed_out".to_string()],
+        non_attempt_session_labels: vec![
+            "attempt a1b2c3d4 (crashed)".to_string(),
+            "attempt e5f6g7h8 (timed_out)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let excluded = history.rotation_excluded_models();
+
+    assert!(
+        excluded.is_empty(),
+        "outcome strings without '/' must not be treated as model IDs; got: {excluded:?}"
+    );
+}
+
+#[test]
+fn rotation_excluded_models_separates_model_ids_from_outcome_fallbacks() {
+    // AC: Mixed list — one session-resolved model ID and one outcome-string
+    // fallback. Only the model ID is excluded from rotation.
+    let history = PostInterventionHistory {
+        any_submitted: false,
+        non_attempt_models: vec!["provider-a/model-x".to_string(), "spawn_failed".to_string()],
+        non_attempt_session_labels: vec![
+            "attempt a1b2c3d4 (provider-a/model-x)".to_string(),
+            "attempt e5f6g7h8 (spawn_failed)".to_string(),
+        ],
+        submission_pending_review: false,
+        latest_submission_at: None,
+        most_recent_reopen_class: ReopenClass::Other,
+    };
+
+    let excluded = history.rotation_excluded_models();
+
+    assert_eq!(
+        excluded,
+        vec!["provider-a/model-x".to_string()],
+        "only actual model IDs must be excluded; got: {excluded:?}"
+    );
+    // The raw non_attempt_models still contains both (for park reason and audit).
+    assert_eq!(
+        history.non_attempt_models.len(),
+        2,
+        "non_attempt_models must retain all labels for audit; got: {:?}",
+        history.non_attempt_models
+    );
+}
+
+#[test]
+fn submitted_terminal_failure_uses_quality_strike_api_not_inline_rotation() {
+    // AC: Submitted terminal failures continue to use shipped quality-strike/
+    // rotation decision APIs rather than being reclassified by new inline math.
+    // When any_submitted=true, rotation_excluded_models() returns empty (no
+    // pre-submission terminal evidence) — the rotation decision is deferred to
+    // the quality-strike park gate, not the inline rotation exclusion block.
+    let history = PostInterventionHistory {
+        any_submitted: true,
+        non_attempt_models: vec![],
+        non_attempt_session_labels: vec![],
+        submission_pending_review: false,
+        latest_submission_at: Some("2026-07-04T21:48:44Z".to_string()),
+        most_recent_reopen_class: ReopenClass::ReviewRejected,
+    };
+
+    let excluded = history.rotation_excluded_models();
+
+    assert!(
+        excluded.is_empty(),
+        "submitted terminal failure must not produce inline rotation exclusions; got: {excluded:?}"
+    );
+    assert!(
+        history.any_submitted,
+        "submitted terminal failure must set any_submitted=true for the quality-strike park gate"
+    );
+}

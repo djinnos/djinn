@@ -13,19 +13,22 @@ use djinn_db::repositories::task_arbitration::{
 use djinn_db::repositories::task_attempt::TaskAttemptRepository;
 
 /// uv3p Part B: what the fleet actually did after the current intervention (or
-/// after a human released a prior hold), derived from durable sessions +
-/// activity. Drives the attempted-remediation park gate, the forced model
-/// rotation at dispatch, and the truthful park reason.
+/// after a human released a prior hold), derived from `task_attempts` rows.
+/// Drives the attempted-remediation park gate, the forced model rotation at
+/// dispatch (via [`rotation_excluded_models`](PostInterventionHistory::rotation_excluded_models)),
+/// and the truthful park reason.
 #[derive(Debug, Default)]
 pub(crate) struct PostInterventionHistory {
     /// At least one post-intervention session reached `submit_work` (logged a
     /// `work_submitted` activity after the evidence floor). When true the
     /// remediation was genuinely attempted, so a park is legitimate.
     pub any_submitted: bool,
-    /// Distinct models of post-intervention worker sessions that terminated
+    /// Distinct model labels of post-intervention worker sessions that terminated
     /// pre-submission, in first-seen (chronological) order. Empty when a submit
-    /// occurred. Excluded from the redispatch model list (forced rotation) and
-    /// counted against [`NON_ATTEMPT_PARK_THRESHOLD`].
+    /// occurred. Contains model IDs when session lookup succeeds, or outcome
+    /// strings as a fallback. Counted against [`NON_ATTEMPT_PARK_THRESHOLD`].
+    /// For model-rotation exclusions, use [`rotation_excluded_models()`](PostInterventionHistory::rotation_excluded_models)
+    /// which filters to actual model IDs only.
     pub non_attempt_models: Vec<String>,
     /// `sess <id8> (model)` labels for the truthful park reason.
     pub non_attempt_session_labels: Vec<String>,
@@ -42,6 +45,29 @@ pub(crate) struct PostInterventionHistory {
     /// Class of the most recent reopen after the evidence floor. Determines the
     /// truthful park-reason attribution (merge_queue_failed vs review_rejected).
     pub most_recent_reopen_class: ReopenClass,
+}
+
+impl PostInterventionHistory {
+    /// Model IDs to exclude from post-intervention forced model rotation.
+    ///
+    /// Filters [`non_attempt_models`] to return only actual `provider/model`
+    /// identifiers (those containing `/`), skipping fallback outcome strings
+    /// (e.g. "crashed", "timed_out") that appear when the session model lookup
+    /// fails and the model ID cannot be resolved from the linked session.
+    ///
+    /// Use this method — not `non_attempt_models` directly — for dispatch
+    /// rotation filtering and arbiter `excluded_models` so the rotation
+    /// decision operates on real model IDs rather than attempt outcome labels.
+    /// Pending/in-flight attempts are already excluded from `non_attempt_models`
+    /// by [`CoordinatorActor::post_intervention_history`], so their models are
+    /// never present here.
+    pub(crate) fn rotation_excluded_models(&self) -> Vec<String> {
+        self.non_attempt_models
+            .iter()
+            .filter(|m| m.contains('/'))
+            .cloned()
+            .collect()
+    }
 }
 
 /// Which kind of remediation task to create for a stuck source task.
@@ -735,7 +761,9 @@ impl CoordinatorActor {
             }
             // Pre-submission terminal: count toward non-attempt evidence.
             // Resolve the model_id from the linked session when available,
-            // falling back to the attempt outcome for model-rotation exclusion.
+            // falling back to the attempt outcome for park-reason display.
+            // `rotation_excluded_models()` filters this list to actual model
+            // IDs so the dispatch rotation block only excludes real models.
             let model_label = attempt
                 .session_id
                 .as_deref()
@@ -1077,7 +1105,7 @@ impl CoordinatorActor {
             };
 
             let failing_ci_job_ids = self.parse_failing_ci_job_ids(ci_failure_sections);
-            let excluded_models = serde_json::json!(history.non_attempt_models);
+            let excluded_models = serde_json::json!(history.rotation_excluded_models());
             let dossier = serde_json::json!({
                 "reason": reason,
                 "role": role,
