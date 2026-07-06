@@ -368,6 +368,14 @@ pub struct TaskAttemptPromptSummary {
     pub submit_ref: Option<String>,
     /// PR URL, if the attempt resulted in a PR.
     pub pr_url: Option<String>,
+    /// Guard decision that prevented dispatch, if the attempt was deferred.
+    pub guard_decision: Option<String>,
+    /// Guard reason category, if the attempt was deferred.
+    pub guard_reason: Option<String>,
+    /// Checkpoint ref/SHA for resumable attempts.
+    pub checkpoint_ref: Option<String>,
+    /// Arbitrary JSON summary payload (e.g. `failure_class`, `last_verify`).
+    pub summary_json: Option<String>,
 }
 
 /// Arbiter / ledger-facing history row for a single attempt.
@@ -612,6 +620,10 @@ mod tests {
             terminal_at: Some("2026-01-01T01:00:00.000Z".to_string()),
             submit_ref: Some("abc".to_string()),
             pr_url: Some("https://example.com/pr/1".to_string()),
+            guard_decision: None,
+            guard_reason: None,
+            checkpoint_ref: Some("def456".to_string()),
+            summary_json: Some(r#"{"failure_class":"compile_error"}"#.to_string()),
         };
         let serialized = serde_json::to_string(&summary).unwrap();
         let deserialized: TaskAttemptPromptSummary = serde_json::from_str(&serialized).unwrap();

@@ -258,6 +258,169 @@ pub fn format_reopen_ledger(entries: &[ReopenLedgerEntry]) -> Option<String> {
     Some(truncate_feedback(&raw, LEDGER_BUDGET_CHARS))
 }
 
+/// Character budget for the formatted attempt-history section.
+///
+/// Sized so the attempt context fits within the combined brief budget and
+/// does not dominate the feedback block.
+pub const ATTEMPT_HISTORY_BUDGET_CHARS: usize = 3000;
+
+/// Format prior attempt history and completed dependency-parent summaries
+/// as an extension of the existing feedback/activity narrative.
+///
+/// Returns `None` when both `prior_attempts` and `completed_parents` are
+/// empty, so callers can skip the section entirely.
+pub fn format_attempt_history(
+    prior_attempts: &[djinn_core::models::task_attempt::TaskAttemptPromptSummary],
+    completed_parents: &[djinn_db::CompletedParentSummary],
+) -> Option<String> {
+    if prior_attempts.is_empty() && completed_parents.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("**Prior attempts (newest first):**".to_string());
+    for attempt in prior_attempts {
+        lines.push(format_single_attempt(attempt));
+    }
+    if !completed_parents.is_empty() {
+        lines.push(String::new());
+        lines.push("**Completed dependency parents:**".to_string());
+        for parent in completed_parents {
+            lines.push(format_completed_parent(parent));
+        }
+    }
+    let raw = lines.join("\n");
+    Some(truncate_feedback(&raw, ATTEMPT_HISTORY_BUDGET_CHARS))
+}
+
+/// Format a single prior attempt entry for prompt context.
+fn format_single_attempt(a: &djinn_core::models::task_attempt::TaskAttemptPromptSummary) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "- Attempt #{} ({}): {}",
+        a.attempt_seq, a.role, a.outcome
+    ));
+
+    // Guard decision/reason (present for deferred attempts).
+    if let Some(decision) = &a.guard_decision
+        && !decision.is_empty()
+    {
+        let reason = a
+            .guard_reason
+            .as_deref()
+            .filter(|r| !r.is_empty())
+            .unwrap_or("—");
+        parts.push(format!("  guard: {decision} ({reason})"));
+    }
+
+    // Timestamps.
+    parts.push(format!("  created: {}", a.created_at));
+    if let Some(terminal) = &a.terminal_at {
+        parts.push(format!("  terminal: {terminal}"));
+    }
+
+    // Summary or deterministic fallback.
+    let summary_text = match &a.summary {
+        Some(s) if !s.is_empty() => s.clone(),
+        _ => attempt_fallback_for_outcome(&a.outcome),
+    };
+    parts.push(format!("  summary: {summary_text}"));
+
+    // Selected summary_json fields.
+    if let Some(json_str) = &a.summary_json
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str)
+    {
+        if let Some(fc) = json.get("failure_class").and_then(|v| v.as_str()) {
+            parts.push(format!("  failure_class: {fc}"));
+        }
+        if let Some(lv) = json.get("last_verify").and_then(|v| v.as_str()) {
+            parts.push(format!("  last_verify: {lv}"));
+        }
+    }
+
+    // Checkpoint/submit/PR refs.
+    if let Some(cr) = &a.checkpoint_ref
+        && !cr.is_empty()
+    {
+        parts.push(format!("  checkpoint: `{cr}`"));
+    }
+    if let Some(sr) = &a.submit_ref
+        && !sr.is_empty()
+    {
+        parts.push(format!("  submit_ref: `{sr}`"));
+    }
+    if let Some(pr) = &a.pr_url
+        && !pr.is_empty()
+    {
+        parts.push(format!("  PR: {pr}"));
+    }
+
+    parts.join("\n")
+}
+
+/// Format a completed dependency-parent entry for prompt context.
+fn format_completed_parent(parent: &djinn_db::CompletedParentSummary) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "- Parent {} ({}): closed {}",
+        parent.short_id, parent.title, parent.terminal_at
+    ));
+    if let Some(attempt) = &parent.latest_completed_attempt {
+        let summary_text = match &attempt.summary {
+            Some(s) if !s.is_empty() => s.as_str(),
+            _ => "completed (no summary available)",
+        };
+        parts.push(format!(
+            "  latest completed attempt #{attempt_seq}: {summary_text}",
+            attempt_seq = attempt.attempt_seq
+        ));
+        if let Some(sr) = &attempt.submit_ref
+            && !sr.is_empty()
+        {
+            parts.push(format!("  submit_ref: `{sr}`"));
+        }
+        if let Some(pr) = &attempt.pr_url
+            && !pr.is_empty()
+        {
+            parts.push(format!("  PR: {pr}"));
+        }
+        // Summary_json fields for parent attempts.
+        if let Some(json_str) = &attempt.summary_json
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            if let Some(fc) = json.get("failure_class").and_then(|v| v.as_str()) {
+                parts.push(format!("  failure_class: {fc}"));
+            }
+            if let Some(lv) = json.get("last_verify").and_then(|v| v.as_str()) {
+                parts.push(format!("  last_verify: {lv}"));
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// Deterministic fallback text for attempts without a summary, differentiated
+/// by outcome.
+fn attempt_fallback_for_outcome(outcome: &str) -> String {
+    match outcome {
+        "crashed" => "attempt crashed (no summary recorded)".to_string(),
+        "timed_out" => "attempt timed out (no summary recorded)".to_string(),
+        "spawn_failed" => {
+            "attempt spawn failed — worker process did not start (no summary recorded)".to_string()
+        }
+        "deferred" => "attempt deferred by guard (no summary recorded)".to_string(),
+        "completed" => "completed (no summary recorded)".to_string(),
+        "reopened" => "attempt reopened (no summary recorded)".to_string(),
+        "cancelled" => "attempt cancelled (no summary recorded)".to_string(),
+        "loop_guard_tripped" => {
+            "attempt terminated by loop guard (no summary recorded)".to_string()
+        }
+        "force_closed" => "attempt force-closed (no summary recorded)".to_string(),
+        "handoff" => "attempt handed off (no summary recorded)".to_string(),
+        "adopted_pr" => "attempt adopted existing PR (no summary recorded)".to_string(),
+        _ => format!("attempt {outcome} (no summary recorded)"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn log_snippet(text: &str, max_chars: usize) -> String {
     let trimmed = text.trim();
