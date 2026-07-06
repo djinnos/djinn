@@ -1991,16 +1991,19 @@ impl TaskRunSupervisor {
                         break;
                     }
                     StageOutcome::LeadParked { park_dossier_json } => {
-                        // Arbiter parked → human-review hold. The task stays
-                        // in_lead_intervention and the coordinator parks it with
-                        // the dossier for human review.
+                        // Arbiter parked → human-review hold. The
+                        // arbiter_park transition persists the decision
+                        // and dossier on the arbitration row, marks it
+                        // consumed, creates a HumanReview remediation
+                        // hold with the dossier as the hold description,
+                        // and parks the source to open.
                         if !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
                                 .transition_task(
                                     spec.task_id.clone(),
-                                    "force_close".into(),
-                                    Some(format!("arbiter_parked: {}", park_dossier_json)),
+                                    "arbiter_park".into(),
+                                    Some(park_dossier_json.clone()),
                                 )
                                 .await
                         {
@@ -2008,7 +2011,7 @@ impl TaskRunSupervisor {
                                 task_run_id = %run_id,
                                 task_id = %spec.task_id,
                                 error = %e,
-                                "supervisor: lead parked transition skipped"
+                                "supervisor: arbiter_park transition failed — task remains in_lead_intervention"
                             );
                         }
                         result = Some(TaskRunOutcome::Closed {

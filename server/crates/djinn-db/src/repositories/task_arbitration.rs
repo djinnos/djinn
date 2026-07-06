@@ -342,6 +342,27 @@ impl TaskArbitrationRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Force the raw arbitration state for repository-boundary regression tests.
+    ///
+    /// This intentionally does not validate `state`: callers use it to simulate
+    /// malformed durable rows while keeping direct SQL access inside `djinn-db`.
+    #[doc(hidden)]
+    pub async fn force_state_for_testing(
+        &self,
+        task_id: &str,
+        hold_cycle: i32,
+        state: &str,
+    ) -> Result<bool> {
+        self.db.ensure_initialized().await?;
+        let result = sqlx::query(ARBITRATION_FORCE_STATE_FOR_TESTING)
+            .bind(state)
+            .bind(task_id)
+            .bind(hold_cycle)
+            .execute(self.db.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// List all arbitrations for a task ordered by hold_cycle.
     pub async fn list_for_task(&self, task_id: &str) -> Result<Vec<TaskArbitrationRecord>> {
         self.db.ensure_initialized().await?;
@@ -486,6 +507,13 @@ const ARBITRATION_RECORD_MONITORED_REOPEN: &str = r#"
         monitored_reopen_count = monitored_reopen_count + 1,
         updated_at             = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     WHERE task_id = $1 AND hold_cycle = $2
+"#;
+
+const ARBITRATION_FORCE_STATE_FOR_TESTING: &str = r#"
+    UPDATE task_arbitrations
+    SET state = $1,
+        updated_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+    WHERE task_id = $2 AND hold_cycle = $3
 "#;
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

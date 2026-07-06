@@ -66,6 +66,36 @@ fn parse_sse_data_line(line: &str) -> Option<&str> {
     Some(data)
 }
 
+/// A single parsed SSE frame from the transport layer.
+///
+/// Distinguishes the three meaningful outcomes of a `data:` line so that
+/// format adapters can observe the provider-specific terminal sentinel
+/// (e.g. OpenAI `[DONE]`) rather than relying on raw EOF as a proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseFrame {
+    /// A data payload — the trimmed JSON string from `data: <json>`.
+    Data(String),
+    /// The `[DONE]` terminal sentinel (`data: [DONE]`).
+    Done,
+}
+
+/// Classify one SSE line into an [`SseFrame`], or `None` for non-data lines
+/// (`event:`, `id:`, comments, blanks) and empty `data:` payloads.
+///
+/// Unlike [`parse_sse_data_line`] which swallows `[DONE]`, this function
+/// surfaces it as [`SseFrame::Done`] so callers can distinguish a clean
+/// provider terminal from a raw EOF.
+fn classify_sse_line(line: &str) -> Option<SseFrame> {
+    let data = line.strip_prefix("data:")?.trim();
+    if data == "[DONE]" {
+        return Some(SseFrame::Done);
+    }
+    if data.is_empty() {
+        return None;
+    }
+    Some(SseFrame::Data(data.to_string()))
+}
+
 /// Render the request headers (auth + extras) into a single redacted string for
 /// the debug log. Auth header VALUES are always redacted; any other header that
 /// looks credential-bearing is scrubbed via [`redact_secrets`] using the same
@@ -400,6 +430,163 @@ impl ApiClient {
         })
     }
 
+    /// Like [`stream_sse`] but yields [`SseFrame`] instead of raw `String`,
+    /// surfacing the `[DONE]` terminal sentinel to format adapters.
+    ///
+    /// Non-data SSE lines (`event:`, `id:`, comments, blanks) and empty `data:`
+    /// payloads are silently skipped. The `[DONE]` sentinel is yielded as
+    /// [`SseFrame::Done`] so adapters can enforce terminal-frame invariants
+    /// (e.g. failing typed on raw EOF before `[DONE]`).
+    pub fn stream_sse_frames(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+        auth: &AuthMethod,
+        extra_headers: HeaderMap,
+    ) -> Pin<Box<dyn Stream<Item = anyhow::Result<SseFrame>> + Send>> {
+        let client = self.inner.clone();
+        let url = url.to_string();
+        let auth = auth.clone();
+        let secrets = auth_secrets(&auth);
+        let first_event_budget_override = self.first_event_budget_override;
+
+        Box::pin(stream! {
+            let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
+            log_outbound_request("POST", &url, &body, &auth, &extra_headers);
+            let response = 'retry: {
+                let mut attempt = 0u32;
+                loop {
+                    let mut req = client.post(&url).json(&body);
+
+                    req = match &auth {
+                        AuthMethod::BearerToken(token) => {
+                            req.header("Authorization", format!("Bearer {}", token))
+                        }
+                        AuthMethod::ApiKeyHeader { header, key } => {
+                            req.header(header.as_str(), key.as_str())
+                        }
+                        AuthMethod::NoAuth => req,
+                    };
+
+                    for (name, value) in &extra_headers {
+                        req = req.header(name, value);
+                    }
+
+                    match req.send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if status.is_success() {
+                                clear_suppression_window();
+                                break 'retry resp;
+                            }
+
+                            let is_retryable = is_retryable_status(status);
+
+                            if should_retry(attempt, is_retryable) {
+                                let retry_after_ms = retry_after_ms(resp.headers());
+                                let body_text = resp.text().await.unwrap_or_default();
+                                attempt += 1;
+                                let delay_ms = retry_after_ms.unwrap_or_else(|| backoff_delay_ms(attempt));
+                                if is_rate_limit_status(status) {
+                                    activate_suppression_window(Duration::from_millis(delay_ms));
+                                }
+                                tracing::warn!(
+                                    attempt,
+                                    status = %status,
+                                    delay_ms,
+                                    "SSE request failed with retryable status; retrying"
+                                );
+                                tracing::debug!(body = %redact_secrets(&body_text, &secret_refs), "retryable error body");
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                continue;
+                            }
+
+                            let retry_after_ms = retry_after_ms(resp.headers());
+                            let body_text = resp.text().await.unwrap_or_default();
+                            yield Err(provider_status_error(status, &body_text, retry_after_ms, &secret_refs));
+                            return;
+                        }
+                        Err(e) => {
+                            let is_retryable = e.is_connect()
+                                || e.is_timeout()
+                                || e.is_request();
+
+                            if should_retry(attempt, is_retryable) {
+                                attempt += 1;
+                                let delay_ms = backoff_delay_ms(attempt);
+                                tracing::warn!(
+                                    attempt,
+                                    error = %e,
+                                    delay_ms,
+                                    "SSE request failed with network error; retrying"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                                continue;
+                            }
+
+                            yield Err(anyhow::Error::new(ProviderError::Transport)
+                                .context(format!("failed to send SSE request after {} attempts: {}", attempt + 1, e)));
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let byte_stream = response.bytes_stream().map(|r| {
+                r.map_err(std::io::Error::other)
+            });
+            let stream_reader = StreamReader::new(byte_stream);
+            let mut lines = BufReader::new(stream_reader).lines();
+
+            let model_id = body_model_id(&body).to_string();
+            let derived_first_event_budget = first_event_budget(&model_id, None);
+            let first_event_timeout = derived_first_event_budget
+                .min(first_event_budget_override.unwrap_or(STREAM_CHUNK_TIMEOUT));
+            let mut first_event_received = false;
+
+            loop {
+                let timeout_dur = if first_event_received {
+                    STREAM_CHUNK_TIMEOUT
+                } else {
+                    first_event_timeout
+                };
+                match tokio::time::timeout(timeout_dur, lines.next_line()).await {
+                    Ok(Ok(Some(line))) => {
+                        if let Some(frame) = classify_sse_line(&line) {
+                            // Only real data events reset the TTFT guard;
+                            // `[DONE]` is a terminal signal, not content.
+                            if matches!(frame, SseFrame::Data(_)) {
+                                first_event_received = true;
+                            }
+                            yield Ok(frame);
+                        }
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
+                        yield Err(anyhow::Error::new(ProviderError::Transport)
+                            .context(format!("SSE read error: {}", e)));
+                        break;
+                    }
+                    Err(_) => {
+                        if !first_event_received {
+                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
+                                "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
+                                first_event_timeout.as_secs(),
+                                model_id
+                            )));
+                        } else {
+                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
+                                "SSE stream timed out: no data received for {}s",
+                                STREAM_CHUNK_TIMEOUT.as_secs()
+                            )));
+                        }
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     /// POST to `url` with `body`, return the complete JSON response body.
     ///
     /// Used for non-streaming provider requests. Applies the same retry logic
@@ -595,6 +782,37 @@ mod tests {
         assert_eq!(parse_sse_data_line("data: "), None);
         assert_eq!(parse_sse_data_line("data: [DONE]"), None);
         assert_eq!(parse_sse_data_line("data:[DONE]"), None);
+    }
+
+    #[test]
+    fn classify_sse_line_surfaces_done_sentinel() {
+        // Unlike parse_sse_data_line which swallows [DONE], classify_sse_line
+        // surfaces it as SseFrame::Done for adapter-level terminal tracking.
+        assert_eq!(classify_sse_line("data: [DONE]"), Some(SseFrame::Done));
+        assert_eq!(classify_sse_line("data:[DONE]"), Some(SseFrame::Done));
+    }
+
+    #[test]
+    fn classify_sse_line_data_payloads() {
+        assert_eq!(
+            classify_sse_line("data: {\"type\":\"message_start\"}"),
+            Some(SseFrame::Data("{\"type\":\"message_start\"}".to_string()))
+        );
+        assert_eq!(
+            classify_sse_line("data:{\"type\":\"message_start\"}"),
+            Some(SseFrame::Data("{\"type\":\"message_start\"}".to_string()))
+        );
+    }
+
+    #[test]
+    fn classify_sse_line_skips_non_data_and_empty() {
+        assert_eq!(classify_sse_line("event: message_start"), None);
+        assert_eq!(classify_sse_line("id: 42"), None);
+        assert_eq!(classify_sse_line(": keep-alive comment"), None);
+        assert_eq!(classify_sse_line(""), None);
+        // Empty data payloads are skipped (not SseFrame::Done).
+        assert_eq!(classify_sse_line("data:"), None);
+        assert_eq!(classify_sse_line("data: "), None);
     }
 
     // ── STREAM_CHUNK_TIMEOUT invariants ───────────────────────────────────────────
