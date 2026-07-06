@@ -606,6 +606,176 @@ pub(crate) async fn run_preapproval_gate(
     .await
 }
 
+/// Run the pre-approval CI-grade verification gate for an arbiter
+/// approve/approve_conflict decision.
+///
+/// Semantically identical to [`run_preapproval_gate`] (same env switches,
+/// same check set, same caching) but with two critical differences:
+///
+/// 1. **No task-status check.**  The reviewer gate expects `approved`;
+///    the arbiter gate is called while the task is still
+///    `in_lead_intervention`.  The workspace and fingerprint are the
+///    same — only the status seam differs.
+///
+/// 2. **No board transition on red.**  The reviewer gate fires
+///    `PreApprovalVerifyRejected` (`approved → open`) on a red result.
+///    The arbiter gate must NOT transition the task — it returns
+///    [`ArbiterGateResult::Blocked`] and the caller is responsible for
+///    leaving the task in `in_lead_intervention` (the arbitration row
+///    stays unconsumed, no strike, no decision-failure increment).
+///
+/// Activity feedback is still logged on red so the arbiter session's
+/// `recent_feedback` channel carries the check failures.
+pub async fn run_arbiter_preapproval_gate(
+    db: &Database,
+    task_repo: &TaskRepository,
+    task: &Task,
+) -> djinn_supervisor::ArbiterGateResult {
+    evaluate_arbiter_gate(
+        db,
+        task_repo,
+        task,
+        gate_enabled(),
+        inline_exec_enabled(),
+        &ShellRunner,
+    )
+    .await
+}
+
+/// Core arbiter-gate evaluation.  Mirrors [`evaluate_and_enforce`] but skips
+/// the task-status check and the `PreApprovalVerifyRejected` transition on
+/// red.
+async fn evaluate_arbiter_gate(
+    db: &Database,
+    task_repo: &TaskRepository,
+    task: &Task,
+    enabled: bool,
+    inline_exec: bool,
+    runner: &dyn CiReproductionRunner,
+) -> djinn_supervisor::ArbiterGateResult {
+    if !enabled {
+        return djinn_supervisor::ArbiterGateResult::Pass;
+    }
+
+    let Some((_task_run_id, workdir)) = resolve_task_run_workdir(db, &task.id).await else {
+        return djinn_supervisor::ArbiterGateResult::Pass;
+    };
+
+    let fingerprint = match djinn_git::compute_submission_diff_fingerprint(&workdir).await {
+        Ok(fp) => fp,
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "arbiter preapproval gate: failed to compute submission diff fingerprint; skipping"
+            );
+            return djinn_supervisor::ArbiterGateResult::Pass;
+        }
+    };
+
+    let digest = match fingerprint.fingerprint() {
+        Some(d) => d.to_string(),
+        None => return djinn_supervisor::ArbiterGateResult::Pass,
+    };
+
+    if !changed_paths_trigger_server_gate(fingerprint.changed_paths()) {
+        return djinn_supervisor::ArbiterGateResult::Pass;
+    }
+
+    let required = required_check_names();
+    let verify_repo = VerifyRunRepository::new(db.clone());
+
+    match verify_repo
+        .latest_pass_for_task_and_fingerprint(&task.id, &digest)
+        .await
+    {
+        Ok(Some(run)) if coverage_covers_required(run.check_coverage.as_ref(), &required) => {
+            tracing::info!(
+                task_id = %task.short_id,
+                fingerprint = %digest,
+                "arbiter preapproval gate: cache hit (green verify run covers check set)"
+            );
+            return djinn_supervisor::ArbiterGateResult::Pass;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "arbiter preapproval gate: cache lookup failed; continuing"
+            );
+        }
+    }
+
+    if !inline_exec {
+        tracing::debug!(
+            task_id = %task.short_id,
+            fingerprint = %digest,
+            "arbiter preapproval gate: no cached verdict and inline exec disabled; deferring to verification pod"
+        );
+        return djinn_supervisor::ArbiterGateResult::Pass;
+    }
+
+    let outcomes = run_check_set(runner, &workdir).await;
+    let all_pass = outcomes.iter().all(|o| o.passed);
+    let coverage = check_coverage_json(&outcomes);
+    let completed_at = now_rfc3339();
+    let result = if all_pass {
+        VerifyResult::Pass
+    } else {
+        VerifyResult::Fail
+    };
+
+    let verify_run_id = uuid::Uuid::now_v7().to_string();
+    if let Err(e) = verify_repo
+        .create(CreateVerifyRunParams {
+            id: &verify_run_id,
+            task_run_id: "", // no task_run context for arbiter gate
+            verify_source: VerifySource::Local.as_str(),
+            verify_run_id: "arbiter-preapproval-gate",
+            command_version: None,
+            profile_version: Some("uv3p-server-v1"),
+            completed_at: &completed_at,
+            result: result.as_str(),
+            diff_fingerprint: &digest,
+            check_coverage: Some(&coverage),
+        })
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %e,
+            "arbiter preapproval gate: failed to persist verify_run row (non-fatal)"
+        );
+    }
+
+    if all_pass {
+        return djinn_supervisor::ArbiterGateResult::Pass;
+    }
+
+    // ── Red result: log feedback, return Blocked (no transition) ─────────
+    let feedback = format_gate_feedback(&outcomes);
+
+    if let Err(e) = task_repo
+        .log_activity(
+            Some(&task.id),
+            "coordinator",
+            "verification",
+            "comment",
+            &serde_json::json!({ "body": feedback }).to_string(),
+        )
+        .await
+    {
+        tracing::warn!(
+            task_id = %task.short_id,
+            error = %e,
+            "arbiter preapproval gate: failed to log verification feedback (non-fatal)"
+        );
+    }
+
+    djinn_supervisor::ArbiterGateResult::Blocked { feedback }
+}
+
 // ─── Utility ──────────────────────────────────────────────────────────────────
 
 fn now_rfc3339() -> String {
