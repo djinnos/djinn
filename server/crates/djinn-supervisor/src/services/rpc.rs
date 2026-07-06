@@ -807,6 +807,42 @@ impl SupervisorServices for RpcServices {
             Err(e) => Err(e),
         }
     }
+
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        task: &crate::Task,
+    ) -> Result<crate::ArbiterGateResult, String> {
+        match self
+            .roundtrip(ServiceRpcRequest::RunArbiterPreapprovalGate { task: task.clone() })
+            .await
+        {
+            Ok(ServiceRpcResponse::RunArbiterPreapprovalGate(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn record_arbiter_decision(
+        &self,
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    ) -> Result<(), String> {
+        match self
+            .roundtrip(ServiceRpcRequest::RecordArbiterDecision {
+                task_id,
+                decision,
+                evidence_json,
+            })
+            .await
+        {
+            Ok(ServiceRpcResponse::RecordArbiterDecision(result)) => result,
+            Ok(ServiceRpcResponse::Err(e)) => Err(format!("rpc transport: {e}")),
+            Ok(other) => Err(format!("rpc protocol: unexpected reply {other:?}")),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // ── Reader / writer loops ────────────────────────────────────────────────────
@@ -1142,6 +1178,26 @@ impl SupervisorServices for UnimplementedRpcServices {
     ) -> Result<(), String> {
         unimplemented!(
             "UnimplementedRpcServices::transition_task — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        _task: &crate::Task,
+    ) -> Result<crate::ArbiterGateResult, String> {
+        unimplemented!(
+            "UnimplementedRpcServices::run_arbiter_preapproval_gate — construct RpcServices for real RPC"
+        )
+    }
+
+    async fn record_arbiter_decision(
+        &self,
+        _task_id: String,
+        _decision: String,
+        _evidence_json: String,
+    ) -> Result<(), String> {
+        unimplemented!(
+            "UnimplementedRpcServices::record_arbiter_decision — construct RpcServices for real RPC"
         )
     }
 }
