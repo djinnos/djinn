@@ -101,4 +101,5 @@ test and are tracked here as operator obligations:
 - `server/crates/djinn-coordinator/src/doctor/leader_tick.rs` — Doctor leader-tick integration
 - `server/crates/djinn-db/src/repositories/task/board_health.rs` — DB board_health sections
 - `server/crates/djinn-control-plane/tests/board_tools.rs` — MCP contract tests
-- `server/crates/djinn-db/tests/task_tests/state_machine.rs` — DB board_health tests
+- `server/crates/djinn-db/tests/task_tests/state_machine.rs` — DB state-machine tests
+- `server/crates/djinn-db/tests/task_tests/board_health.rs` — DB board_health compatibility and liveness/stranded-ready tests
