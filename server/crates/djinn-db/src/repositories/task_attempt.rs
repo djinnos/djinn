@@ -1,3 +1,4 @@
+// djinn:allow-oversize — lifecycle repository: dispatch-start through infra-death log-tail persistence; split when touched substantively.
 use djinn_core::models::task_attempt::{
     GuardDecision, GuardReason, TASK_ATTEMPT_DISPATCH_KEY_MAX_LEN, TASK_ATTEMPT_LOG_TAIL_MAX_LEN,
     TASK_ATTEMPT_SUMMARY_MAX_LEN, TaskAttempt, TaskAttemptHistoryRow, TaskAttemptOutcome,
@@ -419,6 +420,52 @@ impl TaskAttemptRepository {
         .await?;
 
         Ok(())
+    }
+
+    /// Persist infra-death log-tail capture metadata on the matching attempt.
+    ///
+    /// Forward-only and idempotent:
+    /// - `log_tail` is COALESCE'd: first non-null value wins (never overwritten).
+    /// - `summary_json` merges infra-death metadata: if the existing
+    ///   `summary_json` already contains an `infra_death_log_tail` key, it is
+    ///   left unchanged; otherwise the infra-death metadata object is merged
+    ///   in via the JSON `||` operator.
+    /// - Does not change outcome or lifecycle timestamps.
+    /// - Safe to call on terminal rows.
+    pub async fn persist_infra_death_log_tail(
+        &self,
+        attempt_id: &str,
+        log_tail: Option<&str>,
+        infra_death_meta_json: &str,
+    ) -> Result<TaskAttempt> {
+        self.db.ensure_initialized().await?;
+        Self::validate_log_tail(log_tail)?;
+        Self::validate_summary_json(Some(infra_death_meta_json))?;
+
+        sqlx::query!(
+            r#"UPDATE task_attempts
+               SET log_tail = COALESCE(log_tail, $2),
+                   summary_json = CASE
+                     WHEN summary_json IS NULL THEN $3::text::jsonb
+                     WHEN NOT (summary_json ? 'infra_death_log_tail')
+                       THEN summary_json || $3::text::jsonb
+                     ELSE summary_json
+                   END,
+                   updated_at = to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+               WHERE id = $1"#,
+            attempt_id,
+            log_tail,
+            infra_death_meta_json,
+        )
+        .execute(self.db.pool())
+        .await?;
+
+        let row = self.get(attempt_id).await?;
+        row.ok_or_else(|| {
+            DbError::Internal(
+                "task_attempt row disappeared after infra-death log-tail persist".to_owned(),
+            )
+        })
     }
 
     /// List all attempts for a task, newest-first by creation time.
@@ -1277,5 +1324,139 @@ mod tests {
             })
             .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_infra_death_log_tail_sets_fields_idempotently() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-infra",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        // First persist: sets log_tail and merges summary_json.
+        let meta = r#"{"infra_death_log_tail":{"fetched":true,"line_count":42}}"#;
+        let updated = repo
+            .persist_infra_death_log_tail(&attempt.id, Some("first tail lines"), meta)
+            .await
+            .unwrap();
+        assert_eq!(updated.log_tail.as_deref(), Some("first tail lines"));
+        let sj = updated.summary_json.as_deref().unwrap();
+        assert!(sj.contains("infra_death_log_tail"));
+
+        // Second persist: log_tail is preserved (COALESCE), summary_json with
+        // existing infra_death_log_tail key is also preserved.
+        let meta2 = r#"{"infra_death_log_tail":{"fetched":false,"fetch_error_class":"timeout"}}"#;
+        let updated2 = repo
+            .persist_infra_death_log_tail(&attempt.id, Some("overwritten tail"), meta2)
+            .await
+            .unwrap();
+        // log_tail: first non-null wins.
+        assert_eq!(updated2.log_tail.as_deref(), Some("first tail lines"));
+        // summary_json: infra_death_log_tail key already present, so no overwrite.
+        assert_eq!(updated2.summary_json, updated.summary_json);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_infra_death_log_tail_merges_into_existing_summary_json() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-infra-merge",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        // Pre-populate summary_json with some existing key.
+        repo.fill_nullable_fields(FillTaskAttemptParams {
+            id: &attempt.id,
+            summary_json: Some(r#"{"existing_key":"existing_value"}"#),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        // Now persist infra-death log tail: should merge.
+        let meta = r#"{"infra_death_log_tail":{"fetched":true,"line_count":100}}"#;
+        let updated = repo
+            .persist_infra_death_log_tail(&attempt.id, Some("tail content"), meta)
+            .await
+            .unwrap();
+        let sj = updated.summary_json.as_deref().unwrap();
+        assert!(sj.contains("existing_key"));
+        assert!(sj.contains("infra_death_log_tail"));
+        assert_eq!(updated.log_tail.as_deref(), Some("tail content"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persist_infra_death_log_tail_works_on_terminal_rows() {
+        let db = test_db();
+        let (_pid, task_id) = create_task(&db).await;
+        let repo = TaskAttemptRepository::new(db);
+
+        let id = new_attempt_id();
+        let attempt = repo
+            .create_or_get_pending(CreateTaskAttemptParams {
+                id: &id,
+                task_id: &task_id,
+                role: "worker",
+                dispatch_key: "dk-infra-term",
+                session_id: None,
+                attempt_seq: None,
+            })
+            .await
+            .unwrap();
+
+        // Terminalize the attempt.
+        repo.advance_to_terminal(TerminalTaskAttemptParams {
+            id: &attempt.id,
+            outcome: TaskAttemptOutcome::Crashed,
+            pr_url: None,
+            submit_ref: None,
+            checkpoint_ref: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            summary: Some("crashed"),
+            summary_json: None,
+            log_tail: None,
+        })
+        .await
+        .unwrap();
+
+        // Persist infra-death log tail on the terminal row.
+        let meta = r#"{"infra_death_log_tail":{"fetched":true,"line_count":50}}"#;
+        let updated = repo
+            .persist_infra_death_log_tail(&attempt.id, Some("terminal tail"), meta)
+            .await
+            .unwrap();
+        assert_eq!(updated.outcome, "crashed"); // unchanged
+        assert_eq!(updated.log_tail.as_deref(), Some("terminal tail"));
+        assert!(
+            updated
+                .summary_json
+                .as_deref()
+                .unwrap()
+                .contains("infra_death_log_tail")
+        );
     }
 }

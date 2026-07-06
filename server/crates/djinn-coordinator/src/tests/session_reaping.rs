@@ -3889,3 +3889,426 @@ fn running_pod_active_signal_is_live_regardless_of_claim_ttl() {
     assert_eq!(result.outcome, None, "Live has no outcome");
     assert!(!result.extension_eligible);
 }
+
+// ── Attempt-lifecycle terminalization in the session-recovery lane (i6xq) ──
+//
+// These path-level tests drive the real recovery functions
+// (`enforce_session_stall_timeout`, `reap_zombie_sessions`) and assert that the
+// matching `task_attempts` row is advanced to the correct terminal outcome with
+// structured recovery context, and that duplicate/late terminal handling stays
+// idempotent (no backward move, no duplicate row).
+
+/// Seed a `pending` attempt for `(task_id, role)` exactly as the dispatch-start
+/// path would, and return its id.
+async fn seed_pending_attempt(db: &Database, task_id: &str, role: &str) -> String {
+    let repo = djinn_db::TaskAttemptRepository::new(db.clone());
+    let id = uuid::Uuid::now_v7().to_string();
+    let dispatch_key = format!("{task_id}:{role}:{id}");
+    repo.create_or_get_pending(djinn_db::CreateTaskAttemptParams {
+        id: &id,
+        task_id,
+        role,
+        dispatch_key: &dispatch_key,
+        session_id: None,
+        attempt_seq: None,
+    })
+    .await
+    .unwrap();
+    id
+}
+
+/// A per-session token/turn ceiling kill routes through the loop-guard planner
+/// intervention, and must terminalize the matching attempt as
+/// `loop_guard_tripped` with structured recovery context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ceiling_kill_terminalizes_attempt_as_loop_guard_tripped() {
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "ceiling-attempt").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    let cancel = CancellationToken::new();
+    let app_state = test_helpers::agent_context_from_db(db.clone(), cancel.clone());
+    let activity = app_state.register_activity(&task.id);
+    activity.store(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
+        .await
+        .expect("dispatch should create a slot mapping");
+    pool.test_set_token_override(&task.id, 3_000_000, 10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool.clone();
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "ceiling-tripped session must be killed"
+    );
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "loop_guard_tripped",
+        "ceiling kill (runaway guard) must terminalize the attempt as loop_guard_tripped"
+    );
+    assert!(attempt.terminal_at.is_some());
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["recovery_classifier"], "session_recovery_ceiling");
+    assert_eq!(sj["failure_class"], "ceiling_kill");
+    assert_eq!(sj["session_id"], session.id);
+    assert_eq!(sj["liveness_verdict"], "dead");
+    // Exactly one attempt row — no duplicate.
+    assert_eq!(repo.list_for_task(&task.id).await.unwrap().len(), 1);
+
+    cancel.cancel();
+}
+
+/// A stall timeout (session idle past the 30-minute threshold) must terminalize
+/// the matching attempt as `timed_out` with structured recovery context. Uses a
+/// deterministic [`djinn_core::clock::TestClock`] to advance idle time without
+/// sleeping, and disables slow-extension so the stall path is deterministic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stall_timeout_terminalizes_attempt_as_timed_out() {
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+    use std::time::{Duration, Instant, SystemTime};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "stall-attempt").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: DEFAULT_MODEL_ID,
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: None,
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    // Deterministic clock so we can push monotonic idle time past the 300s
+    // first-call cap without sleeping.
+    let clock = Arc::new(djinn_core::clock::TestClock::new(
+        SystemTime::now(),
+        Instant::now(),
+    ));
+    let cancel = CancellationToken::new();
+    let app_state =
+        test_helpers::agent_context_from_db_with_clock(db.clone(), cancel.clone(), clock.clone());
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: DEFAULT_MODEL_ID.to_owned(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", DEFAULT_MODEL_ID)
+        .await
+        .expect("dispatch should create a slot mapping");
+    // Let the slot's registration event populate the pool's slot-model map so
+    // `session_for_task` returns live info rather than falling back to the DB row.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Push both clocks past the 30-minute stall timeout: monotonic drives the
+    // slot's wall-clock duration; wall drives the activity tracker's idle
+    // reading. The session then reads as idle well beyond the stall threshold.
+    clock.advance_mono(Duration::from_secs(2000));
+    clock.advance_wall(Duration::from_secs(2000));
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.pool = pool.clone();
+    // Skip the slow-extension classifier gate so the stall path is deterministic.
+    actor.worker_lifecycle_config.slow_extension.enabled = false;
+    actor.enforce_session_stall_timeout().await;
+
+    assert!(
+        actor.stall_killed.contains(&session.id),
+        "idle-stalled session must be killed"
+    );
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "timed_out",
+        "stall kill must terminalize the attempt as timed_out"
+    );
+    assert!(attempt.terminal_at.is_some());
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["recovery_classifier"], "session_recovery_stall");
+    assert_eq!(sj["failure_class"], "idle_stall");
+    assert_eq!(sj["session_id"], session.id);
+    assert_eq!(repo.list_for_task(&task.id).await.unwrap().len(), 1);
+
+    cancel.cancel();
+}
+
+/// A zombie session reaped past the hard cap with no live worker is a crash:
+/// the matching attempt must be terminalized as `crashed` with a `failure_class`
+/// in its structured context. Running the reaper again must not duplicate the
+/// row or move it — duplicate recovery scans are idempotent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zombie_reap_terminalizes_attempt_as_crashed_with_failure_class() {
+    use djinn_db::{CreateSessionParams, SessionRepository, TaskAttemptRepository};
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "zombie-attempt").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-zombie-attempt";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.reap_zombie_sessions().await;
+
+    let repo = TaskAttemptRepository::new(db.clone());
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "crashed",
+        "a dead zombie (no live worker past hard cap) must terminalize the attempt as crashed"
+    );
+    assert!(attempt.terminal_at.is_some());
+    let sj: serde_json::Value =
+        serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+    assert_eq!(sj["recovery_classifier"], "session_recovery_zombie_reap");
+    assert!(
+        sj["failure_class"].as_str().is_some_and(|s| !s.is_empty()),
+        "crashed attempt must carry a non-empty failure_class, got {:?}",
+        sj["failure_class"]
+    );
+    assert_eq!(sj["session_id"], session.id);
+
+    // Duplicate scan idempotency: reaping again must not duplicate or move.
+    actor.reap_zombie_sessions().await;
+    let after = repo.list_for_task(&task.id).await.unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "duplicate reap must not create a second row"
+    );
+    assert_eq!(
+        after[0].outcome, "crashed",
+        "duplicate reap must not move the terminal attempt"
+    );
+}
+
+/// A late recovery terminalization must never move an attempt that already
+/// reached a terminal outcome backward, nor create a duplicate row. Seeds an
+/// attempt that already `completed`, then drives the zombie reaper (which would
+/// otherwise terminalize as `crashed`) and asserts the attempt stays completed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_terminalization_does_not_move_terminal_attempt_backward() {
+    use djinn_db::{
+        CreateSessionParams, SessionRepository, TaskAttemptRepository, TerminalTaskAttemptParams,
+    };
+
+    let db = test_helpers::create_test_db();
+    let (tx, _rx) = broadcast::channel(256);
+    let (task, _note) = create_task_with_note(&db, &tx, "late-terminal").await;
+    TaskRepository::new(db.clone(), crate::events::event_bus_for(&tx))
+        .set_status(&task.id, "in_progress")
+        .await
+        .unwrap();
+
+    let run_id = "run-late-terminal";
+    TaskRunRepository::new(db.clone())
+        .create(CreateTaskRunParams {
+            id: run_id,
+            project_id: &task.project_id,
+            task_id: &task.id,
+            trigger_type: "manual",
+            status: Some("running"),
+            workspace_path: None,
+            mirror_ref: None,
+        })
+        .await
+        .unwrap();
+
+    let session_repo = SessionRepository::new(db.clone(), crate::events::event_bus_for(&tx));
+    let session = session_repo
+        .create(CreateSessionParams {
+            project_id: &task.project_id,
+            task_id: Some(&task.id),
+            model: "openai/gpt-5.5",
+            agent_type: "worker",
+            metadata_json: None,
+            task_run_id: Some(run_id),
+            pricing: None,
+            cost_basis: None,
+        })
+        .await
+        .unwrap();
+    session_repo
+        .backdate_started_at(&session.id, "20 minutes")
+        .await
+        .unwrap();
+
+    // Seed an attempt that has already reached a terminal `completed` outcome.
+    let attempt_id = seed_pending_attempt(&db, &task.id, "worker").await;
+    let repo = TaskAttemptRepository::new(db.clone());
+    repo.advance_to_terminal(TerminalTaskAttemptParams {
+        id: &attempt_id,
+        outcome: djinn_core::models::task_attempt::TaskAttemptOutcome::Completed,
+        pr_url: Some("https://github.example/pr/1"),
+        submit_ref: None,
+        checkpoint_ref: None,
+        mirror_head_sha: None,
+        github_head_sha: None,
+        summary: Some("already done"),
+        summary_json: None,
+        log_tail: None,
+    })
+    .await
+    .unwrap();
+
+    let mut actor = coordinator_actor_for_tests(&db, &tx);
+    actor.reap_zombie_sessions().await;
+
+    let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
+    assert_eq!(
+        attempt.outcome, "completed",
+        "a late recovery crash must NOT move an already-terminal (completed) attempt backward"
+    );
+    assert_eq!(
+        attempt.summary.as_deref(),
+        Some("already done"),
+        "terminal summary must be preserved"
+    );
+    assert_eq!(
+        repo.list_for_task(&task.id).await.unwrap().len(),
+        1,
+        "late terminalization must not create a duplicate row"
+    );
+}

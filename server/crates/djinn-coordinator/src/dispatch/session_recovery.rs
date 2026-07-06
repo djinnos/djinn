@@ -2,6 +2,7 @@
 use super::super::*;
 use crate::pr_poller::pr_cleanup::CloseKind;
 use djinn_core::models::TransitionAction;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 use djinn_db::{
     ClaimExtensionRecord, CurrentLivenessState, LivenessEvidenceSnapshot, LivenessRepository,
 };
@@ -339,6 +340,22 @@ impl CoordinatorActor {
                 )
                 .await;
 
+                // Terminalize the matching attempt as a loop-guard trip: a
+                // token/turn ceiling kill is a runaway guard, routed through the
+                // loop-guard planner intervention rather than a stall/timeout.
+                self.terminalize_recovery_attempt(
+                    task_id,
+                    &session.agent_type,
+                    TaskAttemptOutcome::LoopGuardTripped,
+                    "session_recovery_ceiling",
+                    Some(&session.id),
+                    session.task_run_id.as_deref(),
+                    Some("dead"),
+                    Some("ceiling_kill"),
+                    Some(&reason),
+                )
+                .await;
+
                 tracing::warn!(
                     task_id = %task_id,
                     session_id = %session.id,
@@ -481,6 +498,22 @@ impl CoordinatorActor {
                             );
                         }
                     }
+
+                    // Terminalize the matching attempt as a timeout: a
+                    // no-progress controlled exit reclaims a session that stopped
+                    // making durable progress (a stall variant).
+                    self.terminalize_recovery_attempt(
+                        task_id,
+                        &session.agent_type,
+                        TaskAttemptOutcome::TimedOut,
+                        "session_recovery_no_progress",
+                        Some(&session.id),
+                        session.task_run_id.as_deref(),
+                        Some("dead"),
+                        Some("no_progress"),
+                        None,
+                    )
+                    .await;
 
                     tracing::warn!(
                         task_id = %task_id,
@@ -847,6 +880,29 @@ impl CoordinatorActor {
                 scope = ?scope,
                 "CoordinatorActor: killed stalled session"
             );
+
+            // Terminalize the matching attempt as a timeout. A stall kill (idle
+            // past threshold, or a first-call hang) reclaims a live session; the
+            // failure class distinguishes the two so downstream can tell a hung
+            // first call from a productive turn that went quiet.
+            let stall_verdict = classification.as_ref().map(|c| c.verdict.as_str());
+            let stall_failure_class = if never_active {
+                "first_call_hang"
+            } else {
+                "idle_stall"
+            };
+            self.terminalize_recovery_attempt(
+                task_id,
+                &session.agent_type,
+                TaskAttemptOutcome::TimedOut,
+                "session_recovery_stall",
+                Some(&session.id),
+                session.task_run_id.as_deref(),
+                stall_verdict,
+                Some(stall_failure_class),
+                Some(reason),
+            )
+            .await;
 
             // ── Second-strike stall escalation ──────────────────────────────
             // Record this stall cancel against the task. Two CONSECUTIVE stall
@@ -1300,6 +1356,35 @@ impl CoordinatorActor {
                 tracing::warn!(task_id = %task_id, error = %e, "CoordinatorActor: failed to finalize zombie session row");
             }
 
+            // Terminalize the matching attempt for the reclaimed zombie session.
+            // A dead pod past the hard cap with no live worker is a crash; a
+            // hard-runtime-cap breach is a timeout. Carry the liveness verdict
+            // and a failure class into the attempt's structured context.
+            let (zombie_outcome, zombie_failure_class) =
+                match classification.as_ref().and_then(|c| c.reason) {
+                    Some(super::liveness::LivenessReason::HardRuntimeExceeded) => {
+                        (TaskAttemptOutcome::TimedOut, "hard_runtime_exceeded")
+                    }
+                    Some(reason) => (TaskAttemptOutcome::Crashed, reason.as_str()),
+                    None => (TaskAttemptOutcome::Crashed, "zombie_no_live_worker"),
+                };
+            let zombie_verdict = classification
+                .as_ref()
+                .map(|c| c.verdict.as_str())
+                .unwrap_or("dead");
+            self.terminalize_recovery_attempt(
+                task_id,
+                &session.agent_type,
+                zombie_outcome,
+                "session_recovery_zombie_reap",
+                Some(&session.id),
+                session.task_run_id.as_deref(),
+                Some(zombie_verdict),
+                Some(zombie_failure_class),
+                None,
+            )
+            .await;
+
             djinn_telemetry::zombie::increment_reap(djinn_telemetry::zombie::KIND_STALL);
 
             // Release the task from its execution status so dispatch can pick
@@ -1609,6 +1694,25 @@ impl CoordinatorActor {
                                 session_id = %running_session.id,
                                 "CoordinatorActor: finalized stale ready-state running session"
                             );
+                            // Terminalize the matching attempt for the reclaimed
+                            // orphan. The session outlived a reset/release with no
+                            // live pod, so it counts as a crashed attempt.
+                            let orphan_verdict = classification
+                                .as_ref()
+                                .map(|c| c.verdict.as_str())
+                                .unwrap_or("dead");
+                            self.terminalize_recovery_attempt(
+                                &task.id,
+                                &running_session.agent_type,
+                                TaskAttemptOutcome::Crashed,
+                                "session_recovery_stale_ready_state",
+                                Some(&running_session.id),
+                                running_session.task_run_id.as_deref(),
+                                Some(orphan_verdict),
+                                Some("stale_ready_state_orphan"),
+                                None,
+                            )
+                            .await;
                             affected += 1;
                         }
                         Ok(_) => {}
@@ -2405,6 +2509,59 @@ impl CoordinatorActor {
         }
 
         Some(result)
+    }
+
+    /// Best-effort terminalization of the live `task_attempts` row for a
+    /// session-recovery outcome.
+    ///
+    /// Wraps [`super::attempt_lifecycle::advance_latest_to_terminal`] with a
+    /// structured `summary_json` capturing the recovery classifier, the
+    /// session/task-run identity, the liveness verdict, and a failure class.
+    /// The underlying repo helper is forward-only and idempotent, so duplicate
+    /// recovery scans, duplicate terminal handlers, and late terminal reports
+    /// never create a duplicate row and never move a terminal attempt backward.
+    ///
+    /// Best-effort: lookup/write failures are logged inside the helper and
+    /// never propagate, so they cannot fail the surrounding recovery
+    /// transition.
+    #[allow(clippy::too_many_arguments)]
+    async fn terminalize_recovery_attempt(
+        &self,
+        task_id: &str,
+        role: &str,
+        outcome: TaskAttemptOutcome,
+        classifier: &str,
+        session_id: Option<&str>,
+        task_run_id: Option<&str>,
+        liveness_verdict: Option<&str>,
+        failure_class: Option<&str>,
+        summary: Option<&str>,
+    ) {
+        let summary_json = serde_json::json!({
+            "recovery_classifier": classifier,
+            "session_id": session_id,
+            "task_run_id": task_run_id,
+            "liveness_verdict": liveness_verdict,
+            "failure_class": failure_class,
+        })
+        .to_string();
+        super::attempt_lifecycle::advance_latest_to_terminal(
+            &self.db,
+            super::attempt_lifecycle::TerminalAdvancementParams {
+                task_id,
+                role,
+                outcome,
+                pr_url: None,
+                submit_ref: None,
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: None,
+                summary,
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
     }
 }
 
