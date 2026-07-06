@@ -131,7 +131,11 @@ async fn transition_to_in_lead_intervention(db: &Database, task_id: &str) {
     )
     .await
     .expect("lead_intervention_start");
-    let task = repo.get(task_id).await.expect("get task").expect("task exists");
+    let task = repo
+        .get(task_id)
+        .await
+        .expect("get task")
+        .expect("task exists");
     assert_eq!(task.status, "in_lead_intervention");
 }
 
@@ -188,24 +192,25 @@ async fn direct_services_arbiter_park_full_transaction() {
     let dossier_json = serde_json::to_string(&dossier).unwrap();
 
     let ctx = test_agent_context(db.clone());
-    let services: Arc<dyn SupervisorServices> = services_for_agent_context(ctx, CancellationToken::new());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
 
     // This is the actual production path: transition_task("arbiter_park") calls
     // execute_arbiter_park_transaction internally, then applies the state
     // transition.
     services
-        .transition_task(
-            task.id.clone(),
-            "arbiter_park".into(),
-            Some(dossier_json),
-        )
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
         .await
         .expect("transition_task arbiter_park must succeed");
 
     // Verify: task landed at open.
     let events = EventBus::noop();
     let repo = TaskRepository::new(db.clone(), events);
-    let task = repo.get(&task.id).await.expect("get task").expect("task exists");
+    let task = repo
+        .get(&task.id)
+        .await
+        .expect("get task")
+        .expect("task exists");
     assert_eq!(
         task.status, "open",
         "ArbiterPark must transition in_lead_intervention → open"
@@ -229,8 +234,7 @@ async fn direct_services_arbiter_park_full_transaction() {
         "dossier hold_description must match"
     );
     assert_eq!(
-        stored["failure_analysis"],
-        "Three attempts failed; auth logic needs domain expertise",
+        stored["failure_analysis"], "Three attempts failed; auth logic needs domain expertise",
         "dossier failure_analysis must match"
     );
 
@@ -287,22 +291,23 @@ async fn direct_services_arbiter_park_fail_closed_no_arbitration_row() {
     let dossier_json = serde_json::to_string(&dossier).unwrap();
 
     let ctx = test_agent_context(db.clone());
-    let services: Arc<dyn SupervisorServices> = services_for_agent_context(ctx, CancellationToken::new());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
 
     // Must succeed even without an unconsumed arbitration row (fail-closed).
     services
-        .transition_task(
-            task.id.clone(),
-            "arbiter_park".into(),
-            Some(dossier_json),
-        )
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
         .await
         .expect("transition_task arbiter_park must succeed (fail-closed)");
 
     // Verify: task landed at open.
     let events = EventBus::noop();
     let repo = TaskRepository::new(db.clone(), events);
-    let task = repo.get(&task.id).await.expect("get task").expect("task exists");
+    let task = repo
+        .get(&task.id)
+        .await
+        .expect("get task")
+        .expect("task exists");
     assert_eq!(
         task.status, "open",
         "fail-closed park must still transition to open"
@@ -326,7 +331,10 @@ async fn direct_services_arbiter_park_fail_closed_no_arbitration_row() {
         .await
         .expect("get recovery row")
         .expect("recovery row must exist");
-    assert_eq!(recovery.arbitration_state(), Some(ArbitrationState::Consumed));
+    assert_eq!(
+        recovery.arbitration_state(),
+        Some(ArbitrationState::Consumed)
+    );
     let stored = recovery.dossier.expect("recovery dossier must be set");
     assert_eq!(
         stored["hold_description"], "No arbitration row — fail-closed recovery",
@@ -416,22 +424,23 @@ async fn direct_services_arbiter_park_fail_closed_stale_consumed_row() {
     let dossier_json = serde_json::to_string(&dossier).unwrap();
 
     let ctx = test_agent_context(db.clone());
-    let services: Arc<dyn SupervisorServices> = services_for_agent_context(ctx, CancellationToken::new());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
 
     // Must succeed with fail-closed recovery at hold_cycle=1.
     services
-        .transition_task(
-            task.id.clone(),
-            "arbiter_park".into(),
-            Some(dossier_json),
-        )
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
         .await
         .expect("transition_task arbiter_park must succeed (stale consumed row)");
 
     // Verify: task landed at open.
     let events = EventBus::noop();
     let repo = TaskRepository::new(db.clone(), events);
-    let task = repo.get(&task.id).await.expect("get task").expect("task exists");
+    let task = repo
+        .get(&task.id)
+        .await
+        .expect("get task")
+        .expect("task exists");
     assert_eq!(task.status, "open");
 
     // Verify: recovery row at hold_cycle=1 was created and consumed.
@@ -440,7 +449,10 @@ async fn direct_services_arbiter_park_fail_closed_stale_consumed_row() {
         .await
         .expect("get recovery row")
         .expect("recovery row at cycle 1 must exist");
-    assert_eq!(recovery.arbitration_state(), Some(ArbitrationState::Consumed));
+    assert_eq!(
+        recovery.arbitration_state(),
+        Some(ArbitrationState::Consumed)
+    );
     let stored = recovery.dossier.expect("recovery dossier must be set");
     assert_eq!(
         stored["hold_description"], "Stale consumed row — recovery dossier",
@@ -477,7 +489,8 @@ async fn direct_services_arbiter_park_malformed_dossier_still_creates_hold() {
 
     // No arbitration row + malformed dossier JSON.
     let ctx = test_agent_context(db.clone());
-    let services: Arc<dyn SupervisorServices> = services_for_agent_context(ctx, CancellationToken::new());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
 
     services
         .transition_task(
@@ -491,7 +504,11 @@ async fn direct_services_arbiter_park_malformed_dossier_still_creates_hold() {
     // Verify: task landed at open.
     let events = EventBus::noop();
     let repo = TaskRepository::new(db.clone(), events);
-    let task = repo.get(&task.id).await.expect("get task").expect("task exists");
+    let task = repo
+        .get(&task.id)
+        .await
+        .expect("get task")
+        .expect("task exists");
     assert_eq!(task.status, "open");
 
     // Verify: HumanReview hold is created (with fallback empty dossier).
@@ -509,6 +526,161 @@ async fn direct_services_arbiter_park_malformed_dossier_still_creates_hold() {
     assert!(
         hold_task.description.contains("Arbiter park decision"),
         "hold description must indicate arbiter park even with malformed dossier, got: {}",
+        hold_task.description
+    );
+}
+
+/// Verify the fail-closed path when the arbitration row exists but has an
+/// invalid/unrecognised `state` column value (one that
+/// `ArbitrationState::parse_state` returns `None` for).  This simulates a
+/// corrupt or otherwise unusable durable arbitration record — distinct from
+/// the "no row" or "stale consumed" cases.  The park transaction must still
+/// succeed by treating the row as non-unconsumed and falling into the
+/// recovery path, creating a HumanReview hold with the dossier content.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_services_arbiter_park_fail_closed_corrupt_arbitration_state() {
+    let db = Database::open_in_memory().expect("open in-memory db");
+    let (project_id, epic_id) = create_project_and_epic(&db).await;
+    let task = create_task(&db, &project_id, &epic_id).await;
+
+    // Move to in_lead_intervention.
+    transition_to_in_lead_intervention(&db, &task.id).await;
+
+    // Create a valid unconsumed arbitration row, then corrupt its state
+    // column to an unrecognised value via raw SQL.
+    let arb_repo = TaskArbitrationRepository::new(db.clone());
+    let ci = serde_json::json!([]);
+    let ex = serde_json::json!([]);
+    arb_repo
+        .try_create(CreateArbitrationParams {
+            task_id: &task.id,
+            hold_cycle: 0,
+            deadline_at: None,
+            mirror_head_sha: None,
+            github_head_sha: None,
+            pr_url: None,
+            failing_ci_job_ids: &ci,
+            dossier: None,
+            directive: None,
+            verification_command: None,
+            excluded_models: &ex,
+        })
+        .await
+        .expect("create arbitration row");
+
+    // Corrupt the state to an unrecognised value.  ArbitrationState only
+    // recognises "unconsumed", "consumed", and "failed"; anything else
+    // makes arbitration_state() return None and the row unusable.
+    sqlx::query("UPDATE task_arbitrations SET state = 'corrupt_invalid_state' WHERE task_id = $1")
+        .bind(&task.id)
+        .execute(db.pool())
+        .await
+        .expect("corrupt arbitration state");
+
+    // Verify the row is present but its state parses as None.
+    let corrupted = arb_repo
+        .get_by_task_and_cycle(&task.id, 0)
+        .await
+        .expect("get corrupted row")
+        .expect("corrupted row must exist");
+    assert_eq!(
+        corrupted.arbitration_state(),
+        None,
+        "corrupted state must parse as None"
+    );
+
+    // resolve_current_hold_cycle should treat this as non-unconsumed and
+    // return (1, None) — same as consumed/failed.
+    let (cycle, unconsumed) = arb_repo
+        .resolve_current_hold_cycle(&task.id)
+        .await
+        .expect("resolve");
+    assert_eq!(cycle, 1, "corrupt state must advance hold_cycle");
+    assert!(
+        unconsumed.is_none(),
+        "corrupt state row must not be returned as unconsumed"
+    );
+
+    // Build dossier and call the actual DirectServices path.
+    let dossier = serde_json::json!({
+        "hold_description": "Corrupt arbitration state — fail-closed recovery",
+        "failure_analysis": "Arbitration row has unrecognised state column value",
+        "attempted_decisions": [],
+        "recommended_action": "Escalate to human — arbitration data integrity issue"
+    });
+    let dossier_json = serde_json::to_string(&dossier).unwrap();
+
+    let ctx = test_agent_context(db.clone());
+    let services: Arc<dyn SupervisorServices> =
+        services_for_agent_context(ctx, CancellationToken::new());
+
+    // Must succeed via fail-closed recovery even though a (corrupt) row exists.
+    services
+        .transition_task(task.id.clone(), "arbiter_park".into(), Some(dossier_json))
+        .await
+        .expect("transition_task arbiter_park must succeed (corrupt arbitration state)");
+
+    // Verify: task landed at open.
+    let events = EventBus::noop();
+    let repo = TaskRepository::new(db.clone(), events);
+    let task = repo
+        .get(&task.id)
+        .await
+        .expect("get task")
+        .expect("task exists");
+    assert_eq!(
+        task.status, "open",
+        "corrupt-state park must still transition to open"
+    );
+
+    // Verify: a recovery arbitration row was created at hold_cycle=1 and
+    // consumed.
+    let recovery = arb_repo
+        .get_by_task_and_cycle(&task.id, 1)
+        .await
+        .expect("get recovery row")
+        .expect("recovery row at cycle 1 must exist");
+    assert_eq!(
+        recovery.arbitration_state(),
+        Some(ArbitrationState::Consumed),
+        "recovery row must be consumed"
+    );
+    let stored = recovery.dossier.expect("recovery dossier must be set");
+    assert_eq!(
+        stored["hold_description"], "Corrupt arbitration state — fail-closed recovery",
+        "recovery dossier must contain the provided dossier"
+    );
+
+    // Verify: HumanReview hold is created with the structured dossier.
+    let blockers = repo.list_blockers(&task.id).await.expect("list blockers");
+    assert!(
+        !blockers.is_empty(),
+        "corrupt-state fail-closed path must create HumanReview hold"
+    );
+    let hold_task = repo
+        .get(&blockers[0].task_id)
+        .await
+        .expect("get hold task")
+        .expect("hold task exists");
+    assert_eq!(hold_task.issue_type, "review", "hold must be a review task");
+    assert_eq!(hold_task.status, "open", "hold must be open");
+    assert!(
+        hold_task
+            .description
+            .contains("Corrupt arbitration state — fail-closed recovery"),
+        "hold description must contain the dossier hold_description, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task
+            .description
+            .contains("unrecognised state column value"),
+        "hold description must contain the dossier failure_analysis, got: {}",
+        hold_task.description
+    );
+    assert!(
+        hold_task.description.contains("Arbiter park decision"),
+        "hold description must indicate arbiter park, got: {}",
         hold_task.description
     );
 }
