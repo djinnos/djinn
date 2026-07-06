@@ -37,3 +37,6 @@ pub(crate) use admission::{
 };
 pub(crate) use outcome::DispatchOutcome;
 pub(crate) use retry::RemediationKind;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use retry::PostInterventionHistory;
