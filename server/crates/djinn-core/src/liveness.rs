@@ -33,8 +33,15 @@ impl LivenessConfig {
     /// `board_reconcile`). The background coordinator sweep applies the
     /// zero-token short-circuit but keeps its own (more lenient) idle
     /// threshold for sessions that have produced tokens.
+    ///
+    /// `zero_token_threshold_secs` was lowered from 180s to 90s so a
+    /// non-reasoning zero-token session fails over within the same budget as
+    /// the provider-side first-event (TTFT) guard. A per-model reasoning floor
+    /// (~600s) raises this at the provider transport layer for known reasoning
+    /// families; this session-level default remains the floor for all other
+    /// models.
     pub const OBSERVATION: Self = Self {
-        zero_token_threshold_secs: 180,
+        zero_token_threshold_secs: 90,
         general_threshold_secs: 600,
     };
 }
@@ -118,7 +125,7 @@ mod tests {
     #[test]
     fn zero_tokens_wedged_at_threshold() {
         let now = t("2026-05-22T12:43:00Z");
-        let started = "2026-05-22T12:39:30Z"; // 210s ago, >= 180s
+        let started = "2026-05-22T12:39:30Z"; // 210s ago, >= 90s
         let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         match v {
             ProgressVerdict::Wedged {
@@ -135,7 +142,7 @@ mod tests {
     #[test]
     fn zero_tokens_live_below_threshold() {
         let now = t("2026-05-22T12:43:00Z");
-        let started = "2026-05-22T12:41:00Z"; // 120s ago, < 180s
+        let started = "2026-05-22T12:42:00Z"; // 60s ago, < 90s
         let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
     }
@@ -200,6 +207,42 @@ mod tests {
     fn negative_elapsed_clamped_to_zero() {
         let now = t("2026-05-22T12:00:00Z");
         let started = "2026-05-22T12:05:00Z"; // future
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
+        assert_eq!(v, ProgressVerdict::Live);
+    }
+
+    #[test]
+    fn zero_token_observation_threshold_is_90s() {
+        // The non-reasoning zero-token failover budget was lowered from 180s
+        // to 90s so it matches the provider-side first-event (TTFT) guard.
+        assert_eq!(
+            LivenessConfig::OBSERVATION.zero_token_threshold_secs,
+            90,
+            "non-reasoning zero-token budget must be no more than 90s"
+        );
+    }
+
+    #[test]
+    fn zero_tokens_wedged_exactly_at_90s_boundary() {
+        let now = t("2026-05-22T12:43:00Z");
+        let started = "2026-05-22T12:41:30Z"; // exactly 90s ago
+        let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
+        assert!(
+            matches!(
+                v,
+                ProgressVerdict::Wedged {
+                    zero_tokens: true,
+                    ..
+                }
+            ),
+            "exactly 90s zero-token should be wedged"
+        );
+    }
+
+    #[test]
+    fn zero_tokens_live_just_below_90s_boundary() {
+        let now = t("2026-05-22T12:43:00Z");
+        let started = "2026-05-22T12:41:31Z"; // 89s ago
         let v = classify_session_progress(started, None, 0, 0, now, &LivenessConfig::OBSERVATION);
         assert_eq!(v, ProgressVerdict::Live);
     }
