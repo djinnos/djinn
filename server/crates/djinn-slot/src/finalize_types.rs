@@ -59,12 +59,23 @@ pub struct SubmitReview {
     pub feedback: Option<String>,
 }
 
-/// Payload for a Lead submitting an intervention decision.
+/// Payload for a Lead/arbiter submitting an intervention decision.
 #[derive(Debug, Deserialize)]
 pub struct SubmitDecision {
     pub task_id: String,
     pub decision: String,
     pub rationale: Option<String>,
+    /// Evidence citation — required for `approve` and `approve_conflict`.
+    pub evidence: Option<serde_json::Value>,
+    /// Park dossier — required for `park`.
+    pub park_dossier: Option<serde_json::Value>,
+    /// Directive — required for `reopen`.
+    pub directive: Option<String>,
+    /// Verification command — required for `reopen`.
+    pub verification_command: Option<String>,
+    /// Models excluded from next dispatch — optional for `reopen`.
+    #[serde(default)]
+    pub exclude_models: Vec<String>,
     #[serde(default)]
     pub created_tasks: Vec<String>,
 }
