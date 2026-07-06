@@ -414,6 +414,14 @@ async fn zombie_liveness_consistency_across_doctor_and_board_health() {
         !doctor_outcome.is_empty(),
         "doctor finding must carry a non-empty outcome"
     );
+    let doctor_reason = doctor_finding.evidence["classifier"]["reason"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    assert!(
+        !doctor_reason.is_empty(),
+        "doctor finding must carry a non-empty reason"
+    );
 
     // ── 4. Board-health surface: query liveness_outcomes ───────────────
     let task_repo = TaskRepository::new(db.clone(), event_bus_for(&tx));
@@ -478,6 +486,23 @@ async fn zombie_liveness_consistency_across_doctor_and_board_health() {
         board_item["outcome_reason"].as_str(),
         Some("hard_runtime_exceeded"),
         "board_health outcome_reason must match the persisted evidence"
+    );
+
+    // ── 6. Cross-surface outcome/reason consistency ───────────────────
+    // The doctor classifier outcome must equal the board_health outcome_kind
+    // and the doctor classifier reason must equal the board_health
+    // outcome_reason for the same scenario.  These assertions prove that a
+    // regression in one surface (e.g. doctor reports a different outcome from
+    // board_health) is caught.
+    assert_eq!(
+        Some(doctor_outcome.as_str()),
+        board_item["outcome_kind"].as_str(),
+        "doctor classifier outcome must equal board_health outcome_kind"
+    );
+    assert_eq!(
+        Some(doctor_reason.as_str()),
+        board_item["outcome_reason"].as_str(),
+        "doctor classifier reason must equal board_health outcome_reason"
     );
 }
 
