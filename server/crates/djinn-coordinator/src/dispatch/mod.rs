@@ -1,5 +1,6 @@
 mod admission;
 pub(crate) mod attempt_lifecycle;
+pub(crate) mod lane_resolution_log;
 pub(crate) mod liveness;
 mod outcome;
 pub(crate) mod post_intervention_lane;
