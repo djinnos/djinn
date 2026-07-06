@@ -1,3 +1,4 @@
+// djinn:allow-oversize — over size-guard byte threshold after arbiter decision plumbing; split when touched substantively.
 //! `DirectServices` — in-process [`SupervisorServices`] impl.
 //!
 //! Phase 2 PR 3 replaced `djinn-supervisor`'s struct-with-callbacks
