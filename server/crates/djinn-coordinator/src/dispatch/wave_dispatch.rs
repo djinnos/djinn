@@ -483,91 +483,20 @@ impl CoordinatorActor {
         task: &djinn_core::models::Task,
         outcome: WaveDispatchAttemptOutcome<'_>,
     ) {
-        let submit_ref = format!("refs/heads/task/{}", task.short_id);
-        let (terminal_outcome, pr_url, head_sha, summary, summary_json) = match outcome {
-            WaveDispatchAttemptOutcome::AdoptedPr { pr_url, head_sha } => {
-                let summary =
-                    format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
-                let summary_json = serde_json::json!({
-                    "source": "wave_dispatch",
-                    "path": "adopted_pr",
-                    "pr_url": pr_url,
-                    "github_head_sha": head_sha,
-                    "submit_ref": submit_ref,
-                    "task_branch": format!("task/{}", task.short_id),
-                })
-                .to_string();
-                (
-                    TaskAttemptOutcome::AdoptedPr,
-                    Some(pr_url),
-                    Some(head_sha),
-                    summary,
-                    summary_json,
-                )
-            }
-            WaveDispatchAttemptOutcome::Handoff {
-                reason,
-                replacement,
-            } => {
-                let summary = format!(
-                    "wave_dispatch: current worker attempt handed off ({replacement}): {reason}"
-                );
-                let summary_json = serde_json::json!({
-                    "source": "wave_dispatch",
-                    "path": "handoff",
-                    "reason": reason,
-                    "replacement": replacement,
-                    "submit_ref": submit_ref,
-                    "pr_url": task.pr_url,
-                    "task_branch": format!("task/{}", task.short_id),
-                })
-                .to_string();
-                (
-                    TaskAttemptOutcome::Handoff,
-                    task.pr_url.as_deref(),
-                    task.ci_head_sha.as_deref(),
-                    summary,
-                    summary_json,
-                )
-            }
-            WaveDispatchAttemptOutcome::ForceClosed {
-                reason,
-                close_reason,
-            } => {
-                let summary =
-                    format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
-                let summary_json = serde_json::json!({
-                    "source": "wave_dispatch",
-                    "path": "force_closed",
-                    "close_reason": close_reason,
-                    "reason": reason,
-                    "submit_ref": submit_ref,
-                    "task_branch": format!("task/{}", task.short_id),
-                })
-                .to_string();
-                (
-                    TaskAttemptOutcome::ForceClosed,
-                    task.pr_url.as_deref(),
-                    task.ci_head_sha.as_deref(),
-                    summary,
-                    summary_json,
-                )
-            }
-        };
-
+        let params = build_wave_dispatch_terminal_params(task, outcome);
         advance_latest_to_terminal(
             &self.db,
             TerminalAdvancementParams {
                 task_id: &task.id,
                 role: "worker",
-                outcome: terminal_outcome,
-                pr_url,
-                submit_ref: Some(&submit_ref),
+                outcome: params.outcome,
+                pr_url: params.pr_url,
+                submit_ref: Some(&params.submit_ref),
                 checkpoint_ref: None,
                 mirror_head_sha: None,
-                github_head_sha: head_sha,
-                summary: Some(&summary),
-                summary_json: Some(&summary_json),
+                github_head_sha: params.github_head_sha,
+                summary: Some(&params.summary),
+                summary_json: Some(&params.summary_json),
                 log_tail: None,
             },
         )
@@ -678,6 +607,103 @@ impl CoordinatorActor {
             }
         }
     }
+}
+
+/// Build the [`TerminalAdvancementParams`] fields for a wave-dispatch
+/// terminalization.  Pure parameter construction — no I/O, no `self`.
+/// Factored out of [`CoordinatorActor::terminalize_wave_dispatch_attempt`]
+/// so that the mapping logic is directly unit-testable without constructing
+/// a full `CoordinatorActor`.
+fn build_wave_dispatch_terminal_params<'a>(
+    task: &'a djinn_core::models::Task,
+    outcome: WaveDispatchAttemptOutcome<'a>,
+) -> WaveDispatchTerminalParams<'a> {
+    let submit_ref = format!("refs/heads/task/{}", task.short_id);
+    let task_branch = format!("task/{}", task.short_id);
+    match outcome {
+        WaveDispatchAttemptOutcome::AdoptedPr { pr_url, head_sha } => {
+            let summary =
+                format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "adopted_pr",
+                "pr_url": pr_url,
+                "github_head_sha": head_sha,
+                "submit_ref": submit_ref,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::AdoptedPr,
+                pr_url: Some(pr_url),
+                github_head_sha: Some(head_sha),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
+        WaveDispatchAttemptOutcome::Handoff {
+            reason,
+            replacement,
+        } => {
+            let summary = format!(
+                "wave_dispatch: current worker attempt handed off ({replacement}): {reason}"
+            );
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "handoff",
+                "reason": reason,
+                "replacement": replacement,
+                "submit_ref": submit_ref,
+                "pr_url": task.pr_url,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::Handoff,
+                pr_url: task.pr_url.as_deref(),
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
+        WaveDispatchAttemptOutcome::ForceClosed {
+            reason,
+            close_reason,
+        } => {
+            let summary = format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
+            let summary_json = serde_json::json!({
+                "source": "wave_dispatch",
+                "path": "force_closed",
+                "close_reason": close_reason,
+                "reason": reason,
+                "submit_ref": submit_ref,
+                "task_branch": task_branch,
+            })
+            .to_string();
+            WaveDispatchTerminalParams {
+                outcome: TaskAttemptOutcome::ForceClosed,
+                pr_url: task.pr_url.as_deref(),
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary,
+                summary_json,
+                submit_ref,
+            }
+        }
+    }
+}
+
+/// Owned terminalization parameters returned by
+/// [`build_wave_dispatch_terminal_params`].  The caller borrows these fields
+/// when building [`TerminalAdvancementParams`].
+struct WaveDispatchTerminalParams<'a> {
+    outcome: TaskAttemptOutcome,
+    pr_url: Option<&'a str>,
+    github_head_sha: Option<&'a str>,
+    summary: String,
+    summary_json: String,
+    submit_ref: String,
 }
 
 #[cfg(test)]
@@ -1004,16 +1030,14 @@ mod e6_tests {
 
     // ── Attempt lifecycle: wave-dispatch terminalization ─────────────────────
     //
-    // These tests exercise the wave-dispatch terminalization outcomes through
-    // the shared `advance_latest_to_terminal` helper with the exact param shapes
-    // that `terminalize_wave_dispatch_attempt` produces for each wave-dispatch
-    // path (adopted-PR, handoff, ForceClose). They prove the outcome mapping,
-    // structured context recording, and duplicate-handling idempotency without
-    // requiring a full CoordinatorActor + mirror + supervisor_pr_open setup.
-    //
-    // The param construction here mirrors `terminalize_wave_dispatch_attempt`
-    // one-to-one — it is the smallest existing function that owns the
-    // terminalization branch.
+    // These tests exercise the `build_wave_dispatch_terminal_params` helper
+    // (the extracted pure-logic core of `terminalize_wave_dispatch_attempt`)
+    // directly.  This is the smallest testable unit that owns the outcome →
+    // terminal params mapping — including `task_branch` in summary_json, the
+    // `pr_url` / `ci_head_sha` passthrough for handoff/ForceClosed, and all
+    // three outcome classifications.  A separate idempotency test exercises
+    // the full `advance_latest_to_terminal` persistence path with the helper's
+    // output to prove duplicate dispatch ticks are safe.
 
     use super::super::attempt_lifecycle::{
         TerminalAdvancementParams, advance_latest_to_terminal, make_dispatch_key,
@@ -1052,225 +1076,234 @@ mod e6_tests {
         (task, attempt_id)
     }
 
-    /// The adopted-PR wave-dispatch path terminalizes as `adopted_pr` with the
-    /// PR URL and head SHA recorded from the adopted PR.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn wave_dispatch_adopted_pr_terminalization_records_pr_context() {
-        let db = lifecycle_test_db();
-        let (task, attempt_id) = setup_pending_attempt(&db).await;
+    /// Construct a `Task` with the minimum set of fields populated for
+    /// `build_wave_dispatch_terminal_params` tests.  `short_id` is used as
+    /// both `id` and `short_id`; other fields are zeroed/empty.
+    fn test_task(short_id: &str) -> djinn_core::models::Task {
+        djinn_core::models::Task {
+            id: short_id.into(),
+            project_id: "p1".into(),
+            short_id: short_id.into(),
+            epic_id: Some("e1".into()),
+            title: String::new(),
+            description: String::new(),
+            design: String::new(),
+            issue_type: "task".into(),
+            status: "approved".into(),
+            priority: 0,
+            owner: String::new(),
+            labels: "[]".into(),
+            acceptance_criteria: "[]".into(),
+            reopen_count: 0,
+            continuation_count: 0,
+            total_reopen_count: 0,
+            intervention_count: 0,
+            last_intervention_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            closed_at: None,
+            close_reason: None,
+            merge_commit_sha: None,
+            pr_url: None,
+            merge_conflict_metadata: None,
+            memory_refs: "[]".into(),
+            agent_type: None,
+            created_by_user_id: None,
+            ci_status: "unknown".into(),
+            ci_head_sha: None,
+            ci_pr_number: None,
+            ci_blocking_required_check_names: "[]".into(),
+            ci_failure_fingerprint: None,
+            ci_first_seen_at: None,
+            ci_last_seen_at: None,
+            ci_same_signature_count: 0,
+            ci_last_remediation_base_sha: None,
+            unresolved_blocker_count: 0,
+        }
+    }
 
-        let submit_ref = format!("refs/heads/task/{}", task.short_id);
+    /// The `build_wave_dispatch_terminal_params` helper maps the adopted-PR
+    /// outcome to `TaskAttemptOutcome::AdoptedPr` and records the PR URL,
+    /// head SHA, `task_branch`, and `submit_ref` in summary_json.
+    #[test]
+    fn build_terminal_params_adopted_pr_records_pr_context_and_branch() {
+        let task = test_task("t-adopt");
         let pr_url = "https://github.example/owner/repo/pull/42";
         let head_sha = "abc123deadbeef";
-        let summary = format!("wave_dispatch: adopted existing open PR {pr_url} for approved task");
-        let summary_json = serde_json::json!({
-            "source": "wave_dispatch",
-            "path": "adopted_pr",
-            "pr_url": pr_url,
-            "github_head_sha": head_sha,
-            "submit_ref": submit_ref,
-        })
-        .to_string();
+        let params = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::AdoptedPr { pr_url, head_sha },
+        );
 
-        advance_latest_to_terminal(
-            &db,
-            TerminalAdvancementParams {
-                task_id: &task.id,
-                role: "worker",
-                outcome: TaskAttemptOutcome::AdoptedPr,
-                pr_url: Some(pr_url),
-                submit_ref: Some(&submit_ref),
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: Some(head_sha),
-                summary: Some(&summary),
-                summary_json: Some(&summary_json),
-                log_tail: None,
-            },
-        )
-        .await;
+        assert_eq!(params.outcome, TaskAttemptOutcome::AdoptedPr);
+        assert_eq!(params.pr_url, Some(pr_url));
+        assert_eq!(params.github_head_sha, Some(head_sha));
+        assert_eq!(params.submit_ref, "refs/heads/task/t-adopt");
 
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.outcome, "adopted_pr");
-        assert_eq!(attempt.pr_url.as_deref(), Some(pr_url));
-        assert_eq!(attempt.github_head_sha.as_deref(), Some(head_sha));
-        assert_eq!(attempt.submit_ref.as_deref(), Some(submit_ref.as_str()));
-        assert!(attempt.terminal_at.is_some());
-        // The structured context must be present.
-        let ctx: serde_json::Value =
-            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        let ctx: serde_json::Value = serde_json::from_str(&params.summary_json).unwrap();
         assert_eq!(ctx["source"], "wave_dispatch");
         assert_eq!(ctx["path"], "adopted_pr");
+        assert_eq!(ctx["pr_url"], pr_url);
+        assert_eq!(ctx["github_head_sha"], head_sha);
+        assert_eq!(ctx["task_branch"], "task/t-adopt");
+        assert_eq!(ctx["submit_ref"], "refs/heads/task/t-adopt");
+        assert!(
+            params.summary.contains(pr_url),
+            "summary must mention the adopted PR URL"
+        );
     }
 
-    /// The handoff wave-dispatch path (closed-no-commits, branch-missing
-    /// re-queue, or pre-PR-gate reroute) terminalizes as `handoff` with a
-    /// structured reason/replacement context.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn wave_dispatch_handoff_terminalization_records_replacement_context() {
-        let db = lifecycle_test_db();
-        let (task, attempt_id) = setup_pending_attempt(&db).await;
-
-        let submit_ref = format!("refs/heads/task/{}", task.short_id);
-        let reason = "approved with no pushed task_branch; re-running worker to recreate it";
-        let replacement = "requeued_missing_branch";
-        let summary =
-            format!("wave_dispatch: current worker attempt handed off ({replacement}): {reason}");
-        let summary_json = serde_json::json!({
-            "source": "wave_dispatch",
-            "path": "handoff",
-            "reason": reason,
-            "replacement": replacement,
-            "submit_ref": submit_ref,
-        })
-        .to_string();
-
-        advance_latest_to_terminal(
-            &db,
-            TerminalAdvancementParams {
-                task_id: &task.id,
-                role: "worker",
-                outcome: TaskAttemptOutcome::Handoff,
-                pr_url: None,
-                submit_ref: Some(&submit_ref),
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some(&summary),
-                summary_json: Some(&summary_json),
-                log_tail: None,
+    /// The handoff outcome maps to `TaskAttemptOutcome::Handoff` and passes
+    /// through `task.pr_url` and `task.ci_head_sha` into the params and the
+    /// structured summary_json.
+    #[test]
+    fn build_terminal_params_handoff_passes_through_task_pr_and_ci_context() {
+        let mut task = test_task("t-handoff");
+        task.pr_url = Some("https://github.example/owner/repo/pull/99".into());
+        task.ci_head_sha = Some("deadbeef".into());
+        let params = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::Handoff {
+                reason: "branch missing from mirror",
+                replacement: "requeued_missing_branch",
             },
-        )
-        .await;
+        );
 
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.outcome, "handoff");
-        assert!(attempt.terminal_at.is_some());
-        let ctx: serde_json::Value =
-            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(params.outcome, TaskAttemptOutcome::Handoff);
+        // The helper must pass through the task's existing PR URL and CI head SHA.
+        assert_eq!(
+            params.pr_url,
+            Some("https://github.example/owner/repo/pull/99")
+        );
+        assert_eq!(params.github_head_sha, Some("deadbeef"));
+        assert_eq!(params.submit_ref, "refs/heads/task/t-handoff");
+
+        let ctx: serde_json::Value = serde_json::from_str(&params.summary_json).unwrap();
         assert_eq!(ctx["source"], "wave_dispatch");
         assert_eq!(ctx["path"], "handoff");
-        assert_eq!(ctx["replacement"], replacement);
+        assert_eq!(ctx["reason"], "branch missing from mirror");
+        assert_eq!(ctx["replacement"], "requeued_missing_branch");
+        assert_eq!(ctx["pr_url"], "https://github.example/owner/repo/pull/99");
+        assert_eq!(ctx["task_branch"], "task/t-handoff");
+        assert_eq!(ctx["submit_ref"], "refs/heads/task/t-handoff");
+        assert!(
+            params.summary.contains("requeued_missing_branch"),
+            "summary must include the replacement identifier"
+        );
     }
 
-    /// The dispatch-owned ForceClose path (oversized blob in branch history)
-    /// terminalizes as `force_closed` with the close reason.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn wave_dispatch_force_close_terminalization_records_close_reason() {
-        let db = lifecycle_test_db();
-        let (task, attempt_id) = setup_pending_attempt(&db).await;
-
-        let submit_ref = format!("refs/heads/task/{}", task.short_id);
-        let reason = "remote: error: GH001: Large files detected. pre-receive hook declined";
-        let close_reason = "oversized_blob_in_branch_history";
-        let summary = format!("wave_dispatch: attempt force-closed ({close_reason}): {reason}");
-        let summary_json = serde_json::json!({
-            "source": "wave_dispatch",
-            "path": "force_closed",
-            "close_reason": close_reason,
-            "reason": reason,
-            "submit_ref": submit_ref,
-        })
-        .to_string();
-
-        advance_latest_to_terminal(
-            &db,
-            TerminalAdvancementParams {
-                task_id: &task.id,
-                role: "worker",
-                outcome: TaskAttemptOutcome::ForceClosed,
-                pr_url: None,
-                submit_ref: Some(&submit_ref),
-                checkpoint_ref: None,
-                mirror_head_sha: None,
-                github_head_sha: None,
-                summary: Some(&summary),
-                summary_json: Some(&summary_json),
-                log_tail: None,
+    /// When the task has no PR URL (e.g. closed-no-commits handoff), the
+    /// helper produces `None` for `pr_url` and still includes `null` in
+    /// summary_json.
+    #[test]
+    fn build_terminal_params_handoff_with_no_pr_url() {
+        let task = test_task("t-nopr");
+        let params = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::Handoff {
+                reason: "no commits ahead of base",
+                replacement: "task_closed_no_commits",
             },
-        )
-        .await;
+        );
 
-        let repo = TaskAttemptRepository::new(db);
-        let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
-        assert_eq!(attempt.outcome, "force_closed");
-        assert!(attempt.terminal_at.is_some());
-        let ctx: serde_json::Value =
-            serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
+        assert_eq!(params.outcome, TaskAttemptOutcome::Handoff);
+        assert!(params.pr_url.is_none());
+        assert!(params.github_head_sha.is_none());
+
+        let ctx: serde_json::Value = serde_json::from_str(&params.summary_json).unwrap();
+        assert!(ctx["pr_url"].is_null());
+        assert_eq!(ctx["task_branch"], "task/t-nopr");
+    }
+
+    /// The ForceClosed outcome maps to `TaskAttemptOutcome::ForceClosed` and
+    /// includes the close_reason and reason in summary_json plus task_branch.
+    #[test]
+    fn build_terminal_params_force_closed_records_close_reason_and_branch() {
+        let task = test_task("t-fc");
+        let params = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::ForceClosed {
+                reason: "GH001: Large files detected. pre-receive hook declined",
+                close_reason: "oversized_blob_in_branch_history",
+            },
+        );
+
+        assert_eq!(params.outcome, TaskAttemptOutcome::ForceClosed);
+        assert_eq!(params.submit_ref, "refs/heads/task/t-fc");
+
+        let ctx: serde_json::Value = serde_json::from_str(&params.summary_json).unwrap();
         assert_eq!(ctx["source"], "wave_dispatch");
         assert_eq!(ctx["path"], "force_closed");
-        assert_eq!(ctx["close_reason"], close_reason);
+        assert_eq!(ctx["close_reason"], "oversized_blob_in_branch_history");
+        assert!(
+            ctx["reason"]
+                .as_str()
+                .unwrap()
+                .contains("pre-receive hook declined")
+        );
+        assert_eq!(ctx["task_branch"], "task/t-fc");
     }
 
-    /// Duplicate wave-dispatch handling is idempotent: a second terminalization
-    /// call (mimicking a re-tick that re-processes the same approved task) must
-    /// NOT create a second attempt row, move the terminal outcome backward, or
-    /// overwrite the original recorded context.
+    /// Duplicate wave-dispatch terminalization is idempotent: a second call
+    /// (mimicking a re-tick that re-processes the same approved task) must NOT
+    /// create a second attempt row, move the terminal outcome backward, or
+    /// overwrite the original recorded context.  This test exercises the full
+    /// `advance_latest_to_terminal` persistence path with params produced by
+    /// the helper.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wave_dispatch_duplicate_terminalization_is_idempotent() {
         let db = lifecycle_test_db();
         let (task, attempt_id) = setup_pending_attempt(&db).await;
 
-        let submit_ref = format!("refs/heads/task/{}", task.short_id);
-        let pr_url_orig = "https://github.example/owner/repo/pull/7";
-        let head_sha_orig = "sha-orig";
-        let summary_orig =
-            format!("wave_dispatch: adopted existing open PR {pr_url_orig} for approved task");
-        let summary_json_orig = serde_json::json!({
-            "source": "wave_dispatch",
-            "path": "adopted_pr",
-            "pr_url": pr_url_orig,
-            "github_head_sha": head_sha_orig,
-            "submit_ref": submit_ref,
-        })
-        .to_string();
-
-        // First terminalization — adopted-PR path.
+        // First call: terminalize as adopted-PR using the helper's output.
+        let params_first = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::AdoptedPr {
+                pr_url: "https://github.example/owner/repo/pull/7",
+                head_sha: "sha-orig",
+            },
+        );
         advance_latest_to_terminal(
             &db,
             TerminalAdvancementParams {
                 task_id: &task.id,
                 role: "worker",
-                outcome: TaskAttemptOutcome::AdoptedPr,
-                pr_url: Some(pr_url_orig),
-                submit_ref: Some(&submit_ref),
+                outcome: params_first.outcome,
+                pr_url: params_first.pr_url,
+                submit_ref: Some(&params_first.submit_ref),
                 checkpoint_ref: None,
                 mirror_head_sha: None,
-                github_head_sha: Some(head_sha_orig),
-                summary: Some(&summary_orig),
-                summary_json: Some(&summary_json_orig),
+                github_head_sha: params_first.github_head_sha,
+                summary: Some(&params_first.summary),
+                summary_json: Some(&params_first.summary_json),
                 log_tail: None,
             },
         )
         .await;
 
-        // A second tick fires a DIFFERENT wave-dispatch path (e.g. a late
-        // ForceClose attempt from a duplicate supervisor_pr_open race). It must
-        // not move the terminal attempt backward or create a new row.
-        let summary_late = "wave_dispatch: attempt force-closed (late): race";
-        let summary_json_late = serde_json::json!({
-            "source": "wave_dispatch",
-            "path": "force_closed",
-            "close_reason": "late",
-            "submit_ref": submit_ref,
-        })
-        .to_string();
-
+        // Second call: a different wave-dispatch path fires (e.g. a late
+        // ForceClose from a duplicate supervisor_pr_open race).  The attempt
+        // must remain unchanged.
+        let params_second = build_wave_dispatch_terminal_params(
+            &task,
+            WaveDispatchAttemptOutcome::ForceClosed {
+                reason: "late race",
+                close_reason: "late",
+            },
+        );
         advance_latest_to_terminal(
             &db,
             TerminalAdvancementParams {
                 task_id: &task.id,
                 role: "worker",
-                outcome: TaskAttemptOutcome::ForceClosed,
-                pr_url: Some("https://github.example/owner/repo/pull/late"),
-                submit_ref: Some(&submit_ref),
+                outcome: params_second.outcome,
+                pr_url: params_second.pr_url,
+                submit_ref: Some(&params_second.submit_ref),
                 checkpoint_ref: None,
                 mirror_head_sha: None,
-                github_head_sha: Some("sha-late"),
-                summary: Some(summary_late),
-                summary_json: Some(&summary_json_late),
+                github_head_sha: params_second.github_head_sha,
+                summary: Some(&params_second.summary),
+                summary_json: Some(&params_second.summary_json),
                 log_tail: None,
             },
         )
@@ -1286,12 +1319,16 @@ mod e6_tests {
         let attempt = repo.get(&attempt_id).await.unwrap().unwrap();
         // The original terminal outcome must be preserved — no backward movement.
         assert_eq!(attempt.outcome, "adopted_pr");
-        assert_eq!(attempt.pr_url.as_deref(), Some(pr_url_orig));
-        assert_eq!(attempt.github_head_sha.as_deref(), Some(head_sha_orig));
+        assert_eq!(
+            attempt.pr_url.as_deref(),
+            Some("https://github.example/owner/repo/pull/7")
+        );
+        assert_eq!(attempt.github_head_sha.as_deref(), Some("sha-orig"));
         // The original structured context must not be overwritten.
         let ctx: serde_json::Value =
             serde_json::from_str(attempt.summary_json.as_deref().unwrap()).unwrap();
         assert_eq!(ctx["path"], "adopted_pr");
-        assert_eq!(ctx["pr_url"], pr_url_orig);
+        assert_eq!(ctx["pr_url"], "https://github.example/owner/repo/pull/7");
+        assert_eq!(ctx["task_branch"], format!("task/{}", task.short_id));
     }
 }
