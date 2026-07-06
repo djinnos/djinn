@@ -516,20 +516,26 @@ fn lead_stage_outcome(
                             provider_failure: None,
                         }
                     } else {
-                        StageOutcome::LeadApproved
+                        StageOutcome::LeadApproved {
+                            evidence: evidence
+                                .map(|e| {
+                                    serde_json::to_string(e).unwrap_or_else(|_| "{}".to_string())
+                                })
+                                .unwrap_or_else(|| "{}".to_string()),
+                        }
                     }
                 }
                 // approve_conflict: approved but merge conflict.
                 // Requires evidence citation.
                 "approve_conflict" => {
                     let evidence = finalize_payload.and_then(|p| p.get("evidence"));
-                    if evidence.is_none()
-                        || evidence
+                    let has_valid_evidence = evidence.is_some()
+                        && evidence
                             .and_then(|e| e.get("summary"))
                             .and_then(|v| v.as_str())
-                            .map(|s| s.is_empty())
-                            .unwrap_or(true)
-                    {
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false);
+                    if !has_valid_evidence {
                         StageOutcome::Failed {
                             reason: "approve_conflict decision requires \
                                      evidence with non-empty summary"
@@ -540,6 +546,11 @@ fn lead_stage_outcome(
                         StageOutcome::LeadApproveConflict {
                             reason: reason()
                                 .unwrap_or_else(|| "lead approved with merge conflict".into()),
+                            evidence: evidence
+                                .map(|e| {
+                                    serde_json::to_string(e).unwrap_or_else(|_| "{}".to_string())
+                                })
+                                .unwrap_or_else(|| "{}".to_string()),
                         }
                     }
                 }
@@ -1881,7 +1892,7 @@ mod tests {
         assert!(
             matches!(
                 lead_stage_outcome("submit_decision", Some(&payload)),
-                StageOutcome::LeadApproved
+                StageOutcome::LeadApproved { ref evidence } if !evidence.is_empty()
             ),
             "approve with valid evidence must succeed",
         );
@@ -1937,7 +1948,7 @@ mod tests {
         assert!(
             matches!(
                 lead_stage_outcome("submit_decision", Some(&payload)),
-                StageOutcome::LeadApproveConflict { reason } if reason == "correct but conflicts"
+                StageOutcome::LeadApproveConflict { ref reason, ref evidence } if reason == "correct but conflicts" && !evidence.is_empty()
             ),
             "approve_conflict with evidence and reason must succeed",
         );

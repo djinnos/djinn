@@ -1,3 +1,4 @@
+// djinn:allow-oversize — over size-guard byte threshold after arbiter decision plumbing; split when touched substantively.
 //! `DirectServices` — in-process [`SupervisorServices`] impl.
 //!
 //! Phase 2 PR 3 replaced `djinn-supervisor`'s struct-with-callbacks
@@ -800,6 +801,125 @@ impl SupervisorServices for DirectServices {
                 Ok(())
             }
         }
+    }
+
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        task: &Task,
+    ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
+        let db = &self.callbacks.agent_context.db;
+        let task_repo = djinn_db::TaskRepository::new(
+            db.clone(),
+            self.callbacks.agent_context.event_bus.clone(),
+        );
+        let outcome = djinn_coordinator::run_arbiter_preapproval_gate(db, &task_repo, task).await;
+        Ok(outcome)
+    }
+
+    /// Persist the arbiter decision (approve / approve_conflict) and its
+    /// evidence on the current unconsumed arbitration row, then emit an
+    /// `arbiter_decision` activity event.  Non-fatal on any individual
+    /// failure — the caller logs and proceeds with the board transition.
+    async fn record_arbiter_decision(
+        &self,
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    ) -> Result<(), String> {
+        use djinn_db::TaskRepository;
+        use djinn_db::repositories::task_arbitration::{
+            TaskArbitrationRepository, UpdateDispatchLedgerParams,
+        };
+
+        let db = self.callbacks.agent_context.db.clone();
+        let event_bus = self.callbacks.agent_context.event_bus.clone();
+        let task_repo = TaskRepository::new(db.clone(), event_bus.clone());
+        let arb_repo = TaskArbitrationRepository::new(db.clone());
+
+        // Load the source task for short_id (activity logging).
+        let task = task_repo
+            .get(&task_id)
+            .await
+            .map_err(|e| format!("record_arbiter_decision: failed to load task: {e}"))?
+            .ok_or_else(|| format!("record_arbiter_decision: task {task_id} not found"))?;
+
+        // Parse evidence.
+        let evidence: serde_json::Value =
+            serde_json::from_str(&evidence_json).unwrap_or_else(|_| serde_json::json!({}));
+        let evidence_summary = evidence
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("arbiter approval")
+            .chars()
+            .take(200)
+            .collect::<String>();
+
+        // Resolve the current unconsumed arbitration row.
+        let (_hold_cycle, unconsumed_record) = arb_repo
+            .resolve_current_hold_cycle(&task_id)
+            .await
+            .map_err(|e| format!("record_arbiter_decision: failed to resolve hold cycle: {e}"))?;
+
+        // Build the decision payload.
+        let decision_json = serde_json::json!({
+            "decision": decision,
+            "evidence_summary": evidence_summary,
+        });
+
+        if let Some(ref record) = unconsumed_record {
+            // Update the existing unconsumed row with the decision and evidence.
+            arb_repo
+                .update_dispatch_ledger(UpdateDispatchLedgerParams {
+                    task_id: &task_id,
+                    hold_cycle: record.hold_cycle,
+                    mirror_head_sha: None,
+                    github_head_sha: None,
+                    pr_url: None,
+                    failing_ci_job_ids: None,
+                    dossier: None,
+                    directive: Some(&decision_json),
+                    verification_command: None,
+                    excluded_models: None,
+                })
+                .await
+                .map_err(|e| {
+                    format!("record_arbiter_decision: failed to update arbitration row: {e}")
+                })?;
+        } else {
+            // No unconsumed row — log and continue. The park transaction
+            // creates its own row, but approve/approve_conflict are expected
+            // to always have an unconsumed row from the dispatch.
+            tracing::warn!(
+                task_id = %task.short_id,
+                "record_arbiter_decision: no unconsumed arbitration row found — decision logged as activity only"
+            );
+        }
+
+        // Emit arbiter_decision activity event.
+        let activity_payload = serde_json::json!({
+            "event": "arbiter_decision",
+            "task_id": task.short_id,
+            "decision": decision,
+            "evidence_summary": evidence_summary,
+        });
+        if let Err(e) = task_repo
+            .log_activity(
+                Some(&task_id),
+                "system",
+                "coordinator",
+                "arbiter_decision",
+                &activity_payload.to_string(),
+            )
+            .await
+        {
+            tracing::warn!(
+                task_id = %task.short_id,
+                error = %e,
+                "record_arbiter_decision: failed to log arbiter_decision activity"
+            );
+        }
+
+        Ok(())
     }
 }
 

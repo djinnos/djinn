@@ -565,6 +565,24 @@ impl SupervisorServices for WorkerSupervisorServices {
     ) -> Result<serde_json::Value, String> {
         self.rpc.tool_ci_job_log(session_task_id, arguments).await
     }
+
+    async fn run_arbiter_preapproval_gate(
+        &self,
+        task: &djinn_core::models::Task,
+    ) -> Result<djinn_supervisor::ArbiterGateResult, String> {
+        self.rpc.run_arbiter_preapproval_gate(task).await
+    }
+
+    async fn record_arbiter_decision(
+        &self,
+        task_id: String,
+        decision: String,
+        evidence_json: String,
+    ) -> Result<(), String> {
+        self.rpc
+            .record_arbiter_decision(task_id, decision, evidence_json)
+            .await
+    }
 }
 
 #[cfg(test)]
