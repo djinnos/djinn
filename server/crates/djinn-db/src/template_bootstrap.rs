@@ -34,6 +34,17 @@ use crate::error::{DbError, DbResult};
 static TEMPLATE_BOOTSTRAP_SEMAPHORE: std::sync::OnceLock<Arc<Semaphore>> =
     std::sync::OnceLock::new();
 
+/// Process-wide latch: set once the template has been created/verified in this
+/// process so every later `ensure_test_template` call short-circuits. Without
+/// this, bootstrap opens a fresh client connection to `djinn_test_template` on
+/// *every* test's first query (to verify migrations), and that connection is
+/// what a concurrent `clone_postgres_test_template` `pg_terminate_backend`
+/// races with — the `57P01 "terminating connection due to administrator
+/// command"` flake. Verifying once per process removes almost all of those
+/// template connections; the advisory lock (below) closes the remaining window
+/// for the single first-test bootstrap.
+static TEMPLATE_READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 fn bootstrap_semaphore() -> Arc<Semaphore> {
     TEMPLATE_BOOTSTRAP_SEMAPHORE
         .get_or_init(|| Arc::new(Semaphore::new(1)))
@@ -43,7 +54,14 @@ fn bootstrap_semaphore() -> Arc<Semaphore> {
 /// Advisory lock id used while creating/migrating `djinn_test_template`.
 ///
 /// Chosen as a deterministic 64-bit hash of the string "djinn_test_template".
-const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
+///
+/// `ensure_test_template` holds this in **exclusive** mode for the entire
+/// maintenance window (including the template-connected migrate/verify);
+/// `clone_postgres_test_template` takes it in **shared** mode around its
+/// `pg_terminate_backend`. Exclusive⇄shared conflict means a clone can never
+/// terminate a live bootstrap template connection, while concurrent clones
+/// (all shared) never block each other.
+pub(crate) const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
 
 /// Ensure the `djinn_test_template` database exists and is migrated.
 ///
@@ -54,31 +72,65 @@ const TEMPLATE_ADVISORY_LOCK_ID: i64 = 0x6a5b4c3d2e1f0a9b;
 /// Uses both a local semaphore (per-process) and a Postgres advisory lock
 /// (cross-process) so parallel tests / worker pods don't collide.
 pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
+    // Fast path: the template was already created/verified in this process.
+    if TEMPLATE_READY.get().is_some() {
+        return Ok(());
+    }
+
     let _permit = acquire_bootstrap_permit().await;
+
+    // Re-check under the local permit: a peer thread may have completed the
+    // bootstrap while we waited on the semaphore.
+    if TEMPLATE_READY.get().is_some() {
+        return Ok(());
+    }
 
     let admin_url = format!("{server_prefix}/postgres");
     let opts = sqlx::postgres::PgConnectOptions::from_str(&admin_url).map_err(DbError::from)?;
     let mut conn = opts.connect().await.map_err(DbError::from)?;
 
-    // Cross-process serialization: take an advisory lock for the duration of
-    // our maintenance work on the template. This makes multi-pod races safe.
+    // Cross-process serialization: take an EXCLUSIVE advisory lock for the
+    // duration of our maintenance work on the template — including the
+    // template-connected migrate/verify below. `clone_postgres_test_template`
+    // takes the same lock in SHARED mode around its `pg_terminate_backend`, so
+    // a concurrent clone can never terminate our live template connection
+    // (the `57P01` "terminating connection due to administrator command" flake).
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(TEMPLATE_ADVISORY_LOCK_ID)
         .execute(&mut conn)
         .await
         .map_err(DbError::from)?;
 
+    // Do the maintenance work under the lock, then always release it — even on
+    // error — so a failed bootstrap never wedges peers waiting on the lock.
+    let result = ensure_test_template_locked(server_prefix, &mut conn).await;
+    let _ = unlock_template_bootstrap(&mut conn).await;
+    drop(conn);
+    result?;
+
+    // Only latch success: a failed bootstrap must be retried by the next test.
+    let _ = TEMPLATE_READY.set(());
+    Ok(())
+}
+
+/// Body of [`ensure_test_template`], run while the exclusive advisory lock is
+/// held on `conn`. Any template-connected work (migrate on create, verify on
+/// pre-existing) is therefore protected from a concurrent clone's
+/// `pg_terminate_backend`.
+async fn ensure_test_template_locked(
+    server_prefix: &str,
+    conn: &mut sqlx::postgres::PgConnection,
+) -> DbResult<()> {
     // Does the template exist?
     let exists: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_database WHERE datname = 'djinn_test_template'",
     )
-    .fetch_one(&mut conn)
+    .fetch_one(&mut *conn)
     .await
     .map_err(DbError::from)?;
 
     if exists == 0 {
-        create_and_migrate_template(server_prefix, &mut conn).await?;
-        unlock_template_bootstrap(&mut conn).await?;
+        create_and_migrate_template(server_prefix, conn).await?;
         return Ok(());
     }
 
@@ -87,12 +139,12 @@ pub(crate) async fn ensure_test_template(server_prefix: &str) -> DbResult<()> {
     sqlx::query(
         "UPDATE pg_database SET datistemplate = TRUE WHERE datname = 'djinn_test_template'",
     )
-    .execute(&mut conn)
+    .execute(&mut *conn)
     .await
     .map_err(DbError::from)?;
 
-    unlock_template_bootstrap(&mut conn).await?;
-    drop(conn);
+    // The exclusive advisory lock is still held on `conn`, so verify's own
+    // connection to the template cannot be terminated by a racing clone.
     verify_template_migrations(server_prefix).await?;
 
     Ok(())
