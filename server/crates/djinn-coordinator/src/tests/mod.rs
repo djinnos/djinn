@@ -1435,3 +1435,6 @@ mod status_and_stuck;
 
 mod boundary;
 mod post_intervention_lane;
+
+#[cfg(test)]
+mod i3mv_regression_tests;

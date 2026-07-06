@@ -36,4 +36,5 @@ pub(crate) use admission::{
     take_dispatch_cap_observations,
 };
 pub(crate) use outcome::DispatchOutcome;
+pub(crate) use retry::PostInterventionHistory;
 pub(crate) use retry::RemediationKind;
