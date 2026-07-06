@@ -10,6 +10,7 @@ use tokio_util::io::StreamReader;
 
 use super::AuthMethod;
 use super::error::{ProviderError, redact_secrets};
+use super::first_event::first_event_budget;
 use crate::rate_limit::{activate_suppression_window, clear_suppression_window};
 
 /// Collect the secret values an `AuthMethod` puts on the wire so a misbehaving
@@ -165,12 +166,25 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// If the provider stops sending data for this long, we consider the stream
 /// dead. This catches the "hung connection" scenario that the overall request
 /// timeout might not catch once headers have already been received.
-/// 300s matches OpenCode's default — reasoning models can be slow to start.
-const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(300);
+///
+/// Sized to at least the longest reasoning-family first-event floor
+/// (`super::first_event::REASONING_FLOOR_TIMEOUT`, 600s) so the per-chunk read
+/// timeout is never lower than the first-event (TTFT) detector threshold.
+/// Reasoning streams can also have long inter-chunk gaps during extended
+/// thinking, so we use 600s across the board. The default first-event budget
+/// for non-reasoning models is 90s (well below this), so non-reasoning streams
+/// are not penalized.
+const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// HTTP client for streaming SSE requests to LLM provider APIs.
 pub struct ApiClient {
     inner: reqwest::Client,
+    /// Optional ceiling on the first-event (TTFT) detector budget for this
+    /// client. When `Some`, `stream_sse` caps the derived budget at this value
+    /// instead of [`STREAM_CHUNK_TIMEOUT`]. Always `None` for production
+    /// clients; exposed via [`Self::new_with_first_event_budget_override`]
+    /// so tests can fire the TTFT guard in milliseconds rather than minutes.
+    first_event_budget_override: Option<Duration>,
 }
 
 impl ApiClient {
@@ -180,7 +194,29 @@ impl ApiClient {
             .pool_max_idle_per_host(10)
             .build()
             .expect("failed to build reqwest client");
-        Self { inner }
+        Self {
+            inner,
+            first_event_budget_override: None,
+        }
+    }
+
+    /// Build a client whose `stream_sse` first-event guard uses `override_` as
+    /// the maximum detector budget instead of [`STREAM_CHUNK_TIMEOUT`].
+    ///
+    /// `#[doc(hidden)]` — production callers use [`Self::new`]. This is a
+    /// test-only escape hatch so the TTFT guard can fire in milliseconds
+    /// without waiting on real production budgets (90s default / 600s floor).
+    #[doc(hidden)]
+    pub fn new_with_first_event_budget_override(override_: Duration) -> Self {
+        let inner = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("failed to build reqwest client");
+        Self {
+            inner,
+            first_event_budget_override: Some(override_),
+        }
     }
 
     /// POST to `url` with `body`, stream the response as SSE data lines.
@@ -201,6 +237,7 @@ impl ApiClient {
         let url = url.to_string();
         let auth = auth.clone();
         let secrets = auth_secrets(&auth);
+        let first_event_budget_override = self.first_event_budget_override;
 
         Box::pin(stream! {
             let secret_refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
@@ -298,12 +335,38 @@ impl ApiClient {
             let stream_reader = StreamReader::new(byte_stream);
             let mut lines = BufReader::new(stream_reader).lines();
 
+            // ── First-event (TTFT) guard ─────────────────────────────────────
+            //
+            // After HTTP headers arrive, a stream that never delivers its first
+            // usable SSE `data:` event is wedged. We derive a per-model budget
+            // from the request body's model id and apply it until the first
+            // data event lands. After that, the normal STREAM_CHUNK_TIMEOUT
+            // governs inter-chunk gaps.
+            //
+            // The transport read timeout must be at least as high as the
+            // derived detector threshold, otherwise the first-event guard would
+            // be redundant with (or masked by) the chunk timeout. STREAM_CHUNK_TIMEOUT
+            // is sized to at least the reasoning floor (600s) precisely for this
+            // reason; the `min` here is a defensive belt should the chunk timeout
+            // be reduced below a future reasoning floor.
+            let model_id = body_model_id(&body).to_string();
+            let derived_first_event_budget = first_event_budget(&model_id, None);
+            let first_event_timeout = derived_first_event_budget
+                .min(first_event_budget_override.unwrap_or(STREAM_CHUNK_TIMEOUT));
+            let mut first_event_received = false;
+
             loop {
-                match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, lines.next_line()).await {
+                let timeout_dur = if first_event_received {
+                    STREAM_CHUNK_TIMEOUT
+                } else {
+                    first_event_timeout
+                };
+                match tokio::time::timeout(timeout_dur, lines.next_line()).await {
                     Ok(Ok(Some(line))) => {
                         // Yield payloads from SSE `data:` lines; skip event:, id:,
                         // comment, blank lines and the `[DONE]` sentinel.
                         if let Some(data) = parse_sse_data_line(&line) {
+                            first_event_received = true;
                             yield Ok(data.to_string());
                         }
                     }
@@ -314,10 +377,22 @@ impl ApiClient {
                         break;
                     }
                     Err(_) => {
-                        yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
-                            "SSE stream timed out: no data received for {}s",
-                            STREAM_CHUNK_TIMEOUT.as_secs()
-                        )));
+                        if !first_event_received {
+                            // First-event / TTFT timeout: no usable SSE event
+                            // arrived within the derived budget. Emit a typed
+                            // retryable Transport error so downstream failover
+                            // can classify it (not an empty turn).
+                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
+                                "SSE first-event (TTFT) timeout: no data event received within {}s for model {:?}",
+                                first_event_timeout.as_secs(),
+                                model_id
+                            )));
+                        } else {
+                            yield Err(anyhow::Error::new(ProviderError::Transport).context(format!(
+                                "SSE stream timed out: no data received for {}s",
+                                STREAM_CHUNK_TIMEOUT.as_secs()
+                            )));
+                        }
                         break;
                     }
                 }
@@ -522,9 +597,74 @@ mod tests {
         assert_eq!(parse_sse_data_line("data:[DONE]"), None);
     }
 
+    // ── STREAM_CHUNK_TIMEOUT invariants ───────────────────────────────────────────
+    //
+    // The transport/chunk read timeout must be at least the longest reasoning-family
+    // first-event floor so the TTFT detector is never capped below its intended
+    // budget. The reasoning floor is 600s (see
+    // `crate::provider::first_event::REASONING_FLOOR_TIMEOUT`). These unit tests
+    // sit on `STREAM_CHUNK_TIMEOUT` directly rather than going through
+    // `first_event_budget` so a future regression that bumps the floor without
+    // raising the chunk timeout is caught here at compile+test time.
     #[test]
-    fn stream_chunk_timeout_is_5_minutes() {
-        assert_eq!(STREAM_CHUNK_TIMEOUT, Duration::from_secs(300));
+    fn stream_chunk_timeout_at_least_reasoning_floor() {
+        assert!(
+            STREAM_CHUNK_TIMEOUT >= crate::provider::first_event::REASONING_FLOOR_TIMEOUT,
+            "STREAM_CHUNK_TIMEOUT ({:?}) must be >= REASONING_FLOOR_TIMEOUT ({:?})",
+            STREAM_CHUNK_TIMEOUT,
+            crate::provider::first_event::REASONING_FLOOR_TIMEOUT
+        );
+        assert_eq!(STREAM_CHUNK_TIMEOUT, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn stream_chunk_timeout_is_larger_than_non_reasoning_default() {
+        // The chunk timeout must also exceed the non-reasoning default
+        // first-event budget (90s) — otherwise every non-reasoning stream
+        // would hit the chunk timeout before the TTFT guard could fire.
+        assert!(
+            STREAM_CHUNK_TIMEOUT > crate::provider::first_event::DEFAULT_FIRST_EVENT_TIMEOUT,
+            "STREAM_CHUNK_TIMEOUT ({:?}) must be > DEFAULT_FIRST_EVENT_TIMEOUT ({:?})",
+            STREAM_CHUNK_TIMEOUT,
+            crate::provider::first_event::DEFAULT_FIRST_EVENT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn first_event_budget_non_reasoning_is_within_90s() {
+        // The non-reasoning default budget must be no more than 90s.
+        assert!(
+            first_event_budget("gpt-4o", None) <= Duration::from_secs(90),
+            "default non-reasoning budget must be <= 90s"
+        );
+    }
+
+    #[test]
+    fn first_event_budget_reasoning_floor_is_600s() {
+        // Reasoning families get a ~600s floor via start-anchored matching.
+        assert_eq!(first_event_budget("o1", None), Duration::from_secs(600));
+        assert_eq!(
+            first_event_budget("gpt-5.1-codex", None),
+            Duration::from_secs(600)
+        );
+    }
+
+    #[test]
+    fn first_event_budget_explicit_config_overrides_floor() {
+        // Explicit config always wins, even when lower than the floor.
+        assert_eq!(
+            first_event_budget("o1", Some(Duration::from_secs(30))),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn first_event_budget_floor_does_not_lower_explicit() {
+        // A floor must never lower an explicit threshold.
+        assert_eq!(
+            first_event_budget("gpt-4o", Some(Duration::from_secs(120))),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
