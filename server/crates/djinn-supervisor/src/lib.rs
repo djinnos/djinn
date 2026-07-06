@@ -179,11 +179,22 @@ pub enum StageOutcome {
     LeadApproveConflict {
         reason: String,
     },
-    /// Lead `submit_decision(decision="reopen")` — the task was rescoped /
-    /// guided / blocked-on-deps and should retry with a fresh worker. Maps to
-    /// `lead_intervention_complete` (in_lead_intervention → open).
+    /// Lead `submit_decision(decision="reopen")` — the arbiter rescoped /
+    /// guided / blocked-on-deps and the task should retry with a fresh worker.
+    /// Maps to `lead_intervention_complete` (in_lead_intervention → open).
+    /// Carries the arbiter's structured reopen payload: the `directive` is
+    /// injected verbatim into the next worker prompt, `verification_command`
+    /// is prompted-for, and `exclude_models` blocks specific models from the
+    /// next dispatch.
     LeadReopen {
         reason: String,
+        /// Arbiter directive injected into the next worker prompt.
+        directive: String,
+        /// Verification command the next worker must execute.
+        verification_command: String,
+        /// Models excluded from the next dispatch (may be empty).
+        #[serde(default)]
+        exclude_models: Vec<String>,
     },
     /// Lead `submit_decision(decision="decompose"|"force_close")` — terminal
     /// closure of the original task (decompose: replacement subtasks were
@@ -229,6 +240,14 @@ pub enum StageOutcome {
         tokens_in: i64,
         tokens_out: i64,
     },
+    /// Arbiter `submit_decision(decision="park")` — the arbiter parked the
+    /// task with a structured `park_dossier` describing the hold. Maps to a
+    /// human-review hold on the board; the task cannot be auto-closed by an
+    /// agent decision.
+    LeadParked {
+        /// JSON-serialized park dossier with hold description and failure analysis.
+        park_dossier_json: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +275,7 @@ impl StageOutcome {
                 | StageOutcome::LeadReopen { .. }
                 | StageOutcome::LeadClose { .. }
                 | StageOutcome::LeadEscalate { .. }
+                | StageOutcome::LeadParked { .. }
         )
     }
 }
@@ -281,6 +301,7 @@ fn emit_stage_outcome_event(
         StageOutcome::LeadReopen { .. } => "lead_reopen",
         StageOutcome::LeadClose { .. } => "lead_close",
         StageOutcome::LeadEscalate { .. } => "lead_escalate",
+        StageOutcome::LeadParked { .. } => "lead_parked",
         StageOutcome::Failed { .. } => "failed",
         StageOutcome::LoopGuardTripped { .. } => "loop_guard_tripped",
         StageOutcome::Parked { .. } => "parked",
@@ -1896,7 +1917,12 @@ impl TaskRunSupervisor {
                         result = Some(TaskRunOutcome::Closed { reason });
                         break;
                     }
-                    StageOutcome::LeadReopen { reason } => {
+                    StageOutcome::LeadReopen {
+                        reason,
+                        directive: _,
+                        verification_command: _,
+                        exclude_models: _,
+                    } => {
                         if !self.services.cancel().is_cancelled()
                             && let Err(e) = self
                                 .services
@@ -1914,7 +1940,9 @@ impl TaskRunSupervisor {
                                 "supervisor: lead_intervention_complete transition skipped"
                             );
                         }
-                        result = Some(TaskRunOutcome::Closed { reason });
+                        result = Some(TaskRunOutcome::Closed {
+                            reason: reason.clone(),
+                        });
                         break;
                     }
                     StageOutcome::LeadClose { reason } => {
@@ -1960,6 +1988,32 @@ impl TaskRunSupervisor {
                             );
                         }
                         result = Some(TaskRunOutcome::Escalated { reason });
+                        break;
+                    }
+                    StageOutcome::LeadParked { park_dossier_json } => {
+                        // Arbiter parked → human-review hold. The task stays
+                        // in_lead_intervention and the coordinator parks it with
+                        // the dossier for human review.
+                        if !self.services.cancel().is_cancelled()
+                            && let Err(e) = self
+                                .services
+                                .transition_task(
+                                    spec.task_id.clone(),
+                                    "force_close".into(),
+                                    Some(format!("arbiter_parked: {}", park_dossier_json)),
+                                )
+                                .await
+                        {
+                            tracing::warn!(
+                                task_run_id = %run_id,
+                                task_id = %spec.task_id,
+                                error = %e,
+                                "supervisor: lead parked transition skipped"
+                            );
+                        }
+                        result = Some(TaskRunOutcome::Closed {
+                            reason: format!("arbiter_parked: {}", park_dossier_json),
+                        });
                         break;
                     }
                     StageOutcome::ReviewerRejected { feedback } => {
@@ -4298,6 +4352,9 @@ mod tests {
             },
             StageOutcome::LeadReopen {
                 reason: "retry".to_string(),
+                directive: "fix the bug".to_string(),
+                verification_command: "cargo test".to_string(),
+                exclude_models: vec![],
             },
             StageOutcome::LeadClose {
                 reason: "close".to_string(),

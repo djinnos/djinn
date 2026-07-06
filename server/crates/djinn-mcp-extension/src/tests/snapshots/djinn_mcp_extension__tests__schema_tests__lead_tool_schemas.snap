@@ -863,34 +863,8 @@ expression: tool_schemas_lead()
     "concurrent_safe": false
   },
   {
-    "name": "request_planner",
-    "description": "Escalate to the Planner when the task requires board-level intervention beyond per-task Lead resolution. Use when the task is mis-shaped, duplicates other work, needs to be split or merged, or has failed multiple Lead interventions. The Planner owns the board and decides whether to reshape the work, dedupe it, or — if the issue requires deeper code-structural reasoning — dispatch an Architect spike. Adds a comment and dispatches the Planner. Your session should end after this call.",
-    "inputSchema": {
-      "type": "object",
-      "required": [
-        "id",
-        "reason"
-      ],
-      "properties": {
-        "id": {
-          "type": "string",
-          "description": "Task UUID or short_id"
-        },
-        "reason": {
-          "type": "string",
-          "description": "Why Planner escalation is needed (e.g. task mis-shaped, duplicates other work, needs splitting, repeated Lead failures with no clear next step)"
-        }
-      }
-    },
-    "readOnly": false,
-    "destructive": false,
-    "idempotent": false,
-    "openWorld": false,
-    "concurrent_safe": false
-  },
-  {
     "name": "submit_decision",
-    "description": "Submit the Lead intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.",
+    "description": "Submit the Lead/arbiter intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -908,15 +882,79 @@ expression: tool_schemas_lead()
             "approve",
             "approve_conflict",
             "reopen",
-            "decompose",
-            "force_close",
-            "escalate"
+            "park"
           ],
-          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; this merges via the PR pipeline), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry), reopen (send back to a fresh worker after you've rescoped/guided/added blockers), decompose (you created replacement subtasks — close the original), force_close (redundant or already-landed work), escalate (you cannot resolve it — return to the board for Planner/human review)"
+          "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier)"
         },
         "rationale": {
           "type": "string",
           "description": "Explanation for the decision"
+        },
+        "evidence": {
+          "type": "object",
+          "description": "Required for approve and approve_conflict. Evidence citation pointing at concrete verification/review/git evidence.",
+          "required": [
+            "source",
+            "summary"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "description": "Evidence source type: 'ci_run', 'review_round', 'git_log', 'test_output', or 'manual_review'"
+            },
+            "summary": {
+              "type": "string",
+              "description": "Human-readable summary of the evidence and why it supports the approval"
+            },
+            "reference_id": {
+              "type": "string",
+              "description": "Optional reference ID (CI run ID, session ID, commit SHA, etc.)"
+            }
+          }
+        },
+        "directive": {
+          "type": "string",
+          "description": "Required for reopen. Non-empty directive injected verbatim into the next worker prompt."
+        },
+        "verification_command": {
+          "type": "string",
+          "description": "Required for reopen. Executable command the next worker must run to verify the fix."
+        },
+        "exclude_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional for reopen. Model IDs excluded from the next dispatch."
+        },
+        "park_dossier": {
+          "type": "object",
+          "description": "Required for park. Structured dossier for the human-review hold.",
+          "required": [
+            "hold_description",
+            "failure_analysis"
+          ],
+          "properties": {
+            "hold_description": {
+              "type": "string",
+              "description": "Description of the hold for human reviewers"
+            },
+            "failure_analysis": {
+              "type": "string",
+              "description": "Analysis of why the task failed and needs human review"
+            },
+            "attempted_decisions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional list of decisions attempted before parking"
+            },
+            "recommended_action": {
+              "type": "string",
+              "description": "Optional recommended action for the human reviewer"
+            }
+          }
         },
         "created_tasks": {
           "type": "array",

@@ -70,11 +70,11 @@ pub fn tool_submit_review() -> RmcpTool {
     )
 }
 
-/// MCP tool descriptor for the Lead finalize tool.
+/// MCP tool descriptor for the Lead/arbiter finalize tool.
 pub fn tool_submit_decision() -> RmcpTool {
     RmcpTool::new(
         "submit_decision".to_string(),
-        "Submit the Lead intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.".to_string(),
+        "Submit the Lead/arbiter intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.".to_string(),
         object!({
             "type": "object",
             "required": ["task_id", "decision"],
@@ -82,10 +82,48 @@ pub fn tool_submit_decision() -> RmcpTool {
                 "task_id": {"type": "string", "description": "Task UUID or short_id"},
                 "decision": {
                     "type": "string",
-                    "enum": ["approve", "approve_conflict", "reopen", "decompose", "force_close", "escalate"],
-                    "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; this merges via the PR pipeline), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry), reopen (send back to a fresh worker after you've rescoped/guided/added blockers), decompose (you created replacement subtasks — close the original), force_close (redundant or already-landed work), escalate (you cannot resolve it — return to the board for Planner/human review)"
+                    "enum": ["approve", "approve_conflict", "reopen", "park"],
+                    "description": "The decision: approve (work is complete + correct — the worker just couldn't self-certify; requires evidence citation), approve_conflict (correct but a merge conflict exists — approve then send for conflict retry; requires evidence citation), reopen (send back to a fresh worker with a directive and verification command), park (hold the task for human review with a structured dossier)"
                 },
                 "rationale": {"type": "string", "description": "Explanation for the decision"},
+                "evidence": {
+                    "type": "object",
+                    "description": "Required for approve and approve_conflict. Evidence citation pointing at concrete verification/review/git evidence.",
+                    "required": ["source", "summary"],
+                    "properties": {
+                        "source": {"type": "string", "description": "Evidence source type: 'ci_run', 'review_round', 'git_log', 'test_output', or 'manual_review'"},
+                        "summary": {"type": "string", "description": "Human-readable summary of the evidence and why it supports the approval"},
+                        "reference_id": {"type": "string", "description": "Optional reference ID (CI run ID, session ID, commit SHA, etc.)"}
+                    }
+                },
+                "directive": {
+                    "type": "string",
+                    "description": "Required for reopen. Non-empty directive injected verbatim into the next worker prompt."
+                },
+                "verification_command": {
+                    "type": "string",
+                    "description": "Required for reopen. Executable command the next worker must run to verify the fix."
+                },
+                "exclude_models": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional for reopen. Model IDs excluded from the next dispatch."
+                },
+                "park_dossier": {
+                    "type": "object",
+                    "description": "Required for park. Structured dossier for the human-review hold.",
+                    "required": ["hold_description", "failure_analysis"],
+                    "properties": {
+                        "hold_description": {"type": "string", "description": "Description of the hold for human reviewers"},
+                        "failure_analysis": {"type": "string", "description": "Analysis of why the task failed and needs human review"},
+                        "attempted_decisions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional list of decisions attempted before parking"
+                        },
+                        "recommended_action": {"type": "string", "description": "Optional recommended action for the human reviewer"}
+                    }
+                },
                 "created_tasks": {
                     "type": "array",
                     "items": {"type": "string"},
