@@ -112,17 +112,6 @@ impl ProviderCredential {
             self
         }
     }
-
-    /// Legacy stamp: sets only `model_id` without re-resolving model defaults.
-    ///
-    /// Prefer [`restamp_to`] for new code; this is retained for call-sites
-    /// that do not yet carry a full [`RestampTarget`].
-    pub fn with_model_id(mut self, model_id: &str) -> Self {
-        if let ProviderCredential::OAuthConfig(cfg) = &mut self {
-            cfg.model_id = model_id.to_string();
-        }
-        self
-    }
 }
 
 pub async fn load_provider_credential(
