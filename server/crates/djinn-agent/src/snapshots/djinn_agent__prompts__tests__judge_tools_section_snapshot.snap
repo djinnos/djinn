@@ -1,5 +1,6 @@
 ---
 source: crates/djinn-agent/src/prompts/tests.rs
+assertion_line: 594
 expression: section
 ---
 - `task_show(id)` — Show details of a work item including recent activity and blockers.
@@ -24,4 +25,4 @@ expression: section
 - `proposal_debate_append(against_revision_seq, agent_role, body, kind, proposal_id, round, blocking?)` — Record a tribunal debate-trail entry against a proposal. This is the ONLY channel the refinement loop reads: an Adversary's objections and a Judge's verdict MUST be filed here — text placed in `submit_review`/`submit_decision` is NOT read by the loop. File one entry per objection. `kind` is `objection` (Adversary), `verdict` (Judge), or `rebuttal`. `blocking=true` means it blocks readiness (use for blocking objections and for a not-ready verdict). Read `proposal_id`, `round`, and `against_revision_seq` from your task description and pass them on every call; `agent_role` is your role (`adversary` or `judge`).
 - `proposal_refinement_demand_evidence(against_revision_seq, expected_findings, insufficient_in_session_research, proposal_id, question, round, spec_unknown_anchor, target_subsystem)` — Demand a read-only evidence spike for an insufficiently-evidenced feasibility claim. The Judge calls this when in-session research cannot resolve a load-bearing claim in the spec. Validates the proposal and refinement state, checks the per-run needs-evidence cap (max 2 per refinement run), records the structured claim, and parks refinement until spike findings arrive. Read `proposal_id`, `round`, and `against_revision_seq` from your task description.
 - `task_comment_add(body, id)` — Add a comment or strategic observation to a task's activity log.
-- `submit_decision(decision, task_id, created_tasks?, rationale?)` — Submit the Lead intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.
+- `submit_decision(decision, task_id, created_tasks?, directive?, evidence?, exclude_models?, park_dossier?, rationale?, verification_command?)` — Submit the Lead/arbiter intervention decision. This is the ONLY way to end your session and is what applies the board transition — do not call task_transition yourself. Your session ends after this call.
