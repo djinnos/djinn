@@ -374,25 +374,47 @@ impl DjinnMcpServer {
                     if let Some(task_id) = session.task_id.as_deref() {
                         match pool.has_session(task_id).await {
                             Ok(true) => {
-                                // Slot is alive — but it might be wedged on
-                                // a never-returning model call. Classify
-                                // using the latest session_messages
-                                // timestamp + token counts.
+                                // Slot is alive — but it might be wedged
+                                // on a never-returning model call, or
+                                // running past the model runtime cap
+                                // (epic 5wxi: glm-5.2 worker cap).
+                                // Classify using the combined
+                                // interruption helper so both paths are
+                                // handled uniformly.
                                 let last_msg =
                                     repo.last_message_at(&session.id).await.unwrap_or(None);
-                                let verdict = djinn_core::liveness::classify_session_progress(
-                                    &session.started_at,
-                                    last_msg.as_deref(),
-                                    session.tokens_in,
-                                    session.tokens_out,
-                                    now,
-                                    &config,
-                                );
-                                match verdict {
-                                    djinn_core::liveness::ProgressVerdict::Live => {
+                                let interruption =
+                                    djinn_core::liveness::classify_session_interruption(
+                                        &session.agent_type,
+                                        &session.model_id,
+                                        &session.started_at,
+                                        last_msg.as_deref(),
+                                        session.tokens_in,
+                                        session.tokens_out,
+                                        now,
+                                        &config,
+                                        &djinn_core::liveness::RuntimeCapConfig::default_config(),
+                                    );
+                                match interruption {
+                                    None => {
                                         runtime_sessions.push(session);
                                     }
-                                    djinn_core::liveness::ProgressVerdict::Wedged { .. } => {
+                                    Some(reason) => {
+                                        if let djinn_core::liveness::SessionInterruptReason::RuntimeCap {
+                                            ref provider_id,
+                                            ref model_name,
+                                            ..
+                                        } = reason
+                                        {
+                                            tracing::info!(
+                                                session_id = %session.id,
+                                                provider_id = %provider_id,
+                                                model_name = %model_name,
+                                                "session_active: glm-5.2 runtime-cap \
+                                                 session flagged for reroute \
+                                                 (not a task-quality strike)"
+                                            );
+                                        }
                                         stale_sessions.push(session);
                                     }
                                 }
