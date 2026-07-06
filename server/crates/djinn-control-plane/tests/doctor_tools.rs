@@ -717,3 +717,143 @@ async fn doctor_run_without_check_names_runs_all_registered() {
         "run() should have been called"
     );
 }
+
+/// Exercise the jk7v diagnostic payload shapes through the MCP `doctor_run`
+/// tool path.  This test registers a check that produces a finding with
+/// liveness-classifier evidence (verdict / outcome / reason — the fields
+/// that `board_health` reads from the same DB columns), runs `doctor_run`,
+/// and verifies the persisted finding carries those fields in the shape
+/// the board-health surface expects.
+///
+/// This closes AC 3: "The tests exercise the landed diagnostic fields from
+/// `jk7v` without replacing existing coarse response shape checks."
+#[tokio::test]
+async fn doctor_run_persists_jk7v_aligned_classifier_evidence() {
+    const LIVENESS_CHECK: &str = "test.doctor_liveness_jk7v";
+
+    struct LivenessEvidenceCheck;
+
+    impl DoctorCheck for LivenessEvidenceCheck {
+        fn name(&self) -> &'static str {
+            LIVENESS_CHECK
+        }
+        fn description(&self) -> &'static str {
+            "Test check that produces a finding with jk7v-aligned classifier evidence"
+        }
+        fn cadence(&self) -> DoctorCheckCadence {
+            DoctorCheckCadence::Cheap
+        }
+        fn run(&self) -> DoctorResult<Vec<Finding>> {
+            let inputs = json!({ "session_id": "sess-1", "task_id": "task-1" });
+            let outputs = json!({
+                "verdict": "dead",
+                "outcome": "dead_reclaimed",
+                "reason": "hard_runtime_exceeded",
+            });
+            Ok(vec![
+                Finding::new(
+                    FindingSeverity::Critical,
+                    self.name(),
+                    ResolverSnapshot::new("resolve_liveness", inputs, outputs.clone()),
+                    "zombie session detected with dead verdict",
+                )
+                .with_entity_id("task_id", "task-1")
+                .with_entity_id("session_id", "sess-1")
+                .with_evidence(json!({
+                    "classifier": {
+                        "verdict": "dead",
+                        "outcome": "dead_reclaimed",
+                        "reason": "hard_runtime_exceeded",
+                    },
+                    "pod_phase": "Succeeded",
+                })),
+            ])
+        }
+    }
+
+    let harness = doctor_test_harness().await;
+
+    // Register our liveness-evidence-aware check in the global registry.
+    // We use a fresh AtomicBool to track whether it was found.
+    registry().register(Arc::new(LivenessEvidenceCheck));
+
+    // Run through the MCP tool.
+    let response = harness
+        .call_tool("doctor_run", json!({ "check_names": [LIVENESS_CHECK] }))
+        .await
+        .expect("doctor_run should dispatch");
+    assert_eq!(response["ok"], true);
+
+    let results = response["results"].as_array().expect("results array");
+    let our_result = results
+        .iter()
+        .find(|r| r["check"]["name"] == LIVENESS_CHECK)
+        .expect("our check result");
+    assert_eq!(our_result["ran"], true);
+
+    let findings = our_result["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 1, "must produce exactly one finding");
+
+    let finding = &findings[0];
+    assert_eq!(finding["check_name"], LIVENESS_CHECK);
+    assert_eq!(finding["severity"], "critical");
+
+    // Verify the persisted finding in the DB carries jk7v-aligned evidence.
+    let finding_id = finding["finding_id"]
+        .as_str()
+        .expect("finding_id should be present");
+    let repo = DoctorFindingRepository::new(harness.db().clone());
+    let persisted = repo
+        .get(finding_id)
+        .await
+        .expect("repo get")
+        .expect("finding must be persisted");
+
+    // The persisted evidence must carry the classifier object with the
+    // same verdict/outcome/reason fields that board_health reads.
+    let evidence = &persisted.evidence;
+    assert_eq!(
+        evidence["classifier"]["verdict"].as_str(),
+        Some("dead"),
+        "persisted evidence must carry classifier.verdict = dead"
+    );
+    assert_eq!(
+        evidence["classifier"]["outcome"].as_str(),
+        Some("dead_reclaimed"),
+        "persisted evidence must carry classifier.outcome = dead_reclaimed"
+    );
+    assert_eq!(
+        evidence["classifier"]["reason"].as_str(),
+        Some("hard_runtime_exceeded"),
+        "persisted evidence must carry classifier.reason = hard_runtime_exceeded"
+    );
+    assert_eq!(
+        evidence["pod_phase"].as_str(),
+        Some("Succeeded"),
+        "persisted evidence must carry pod_phase"
+    );
+
+    // The entity_ids must reference the same task/session as the finding.
+    assert_eq!(
+        persisted.entity_ids.get("task_id").and_then(|v| v.as_str()),
+        Some("task-1"),
+        "persisted entity_ids must carry task_id"
+    );
+    assert_eq!(
+        persisted
+            .entity_ids
+            .get("session_id")
+            .and_then(|v| v.as_str()),
+        Some("sess-1"),
+        "persisted entity_ids must carry session_id"
+    );
+
+    // The resolver snapshot must carry the liveness resolve outputs.
+    let snapshot = persisted
+        .resolver_snapshot
+        .as_ref()
+        .expect("resolver_snapshot must be persisted");
+    assert_eq!(snapshot["resolver"], "resolve_liveness");
+    assert_eq!(snapshot["outputs"]["verdict"], "dead");
+    assert_eq!(snapshot["outputs"]["outcome"], "dead_reclaimed");
+}
