@@ -221,15 +221,33 @@ impl CodexTokens {
     }
 }
 
+/// Serializes Codex OAuth token refresh process-wide. Codex/OpenAI rotate the
+/// refresh token on every use (single-use), so any two refreshers racing an
+/// expired token would each POST the SAME refresh_token — the first rotates it
+/// and the rest get `invalid_grant`. Both the slot dispatch path
+/// (`try_load_or_refresh_codex`) and the background keep-alive sweep
+/// (`keepalive::run_codex_keepalive_sweep`) take this before refreshing, and
+/// they run in the same (leader) process, so one async mutex fully serializes
+/// them.
+pub static CODEX_REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Perform the refresh-token exchange and build the new `CodexTokens` **without
+/// persisting** them. Separated from [`refresh_cached_token`] so the keep-alive
+/// sweep can own persistence (stamping the owning user) and so the exchange can
+/// be stubbed in tests.
+pub async fn exchange_refresh(cached: &CodexTokens) -> Result<CodexTokens> {
+    let tr = refresh_token(ISSUER, &cached.refresh_token).await?;
+    let account_id = pick_account_id(&tr).or(cached.account_id.clone());
+    Ok(token_response_to_tokens(tr, account_id))
+}
+
 /// Attempt a silent token refresh using the cached refresh_token.
 /// Returns refreshed `CodexTokens` on success, saving them to the DB.
 pub async fn refresh_cached_token(
     cached: &CodexTokens,
     repo: &CredentialRepository,
 ) -> Result<CodexTokens> {
-    let tr = refresh_token(ISSUER, &cached.refresh_token).await?;
-    let account_id = pick_account_id(&tr).or(cached.account_id.clone());
-    let tokens = token_response_to_tokens(tr, account_id);
+    let tokens = exchange_refresh(cached).await?;
     tokens.save_to_db(repo).await?;
     tracing::info!("Codex: token refreshed successfully (lifecycle)");
     Ok(tokens)
@@ -309,7 +327,7 @@ fn token_response_to_tokens(tr: TokenResponse, account_id: Option<String>) -> Co
     }
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     SystemClockTrait::new()
         .now()
         .duration_since(std::time::UNIX_EPOCH)

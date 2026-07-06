@@ -406,6 +406,8 @@ fn resume_metadata_with_checkpoint() -> djinn_runtime::ResumeLifecycleMetadata {
         target_ref: Some("refs/heads/task/test".to_string()),
         prior_session_lineage: Some("session-prior-001".to_string()),
         previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+        new_model: Some("openai/gpt-4.1".to_string()),
+        failover_reason: Some("no_durable_progress_streak".to_string()),
         last_durable_progress_summary: Some("Implemented core feature".to_string()),
         verification_command: Some("cargo test -p djinn-agent".to_string()),
         ..Default::default()
@@ -442,7 +444,11 @@ async fn worker_resume_note_injected_for_worker_role() {
             "session-prior-001",
             "abc123def456",
             "claude-opus-4.7",
+            "gpt-4.1",
+            "no_durable_progress_streak",
             "no-progress checkpoint",
+            "task-branch checkpoint",
+            "refs/heads/task/test",
             "Implemented core feature",
             "cargo test -p djinn-agent",
         ],
@@ -531,6 +537,53 @@ fn worker_resume_note_minimal_fields() {
     };
     let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
     assert!(note.contains("sess-1"));
+}
+
+#[test]
+fn worker_resume_note_includes_failover_context() {
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        prior_session_lineage: Some("session-prev".to_string()),
+        previous_model: Some("anthropic/claude-opus-4.7".to_string()),
+        new_model: Some("openai/gpt-4.1".to_string()),
+        failover_reason: Some("provider_health_degraded".to_string()),
+        source_kind: Some(djinn_runtime::ResumeSourceKind::CleanTaskBranch),
+        target_ref: Some("refs/heads/task/test".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "session-prev",
+            "claude-opus-4.7",
+            "gpt-4.1",
+            "provider_health_degraded",
+            "clean task branch",
+            "refs/heads/task/test",
+        ],
+    );
+}
+
+#[test]
+fn worker_resume_note_failover_only_produces_note() {
+    // When no checkpoint/submit/prior session exists but failover context
+    // is present, the note should still be produced.
+    let metadata = djinn_runtime::ResumeLifecycleMetadata {
+        considered: true,
+        new_model: Some("openai/gpt-4.1".to_string()),
+        failover_reason: Some("no_durable_progress_streak".to_string()),
+        ..Default::default()
+    };
+    let note = build_worker_resume_note("worker", Some(&metadata)).unwrap();
+    assert_contains_all(
+        &note,
+        &[
+            "Resuming from prior session",
+            "gpt-4.1",
+            "no_durable_progress_streak",
+        ],
+    );
 }
 
 // ── MCP server instructions prompt tests ────────────────────────────
