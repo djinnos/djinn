@@ -5003,10 +5003,16 @@ async fn slow_verdict_with_concurrent_terminal_transition_does_not_grant_extensi
 // the reap even when the underlying raw signals would otherwise look Dead.
 
 /// A session that is past the zombie hard cap and would look Dead on raw
-/// signals, but whose DB token counters advanced since the previous sweep
-/// (independent evidence of liveness that the raw heuristic cannot fake) is
-/// NOT reaped by the zombie reaper. The classifier sees fresh DB activity as
-/// authoritative liveness and spares the session.
+/// signals (zero tokens, aged session), but whose pool still holds a Running
+/// slot with `activity_tracked=true` (the worker pod is alive but quiet), is
+/// classified `Slow` — not `Dead` — by the liveness classifier, and the zombie
+/// reaper spares it.
+///
+/// Invariant protected: the zombie reaper trusts the classifier's Slow verdict
+/// over raw heuristics.  The test asserts the persisted classifier verdict and
+/// outcome/evidence on the denormalized session columns AND in the append-only
+/// `liveness_evidence` table so that a future raw-signal shortcut that skips
+/// the classifier cannot satisfy this test accidentally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
     use djinn_db::{CreateSessionParams, SessionRepository};
@@ -5048,26 +5054,82 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         })
         .await
         .unwrap();
-    // Backdate past the 10-minute zombie hard cap so the raw age gate fires.
+    // Backdate past the 10-minute zombie hard cap so the raw age gate fires
+    // and the classifier's claim TTL is zero (extension budget exhausted).
     session_repo
         .backdate_started_at(&session.id, "20 minutes")
         .await
         .unwrap();
-    // Flush nonzero tokens to the DB row — independent evidence of progress that
-    // a raw "zero tokens + past cap" heuristic would have reaped.
-    session_repo
-        .flush_tokens(&session.id, 5000, 1500, 0, 0)
+    // NOTE: tokens are intentionally LEFT at zero so the pre-classifier
+    // token-nonzero gate in `reap_zombie_sessions` does NOT skip this
+    // session.  The classifier must be reached.
+
+    // Dispatch the task to a live pool slot so `session_for_task` returns
+    // Some — the classifier sees a Running pod (not Absent).
+    let mut app_state = test_helpers::agent_context_from_db(db.clone(), CancellationToken::new());
+    app_state.runtime_ops = Some(std::sync::Arc::new(RecordingRuntimeOps::new(true)));
+    let active_tasks = app_state.active_tasks.clone();
+    let cancel = CancellationToken::new();
+    let pool = SlotPoolHandle::spawn_with_factory(
+        app_state,
+        cancel.clone(),
+        SlotPoolConfig {
+            models: vec![ModelSlotConfig {
+                model_id: "openai/gpt-5.5".to_string(),
+                max_slots: 1,
+                roles: ["worker"].into_iter().map(ToOwned::to_owned).collect(),
+            }],
+            role_priorities: HashMap::new(),
+        },
+        std::sync::Arc::new(|slot_id, model_id, event_tx, app_state, cancel| {
+            let runner: djinn_slot::TestLifecycleRunner = std::sync::Arc::new(
+                |_task_id,
+                 _project_path,
+                 _model_id,
+                 _app_state,
+                 kill,
+                 _pause,
+                 _resume_lifecycle_metadata| {
+                    Box::pin(async move {
+                        kill.cancelled().await;
+                        Ok(())
+                    })
+                },
+            );
+            SlotHandle::spawn_with_test_runner(
+                slot_id, model_id, event_tx, app_state, cancel, runner,
+            )
+        }),
+    );
+    pool.dispatch(&task.id, "test-project", "openai/gpt-5.5")
         .await
-        .unwrap();
+        .expect("dispatch should create a slot mapping");
+
+    // Age the activity tracker so idle > ZOMBIE_HARD_CAP_SECS but
+    // activity_tracked is still true.  The pool check at
+    // `info.activity_tracked && info.idle_seconds <= ZOMBIE_HARD_CAP_SECS`
+    // does NOT spare (idle exceeds cap), but the classifier sees a Running
+    // pod with Idle activity → Slow verdict (not Dead).
+    let old = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(20 * 60))
+        .unwrap_or(0);
+    {
+        let guard = active_tasks.lock().expect("active_tasks mutex");
+        if let Some(ts) = guard.get(&task.id) {
+            ts.store(old, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 
     let runtime = RecordingRuntimeOps::new(true);
     // Hold a clone for inspection after `actor.runtime_ops` takes ownership.
     let runtime_for_calls = runtime.clone();
     let mut actor = coordinator_actor_for_tests(&db, &tx);
     actor.runtime_ops = Some(Arc::new(runtime));
+    actor.pool = pool;
     actor.reap_zombie_sessions().await;
 
-    // ── Invariant: the zombie reaper did NOT finalize the session ──
+    // ── Invariant: the classifier returned Slow → session is spared ────
     assert!(
         session_repo
             .list_active()
@@ -5075,26 +5137,62 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
             .unwrap()
             .iter()
             .any(|s| s.id == session.id),
-        "a session with fresh DB token progress past the zombie hard cap must NOT be reaped (DB-truth liveness backstop)"
+        "a session past the zombie hard cap whose pool still shows a Running pod \
+         must be classified Slow (not Dead) and spared by the liveness classifier"
     );
 
-    // The teardown runtime_ops must NOT have been invoked — a regression that
-    // bypassed the DB-truth backstop would call teardown_taskrun_job even
+    // The teardown runtime_ops must NOT have been invoked — a regression
+    // that bypassed the classifier would call teardown_taskrun_job even
     // though the session was not reaped.
     assert!(
         runtime_for_calls.calls().is_empty(),
-        "zombie reaper must NOT call teardown_taskrun_job when DB progress suppresses the reap"
+        "zombie reaper must NOT call teardown_taskrun_job when the classifier returns Slow"
+    );
+
+    // ── Classifier verdict/evidence assertions (AC 2) ──────────────────
+    // The classifier must have persisted its verdict on the session's
+    // denormalized columns and in the append-only liveness_evidence table.
+    // These assertions pin the classifier invariant: a raw-token shortcut
+    // that skips the classifier would leave these fields empty.
+    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
+    let (verdict, outcome_kind) = liveness_repo
+        .get_session_liveness_fields(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        verdict.as_deref(),
+        Some("slow"),
+        "classifier must record Slow verdict on session row — not Dead"
+    );
+    // With a 20-minute-old session the claim TTL is zero → extension budget
+    // exhausted → the classifier tags the Slow verdict with SlowExtended
+    // outcome and HardRuntimeExceeded-adjacent reason.
+    assert_eq!(
+        outcome_kind.as_deref(),
+        Some("slow_extended"),
+        "classifier must record slow_extended outcome when extension budget is exhausted"
     );
 
     // No dead_reclaimed evidence row may have been persisted.
-    let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
     let dead_reclaimed = liveness_repo
         .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
         .await
         .unwrap();
     assert_eq!(
         dead_reclaimed, 0,
-        "a Dead reclaim must NOT be persisted when the session shows fresh DB activity"
+        "a Dead reclaim must NOT be persisted when the classifier returns Slow"
+    );
+
+    // The classifier must have persisted at least one evidence row (the
+    // Slow verdict itself).  A bypass that skips the classifier entirely
+    // would leave zero rows.
+    let total_evidence = liveness_repo
+        .count_evidence_for_session(&session.id, None)
+        .await
+        .unwrap();
+    assert!(
+        total_evidence >= 1,
+        "classifier must persist at least one liveness_evidence row for the Slow verdict"
     );
 
     // The task must NOT have been released to `open` (no reclaim happened).
@@ -5105,8 +5203,10 @@ async fn dead_verdict_with_fresh_db_activity_suppresses_reap() {
         .unwrap();
     assert_eq!(
         updated.status, "in_progress",
-        "task must remain in_progress — DB-truth liveness backstop suppresses Dead reclaim"
+        "task must remain in_progress — liveness classifier Slow verdict suppresses Dead reclaim"
     );
+
+    cancel.cancel();
 }
 
 // ── AC 3: hard runtime cap takes precedence over Slow extension budget ───────
