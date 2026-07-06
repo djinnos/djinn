@@ -1,5 +1,7 @@
 use super::*;
+use crate::dispatch::attempt_lifecycle::{TerminalAdvancementParams, advance_latest_to_terminal};
 use crate::pr_poller::pr_cleanup::CloseKind;
+use djinn_core::models::task_attempt::TaskAttemptOutcome;
 
 impl CoordinatorActor {
     pub(crate) async fn attach_pr_review_feedback(
@@ -248,11 +250,11 @@ impl CoordinatorActor {
         }
 
         // Collect reviewer logins from the most recent pr_review_feedback entry.
-        let reviewer_logins: Vec<String> = match task_repo
+        let mut feedback_entries = match task_repo
             .query_activity(ActivityQuery {
                 task_id: Some(task_id.to_owned()),
                 event_type: Some(PR_REVIEW_FEEDBACK_EVENT.to_string()),
-                actor_role: Some("system".to_string()),
+                actor_role: None,
                 project_id: None,
                 from_time: None,
                 to_time: None,
@@ -261,70 +263,76 @@ impl CoordinatorActor {
             })
             .await
         {
-            Ok(entries) => entries
-                .into_iter()
-                .flat_map(|entry| {
-                    let payload: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
-                    let reviews = payload
-                        .get("change_request_reviews")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|r| {
-                            r.get("reviewer")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_owned())
-                        })
-                        .collect::<Vec<_>>();
-                    Some(reviews)
-                })
-                .flatten()
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect(),
-            Err(_) => return,
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_short_id,
+                    error = %e,
+                    "PR poller: failed to query latest review feedback entry"
+                );
+                return;
+            }
         };
+        if feedback_entries.is_empty() {
+            return;
+        }
+        let latest_feedback_entry = feedback_entries.remove(0);
+        let feedback_payload: serde_json::Value =
+            match serde_json::from_str(&latest_feedback_entry.payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        error = %e,
+                        "PR poller: failed to parse latest review feedback payload"
+                    );
+                    return;
+                }
+            };
+        let reviewers: Vec<String> = feedback_payload
+            .get("change_request_reviews")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.get("reviewer").and_then(|v| v.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        if reviewer_logins.is_empty() {
+        if reviewers.is_empty() {
             return;
         }
 
-        tracing::info!(
-            task_id = %task_short_id,
-            pr = pull_number,
-            reviewers = ?reviewer_logins,
-            "PR poller: re-requesting review after fixup commits"
-        );
-
-        if let Err(e) = gh_client
-            .re_request_review(owner, repo, pull_number, &reviewer_logins)
-            .await
-        {
-            tracing::warn!(
-                task_id = %task_short_id,
-                pr = pull_number,
-                error = %e,
-                "PR poller: re-request review failed (non-fatal)"
-            );
-        } else {
-            // Mark as done for this SHA so we don't re-request repeatedly.
+        // Re-request review from each reviewer. If any call fails, log and continue.
+        let mut any_requested = false;
+        for login in reviewers {
+            match gh_client
+                .re_request_review(owner, repo, pull_number, std::slice::from_ref(&login))
+                .await
+            {
+                Ok(_) => {
+                    any_requested = true;
+                    tracing::info!(
+                        task_id = %task_short_id,
+                        reviewer = %login,
+                        pr = pull_number,
+                        "PR poller: re-requested review from reviewer"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_short_id,
+                        reviewer = %login,
+                        pr = pull_number,
+                        error = %e,
+                        "PR poller: failed to re-request review from reviewer"
+                    );
+                }
+            }
+        }
+        if any_requested {
             self.pr_status_cache
-                .insert(current_sha_cache_key, "done".to_string());
-
-            // Log a comment for visibility.
-            let comment_body = format!(
-                "**Re-requested review** from {} on PR #{pull_number} after fixup commits.",
-                reviewer_logins.join(", ")
-            );
-            let comment_payload = serde_json::json!({ "body": comment_body }).to_string();
-            let _ = task_repo
-                .log_activity(
-                    Some(task_id),
-                    "coordinator",
-                    "system",
-                    "comment",
-                    &comment_payload,
-                )
-                .await;
+                .insert(current_sha_cache_key, String::new());
         }
     }
 
@@ -352,6 +360,14 @@ impl CoordinatorActor {
                 "PR poller: PR merged without a known merge_commit_sha — task closes but won't show as merged"
             );
         }
+        // Best-effort terminalize the current worker attempt as completed.
+        self.terminalize_for_pr_outcome(
+            task_id,
+            TaskAttemptOutcome::Completed,
+            Some(&TransitionAction::PrMerge),
+            Some("PR merged and task completed"),
+        )
+        .await;
         self.apply_pr_transition(task_id, TransitionAction::PrMerge, None)
             .await;
     }
@@ -364,6 +380,12 @@ impl CoordinatorActor {
     ) {
         let task_repo = self.task_repo();
         let cleanup_action = action.clone();
+        let terminal_outcome = pr_transition_to_attempt_outcome(&action);
+        // Best-effort terminalize the matching attempt before the board transition.
+        if let Some(outcome) = terminal_outcome {
+            self.terminalize_for_pr_outcome(task_id, outcome, Some(&cleanup_action), reason)
+                .await;
+        }
         if let Err(e) = task_repo
             .transition(task_id, action, "system", "pr_poller", reason, None)
             .await
@@ -540,7 +562,7 @@ impl CoordinatorActor {
             run_ids.truncate(MAX_AGGREGATED_CI_RUNS);
         }
 
-        // Fetch jobs for each run and union them, de-duping by job id so the same
+        // Fetch jobs for each run and union them, de-deping by job id so the same
         // job reported under multiple check runs of one run isn't double-counted.
         let mut all_jobs: Vec<ActionsJob> = Vec::new();
         let mut seen_job_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -656,189 +678,319 @@ impl CoordinatorActor {
                 tracing::debug!(
                     task_id = %task_short_id,
                     user_id = %user_id,
-                    "PR poller: task owner has not opted into auto-approval; leaving PR for manual approval"
+                    "PR poller: task owner has auto_approve_prs off; leaving for manual approval"
                 );
                 return None;
             }
-            match sa_repo.latest_token_for_user(&user_id).await {
-                Ok(Some(session)) => return Some((user_id, session)),
+            let session = match sa_repo.latest_token_for_user(&user_id).await {
+                Ok(Some(s)) => s,
                 Ok(None) => {
                     tracing::debug!(
                         task_id = %task_short_id,
                         user_id = %user_id,
-                        "PR poller: task owner opted in but has no live session; leaving PR for manual approval"
+                        "PR poller: task owner has no live session; leaving for manual approval"
                     );
+                    return None;
                 }
                 Err(e) => {
                     tracing::warn!(
                         task_id = %task_short_id,
                         user_id = %user_id,
                         error = %e,
-                        "PR poller: session lookup failed for task owner; leaving PR for manual approval"
+                        "PR poller: failed to read owner session; leaving for manual approval"
                     );
+                    return None;
                 }
-            }
-            return None;
+            };
+            return Some((user_id, session));
         }
 
-        // Unattributed task (created_by_user_id IS NULL — background-agent
-        // output). Fall back to any opted-in user with a live session.
-        let candidates = match us_repo.list_users_with_auto_approve().await {
-            Ok(ids) => ids,
+        // Background-agent-spawned task: any opted-in user with a live session
+        // can act as the approver. Pick the most-recently-updated session so the
+        // choice is deterministic per tick.
+        match us_repo.list_users_with_auto_approve().await {
+            Ok(user_ids) => {
+                for user_id in user_ids {
+                    match sa_repo.latest_token_for_user(&user_id).await {
+                        Ok(Some(session)) => {
+                            tracing::debug!(
+                                task_id = %task_short_id,
+                                user_id = %user_id,
+                                "PR poller: using live fallback user for auto-approve"
+                            );
+                            return Some((user_id, session));
+                        }
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_short_id,
+                                user_id = %user_id,
+                                error = %e,
+                                "PR poller: failed to read fallback approver session"
+                            );
+                        }
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(
                     task_id = %task_short_id,
                     error = %e,
-                    "PR poller: list_users_with_auto_approve failed; skipping fallback approver"
+                    "PR poller: failed to list users with auto_approve_prs for fallback approver"
                 );
-                return None;
-            }
-        };
-        for uid in candidates {
-            match sa_repo.latest_token_for_user(&uid).await {
-                Ok(Some(session)) => {
-                    tracing::debug!(
-                        task_id = %task_short_id,
-                        user_id = %uid,
-                        "PR poller: selected fallback auto-approver"
-                    );
-                    return Some((uid, session));
-                }
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %task_short_id,
-                        user_id = %uid,
-                        error = %e,
-                        "PR poller: session lookup failed for fallback approver candidate"
-                    );
-                }
             }
         }
-
-        tracing::debug!(
-            task_id = %task_short_id,
-            "PR poller: no eligible auto-approver (nobody opted in with a live session)"
-        );
         None
     }
 
-    /// Side-query for the task's `created_by_user_id` column. The `Task`
-    /// model deliberately does not expose this column (added by migration 3
-    /// for attribution; only repositories and the auto-approve path need it),
-    /// so the auto-approve branch reads it directly here. Returns `None` for
-    /// background-agent-created tasks (column is NULL) or on DB error.
+    /// Resolve the task owner user_id when present.
     pub(crate) async fn task_created_by_user_id(&self, task_id: &str) -> Option<String> {
-        match self.task_repo().created_by_user_id(task_id).await {
-            Ok(opt) => opt,
-            Err(e) => {
-                tracing::warn!(
-                    task_id = %task_id,
-                    error = %e,
-                    "PR poller: failed to read created_by_user_id; treating as unattributed"
-                );
-                None
-            }
+        let task_repo = self.task_repo();
+        match task_repo.get(task_id).await {
+            Ok(Some(task)) => task.created_by_user_id.clone(),
+            _ => None,
         }
+    }
+
+    /// Decide whether a `TransitionAction` counts as a reopen for the purpose
+    /// of incrementing `reopen_count`. Used for telemetry only.
+    pub(crate) fn pr_transition_increments_reopen_count(action: &TransitionAction) -> bool {
+        matches!(
+            action,
+            TransitionAction::PrCiFailed
+                | TransitionAction::PrChangesRequested
+                | TransitionAction::TaskReviewReject
+                | TransitionAction::TaskReviewRejectStale
+                | TransitionAction::TaskReviewRejectConflict
+                | TransitionAction::Reopen
+        )
     }
 }
 
+/// Parse a GitHub pull request URL into `(owner, repo, pull_number)`.
+pub fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let parts: Vec<&str> = without_fragment.split('/').collect();
+    if parts.len() < 7 || parts.get(2) != Some(&"github.com") || parts.get(5) != Some(&"pull") {
+        return None;
+    }
+    let pull_number = parts.get(6)?.parse().ok()?;
+    Some((parts[3].to_string(), parts[4].to_string(), pull_number))
+}
+
+fn pr_transition_action_name(action: &TransitionAction) -> &'static str {
+    match action {
+        TransitionAction::PrMerge => "pr_merge",
+        TransitionAction::PrCiFailed => "pr_ci_failed",
+        TransitionAction::PrChangesRequested => "pr_changes_requested",
+        TransitionAction::TaskReviewReject => "task_review_reject",
+        TransitionAction::TaskReviewRejectStale => "task_review_reject_stale",
+        TransitionAction::TaskReviewRejectConflict => "task_review_reject_conflict",
+        TransitionAction::PrConflict => "pr_conflict",
+        TransitionAction::Reopen => "reopen",
+        TransitionAction::ForceClose => "force_close",
+        _ => "unknown",
+    }
+}
+
+fn pr_attempt_reason_code(
+    action: Option<&TransitionAction>,
+    outcome: TaskAttemptOutcome,
+) -> Option<&'static str> {
+    match action {
+        Some(TransitionAction::PrCiFailed) => Some("ci_failed"),
+        Some(TransitionAction::PrChangesRequested) => Some("changes_requested"),
+        Some(TransitionAction::TaskReviewReject) => Some("review_rejected"),
+        Some(TransitionAction::TaskReviewRejectStale) => Some("review_rejected_stale"),
+        Some(TransitionAction::TaskReviewRejectConflict) => Some("review_rejected_conflict"),
+        Some(TransitionAction::PrConflict) => Some("conflict"),
+        Some(TransitionAction::ForceClose) => Some("force_close"),
+        Some(TransitionAction::PrMerge) => Some("merged"),
+        Some(TransitionAction::Reopen) if outcome == TaskAttemptOutcome::Reopened => {
+            Some("reopened")
+        }
+        _ => None,
+    }
+}
+
+fn pr_attempt_summary(
+    action_name: Option<&str>,
+    reason: Option<&str>,
+    outcome: TaskAttemptOutcome,
+) -> String {
+    match (outcome, reason, action_name) {
+        (TaskAttemptOutcome::Completed, Some(reason), _) => reason.to_string(),
+        (TaskAttemptOutcome::Completed, None, _) => "PR merged and task completed".to_string(),
+        (TaskAttemptOutcome::Reopened, Some(reason), _) => reason.to_string(),
+        (TaskAttemptOutcome::Reopened, None, Some(action)) => {
+            format!("PR outcome {action} reopened the task")
+        }
+        (TaskAttemptOutcome::Reopened, None, None) => "PR outcome reopened the task".to_string(),
+        (TaskAttemptOutcome::ForceClosed, Some(reason), _) => reason.to_string(),
+        (TaskAttemptOutcome::ForceClosed, None, _) => {
+            "PR outcome force-closed the task".to_string()
+        }
+        (_, Some(reason), _) => reason.to_string(),
+        (_, None, Some(action)) => format!("PR outcome {action}"),
+        (_, None, None) => "PR outcome terminalized the attempt".to_string(),
+    }
+}
+
+fn pr_attempt_submit_ref(task: &Task) -> String {
+    format!("refs/heads/task/{}", task.short_id)
+}
+
+fn pr_attempt_conflict_context(reason: Option<&str>, task: &Task) -> Option<serde_json::Value> {
+    if let Some(raw) = reason.and_then(|r| r.strip_prefix("merge_conflict:"))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+    {
+        return Some(value);
+    }
+
+    task.merge_conflict_metadata
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+}
+
+impl CoordinatorActor {
+    /// Best-effort terminalize the latest pending/submitted worker attempt for a
+    /// PR-driven outcome.  Fills `pr_url` and any head SHA/refs available from the
+    /// current task row.  Errors are logged, never propagated.
+    pub(crate) async fn terminalize_for_pr_outcome(
+        &self,
+        task_id: &str,
+        outcome: TaskAttemptOutcome,
+        action: Option<&TransitionAction>,
+        reason: Option<&str>,
+    ) {
+        let task = match self.task_repo().get(task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::debug!(
+                    task_id,
+                    "attempt_lifecycle: task not found for PR terminalization"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(task_id, error = %e, "attempt_lifecycle: failed to load task for PR terminalization");
+                return;
+            }
+        };
+        let action_name = action.map(pr_transition_action_name);
+        let reason_code = pr_attempt_reason_code(action, outcome);
+        let summary = pr_attempt_summary(action_name, reason, outcome);
+        let submit_ref = pr_attempt_submit_ref(&task);
+        let conflict_context = pr_attempt_conflict_context(reason, &task);
+        let summary_json = serde_json::json!({
+            "source": "pr_poller",
+            "action": action_name,
+            "reason": reason_code,
+            "message": reason,
+            "pr_url": task.pr_url,
+            "github_head_sha": task.ci_head_sha,
+            "submit_ref": submit_ref,
+            "pr_number": task.ci_pr_number,
+            "status": task.status,
+            "merge_commit_sha": task.merge_commit_sha,
+            "conflict": conflict_context,
+        })
+        .to_string();
+
+        advance_latest_to_terminal(
+            &self.db,
+            TerminalAdvancementParams {
+                task_id,
+                role: "worker",
+                outcome,
+                pr_url: task.pr_url.as_deref(),
+                submit_ref: Some(&submit_ref),
+                checkpoint_ref: None,
+                mirror_head_sha: None,
+                github_head_sha: task.ci_head_sha.as_deref(),
+                summary: Some(&summary),
+                summary_json: Some(&summary_json),
+                log_tail: None,
+            },
+        )
+        .await;
+    }
+}
+
+/// Map a PR transition action to the attempt outcome that should terminalize
+/// the current worker attempt.  Returns `None` for actions that do not represent
+/// a terminal PR outcome (e.g. draft undraft).
+pub(crate) fn pr_transition_to_attempt_outcome(
+    action: &TransitionAction,
+) -> Option<TaskAttemptOutcome> {
+    match action {
+        TransitionAction::PrMerge => Some(TaskAttemptOutcome::Completed),
+        TransitionAction::PrCiFailed
+        | TransitionAction::PrChangesRequested
+        | TransitionAction::TaskReviewReject
+        | TransitionAction::TaskReviewRejectStale
+        | TransitionAction::TaskReviewRejectConflict
+        | TransitionAction::PrConflict
+        | TransitionAction::Reopen => Some(TaskAttemptOutcome::Reopened),
+        TransitionAction::ForceClose => Some(TaskAttemptOutcome::ForceClosed),
+        _ => None,
+    }
+}
+
+/// Decide whether a `TransitionAction` counts as a reopen for the purpose
+/// of incrementing `reopen_count`. Used for telemetry only.
 pub(crate) fn pr_transition_increments_reopen_count(action: &TransitionAction) -> bool {
+    CoordinatorActor::pr_transition_increments_reopen_count(action)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_pr_transition_reopen_metric(action: &TransitionAction) -> bool {
+    if pr_transition_increments_reopen_count(action) {
+        djinn_telemetry::task::increment_reopen();
+        true
+    } else {
+        false
+    }
+}
+
+/// Pick a sibling task to wait on when `task` has a merge conflict. Prefers a
+/// single racing sibling in the same epic that is also unmerged (i.e. in a
+/// gating status). If zero or more than one racing sibling exists, returns None.
+///
+/// Returns the sibling task id.
+pub(crate) fn pick_conflict_blocker_sibling(task_id: &str, siblings: &[Task]) -> Option<String> {
+    let racing: Vec<&Task> = siblings
+        .iter()
+        .filter(|s| s.id != task_id && is_racing_unmerged_status(&s.status))
+        .collect();
+    if racing.len() == 1 {
+        Some(racing[0].id.clone())
+    } else {
+        None
+    }
+}
+
+/// Returns true if the task status is "in-flight and unmerged" for the purpose
+/// of conflict-race detection. These statuses may land on main before the
+/// current task and cause a conflict.
+pub(crate) fn is_racing_unmerged_status(status: &str) -> bool {
     matches!(
-        action,
-        TransitionAction::PrCiFailed | TransitionAction::PrChangesRequested
+        status,
+        "approved" | "pr_draft" | "pr_review" | "needs_task_review"
     )
 }
 
-pub(crate) fn record_pr_transition_reopen_metric(action: &TransitionAction) -> bool {
-    let increments_reopen = pr_transition_increments_reopen_count(action);
-    if increments_reopen {
-        djinn_telemetry::task::increment_reopen();
-    }
-    increments_reopen
-}
-
-/// Parse a GitHub PR URL into `(owner, repo, pull_number)`.
+/// Effective gating review decision, deduping stale CHANGES_REQUESTED by reviewer.
+/// Returns `(changes_requested, has_approved)`.
 ///
-/// Handles URLs of the form `https://github.com/{owner}/{repo}/pull/{number}`.
-pub fn parse_pr_url(url: &str) -> Option<(String, String, u64)> {
-    let path = url.strip_prefix("https://github.com/")?;
-    let mut parts = path.splitn(5, '/');
-    let owner = parts.next()?;
-    let repo = parts.next()?;
-    let segment = parts.next()?;
-    if segment != "pull" {
-        return None;
-    }
-    let number_str = parts.next()?;
-    // Strip any trailing fragment/query.
-    let number_str = number_str.split(&['?', '#'][..]).next()?;
-    let number: u64 = number_str.parse().ok()?;
-    Some((owner.to_string(), repo.to_string(), number))
-}
-
-/// True when `status` is a post-implementation, UNMERGED, racing PR state — the
-/// shape of an epic sibling whose work is landing on main and can cause a
-/// conflict. A merged/closed sibling is `closed`, which is deliberately
-/// excluded (nothing to wait on; blocking on it would never release).
-pub(crate) fn is_racing_unmerged_status(status: &str) -> bool {
-    matches!(status, "approved" | "pr_draft" | "pr_review")
-}
-
-/// Pick the single racing same-epic sibling to block `this_task_id` on, if
-/// attribution is unambiguous.
-///
-/// Returns `Some(sibling_id)` ONLY when exactly one sibling (other than
-/// `this_task_id`) is in a racing-unmerged state (see
-/// [`is_racing_unmerged_status`]). Returns `None` for zero candidates (conflict
-/// is against already-merged main — nothing to wait on) or more than one
-/// (ambiguous — don't guess). Conservative by design: correctness over coverage.
-pub(crate) fn pick_conflict_blocker_sibling(
-    this_task_id: &str,
-    siblings: &[Task],
-) -> Option<String> {
-    let mut candidates = siblings
-        .iter()
-        .filter(|s| s.id != this_task_id && is_racing_unmerged_status(&s.status));
-    let first = candidates.next()?;
-    // More than one racing sibling → ambiguous attribution → fall back.
-    if candidates.next().is_some() {
-        return None;
-    }
-    Some(first.id.clone())
-}
-
-/// Collapse a PR's full review history into the *effective* merge-gating
-/// decision, mirroring GitHub's own `reviewDecision`.
-///
-/// `GET /pulls/{n}/reviews` returns every review a reviewer ever submitted, and
-/// a `CHANGES_REQUESTED` review's `state` stays `CHANGES_REQUESTED` forever —
-/// pushing new commits, dismissing it, or even approving afterwards does NOT
-/// rewrite that historical entry. The merge-gating decision therefore depends
-/// only on each reviewer's *latest* standing review, never on whether any
-/// historical review was CHANGES_REQUESTED.
-///
-/// Per author we take the most-recent review (by `submitted_at`, which is
-/// RFC-3339 UTC so lexical ordering is chronological) whose state is one of
-/// `APPROVED` / `CHANGES_REQUESTED` / `DISMISSED`. `COMMENTED` and `PENDING`
-/// carry no standing and are ignored; `DISMISSED` clears a reviewer's prior
-/// standing without adding a new one. Then:
-///   - `changes_requested` is true iff some author's latest standing review is
-///     `CHANGES_REQUESTED`.
-///   - `has_approved` is true iff some author's latest standing review is
-///     `APPROVED`.
-///
-/// Reviews with no author or no `submitted_at` are skipped (can't attribute or
-/// order them). Returns `(changes_requested, has_approved)`.
+/// Uses the latest standing review per reviewer: if a reviewer submitted
+/// CHANGES_REQUESTED and later APPROVED, only the APPROVED is considered.
+/// If the latest review is COMMENTED or DISMISSED, it does not count as either.
 pub(crate) fn effective_review_decision(reviews: &[PrReview]) -> (bool, bool) {
-    use std::collections::HashMap;
-    // author login -> (submitted_at, state) of their latest standing review.
-    let mut latest: HashMap<&str, (&str, &str)> = HashMap::new();
+    let mut latest: std::collections::HashMap<&str, (&str, &str)> =
+        std::collections::HashMap::new();
     for r in reviews {
         let state = r.state.as_str();
-        if !matches!(state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED") {
-            continue; // COMMENTED / PENDING carry no merge-gating standing.
-        }
         let Some(login) = r.user.as_ref().map(|u| u.login.as_str()) else {
             continue;
         };

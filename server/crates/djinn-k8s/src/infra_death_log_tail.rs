@@ -1,15 +1,32 @@
-//! Infra-death log-tail capture helpers.
+//! Best-effort capture of the last log lines from a dying K8s worker Pod.
 //!
-//! When a worker pod dies before delivering its terminal report (OOM,
-//! eviction, Job failure), the host fetches the last ~200 lines / ~16 KiB of
-//! pod logs and persists them in the task_attempt `log_tail` column.  These
-//! helpers handle the redaction, truncation, and fetch-error classification
-//! that the capture path requires.
+//! Called between `watch_infra_death` resolving and `teardown` deleting the
+//! Job, so the Pod may still exist on the apiserver for a brief window.
 //!
-//! The design intentionally keeps these helpers **synchronous and
-//! kube-free** so they are unit-testable without a live Kubernetes cluster.
+//! Design constraints:
+//! - Short timeout (≤ 10 s) — must never block teardown.
+//! - Truncates to the `task_attempts.log_tail` DB bound (~8 KiB).
+//! - Returns `None` on any failure — capture is purely diagnostic enrichment.
+//!
+//! The redaction, truncation, and fetch-error classification helpers are
+//! **synchronous and kube-free** so they are unit-testable without a live
+//! Kubernetes cluster.
+
+use std::time::Duration;
 
 use djinn_core::models::task_attempt::TASK_ATTEMPT_LOG_TAIL_MAX_LEN;
+use djinn_runtime::InfraDeathLogTailCapture;
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::{Api, ListParams};
+use tracing::{debug, warn};
+
+use crate::job::LABEL_TASK_RUN_ID;
+
+/// Maximum number of log lines to request from the apiserver.
+const LOG_TAIL_LINE_COUNT: i64 = 200;
+
+/// Timeout for the entire capture operation (pod list + log fetch).
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
 
 // ─── Redaction ──────────────────────────────────────────────────────────────
 
@@ -267,6 +284,155 @@ pub fn classify_fetch_error(err: &kube::Error) -> LogTailFetchError {
     }
 }
 
+// ─── Async capture path (requires kube) ─────────────────────────────────────
+
+/// Try to capture the last log lines from the worker Pod's container after an
+/// infra-death has been detected.  Returns `None` on any failure.
+///
+/// The `namespace` and `client` come from the same `KubernetesRuntime` that
+/// owns the Pod.  The `task_run_id` is used to find the Pod via the standard
+/// task-run label selector.
+pub async fn capture_infra_death_log_tail(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+) -> Option<InfraDeathLogTailCapture> {
+    let result =
+        tokio::time::timeout(CAPTURE_TIMEOUT, do_capture(client, namespace, task_run_id)).await;
+
+    match result {
+        Ok(capture) => capture,
+        Err(_elapsed) => {
+            warn!(
+                task_run_id,
+                "infra_death_log_tail: capture timed out after {:?}", CAPTURE_TIMEOUT
+            );
+            Some(InfraDeathLogTailCapture {
+                log_tail: None,
+                fetch_error_class: Some(LogTailFetchError::Timeout.as_str().to_owned()),
+                fetch_error_detail: Some(format!(
+                    "log-tail capture timed out after {:?}",
+                    CAPTURE_TIMEOUT
+                )),
+            })
+        }
+    }
+}
+
+async fn do_capture(
+    client: &kube::Client,
+    namespace: &str,
+    task_run_id: &str,
+) -> Option<InfraDeathLogTailCapture> {
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
+    let label_selector = format!("{}={}", LABEL_TASK_RUN_ID, task_run_id);
+
+    // 1. Find the Pod.
+    let pod_name = match pods
+        .list(&ListParams::default().labels(&label_selector))
+        .await
+    {
+        Ok(list) => match list.items.into_iter().next() {
+            Some(pod) => {
+                let name = pod.metadata.name.clone().unwrap_or_default();
+                if name.is_empty() {
+                    return Some(InfraDeathLogTailCapture {
+                        log_tail: None,
+                        fetch_error_class: Some(LogTailFetchError::NoPodFound.as_str().to_owned()),
+                        fetch_error_detail: Some("Pod found but has no name".to_owned()),
+                    });
+                }
+                name
+            }
+            None => {
+                debug!(
+                    task_run_id,
+                    "infra_death_log_tail: no Pod found (already GC'd)"
+                );
+                return Some(InfraDeathLogTailCapture {
+                    log_tail: None,
+                    fetch_error_class: Some(LogTailFetchError::NoPodFound.as_str().to_owned()),
+                    fetch_error_detail: Some(
+                        "Pod not found by label (likely already GC'd by Job TTL)".to_owned(),
+                    ),
+                });
+            }
+        },
+        Err(e) => {
+            let classified = classify_fetch_error(&e);
+            warn!(
+                task_run_id,
+                error = %e,
+                error_class = classified.as_str(),
+                "infra_death_log_tail: pod list failed"
+            );
+            let detail = format!("Pod list failed: {e}");
+            return Some(InfraDeathLogTailCapture {
+                log_tail: None,
+                fetch_error_class: Some(classified.as_str().to_owned()),
+                fetch_error_detail: Some(detail),
+            });
+        }
+    };
+
+    // 2. Fetch logs from the `worker` container (falls back to first container).
+    let log_params = kube::api::LogParams {
+        container: Some("worker".to_owned()),
+        tail_lines: Some(LOG_TAIL_LINE_COUNT),
+        limit_bytes: Some(TASK_ATTEMPT_LOG_TAIL_MAX_LEN as i64),
+        ..Default::default()
+    };
+
+    let logs = match pods.logs(&pod_name, &log_params).await {
+        Ok(logs) => logs,
+        Err(e) => {
+            let classified = classify_fetch_error(&e);
+            warn!(
+                task_run_id,
+                pod = %pod_name,
+                error = %e,
+                error_class = classified.as_str(),
+                "infra_death_log_tail: log fetch failed"
+            );
+            let detail = format!("Pod log fetch failed: {e}");
+            return Some(InfraDeathLogTailCapture {
+                log_tail: None,
+                fetch_error_class: Some(classified.as_str().to_owned()),
+                fetch_error_detail: Some(detail),
+            });
+        }
+    };
+
+    if logs.is_empty() {
+        debug!(
+            task_run_id,
+            pod = %pod_name,
+            "infra_death_log_tail: pod logs are empty"
+        );
+        return Some(InfraDeathLogTailCapture {
+            log_tail: None,
+            fetch_error_class: Some("empty_logs".to_owned()),
+            fetch_error_detail: Some("Pod logs are empty".to_owned()),
+        });
+    }
+
+    // 3. Redact and truncate to the DB bound.
+    let prepared = prepare_log_tail(&logs);
+
+    debug!(
+        task_run_id,
+        pod = %pod_name,
+        byte_count = prepared.len(),
+        "infra_death_log_tail: captured successfully"
+    );
+
+    Some(InfraDeathLogTailCapture {
+        log_tail: Some(prepared),
+        fetch_error_class: None,
+        fetch_error_detail: None,
+    })
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -418,6 +584,20 @@ mod tests {
         assert_eq!(truncate_log_tail_utf8("hello", 0), "");
     }
 
+    #[test]
+    fn truncate_ascii() {
+        assert_eq!(truncate_log_tail_utf8("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_multibyte_utf8_char_count() {
+        // "ééé" is 6 bytes in UTF-8.
+        let s = "ééé";
+        assert_eq!(truncate_log_tail_utf8(s, 5).len(), 4); // "éé" = 4 bytes
+        assert_eq!(truncate_log_tail_utf8(s, 4).len(), 4); // "éé"
+        assert_eq!(truncate_log_tail_utf8(s, 3).len(), 2); // "é"
+    }
+
     // ── prepare_log_tail (combined) ─────────────────────────────────────────
 
     #[test]
@@ -489,6 +669,10 @@ mod tests {
     }
 
     // ── fetch error classification ──────────────────────────────────────────
+    //
+    // These tests exercise the production classification logic used by
+    // `do_capture` — `classify_fetch_error` is called for every `kube::Error`
+    // encountered during pod list and log fetch operations.
 
     #[test]
     fn classify_kube_api_404_as_no_pod_found() {

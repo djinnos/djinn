@@ -30,7 +30,18 @@ pub fn create_test_db() -> Database {
     Database::open_in_memory().expect("open in-memory test database")
 }
 
-pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotContext {
+pub fn agent_context_from_db(db: Database, cancel: CancellationToken) -> SlotContext {
+    agent_context_from_db_with_clock(db, cancel, Arc::new(djinn_core::clock::SystemClock::new()))
+}
+
+/// Like [`agent_context_from_db`] but with an injectable [`djinn_core::clock::Clock`]
+/// so tests can advance monotonic time deterministically (e.g. to drive the
+/// stall-timeout recovery path without sleeping).
+pub fn agent_context_from_db_with_clock(
+    db: Database,
+    _cancel: CancellationToken,
+    clock: Arc<dyn djinn_core::clock::Clock>,
+) -> SlotContext {
     let event_bus = EventBus::noop();
     let catalog = CatalogService::new();
     let health_tracker = HealthTracker::default();
@@ -162,7 +173,7 @@ pub fn agent_context_from_db(db: Database, _cancel: CancellationToken) -> SlotCo
         coordinator_trigger: None,
         runtime_ops: None,
         repo_graph_ops: None,
-        clock: Arc::new(djinn_core::clock::SystemClock::new()),
+        clock,
         callbacks: Arc::new(NoopCallbacks),
         tool_dispatcher: None,
         compaction_cs: CompactionCriticalSection::new(),
