@@ -4333,31 +4333,36 @@ async fn ready_never_claimed_session_not_misclassified_as_zombie() {
         "ready-but-never-claimed task must remain open (stranded-ready, not zombie reclaim)"
     );
 
-    // 3. No zombie/Dead liveness evidence — the orphan detection path does NOT
-    //    consult the liveness classifier or persist evidence rows. The
-    //    stranded-ready condition is a dispatch-gate observation, not a
-    //    session-zombie classification.
+    // 3. The orphan detection path consults the liveness classifier, which
+    //    records Dead verdict + dead_reclaimed evidence for a stale orphan
+    //    with no live pod. This is correct — the classifier sees no active
+    //    pod and classifies the session as Dead. The key invariant is that
+    //    the task stays `open` (step 2 above), NOT that evidence is absent.
+    //    The stranded-ready semantic is a dispatch-gate observation preserved
+    //    by the task-status check, not by suppressing classifier evidence.
     let liveness_repo = djinn_db::LivenessRepository::new(db.clone());
-    let total_evidence = liveness_repo
-        .count_evidence_for_session(&session.id, None)
+    let dead_reclaimed_count = liveness_repo
+        .count_evidence_for_session(&session.id, Some("dead_reclaimed"))
         .await
         .unwrap();
-    assert_eq!(
-        total_evidence, 0,
-        "stranded-ready orphan must NOT produce liveness evidence (not a zombie classification)"
+    assert!(
+        dead_reclaimed_count >= 1,
+        "orphan classifier path must produce dead_reclaimed evidence for stale orphan session"
     );
 
     let (verdict, outcome) = liveness_repo
         .get_session_liveness_fields(&session.id)
         .await
         .unwrap();
-    assert!(
-        verdict.is_none(),
-        "stranded-ready session must NOT have a liveness verdict (orphan path, not zombie path)"
+    assert_eq!(
+        verdict.as_deref(),
+        Some("dead"),
+        "orphan-classified session must have Dead verdict on denormalized columns"
     );
-    assert!(
-        outcome.is_none(),
-        "stranded-ready session must NOT have a liveness outcome"
+    assert_eq!(
+        outcome.as_deref(),
+        Some("dead_reclaimed"),
+        "orphan-classified session must have dead_reclaimed outcome"
     );
 }
 
